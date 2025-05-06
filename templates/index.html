@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Создание отчета</title>
+  <style>
+    body {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background-color: #121212;
+      color: #ffffff;
+    }
+    
+    #form-container {
+      background-color: #1e1e1e;
+      padding: 20px 30px;
+      border-radius: 8px;
+      box-shadow: 0px 4px 8px rgba(0, 0, 0, 0.2);
+      width: 300px;
+      text-align: center;
+    }
+
+    label {
+      display: block;
+      margin-top: 15px;
+      font-size: 0.9rem;
+      color: #bbbbbb;
+      text-align: left; /* Чтобы label не прилипал к центру */
+    }
+
+    input, button {
+      width: 100%;
+      padding: 8px;
+      margin-top: 5px;
+      border-radius: 4px;
+      border: 1px solid #444;
+      background-color: #2b2b2b;
+      color: #ffffff;
+      font-size: 1rem;
+    }
+
+    button {
+      margin-top: 20px;
+      background-color: #6200ee;
+      border: none;
+      cursor: pointer;
+      transition: background-color 0.3s;
+    }
+
+    button:hover {
+      background-color: #3700b3;
+    }
+
+    #responseMessage {
+      margin-top: 20px;
+      font-size: 0.9rem;
+      color: #b3b3b3;
+    }
+
+    /* ---------- Кастомный выпадающий список ---------- */
+    .custom-select-wrapper {
+      position: relative;
+      display: block;
+      background-color: #2b2b2b;
+      color: #ffffff;
+      border: 1px solid #444;
+      border-radius: 4px;
+      margin-top: 5px;
+      cursor: pointer;
+    }
+
+    /* Сам "видимый" селект (надпись) */
+    .custom-select {
+      padding: 8px;
+      position: relative;
+    }
+
+    /* Стрелочка справа */
+    .custom-select::after {
+      content: '';
+      position: absolute;
+      top: 50%;
+      right: 10px;
+      width: 0;
+      height: 0;
+      border-left: 5px solid transparent;
+      border-right: 5px solid transparent;
+      border-top: 5px solid #ffffff;
+      transform: translateY(-50%);
+    }
+
+    /* Список опций (изначально скрыт) */
+    .custom-options {
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      background-color: #2b2b2b;
+      border: 1px solid #444;
+      border-top: none;
+      max-height: 200px;
+      overflow-y: auto; /* Полоса прокрутки */
+      z-index: 1000;
+      display: none; /* По умолчанию скрыто */
+    }
+
+    .custom-option {
+      padding: 8px;
+      cursor: pointer;
+      border-bottom: 1px solid #444;
+    }
+
+    .custom-option:last-child {
+      border-bottom: none;
+    }
+
+    .custom-option:hover {
+      background-color: #444;
+    }
+
+    /*
+      Когда у .custom-select-wrapper появляется класс .open
+      — показываем список опций
+    */
+    .custom-select-wrapper.open .custom-options {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div id="form-container">
+    <h2>Создание отчета</h2>
+    <form id="reportForm">
+      <label for="start">Start Time</label>
+      <input type="datetime-local" id="start" name="start" required />
+
+      <label for="end">End Time</label>
+      <input type="datetime-local" id="end" name="end" required />
+
+      <label for="service">Service</label>
+      <!-- Родительский контейнер для "шапки" и списка -->
+      <div class="custom-select-wrapper" id="serviceWrapper">
+        <!-- Шапка, на которую кликают для раскрытия списка -->
+        <div class="custom-select" id="serviceSelect">
+          Выберите сервис
+        </div>
+        <!-- Сами опции, появятся при .open у родителя -->
+        <div class="custom-options" id="serviceOptions">
+          <!-- Опции добавятся динамически из JS -->
+        </div>
+      </div>
+
+      <button type="button" onclick="createReport()">Создать отчет</button>
+    </form>
+    <p id="responseMessage"></p>
+  </div>
+
+  <script>
+    // При загрузке страницы получаем сервисы
+    document.addEventListener('DOMContentLoaded', loadServices);
+
+
+    // При клике на надпись .custom-select
+    // переключаем класс .open у родителя #serviceWrapper
+    document.getElementById("serviceSelect").addEventListener("click", function(e) {
+        e.stopPropagation();  // Чтобы клик не закрыл список сразу
+        document.getElementById("serviceWrapper").classList.toggle("open");
+      });
+  
+      // При клике вне списка — закрываем его
+      window.addEventListener("click", function(e) {
+        const wrapper = document.getElementById("serviceWrapper");
+        if (!wrapper.contains(e.target)) {
+          wrapper.classList.remove("open");
+        }
+      });
+  
+      // Обработка клика по опции
+      document.getElementById("serviceOptions").addEventListener("click", function(e) {
+        if (e.target.classList.contains('custom-option')) {
+          // Получаем значение опции
+          const selectedService = e.target.dataset.value;
+          // Ставим в текст "шапки" выбранный сервис
+          document.getElementById("serviceSelect").textContent = selectedService;
+          // Закрываем список
+          document.getElementById("serviceWrapper").classList.remove("open");
+        }
+      });
+  
+      // Загружаем список сервисов из бэкенда
+      async function loadServices() {
+        try {
+          const response = await fetch("/services");
+          const services = await response.json();
+          const serviceOptions = document.getElementById("serviceOptions");
+  
+          // Очищаем список перед заполнением
+          serviceOptions.innerHTML = "";
+  
+          services.forEach(svc => {
+            const optionDiv = document.createElement('div');
+            optionDiv.classList.add('custom-option');
+            optionDiv.textContent = svc;
+            optionDiv.dataset.value = svc;
+            serviceOptions.appendChild(optionDiv);
+          });
+        } catch (error) {
+          console.error("Ошибка загрузки сервисов:", error);
+        }
+      }
+  
+      // Отправка запроса на создание отчета
+      async function createReport() {
+        const start = document.getElementById("start").value;
+        const end = document.getElementById("end").value;
+        const selectedText = document.getElementById("serviceSelect").textContent;
+        
+        // Если пользователь не выбрал сервис
+        if (selectedText === "Выберите сервис") {
+          document.getElementById("responseMessage").innerText = "Пожалуйста, выберите сервис.";
+          return;
+        }
+  
+        const formData = {
+          start: start,
+          end: end,
+          service: selectedText
+        };
+  
+        try {
+          const response = await fetch("/create_report", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify(formData)
+          });
+          const result = await response.json();
+          document.getElementById("responseMessage").innerText = result.message;
+        } catch (error) {
+          document.getElementById("responseMessage").innerText = "Ошибка создания отчета: " + error.message;
+        }
+      }
+    </script>
+  </body>
+  </html>
+  
