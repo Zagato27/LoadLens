@@ -62,7 +62,7 @@ def _ensure_gigachat_env(gcfg: dict) -> None:
 
 
 def _gigachat_preflight(gcfg: dict) -> None:
-    """Быстрая проверка доступности сетевых хостов GigaChat перед вызовом SDK."""
+    """Быстрая проверка доступности сетевых хостов GigaChat перед вызовом SDK/REST."""
     timeout = float((gcfg or {}).get("connect_timeout_sec") or 5)
     proxies = (gcfg or {}).get("proxies", {}) or {}
     has_proxy = bool(proxies.get("https") or proxies.get("http") or proxies.get("HTTPS") or proxies.get("HTTP"))
@@ -70,7 +70,6 @@ def _gigachat_preflight(gcfg: dict) -> None:
     # Если прокси задан, пропускаем прямые TCP-подключения (они всё равно не сработают)
     if not has_proxy:
         checks = [
-            ("token_host", "ngw.devices.sberbank.ru", 9443),
             ("api_host", "gigachat.devices.sberbank.ru", 443),
         ]
         for name, host, port in checks:
@@ -82,12 +81,20 @@ def _gigachat_preflight(gcfg: dict) -> None:
     else:
         logger.info("Preflight: proxies detected, skipping direct TCP checks")
 
-    # HTTP preflight (через requests с учётом env и proxy)
+    # HTTP preflight (через requests с учётом env и proxy), учитываем mTLS verify/cert
+    verify = gcfg.get("verify") or gcfg.get("ca_bundle_file") or gcfg.get("ca_bundle") or True
+    cert = None
+    if gcfg.get("use_mtls") and gcfg.get("cert_file") and gcfg.get("key_file"):
+        cert = (gcfg.get("cert_file"), gcfg.get("key_file"))
+
     try:
-        resp = requests.get(
+        resp = _http_get(
             "https://gigachat.devices.sberbank.ru/api/v1/models",
             headers={"Accept": "application/json"},
             timeout=timeout,
+            verify=verify,
+            cert=cert,
+            log_context="preflight_models",
         )
         logger.info(f"Preflight GET /models status={resp.status_code}")
     except Exception as e:
@@ -132,11 +139,11 @@ def _safe_auth(auth):
         return "***"
 
 
-def _http_get(url: str, *, headers=None, auth=None, params=None, timeout=30, verify=True, log_context=""):
-    logger.debug(f"HTTP GET {url} params={params} headers={_safe_headers(headers)} auth={_safe_auth(auth)} verify={verify} {log_context}")
+def _http_get(url: str, *, headers=None, auth=None, params=None, timeout=30, verify=True, cert=None, log_context=""):
+    logger.debug(f"HTTP GET {url} params={params} headers={_safe_headers(headers)} auth={_safe_auth(auth)} verify={verify} cert={'set' if cert else 'unset'} {log_context}")
     resp = None
     try:
-        resp = requests.get(url, headers=headers, auth=auth, params=params, timeout=timeout, verify=verify)
+        resp = requests.get(url, headers=headers, auth=auth, params=params, timeout=timeout, verify=verify, cert=cert)
         logger.debug(f"HTTP GET {url} -> {resp.status_code}")
         resp.raise_for_status()
         return resp
@@ -150,13 +157,13 @@ def _http_get(url: str, *, headers=None, auth=None, params=None, timeout=30, ver
         raise
 
 
-def _http_post(url: str, *, headers=None, data=None, json=None, timeout=30, verify=True, log_context=""):
+def _http_post(url: str, *, headers=None, data=None, json=None, timeout=30, verify=True, cert=None, log_context=""):
     safe_headers = _safe_headers(headers)
     data_keys = list(data.keys()) if isinstance(data, dict) else None
-    logger.debug(f"HTTP POST {url} data_keys={data_keys} json_keys={list(json.keys()) if isinstance(json, dict) else None} headers={safe_headers} verify={verify} {log_context}")
+    logger.debug(f"HTTP POST {url} data_keys={data_keys} json_keys={list(json.keys()) if isinstance(json, dict) else None} headers={safe_headers} verify={verify} cert={'set' if cert else 'unset'} {log_context}")
     resp = None
     try:
-        resp = requests.post(url, headers=headers, data=data, json=json, timeout=timeout, verify=verify)
+        resp = requests.post(url, headers=headers, data=data, json=json, timeout=timeout, verify=verify, cert=cert)
         logger.debug(f"HTTP POST {url} -> {resp.status_code}")
         resp.raise_for_status()
         return resp
@@ -612,6 +619,37 @@ def _ask_gigachat(messages, llm_cfg: dict) -> str:
         return str(response)
 
 
+def _ask_gigachat_mtls(messages, llm_cfg: dict) -> str:
+    gcfg = (llm_cfg or {}).get("gigachat", {})
+    api_base = gcfg.get("api_base_url", "https://gigachat.devices.sberbank.ru/api/v1").rstrip("/")
+    model_name = gcfg.get("model", llm_cfg.get("model", "GigaChat-Pro"))
+
+    verify = gcfg.get("verify") or gcfg.get("ca_bundle_file") or gcfg.get("ca_bundle") or True
+    cert = None
+    if gcfg.get("cert_file") and gcfg.get("key_file"):
+        cert = (gcfg.get("cert_file"), gcfg.get("key_file"))
+
+    payload = {
+        "model": model_name,
+        "messages": messages,
+        "stream": False,
+    }
+
+    logger.info(f"GigaChat REST mTLS: url={api_base}/chat/completions model={model_name} verify={'path' if isinstance(verify, str) else verify} cert={'set' if cert else 'unset'}")
+
+    resp = _http_post(
+        f"{api_base}/chat/completions",
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        json=payload,
+        timeout=60,
+        verify=verify,
+        cert=cert,
+        log_context="gigachat_mtls_chat",
+    )
+    data = resp.json()
+    return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+
 def ask_llm_with_text_data(
     user_prompt: str,
     data_context: str,
@@ -650,7 +688,12 @@ def ask_llm_with_text_data(
     provider = (llm_config.get("provider") or "openai_compatible").lower()
 
     if provider == "gigachat":
-        # Используем официальную библиотеку gigachat
+        gcfg = llm_config.get("gigachat", {})
+        _ensure_gigachat_env(gcfg)
+        _gigachat_preflight(gcfg)
+        if gcfg.get("use_mtls"):
+            return _ask_gigachat_mtls(messages, llm_config)
+        # иначе SDK
         return _ask_gigachat(messages, llm_config)
 
     # Иначе используем OpenAI-совместимый клиент
