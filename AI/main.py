@@ -14,6 +14,7 @@ from getpass import getpass
 from bs4 import BeautifulSoup
 from tabulate import tabulate
 import logging
+import threading
 
 from requests.auth import HTTPBasicAuth
 from gigachat import GigaChat
@@ -23,6 +24,7 @@ from gigachat import GigaChat
 from AI.config import CONFIG
 
 logger = logging.getLogger(__name__)
+_gigachat_lock = threading.Lock()
 
 def _configure_logging():
     level_name = (CONFIG.get("logging", {}).get("level") if CONFIG.get("logging") else "INFO")
@@ -485,12 +487,9 @@ def _ask_gigachat(messages, llm_cfg: dict) -> str:
     scope = gcfg.get("scope", "GIGACHAT_API_PERS")
     model_name = gcfg.get("model", llm_cfg.get("model", "GigaChat-Pro"))
 
-    # Логируем параметры (без чувствительных данных)
     logger.info(f"GigaChat chat: model={model_name} scope={scope}")
 
-    # Инициализация клиента gigachat
     try:
-        # Некоторые версии SDK принимают verify_ssl, некоторые — нет. Попробуем аккуратно.
         try:
             giga = GigaChat(credentials=credentials, scope=scope, verify_ssl=gcfg.get("verify_ssl", False))
         except TypeError:
@@ -499,32 +498,29 @@ def _ask_gigachat(messages, llm_cfg: dict) -> str:
         logger.error(f"GigaChat init failed: {e}")
         raise
 
-    # Вызов chat. SDK может принимать либо строку, либо messages/model
     try:
-        response = giga.chat({
-            "model": model_name,
-            "messages": messages,
-            "stream": False,
-        })
+        with _gigachat_lock:
+            response = giga.chat({
+                "model": model_name,
+                "messages": messages,
+                "stream": False,
+            })
     except TypeError:
-        # Попытка альтернативной сигнатуры: giga.chat(messages=..., model=...)
-        response = giga.chat(messages=messages, model=model_name)
+        with _gigachat_lock:
+            response = giga.chat(messages=messages, model=model_name)
     except Exception as e:
         logger.error(f"GigaChat chat failed: {e}")
         raise
 
-    # Извлекаем контент
     try:
         if isinstance(response, dict):
             return response.get("choices", [{}])[0].get("message", {}).get("content", "")
-        # Объект с атрибутами
         choices = getattr(response, "choices", None)
         if choices:
             first = choices[0]
             message = getattr(first, "message", None) or first.get("message")
             if message:
                 return getattr(message, "content", None) or message.get("content", "")
-        # Fallback: преобразуем в строку
         return str(response)
     except Exception:
         return str(response)
