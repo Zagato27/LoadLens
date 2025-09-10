@@ -239,12 +239,21 @@ def label_dataframes(
 
 
 
-def _get_gigachat_access_token(client_id: str, client_secret: str, auth_url: str, scope: str, verify_ssl: bool = False) -> str:
+def _get_gigachat_access_token(client_id: str = None, client_secret: str = None, auth_url: str = None, scope: str = None, verify_ssl: bool = False, authorization_key: str = None) -> str:
     """Получает OAuth2 токен для Sber GigaChat API."""
-    # Формируем заголовок Authorization: Basic base64(client_id:client_secret)
-    basic_token = base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("utf-8")
+    # Если передан готовый Basic Authorization key из личного кабинета, используем его напрямую
+    if authorization_key:
+        basic_header_value = authorization_key.strip()
+        if not basic_header_value.lower().startswith("basic "):
+            basic_header_value = f"Basic {basic_header_value}"
+    else:
+        # Формируем заголовок Authorization: Basic base64(client_id:client_secret)
+        if not client_id or not client_secret:
+            raise RuntimeError("Для GigaChat требуется либо authorization_key, либо client_id и client_secret")
+        basic_token = base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("utf-8")
+        basic_header_value = f"Basic {basic_token}"
     headers = {
-        "Authorization": f"Basic {basic_token}",
+        "Authorization": basic_header_value,
         "RqUID": str(uuid.uuid4()),
         "Content-Type": "application/x-www-form-urlencoded"
     }
@@ -272,11 +281,12 @@ def _create_openai_compatible_client(llm_cfg: dict) -> (OpenAI, str):
     if provider == "gigachat":
         gcfg = llm_cfg.get("gigachat", {})
         token = _get_gigachat_access_token(
-            client_id=gcfg["client_id"],
-            client_secret=gcfg["client_secret"],
+            client_id=gcfg.get("client_id"),
+            client_secret=gcfg.get("client_secret"),
             auth_url=gcfg.get("auth_url", "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"),
             scope=gcfg.get("scope", "GIGACHAT_API_PERS"),
-            verify_ssl=gcfg.get("verify_ssl", False)
+            verify_ssl=gcfg.get("verify_ssl", False),
+            authorization_key=gcfg.get("authorization_key")
         )
         client = OpenAI(api_key=token, base_url=gcfg.get("api_base_url", "https://gigachat.devices.sberbank.ru/api/v1"))
         model_name = gcfg.get("model", llm_cfg.get("model", "GigaChat-Pro"))
