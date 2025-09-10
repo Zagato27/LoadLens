@@ -3,7 +3,6 @@
 import requests
 import pandas as pd
 from typing import List, Dict
-from openai import OpenAI
 import base64
 import uuid
 import os
@@ -18,7 +17,6 @@ import threading
 import socket
 
 from requests.auth import HTTPBasicAuth
-from gigachat import GigaChat
 
 
 # Импортируем CONFIG из config.py
@@ -29,9 +27,7 @@ _gigachat_lock = threading.Lock()
 
 
 def _ensure_gigachat_env(gcfg: dict) -> None:
-    """Применяет сетевые настройки для GigaChat SDK через переменные окружения (прокси/CA/инsecure).
-    Это влияет на HTTP-клиент внутри библиотеки.
-    """
+    """Применяет сетевые настройки для GigaChat через переменные окружения (прокси/CA/инsecure)."""
     proxies = (gcfg or {}).get("proxies", {}) or {}
     ca_bundle = (gcfg or {}).get("ca_bundle")
     insecure = bool((gcfg or {}).get("insecure_skip_verify", False))
@@ -49,7 +45,6 @@ def _ensure_gigachat_env(gcfg: dict) -> None:
         os.environ["SSL_CERT_FILE"] = ca_bundle
 
     if insecure:
-        # Отключаем проверку TLS (использовать только как временный workaround)
         os.environ["PYTHONHTTPSVERIFY"] = "0"
         os.environ.pop("REQUESTS_CA_BUNDLE", None)
         os.environ.pop("SSL_CERT_FILE", None)
@@ -62,26 +57,20 @@ def _ensure_gigachat_env(gcfg: dict) -> None:
 
 
 def _gigachat_preflight(gcfg: dict) -> None:
-    """Быстрая проверка доступности сетевых хостов GigaChat перед вызовом SDK/REST."""
+    """Быстрая проверка доступности GigaChat API (mTLS)."""
     timeout = float((gcfg or {}).get("connect_timeout_sec") or 5)
     proxies = (gcfg or {}).get("proxies", {}) or {}
     has_proxy = bool(proxies.get("https") or proxies.get("http") or proxies.get("HTTPS") or proxies.get("HTTP"))
 
-    # Если прокси задан, пропускаем прямые TCP-подключения (они всё равно не сработают)
     if not has_proxy:
-        checks = [
-            ("api_host", "gigachat.devices.sberbank.ru", 443),
-        ]
-        for name, host, port in checks:
-            try:
-                with socket.create_connection((host, port), timeout=timeout):
-                    logger.info(f"Preflight ok: {name} {host}:{port}")
-            except Exception as e:
-                logger.error(f"Preflight FAIL: {name} {host}:{port} -> {e}")
+        try:
+            with socket.create_connection(("gigachat.devices.sberbank.ru", 443), timeout=timeout):
+                logger.info("Preflight ok: api_host gigachat.devices.sberbank.ru:443")
+        except Exception as e:
+            logger.error(f"Preflight FAIL: api_host gigachat.devices.sberbank.ru:443 -> {e}")
     else:
         logger.info("Preflight: proxies detected, skipping direct TCP checks")
 
-    # HTTP preflight (через requests с учётом env и proxy), учитываем mTLS verify/cert
     verify = gcfg.get("verify") or gcfg.get("ca_bundle_file") or gcfg.get("ca_bundle") or True
     cert = None
     if gcfg.get("use_mtls") and gcfg.get("cert_file") and gcfg.get("key_file"):
@@ -94,22 +83,12 @@ def _gigachat_preflight(gcfg: dict) -> None:
             timeout=timeout,
             verify=verify,
             cert=cert,
+            proxies=proxies,
             log_context="preflight_models",
         )
         logger.info(f"Preflight GET /models status={resp.status_code}")
     except Exception as e:
         logger.error(f"Preflight HTTP to API failed: {e}")
-
-    # Проверка доступности токен-узла через HTTP (ожидаем 400/401/405, важно TLS/доступность)
-    try:
-        resp2 = requests.get(
-            "https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
-            headers={"Accept": "application/json"},
-            timeout=timeout,
-        )
-        logger.info(f"Preflight GET token endpoint status={resp2.status_code}")
-    except Exception as e:
-        logger.error(f"Preflight HTTP to token endpoint failed: {e}")
 
 
 def _configure_logging():
@@ -139,11 +118,11 @@ def _safe_auth(auth):
         return "***"
 
 
-def _http_get(url: str, *, headers=None, auth=None, params=None, timeout=30, verify=True, cert=None, log_context=""):
-    logger.debug(f"HTTP GET {url} params={params} headers={_safe_headers(headers)} auth={_safe_auth(auth)} verify={verify} cert={'set' if cert else 'unset'} {log_context}")
+def _http_get(url: str, *, headers=None, auth=None, params=None, timeout=30, verify=True, cert=None, proxies=None, log_context=""):
+    logger.debug(f"HTTP GET {url} params={params} headers={_safe_headers(headers)} auth={_safe_auth(auth)} verify={verify} cert={'set' if cert else 'unset'} proxies={'set' if proxies else 'unset'} {log_context}")
     resp = None
     try:
-        resp = requests.get(url, headers=headers, auth=auth, params=params, timeout=timeout, verify=verify, cert=cert)
+        resp = requests.get(url, headers=headers, auth=auth, params=params, timeout=timeout, verify=verify, cert=cert, proxies=proxies)
         logger.debug(f"HTTP GET {url} -> {resp.status_code}")
         resp.raise_for_status()
         return resp
@@ -157,13 +136,13 @@ def _http_get(url: str, *, headers=None, auth=None, params=None, timeout=30, ver
         raise
 
 
-def _http_post(url: str, *, headers=None, data=None, json=None, timeout=30, verify=True, cert=None, log_context=""):
+def _http_post(url: str, *, headers=None, data=None, json=None, timeout=30, verify=True, cert=None, proxies=None, log_context=""):
     safe_headers = _safe_headers(headers)
     data_keys = list(data.keys()) if isinstance(data, dict) else None
-    logger.debug(f"HTTP POST {url} data_keys={data_keys} json_keys={list(json.keys()) if isinstance(json, dict) else None} headers={safe_headers} verify={verify} cert={'set' if cert else 'unset'} {log_context}")
+    logger.debug(f"HTTP POST {url} data_keys={data_keys} json_keys={list(json.keys()) if isinstance(json, dict) else None} headers={safe_headers} verify={verify} cert={'set' if cert else 'unset'} proxies={'set' if proxies else 'unset'} {log_context}")
     resp = None
     try:
-        resp = requests.post(url, headers=headers, data=data, json=json, timeout=timeout, verify=verify, cert=cert)
+        resp = requests.post(url, headers=headers, data=data, json=json, timeout=timeout, verify=verify, cert=cert, proxies=proxies)
         logger.debug(f"HTTP POST {url} -> {resp.status_code}")
         resp.raise_for_status()
         return resp
@@ -175,7 +154,6 @@ def _http_post(url: str, *, headers=None, data=None, json=None, timeout=30, veri
             body = None
         logger.error(f"HTTP POST failed {url}: {e}; status={getattr(resp,'status_code',None)}; body_snippet={body}")
         raise
-
 
 # Вспомогательная функция для конвертации времени
 def convert_to_timestamp(date_str):
@@ -464,12 +442,6 @@ def dataframes_to_markdown(labeled_dfs):
     return "\n".join(result)
 
 
-
-
-
-
-
-
 def label_dataframes(
     dfs: List[pd.DataFrame],
     labels: List[str]
@@ -490,135 +462,6 @@ def label_dataframes(
     return labeled_list
 
 
-
-
-
-def _get_gigachat_access_token(client_id: str = None, client_secret: str = None, auth_url: str = None, scope: str = None, verify_ssl: bool = False, authorization_key: str = None) -> str:
-    """Получает OAuth2 токен для Sber GigaChat API."""
-    # Если передан готовый Basic Authorization key из личного кабинета, используем его напрямую
-    if authorization_key:
-        basic_header_value = authorization_key.strip()
-        if not basic_header_value.lower().startswith("basic "):
-            basic_header_value = f"Basic {basic_header_value}"
-    else:
-        # Формируем заголовок Authorization: Basic base64(client_id:client_secret)
-        if not client_id or not client_secret:
-            raise RuntimeError("Для GigaChat требуется либо authorization_key, либо client_id и client_secret")
-        basic_token = base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("utf-8")
-        basic_header_value = f"Basic {basic_token}"
-    headers = {
-        "Authorization": basic_header_value,
-        "RqUID": str(uuid.uuid4()),
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
-    data = {
-        "scope": scope,
-        "grant_type": "client_credentials"
-    }
-    logger.info(f"GigaChat OAuth: url={auth_url} verify_ssl={verify_ssl}")
-    resp = _http_post(auth_url, headers=headers, data=data, timeout=30, verify=verify_ssl, log_context="gigachat_oauth")
-    payload = resp.json()
-    access_token = payload.get("access_token")
-    if not access_token:
-        raise RuntimeError("Не удалось получить access_token для GigaChat")
-    return access_token
-
-
-def _create_openai_compatible_client(llm_cfg: dict) -> (OpenAI, str):
-    """Создаёт клиента OpenAI-совместимого API и возвращает пару (client, model)."""
-    provider = llm_cfg.get("provider", "perplexity").lower()
-
-    if provider in ("openai", "perplexity", "openai_compatible"):
-        client = OpenAI(api_key=llm_cfg["api_key"], base_url=llm_cfg.get("base_url"))
-        logger.info(f"LLM client: provider={provider} base_url={llm_cfg.get('base_url')} model={llm_cfg.get('model')}")
-        return client, llm_cfg["model"]
-
-    if provider == "gigachat":
-        gcfg = llm_cfg.get("gigachat", {})
-        token = _get_gigachat_access_token(
-            client_id=gcfg.get("client_id"),
-            client_secret=gcfg.get("client_secret"),
-            auth_url=gcfg.get("auth_url", "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"),
-            scope=gcfg.get("scope", "GIGACHAT_API_PERS"),
-            verify_ssl=gcfg.get("verify_ssl", False),
-            authorization_key=gcfg.get("authorization_key")
-        )
-        client = OpenAI(api_key=token, base_url=gcfg.get("api_base_url", "https://gigachat.devices.sberbank.ru/api/v1"))
-        model_name = gcfg.get("model", llm_cfg.get("model", "GigaChat-Pro"))
-        logger.info(f"LLM client: provider=gigachat base_url={gcfg.get('api_base_url')} model={model_name}")
-        return client, model_name
-
-    raise ValueError(f"Неизвестный провайдер LLM: {provider}")
-
-
-def _normalize_gigachat_credentials(gcfg: dict) -> str:
-    key = (gcfg or {}).get("authorization_key")
-    if not key:
-        client_id = (gcfg or {}).get("client_id")
-        client_secret = (gcfg or {}).get("client_secret")
-        if client_id and client_secret:
-            # base64(client_id:client_secret)
-            return base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("utf-8")
-        raise RuntimeError("GigaChat: не указан authorization_key или client_id/client_secret")
-    # допускаем, что ключ может быть с префиксом "Basic " — уберем его
-    key = key.strip()
-    if key.lower().startswith("basic "):
-        key = key.split(" ", 1)[1].strip()
-    return key
-
-
-def _ask_gigachat(messages, llm_cfg: dict) -> str:
-    gcfg = (llm_cfg or {}).get("gigachat", {})
-    credentials = _normalize_gigachat_credentials(gcfg)
-    scope = gcfg.get("scope", "GIGACHAT_API_PERS")
-    model_name = gcfg.get("model", llm_cfg.get("model", "GigaChat-Pro"))
-    ca_bundle_file = gcfg.get("ca_bundle_file") or gcfg.get("ca_bundle")
-
-    logger.info(f"GigaChat chat: model={model_name} scope={scope}")
-
-    # Применяем прокси/CA и выполняем предварительную сетевую проверку
-    _ensure_gigachat_env(gcfg)
-    _gigachat_preflight(gcfg)
-
-    try:
-        init_kwargs = {"credentials": credentials, "scope": scope}
-        if ca_bundle_file:
-            init_kwargs["ca_bundle_file"] = ca_bundle_file
-        giga = GigaChat(**init_kwargs)
-    except TypeError:
-        giga = GigaChat(credentials=credentials, scope=scope)
-    except Exception as e:
-        logger.error(f"GigaChat init failed: {e}")
-        raise
-
-    try:
-        with _gigachat_lock:
-            response = giga.chat({
-                "model": model_name,
-                "messages": messages,
-                "stream": False,
-            })
-    except TypeError:
-        with _gigachat_lock:
-            response = giga.chat(messages=messages, model=model_name)
-    except Exception as e:
-        logger.error(f"GigaChat chat failed: {e}")
-        raise
-
-    try:
-        if isinstance(response, dict):
-            return response.get("choices", [{}])[0].get("message", {}).get("content", "")
-        choices = getattr(response, "choices", None)
-        if choices:
-            first = choices[0]
-            message = getattr(first, "message", None) or first.get("message")
-            if message:
-                return getattr(message, "content", None) or message.get("content", "")
-        return str(response)
-    except Exception:
-        return str(response)
-
-
 def _ask_gigachat_mtls(messages, llm_cfg: dict) -> str:
     gcfg = (llm_cfg or {}).get("gigachat", {})
     api_base = gcfg.get("api_base_url", "https://gigachat.devices.sberbank.ru/api/v1").rstrip("/")
@@ -628,6 +471,7 @@ def _ask_gigachat_mtls(messages, llm_cfg: dict) -> str:
     cert = None
     if gcfg.get("cert_file") and gcfg.get("key_file"):
         cert = (gcfg.get("cert_file"), gcfg.get("key_file"))
+    proxies = gcfg.get("proxies") or None
 
     payload = {
         "model": model_name,
@@ -637,15 +481,17 @@ def _ask_gigachat_mtls(messages, llm_cfg: dict) -> str:
 
     logger.info(f"GigaChat REST mTLS: url={api_base}/chat/completions model={model_name} verify={'path' if isinstance(verify, str) else verify} cert={'set' if cert else 'unset'}")
 
-    resp = _http_post(
-        f"{api_base}/chat/completions",
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
-        json=payload,
-        timeout=60,
-        verify=verify,
-        cert=cert,
-        log_context="gigachat_mtls_chat",
-    )
+    with _gigachat_lock:
+        resp = _http_post(
+            f"{api_base}/chat/completions",
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            json=payload,
+            timeout=60,
+            verify=verify,
+            cert=cert,
+            proxies=proxies,
+            log_context="gigachat_mtls_chat",
+        )
     data = resp.json()
     return data.get("choices", [{}])[0].get("message", {}).get("content", "")
 
@@ -659,8 +505,7 @@ def ask_llm_with_text_data(
     base_url: str = None
 ) -> str:
     """
-    Отправляет запрос к LLM-провайдеру (OpenAI/Perplexity/GigaChat) с подготовленными текстовыми данными.
-    Можно передать полный `llm_config` или совместимые параметры `api_key/model/base_url`.
+    Отправляет запрос к GigaChat (REST mTLS) с подготовленными текстовыми данными.
     """
     system_message = {
         "role": "system",
@@ -677,52 +522,18 @@ def ask_llm_with_text_data(
     messages = [system_message, user_message]
 
     if llm_config is None:
-        # Совместимость со старым интерфейсом (OpenAI-совместимые API)
-        llm_config = {
-            "provider": "openai_compatible",
-            "api_key": api_key,
-            "model": model or "gpt-4o-mini",
-            "base_url": base_url,
-        }
+        llm_config = CONFIG.get("llm", {})
 
-    provider = (llm_config.get("provider") or "openai_compatible").lower()
-
-    if provider == "gigachat":
-        gcfg = llm_config.get("gigachat", {})
-        _ensure_gigachat_env(gcfg)
-        _gigachat_preflight(gcfg)
-        if gcfg.get("use_mtls"):
-            return _ask_gigachat_mtls(messages, llm_config)
-        # иначе SDK
-        return _ask_gigachat(messages, llm_config)
-
-    # Иначе используем OpenAI-совместимый клиент
-    client, final_model = _create_openai_compatible_client(llm_config)
-
-    base_for_log = (llm_config.get("gigachat", {}).get("api_base_url") if provider == "gigachat" else llm_config.get("base_url"))
-    logger.info(f"LLM request: provider={provider} model={final_model} base_url={base_for_log} user_prompt_len={len(user_prompt)} data_context_len={len(data_context)}")
-
-    try:
-        response = client.chat.completions.create(
-            model=final_model,
-            messages=messages,
-            stream=False,
-            temperature=0,
-            top_p=0.7
-        )
-    except Exception as e:
-        logger.error(f"LLM request failed: provider={provider} model={final_model} base_url={base_for_log} error={e}")
-        raise
-
-    llm_answer = response.choices[0].message.content
-    return llm_answer
+    gcfg = llm_config.get("gigachat", {})
+    _ensure_gigachat_env(gcfg)
+    _gigachat_preflight(gcfg)
+    return _ask_gigachat_mtls(messages, llm_config)
 
 
 def read_prompt_from_file(filename: str) -> str:
     """Считывает текст промта из файла с учетом кодировки UTF-8."""
     with open(filename, 'r', encoding='utf-8') as f:
         return f.read()
-
 
 
 
