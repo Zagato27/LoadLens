@@ -16,6 +16,7 @@ from tabulate import tabulate
 import logging
 
 from requests.auth import HTTPBasicAuth
+from gigachat import GigaChat
 
 
 # Импортируем CONFIG из config.py
@@ -462,6 +463,73 @@ def _create_openai_compatible_client(llm_cfg: dict) -> (OpenAI, str):
     raise ValueError(f"Неизвестный провайдер LLM: {provider}")
 
 
+def _normalize_gigachat_credentials(gcfg: dict) -> str:
+    key = (gcfg or {}).get("authorization_key")
+    if not key:
+        client_id = (gcfg or {}).get("client_id")
+        client_secret = (gcfg or {}).get("client_secret")
+        if client_id and client_secret:
+            # base64(client_id:client_secret)
+            return base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("utf-8")
+        raise RuntimeError("GigaChat: не указан authorization_key или client_id/client_secret")
+    # допускаем, что ключ может быть с префиксом "Basic " — уберем его
+    key = key.strip()
+    if key.lower().startswith("basic "):
+        key = key.split(" ", 1)[1].strip()
+    return key
+
+
+def _ask_gigachat(messages, llm_cfg: dict) -> str:
+    gcfg = (llm_cfg or {}).get("gigachat", {})
+    credentials = _normalize_gigachat_credentials(gcfg)
+    scope = gcfg.get("scope", "GIGACHAT_API_PERS")
+    model_name = gcfg.get("model", llm_cfg.get("model", "GigaChat-Pro"))
+
+    # Логируем параметры (без чувствительных данных)
+    logger.info(f"GigaChat chat: model={model_name} scope={scope}")
+
+    # Инициализация клиента gigachat
+    try:
+        # Некоторые версии SDK принимают verify_ssl, некоторые — нет. Попробуем аккуратно.
+        try:
+            giga = GigaChat(credentials=credentials, scope=scope, verify_ssl=gcfg.get("verify_ssl", False))
+        except TypeError:
+            giga = GigaChat(credentials=credentials, scope=scope)
+    except Exception as e:
+        logger.error(f"GigaChat init failed: {e}")
+        raise
+
+    # Вызов chat. SDK может принимать либо строку, либо messages/model
+    try:
+        response = giga.chat({
+            "model": model_name,
+            "messages": messages,
+            "stream": False,
+        })
+    except TypeError:
+        # Попытка альтернативной сигнатуры: giga.chat(messages=..., model=...)
+        response = giga.chat(messages=messages, model=model_name)
+    except Exception as e:
+        logger.error(f"GigaChat chat failed: {e}")
+        raise
+
+    # Извлекаем контент
+    try:
+        if isinstance(response, dict):
+            return response.get("choices", [{}])[0].get("message", {}).get("content", "")
+        # Объект с атрибутами
+        choices = getattr(response, "choices", None)
+        if choices:
+            first = choices[0]
+            message = getattr(first, "message", None) or first.get("message")
+            if message:
+                return getattr(message, "content", None) or message.get("content", "")
+        # Fallback: преобразуем в строку
+        return str(response)
+    except Exception:
+        return str(response)
+
+
 def ask_llm_with_text_data(
     user_prompt: str,
     data_context: str,
@@ -497,9 +565,15 @@ def ask_llm_with_text_data(
             "base_url": base_url,
         }
 
+    provider = (llm_config.get("provider") or "openai_compatible").lower()
+
+    if provider == "gigachat":
+        # Используем официальную библиотеку gigachat
+        return _ask_gigachat(messages, llm_config)
+
+    # Иначе используем OpenAI-совместимый клиент
     client, final_model = _create_openai_compatible_client(llm_config)
 
-    provider = llm_config.get("provider")
     base_for_log = (llm_config.get("gigachat", {}).get("api_base_url") if provider == "gigachat" else llm_config.get("base_url"))
     logger.info(f"LLM request: provider={provider} model={final_model} base_url={base_for_log} user_prompt_len={len(user_prompt)} data_context_len={len(data_context)}")
 
