@@ -13,12 +13,79 @@ from datetime import datetime
 from getpass import getpass
 from bs4 import BeautifulSoup
 from tabulate import tabulate
+import logging
 
 from requests.auth import HTTPBasicAuth
 
 
 # Импортируем CONFIG из config.py
 from AI.config import CONFIG
+
+logger = logging.getLogger(__name__)
+
+def _configure_logging():
+    level_name = (CONFIG.get("logging", {}).get("level") if CONFIG.get("logging") else "INFO")
+    level = getattr(logging, str(level_name).upper(), logging.INFO)
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    logging.getLogger().setLevel(level)
+
+
+def _safe_headers(headers: dict) -> dict:
+    if not headers:
+        return {}
+    safe = dict(headers)
+    if "Authorization" in safe:
+        safe["Authorization"] = "***"
+    return safe
+
+
+def _safe_auth(auth):
+    if auth is None:
+        return None
+    try:
+        username, _ = auth
+        return (username, "***")
+    except Exception:
+        return "***"
+
+
+def _http_get(url: str, *, headers=None, auth=None, params=None, timeout=30, verify=True, log_context=""):
+    logger.debug(f"HTTP GET {url} params={params} headers={_safe_headers(headers)} auth={_safe_auth(auth)} verify={verify} {log_context}")
+    resp = None
+    try:
+        resp = requests.get(url, headers=headers, auth=auth, params=params, timeout=timeout, verify=verify)
+        logger.debug(f"HTTP GET {url} -> {resp.status_code}")
+        resp.raise_for_status()
+        return resp
+    except Exception as e:
+        body = None
+        try:
+            body = resp.text[:1000] if resp is not None else None
+        except Exception:
+            body = None
+        logger.error(f"HTTP GET failed {url}: {e}; status={getattr(resp,'status_code',None)}; body_snippet={body}")
+        raise
+
+
+def _http_post(url: str, *, headers=None, data=None, json=None, timeout=30, verify=True, log_context=""):
+    safe_headers = _safe_headers(headers)
+    data_keys = list(data.keys()) if isinstance(data, dict) else None
+    logger.debug(f"HTTP POST {url} data_keys={data_keys} json_keys={list(json.keys()) if isinstance(json, dict) else None} headers={safe_headers} verify={verify} {log_context}")
+    resp = None
+    try:
+        resp = requests.post(url, headers=headers, data=data, json=json, timeout=timeout, verify=verify)
+        logger.debug(f"HTTP POST {url} -> {resp.status_code}")
+        resp.raise_for_status()
+        return resp
+    except Exception as e:
+        body = None
+        try:
+            body = resp.text[:1000] if resp is not None else None
+        except Exception:
+            body = None
+        logger.error(f"HTTP POST failed {url}: {e}; status={getattr(resp,'status_code',None)}; body_snippet={body}")
+        raise
 
 
 # Вспомогательная функция для конвертации времени
@@ -57,13 +124,9 @@ def fetch_prometheus_data(
         'step':  step_in_seconds
     }
 
-    response = requests.get(
-        f'{prometheus_url}/api/v1/query_range',
-        params=params,
-        timeout=30
-    )
-    response.raise_for_status()
-    return response.json()
+    url = f'{prometheus_url}/api/v1/query_range'
+    resp = _http_get(url, params=params, timeout=30, verify=True, log_context="prometheus_query_range")
+    return resp.json()
 
 
 def _resolve_grafana_prom_ds_id(g_cfg: dict) -> int:
@@ -83,27 +146,35 @@ def _resolve_grafana_prom_ds_id(g_cfg: dict) -> int:
     elif method == "basic" and auth_cfg.get("username") and auth_cfg.get("password"):
         auth = (auth_cfg["username"], auth_cfg["password"])
 
+    verify = g_cfg.get("verify_ssl", True)
+
     # 1) Прямой id
     if isinstance(ds_cfg.get("id"), int):
+        logger.info(f"Grafana datasource id (configured): {ds_cfg['id']}")
         return ds_cfg["id"]
 
     # 2) По uid
     if ds_cfg.get("uid"):
-        resp = requests.get(f"{base_url}/api/datasources/uid/{ds_cfg['uid']}", headers=headers, auth=auth, timeout=30, verify=g_cfg.get("verify_ssl", True))
-        resp.raise_for_status()
-        return resp.json()["id"]
+        url = f"{base_url}/api/datasources/uid/{ds_cfg['uid']}"
+        resp = _http_get(url, headers=headers, auth=auth, timeout=30, verify=verify, log_context="grafana_get_ds_by_uid")
+        ds_id = resp.json()["id"]
+        logger.info(f"Grafana datasource resolved by uid={ds_cfg['uid']} -> id={ds_id}")
+        return ds_id
 
     # 3) По name
     if ds_cfg.get("name"):
-        resp = requests.get(f"{base_url}/api/datasources/name/{ds_cfg['name']}", headers=headers, auth=auth, timeout=30, verify=g_cfg.get("verify_ssl", True))
-        resp.raise_for_status()
-        return resp.json()["id"]
+        url = f"{base_url}/api/datasources/name/{ds_cfg['name']}"
+        resp = _http_get(url, headers=headers, auth=auth, timeout=30, verify=verify, log_context="grafana_get_ds_by_name")
+        ds_id = resp.json()["id"]
+        logger.info(f"Grafana datasource resolved by name={ds_cfg['name']} -> id={ds_id}")
+        return ds_id
 
     # 4) Автовыбор первого Prometheus-датасорса
-    resp = requests.get(f"{base_url}/api/datasources", headers=headers, auth=auth, timeout=30, verify=g_cfg.get("verify_ssl", True))
-    resp.raise_for_status()
+    url = f"{base_url}/api/datasources"
+    resp = _http_get(url, headers=headers, auth=auth, timeout=30, verify=verify, log_context="grafana_list_ds")
     for ds in resp.json():
         if ds.get("type") == "prometheus":
+            logger.info(f"Grafana datasource auto-selected: id={ds['id']} name={ds.get('name')}")
             return ds["id"]
     raise RuntimeError("Не найден Prometheus datasource в Grafana")
 
@@ -140,9 +211,8 @@ def fetch_prometheus_data_via_grafana(
         auth = (g_cfg["auth"]["username"], g_cfg["auth"]["password"])
 
     url = f"{base_url}/api/datasources/proxy/{ds_id}/api/v1/query_range"
-    response = requests.get(url, params=params, headers=headers, auth=auth, timeout=30, verify=g_cfg.get("verify_ssl", True))
-    response.raise_for_status()
-    return response.json()
+    resp = _http_get(url, headers=headers, auth=auth, params=params, timeout=30, verify=g_cfg.get("verify_ssl", True), log_context="grafana_proxy_query_range")
+    return resp.json()
 
 
 def fetch_metric_series(
@@ -356,8 +426,8 @@ def _get_gigachat_access_token(client_id: str = None, client_secret: str = None,
         "scope": scope,
         "grant_type": "client_credentials"
     }
-    resp = requests.post(auth_url, headers=headers, data=data, timeout=30, verify=verify_ssl)
-    resp.raise_for_status()
+    logger.info(f"GigaChat OAuth: url={auth_url} verify_ssl={verify_ssl}")
+    resp = _http_post(auth_url, headers=headers, data=data, timeout=30, verify=verify_ssl, log_context="gigachat_oauth")
     payload = resp.json()
     access_token = payload.get("access_token")
     if not access_token:
@@ -371,6 +441,7 @@ def _create_openai_compatible_client(llm_cfg: dict) -> (OpenAI, str):
 
     if provider in ("openai", "perplexity", "openai_compatible"):
         client = OpenAI(api_key=llm_cfg["api_key"], base_url=llm_cfg.get("base_url"))
+        logger.info(f"LLM client: provider={provider} base_url={llm_cfg.get('base_url')} model={llm_cfg.get('model')}")
         return client, llm_cfg["model"]
 
     if provider == "gigachat":
@@ -385,6 +456,7 @@ def _create_openai_compatible_client(llm_cfg: dict) -> (OpenAI, str):
         )
         client = OpenAI(api_key=token, base_url=gcfg.get("api_base_url", "https://gigachat.devices.sberbank.ru/api/v1"))
         model_name = gcfg.get("model", llm_cfg.get("model", "GigaChat-Pro"))
+        logger.info(f"LLM client: provider=gigachat base_url={gcfg.get('api_base_url')} model={model_name}")
         return client, model_name
 
     raise ValueError(f"Неизвестный провайдер LLM: {provider}")
@@ -427,13 +499,22 @@ def ask_llm_with_text_data(
 
     client, final_model = _create_openai_compatible_client(llm_config)
 
-    response = client.chat.completions.create(
-        model=final_model,
-        messages=messages,
-        stream=False,
-        temperature=0,
-        top_p=0.7
-    )
+    provider = llm_config.get("provider")
+    base_for_log = (llm_config.get("gigachat", {}).get("api_base_url") if provider == "gigachat" else llm_config.get("base_url"))
+    logger.info(f"LLM request: provider={provider} model={final_model} base_url={base_for_log} user_prompt_len={len(user_prompt)} data_context_len={len(data_context)}")
+
+    try:
+        response = client.chat.completions.create(
+            model=final_model,
+            messages=messages,
+            stream=False,
+            temperature=0,
+            top_p=0.7
+        )
+    except Exception as e:
+        logger.error(f"LLM request failed: provider={provider} model={final_model} base_url={base_for_log} error={e}")
+        raise
+
     llm_answer = response.choices[0].message.content
     return llm_answer
 
@@ -449,7 +530,14 @@ def read_prompt_from_file(filename: str) -> str:
 def uploadFromLLM(start_ts, end_ts):
 
     # 1. Читаем конфигурацию
+    _configure_logging()
     prometheus_url = CONFIG["prometheus"]["url"]
+    src_type = (CONFIG.get("metrics_source", {}).get("type") or "prometheus").lower()
+    if src_type == "grafana_proxy":
+        g = CONFIG.get("metrics_source", {}).get("grafana", {})
+        logger.info(f"Metrics source: Grafana proxy base_url={g.get('base_url')} auth_method={(g.get('auth', {}).get('method'))} verify_ssl={g.get('verify_ssl')} ds_hint={g.get('prometheus_datasource')}")
+    else:
+        logger.info(f"Metrics source: Prometheus url={prometheus_url}")
     
     llm_config = CONFIG["llm"]
 
