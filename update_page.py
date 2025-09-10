@@ -1,5 +1,5 @@
 from confluence_manager.update_confluence_template import copy_confluence_page, update_confluence_page
-from AI.main import uploadFromDeepSeek
+from AI.main import uploadFromLLM
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from data_collectors.grafana_collector import uploadFromGrafana
@@ -89,12 +89,12 @@ def update_report(start, end, service):
             except Exception as e:
                 print(f"Ошибка при обновлении метрики/лога: {e}")
 
-    # Получаем результаты DeepSeek и обновляем их последовательно
-    results = uploadFromDeepSeek(start/1000, end/1000)
+    # Получаем результаты LLM и обновляем их последовательно
+    results = uploadFromLLM(start/1000, end/1000)
 
     # Последовательное обновление для предотвращения конфликтов версий
     try:
-        print("Обновление данных DeepSeek...")
+        print("Обновление данных LLM...")
         
         # Последовательно обновляем каждый раздел с повторными попытками
         update_with_retry(url_basic, user, password, copy_page_id, "$$final_answer$$", results["final"])
@@ -112,7 +112,7 @@ def update_report(start, end, service):
         update_with_retry(url_basic, user, password, copy_page_id, "$$answer_ms$$", results["ms"])
         print("✓ Microservices обновлен")
         
-        print("Все данные DeepSeek успешно обновлены")
+        print("Все данные LLM успешно обновлены")
     except Exception as e:
-        print(f"Ошибка при последовательном обновлении данных DeepSeek: {e}")
+        print(f"Ошибка при последовательном обновлении данных LLM: {e}")
 

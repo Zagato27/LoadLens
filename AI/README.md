@@ -128,7 +128,7 @@
 
 2. **Запуск скрипта:**
 
-   Функция `uploadFromDeepSeek(start_ts, end_ts)` в файле `main.py` объединяет все шаги:
+   Функция `uploadFromLLM(start_ts, end_ts)` в файле `main.py` объединяет все шаги:
    - Получение данных из Prometheus.
    - Аггрегация и обработка метрик для каждого компонента.
    - Отправка данных в LLM для анализа и формирования отчётов.
@@ -142,7 +142,7 @@
        start_ts = 1740126600
        end_ts = 1740136200
 
-       final_report = uploadFromDeepSeek(start_ts, end_ts)
+       final_report = uploadFromLLM(start_ts, end_ts)
        print("Итоговый отчёт:")
        print(final_report)
    ```
@@ -178,7 +178,7 @@
   `read_prompt_from_file()` – считывает содержимое файла с промтом, учитывая кодировку UTF-8.
 
 - **Основной рабочий процесс:**  
-  `uploadFromDeepSeek()` – объединяет все вышеописанные шаги:
+  `uploadFromLLM()` – объединяет все вышеописанные шаги:
   - Чтение конфигурации.
   - Получение и агрегация метрик для компонентов (JVM, ArangoDB, Kafka, Microservices).
   - Получение индивидуальных ответов от LLM.

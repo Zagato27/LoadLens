@@ -4,6 +4,8 @@ import requests
 import pandas as pd
 from typing import List, Dict
 from openai import OpenAI
+import base64
+import uuid
 import os
 from datetime import datetime
 from atlassian import Confluence
@@ -237,25 +239,63 @@ def label_dataframes(
 
 
 
+def _get_gigachat_access_token(client_id: str, client_secret: str, auth_url: str, scope: str, verify_ssl: bool = False) -> str:
+    """Получает OAuth2 токен для Sber GigaChat API."""
+    # Формируем заголовок Authorization: Basic base64(client_id:client_secret)
+    basic_token = base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("utf-8")
+    headers = {
+        "Authorization": f"Basic {basic_token}",
+        "RqUID": str(uuid.uuid4()),
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+    data = {
+        "scope": scope,
+        "grant_type": "client_credentials"
+    }
+    resp = requests.post(auth_url, headers=headers, data=data, timeout=30, verify=verify_ssl)
+    resp.raise_for_status()
+    payload = resp.json()
+    access_token = payload.get("access_token")
+    if not access_token:
+        raise RuntimeError("Не удалось получить access_token для GigaChat")
+    return access_token
+
+
+def _create_openai_compatible_client(llm_cfg: dict) -> (OpenAI, str):
+    """Создаёт клиента OpenAI-совместимого API и возвращает пару (client, model)."""
+    provider = llm_cfg.get("provider", "perplexity").lower()
+
+    if provider in ("openai", "perplexity", "openai_compatible"):
+        client = OpenAI(api_key=llm_cfg["api_key"], base_url=llm_cfg.get("base_url"))
+        return client, llm_cfg["model"]
+
+    if provider == "gigachat":
+        gcfg = llm_cfg.get("gigachat", {})
+        token = _get_gigachat_access_token(
+            client_id=gcfg["client_id"],
+            client_secret=gcfg["client_secret"],
+            auth_url=gcfg.get("auth_url", "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"),
+            scope=gcfg.get("scope", "GIGACHAT_API_PERS"),
+            verify_ssl=gcfg.get("verify_ssl", False)
+        )
+        client = OpenAI(api_key=token, base_url=gcfg.get("api_base_url", "https://gigachat.devices.sberbank.ru/api/v1"))
+        model_name = gcfg.get("model", llm_cfg.get("model", "GigaChat-Pro"))
+        return client, model_name
+
+    raise ValueError(f"Неизвестный провайдер LLM: {provider}")
+
+
 def ask_llm_with_text_data(
     user_prompt: str,
     data_context: str,
-    api_key: str,
-    model: str = "sonar-deep-research",
-    base_url: str = "https://api.perplexity.ai"
+    llm_config: dict = None,
+    api_key: str = None,
+    model: str = None,
+    base_url: str = None
 ) -> str:
     """
-    Отправляет запрос к модели, используя предварительно форматированные текстовые данные.
-    
-    Args:
-        user_prompt: Пользовательский запрос к модели
-        data_context: Полное текстовое представление данных
-        api_key: API ключ для доступа к модели
-        model: Название модели
-        base_url: Базовый URL для API запросов
-        
-    Returns:
-        Ответ от модели
+    Отправляет запрос к LLM-провайдеру (OpenAI/Perplexity/GigaChat) с подготовленными текстовыми данными.
+    Можно передать полный `llm_config` или совместимые параметры `api_key/model/base_url`.
     """
     system_message = {
         "role": "system",
@@ -269,19 +309,26 @@ def ask_llm_with_text_data(
         "role": "user",
         "content": user_prompt + f"\n\n{data_context}"
     }
-
     messages = [system_message, user_message]
 
-    client = OpenAI(api_key=api_key, base_url=base_url)
+    if llm_config is None:
+        # Совместимость со старым интерфейсом (OpenAI-совместимые API)
+        llm_config = {
+            "provider": "openai_compatible",
+            "api_key": api_key,
+            "model": model or "gpt-4o-mini",
+            "base_url": base_url,
+        }
+
+    client, final_model = _create_openai_compatible_client(llm_config)
+
     response = client.chat.completions.create(
-        model=model,
+        model=final_model,
         messages=messages,
         stream=False,
         temperature=0,
         top_p=0.7
-
     )
-
     llm_answer = response.choices[0].message.content
     return llm_answer
 
@@ -294,14 +341,12 @@ def read_prompt_from_file(filename: str) -> str:
 
 
 
-def uploadFromDeepSeek(start_ts, end_ts):
+def uploadFromLLM(start_ts, end_ts):
 
     # 1. Читаем конфигурацию
     prometheus_url = CONFIG["prometheus"]["url"]
     
-    deepseek_api_key = CONFIG["llm"]["api_key"]
-    llm_model = CONFIG["llm"]["model"]
-    llm_base_url = CONFIG["llm"]["base_url"]
+    llm_config = CONFIG["llm"]
 
     step = CONFIG["default_params"]["step"]
     resample = CONFIG["default_params"]["resample_interval"]
@@ -378,33 +423,25 @@ def uploadFromDeepSeek(start_ts, end_ts):
     answer_jvm = ask_llm_with_text_data(
         user_prompt=prompt_jvm,
         data_context=jvm_full_data,
-        api_key=deepseek_api_key,
-        model=llm_model,
-        base_url=llm_base_url
+        llm_config=llm_config
     )
 
     answer_arangodb = ask_llm_with_text_data(
         user_prompt=prompt_arangodb,
         data_context=arangodb_full_data,
-        api_key=deepseek_api_key,
-        model=llm_model,
-        base_url=llm_base_url
+        llm_config=llm_config
     )
 
     answer_kafka = ask_llm_with_text_data(
         user_prompt=prompt_kafka,
         data_context=kafka_full_data,
-        api_key=deepseek_api_key,
-        model=llm_model,
-        base_url=llm_base_url
+        llm_config=llm_config
     )
 
     answer_ms = ask_llm_with_text_data(
         user_prompt=prompt_microservices,
         data_context=ms_full_data,
-        api_key=deepseek_api_key,
-        model=llm_model,
-        base_url=llm_base_url
+        llm_config=llm_config
     )
 
     # 8. Формируем сводный отчёт (используем готовые ответы)
@@ -419,9 +456,7 @@ def uploadFromDeepSeek(start_ts, end_ts):
     final_answer = ask_llm_with_text_data(
         user_prompt=merged_prompt_overall,
         data_context="",  # не передаём датафреймы, т.к. контекст уже в answer_*
-        api_key=deepseek_api_key,
-        model=llm_model,
-        base_url=llm_base_url
+        llm_config=llm_config
     )
 
     # Возвращаем результаты, включая полные данные таблиц
