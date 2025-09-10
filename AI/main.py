@@ -15,6 +15,7 @@ from bs4 import BeautifulSoup
 from tabulate import tabulate
 import logging
 import threading
+import socket
 
 from requests.auth import HTTPBasicAuth
 from gigachat import GigaChat
@@ -25,6 +26,59 @@ from AI.config import CONFIG
 
 logger = logging.getLogger(__name__)
 _gigachat_lock = threading.Lock()
+
+
+def _ensure_gigachat_env(gcfg: dict) -> None:
+    """Применяет сетевые настройки для GigaChat SDK через переменные окружения (прокси/CA).
+    Это влияет на HTTP-клиент внутри библиотеки.
+    """
+    proxies = (gcfg or {}).get("proxies", {}) or {}
+    ca_bundle = (gcfg or {}).get("ca_bundle")
+
+    https_proxy = proxies.get("https") or proxies.get("HTTPS")
+    http_proxy = proxies.get("http") or proxies.get("HTTP")
+
+    if https_proxy:
+        os.environ["HTTPS_PROXY"] = https_proxy
+    if http_proxy:
+        os.environ["HTTP_PROXY"] = http_proxy
+
+    if ca_bundle:
+        os.environ["REQUESTS_CA_BUNDLE"] = ca_bundle
+        os.environ["SSL_CERT_FILE"] = ca_bundle
+
+    logger.info(
+        f"GigaChat net env set: HTTPS_PROXY={'set' if https_proxy else 'unset'} "
+        f"HTTP_PROXY={'set' if http_proxy else 'unset'} CA_BUNDLE={'set' if ca_bundle else 'unset'}"
+    )
+
+
+def _gigachat_preflight(gcfg: dict) -> None:
+    """Быстрая проверка доступности сетевых хостов GigaChat перед вызовом SDK."""
+    checks = [
+        ("token_host", "ngw.devices.sberbank.ru", 9443),
+        ("api_host", "gigachat.devices.sberbank.ru", 443),
+    ]
+    timeout = float((gcfg or {}).get("connect_timeout_sec") or 5)
+
+    for name, host, port in checks:
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                logger.info(f"Preflight ok: {name} {host}:{port}")
+        except Exception as e:
+            logger.error(f"Preflight FAIL: {name} {host}:{port} -> {e}")
+
+    # HTTP preflight до API без токена (ожидаем 401, главное — коннект и TLS)
+    try:
+        resp = requests.get(
+            "https://gigachat.devices.sberbank.ru/api/v1/models",
+            headers={"Accept": "application/json"},
+            timeout=timeout,
+        )
+        logger.info(f"Preflight GET /models status={resp.status_code}")
+    except Exception as e:
+        logger.error(f"Preflight HTTP to API failed: {e}")
+
 
 def _configure_logging():
     level_name = (CONFIG.get("logging", {}).get("level") if CONFIG.get("logging") else "INFO")
@@ -489,11 +543,12 @@ def _ask_gigachat(messages, llm_cfg: dict) -> str:
 
     logger.info(f"GigaChat chat: model={model_name} scope={scope}")
 
+    # Применяем прокси/CA и выполняем предварительную сетевую проверку
+    _ensure_gigachat_env(gcfg)
+    _gigachat_preflight(gcfg)
+
     try:
-        try:
-            giga = GigaChat(credentials=credentials, scope=scope, verify_ssl=gcfg.get("verify_ssl", False))
-        except TypeError:
-            giga = GigaChat(credentials=credentials, scope=scope)
+        giga = GigaChat(credentials=credentials, scope=scope)
     except Exception as e:
         logger.error(f"GigaChat init failed: {e}")
         raise
