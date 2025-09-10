@@ -66,6 +66,101 @@ def fetch_prometheus_data(
     return response.json()
 
 
+def _resolve_grafana_prom_ds_id(g_cfg: dict) -> int:
+    """
+    Определяет id Prometheus datasource в Grafana по id/uid/name.
+    Возвращает целочисленный id.
+    """
+    base_url = g_cfg["base_url"].rstrip("/")
+    ds_cfg = g_cfg.get("prometheus_datasource", {})
+    auth_cfg = g_cfg.get("auth", {})
+
+    headers = {}
+    auth = None
+    method = (auth_cfg.get("method") or "basic").lower()
+    if method == "bearer" and auth_cfg.get("token"):
+        headers["Authorization"] = f"Bearer {auth_cfg['token']}"
+    elif method == "basic" and auth_cfg.get("username") and auth_cfg.get("password"):
+        auth = (auth_cfg["username"], auth_cfg["password"])
+
+    # 1) Прямой id
+    if isinstance(ds_cfg.get("id"), int):
+        return ds_cfg["id"]
+
+    # 2) По uid
+    if ds_cfg.get("uid"):
+        resp = requests.get(f"{base_url}/api/datasources/uid/{ds_cfg['uid']}", headers=headers, auth=auth, timeout=30, verify=g_cfg.get("verify_ssl", True))
+        resp.raise_for_status()
+        return resp.json()["id"]
+
+    # 3) По name
+    if ds_cfg.get("name"):
+        resp = requests.get(f"{base_url}/api/datasources/name/{ds_cfg['name']}", headers=headers, auth=auth, timeout=30, verify=g_cfg.get("verify_ssl", True))
+        resp.raise_for_status()
+        return resp.json()["id"]
+
+    # 4) Автовыбор первого Prometheus-датасорса
+    resp = requests.get(f"{base_url}/api/datasources", headers=headers, auth=auth, timeout=30, verify=g_cfg.get("verify_ssl", True))
+    resp.raise_for_status()
+    for ds in resp.json():
+        if ds.get("type") == "prometheus":
+            return ds["id"]
+    raise RuntimeError("Не найден Prometheus datasource в Grafana")
+
+
+def fetch_prometheus_data_via_grafana(
+    g_cfg: dict,
+    start_ts: float,
+    end_ts: float,
+    promql_query: str,
+    step: str
+) -> dict:
+    """
+    Выполняет PromQL-запрос через Grafana proxy: /api/datasources/proxy/{id}/api/v1/query_range.
+    Возвращает ответ в формате Prometheus API.
+    """
+    step_in_seconds = parse_step_to_seconds(step)
+    base_url = g_cfg["base_url"].rstrip("/")
+
+    ds_id = _resolve_grafana_prom_ds_id(g_cfg)
+
+    params = {
+        'query': promql_query,
+        'start': start_ts,
+        'end':   end_ts,
+        'step':  step_in_seconds
+    }
+
+    headers = {}
+    auth = None
+    method = (g_cfg.get("auth", {}).get("method") or "basic").lower()
+    if method == "bearer" and g_cfg["auth"].get("token"):
+        headers["Authorization"] = f"Bearer {g_cfg['auth']['token']}"
+    elif method == "basic" and g_cfg["auth"].get("username") and g_cfg["auth"].get("password"):
+        auth = (g_cfg["auth"]["username"], g_cfg["auth"]["password"])
+
+    url = f"{base_url}/api/datasources/proxy/{ds_id}/api/v1/query_range"
+    response = requests.get(url, params=params, headers=headers, auth=auth, timeout=30, verify=g_cfg.get("verify_ssl", True))
+    response.raise_for_status()
+    return response.json()
+
+
+def fetch_metric_series(
+    prometheus_url: str,
+    start_ts: float,
+    end_ts: float,
+    promql_query: str,
+    step: str
+) -> dict:
+    """Единая точка получения метрик: напрямую Prometheus или через Grafana proxy (по CONFIG)."""
+    src = (CONFIG.get("metrics_source", {}).get("type") or "prometheus").lower()
+    if src == "grafana_proxy":
+        g_cfg = CONFIG.get("metrics_source", {}).get("grafana", {})
+        return fetch_prometheus_data_via_grafana(g_cfg, start_ts, end_ts, promql_query, step)
+    else:
+        return fetch_prometheus_data(prometheus_url, start_ts, end_ts, promql_query, step)
+
+
 def fetch_and_aggregate_with_label_keys(
     prometheus_url: str,
     start_ts: float,
@@ -86,7 +181,7 @@ def fetch_and_aggregate_with_label_keys(
 
     dfs = []
     for query, keys_for_this_query in zip(promql_queries, label_keys_list):
-        data_json = fetch_prometheus_data(
+        data_json = fetch_metric_series(
             prometheus_url,
             start_ts,
             end_ts,
