@@ -3,8 +3,6 @@
 import requests
 import pandas as pd
 from typing import List, Dict
-import base64
-import uuid
 import os
 from datetime import datetime
 from atlassian import Confluence
@@ -15,8 +13,18 @@ from tabulate import tabulate
 import logging
 import threading
 import socket
+from urllib.parse import urlparse
 
 from requests.auth import HTTPBasicAuth
+from langchain_gigachat.chat_models import GigaChat as LC_GigaChat
+try:
+    from langchain_core.messages import SystemMessage, HumanMessage
+except Exception:
+    try:
+        from langchain.schema import SystemMessage, HumanMessage  # старые версии langchain
+    except Exception:
+        SystemMessage = None
+        HumanMessage = None
 
 
 # Импортируем CONFIG из config.py
@@ -24,10 +32,11 @@ from AI.config import CONFIG
 
 logger = logging.getLogger(__name__)
 _gigachat_lock = threading.Lock()
+_gigachat_client = None
 
 
 def _ensure_gigachat_env(gcfg: dict) -> None:
-    """Применяет сетевые настройки для GigaChat через переменные окружения (прокси/CA/инsecure)."""
+    """Применяет сетевые настройки (прокси/CA/инsecure) через переменные окружения."""
     proxies = (gcfg or {}).get("proxies", {}) or {}
     ca_bundle = (gcfg or {}).get("ca_bundle")
     insecure = bool((gcfg or {}).get("insecure_skip_verify", False))
@@ -62,12 +71,18 @@ def _gigachat_preflight(gcfg: dict) -> None:
     proxies = (gcfg or {}).get("proxies", {}) or {}
     has_proxy = bool(proxies.get("https") or proxies.get("http") or proxies.get("HTTPS") or proxies.get("HTTP"))
 
+    api_base = (gcfg.get("api_base_url") or gcfg.get("base_url") or "https://gigachat.devices.sberbank.ru/api/v1").rstrip("/")
+    parsed = urlparse(api_base)
+    host = parsed.hostname or "gigachat.devices.sberbank.ru"
+    port = parsed.port or (443 if (parsed.scheme or "https").lower() == "https" else 80)
+    models_url = f"{api_base}/models"
+
     if not has_proxy:
         try:
-            with socket.create_connection(("gigachat.devices.sberbank.ru", 443), timeout=timeout):
-                logger.info("Preflight ok: api_host gigachat.devices.sberbank.ru:443")
+            with socket.create_connection((host, port), timeout=timeout):
+                logger.info(f"Preflight ok: api_host {host}:{port}")
         except Exception as e:
-            logger.error(f"Preflight FAIL: api_host gigachat.devices.sberbank.ru:443 -> {e}")
+            logger.error(f"Preflight FAIL: api_host {host}:{port} -> {e}")
     else:
         logger.info("Preflight: proxies detected, skipping direct TCP checks")
 
@@ -77,16 +92,15 @@ def _gigachat_preflight(gcfg: dict) -> None:
         cert = (gcfg.get("cert_file"), gcfg.get("key_file"))
 
     try:
-        resp = _http_get(
-            "https://gigachat.devices.sberbank.ru/api/v1/models",
+        resp = requests.get(
+            models_url,
             headers={"Accept": "application/json"},
             timeout=timeout,
             verify=verify,
             cert=cert,
-            proxies=proxies,
-            log_context="preflight_models",
+            proxies=proxies if proxies else None,
         )
-        logger.info(f"Preflight GET /models status={resp.status_code}")
+        logger.info(f"Preflight GET {models_url} status={resp.status_code}")
     except Exception as e:
         logger.error(f"Preflight HTTP to API failed: {e}")
 
@@ -98,62 +112,6 @@ def _configure_logging():
         logging.basicConfig(level=level, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     logging.getLogger().setLevel(level)
 
-
-def _safe_headers(headers: dict) -> dict:
-    if not headers:
-        return {}
-    safe = dict(headers)
-    if "Authorization" in safe:
-        safe["Authorization"] = "***"
-    return safe
-
-
-def _safe_auth(auth):
-    if auth is None:
-        return None
-    try:
-        username, _ = auth
-        return (username, "***")
-    except Exception:
-        return "***"
-
-
-def _http_get(url: str, *, headers=None, auth=None, params=None, timeout=30, verify=True, cert=None, proxies=None, log_context=""):
-    logger.debug(f"HTTP GET {url} params={params} headers={_safe_headers(headers)} auth={_safe_auth(auth)} verify={verify} cert={'set' if cert else 'unset'} proxies={'set' if proxies else 'unset'} {log_context}")
-    resp = None
-    try:
-        resp = requests.get(url, headers=headers, auth=auth, params=params, timeout=timeout, verify=verify, cert=cert, proxies=proxies)
-        logger.debug(f"HTTP GET {url} -> {resp.status_code}")
-        resp.raise_for_status()
-        return resp
-    except Exception as e:
-        body = None
-        try:
-            body = resp.text[:1000] if resp is not None else None
-        except Exception:
-            body = None
-        logger.error(f"HTTP GET failed {url}: {e}; status={getattr(resp,'status_code',None)}; body_snippet={body}")
-        raise
-
-
-def _http_post(url: str, *, headers=None, data=None, json=None, timeout=30, verify=True, cert=None, proxies=None, log_context=""):
-    safe_headers = _safe_headers(headers)
-    data_keys = list(data.keys()) if isinstance(data, dict) else None
-    logger.debug(f"HTTP POST {url} data_keys={data_keys} json_keys={list(json.keys()) if isinstance(json, dict) else None} headers={safe_headers} verify={verify} cert={'set' if cert else 'unset'} proxies={'set' if proxies else 'unset'} {log_context}")
-    resp = None
-    try:
-        resp = requests.post(url, headers=headers, data=data, json=json, timeout=timeout, verify=verify, cert=cert, proxies=proxies)
-        logger.debug(f"HTTP POST {url} -> {resp.status_code}")
-        resp.raise_for_status()
-        return resp
-    except Exception as e:
-        body = None
-        try:
-            body = resp.text[:1000] if resp is not None else None
-        except Exception:
-            body = None
-        logger.error(f"HTTP POST failed {url}: {e}; status={getattr(resp,'status_code',None)}; body_snippet={body}")
-        raise
 
 # Вспомогательная функция для конвертации времени
 def convert_to_timestamp(date_str):
@@ -192,15 +150,12 @@ def fetch_prometheus_data(
     }
 
     url = f'{prometheus_url}/api/v1/query_range'
-    resp = _http_get(url, params=params, timeout=30, verify=True, log_context="prometheus_query_range")
+    resp = requests.get(url, params=params, timeout=30)
+    resp.raise_for_status()
     return resp.json()
 
 
 def _resolve_grafana_prom_ds_id(g_cfg: dict) -> int:
-    """
-    Определяет id Prometheus datasource в Grafana по id/uid/name.
-    Возвращает целочисленный id.
-    """
     base_url = g_cfg["base_url"].rstrip("/")
     ds_cfg = g_cfg.get("prometheus_datasource", {})
     auth_cfg = g_cfg.get("auth", {})
@@ -215,33 +170,27 @@ def _resolve_grafana_prom_ds_id(g_cfg: dict) -> int:
 
     verify = g_cfg.get("verify_ssl", True)
 
-    # 1) Прямой id
     if isinstance(ds_cfg.get("id"), int):
         logger.info(f"Grafana datasource id (configured): {ds_cfg['id']}")
         return ds_cfg["id"]
 
-    # 2) По uid
     if ds_cfg.get("uid"):
         url = f"{base_url}/api/datasources/uid/{ds_cfg['uid']}"
-        resp = _http_get(url, headers=headers, auth=auth, timeout=30, verify=verify, log_context="grafana_get_ds_by_uid")
-        ds_id = resp.json()["id"]
-        logger.info(f"Grafana datasource resolved by uid={ds_cfg['uid']} -> id={ds_id}")
-        return ds_id
+        resp = requests.get(url, headers=headers, auth=auth, timeout=30, verify=verify)
+        resp.raise_for_status()
+        return resp.json()["id"]
 
-    # 3) По name
     if ds_cfg.get("name"):
         url = f"{base_url}/api/datasources/name/{ds_cfg['name']}"
-        resp = _http_get(url, headers=headers, auth=auth, timeout=30, verify=verify, log_context="grafana_get_ds_by_name")
-        ds_id = resp.json()["id"]
-        logger.info(f"Grafana datasource resolved by name={ds_cfg['name']} -> id={ds_id}")
-        return ds_id
+        resp = requests.get(url, headers=headers, auth=auth, timeout=30, verify=verify)
+        resp.raise_for_status()
+        return resp.json()["id"]
 
-    # 4) Автовыбор первого Prometheus-датасорса
     url = f"{base_url}/api/datasources"
-    resp = _http_get(url, headers=headers, auth=auth, timeout=30, verify=verify, log_context="grafana_list_ds")
+    resp = requests.get(url, headers=headers, auth=auth, timeout=30, verify=verify)
+    resp.raise_for_status()
     for ds in resp.json():
         if ds.get("type") == "prometheus":
-            logger.info(f"Grafana datasource auto-selected: id={ds['id']} name={ds.get('name')}")
             return ds["id"]
     raise RuntimeError("Не найден Prometheus datasource в Grafana")
 
@@ -253,10 +202,6 @@ def fetch_prometheus_data_via_grafana(
     promql_query: str,
     step: str
 ) -> dict:
-    """
-    Выполняет PromQL-запрос через Grafana proxy: /api/datasources/proxy/{id}/api/v1/query_range.
-    Возвращает ответ в формате Prometheus API.
-    """
     step_in_seconds = parse_step_to_seconds(step)
     base_url = g_cfg["base_url"].rstrip("/")
 
@@ -278,7 +223,8 @@ def fetch_prometheus_data_via_grafana(
         auth = (g_cfg["auth"]["username"], g_cfg["auth"]["password"])
 
     url = f"{base_url}/api/datasources/proxy/{ds_id}/api/v1/query_range"
-    resp = _http_get(url, headers=headers, auth=auth, params=params, timeout=30, verify=g_cfg.get("verify_ssl", True), log_context="grafana_proxy_query_range")
+    resp = requests.get(url, headers=headers, auth=auth, params=params, timeout=30, verify=g_cfg.get("verify_ssl", True))
+    resp.raise_for_status()
     return resp.json()
 
 
@@ -289,7 +235,6 @@ def fetch_metric_series(
     promql_query: str,
     step: str
 ) -> dict:
-    """Единая точка получения метрик: напрямую Prometheus или через Grafana proxy (по CONFIG)."""
     src = (CONFIG.get("metrics_source", {}).get("type") or "prometheus").lower()
     if src == "grafana_proxy":
         g_cfg = CONFIG.get("metrics_source", {}).get("grafana", {})
@@ -307,10 +252,6 @@ def fetch_and_aggregate_with_label_keys(
     step: str,
     resample_interval: str
 ) -> List[pd.DataFrame]:
-    """
-    Выполняет несколько PromQL-запросов, превращает их в DataFrame с учётом
-    списка лейблов (label_keys) для каждого запроса.
-    """
     if len(promql_queries) != len(label_keys_list):
         raise ValueError(
             "Количество запросов (promql_queries) и количество списков лейблов (label_keys_list) не совпадает!"
@@ -366,79 +307,38 @@ def fetch_and_aggregate_with_label_keys(
 
 
 def dataframes_to_markdown(labeled_dfs):
-    """
-    Преобразует DataFrame в читаемый формат Markdown с транспонированием таблицы
-    и сортировкой значений от больших к меньшим, выводит только топ-10.
-    Форматирует числа в обычном виде, без научной нотации.
-    Заменяет символ '|' на '/' для корректного отображения таблицы в markdown.
-    """
     result = []
     for item in labeled_dfs:
         label = item['label']
-        df = item['df'].copy()  # Создаем копию, чтобы не модифицировать оригинал
-        
-        # Добавляем заголовок таблицы
+        df = item['df'].copy()
         result.append(f"## {label}\n")
-        
-        # Проверяем структуру DataFrame
-        is_time_in_index = 'time' in df.index.names
-        
-        # Вывод топ-10 данных (транспонированный и отсортированный)
         result.append("### Топ-10 сервисов по среднему значению\n")
-        
-        # Сортируем по среднему значению столбцов (от большего к меньшему)
         if not df.empty and df.shape[0] > 0:
-            # Проверяем, содержит ли DataFrame числовые данные
             numeric_columns = df.select_dtypes(include=['number']).columns
-            
             if len(numeric_columns) > 0:
-                # Рассчитываем среднее значение для числовых столбцов
                 column_means = df[numeric_columns].mean()
-                # Сортируем числовые столбцы по среднему значению (от большего к меньшему)
                 sorted_numeric_columns = column_means.sort_values(ascending=False).index.tolist()
-                
-                # Составляем полный список столбцов, сначала отсортированные числовые, затем остальные
                 non_numeric_columns = [col for col in df.columns if col not in numeric_columns]
                 sorted_columns = sorted_numeric_columns + non_numeric_columns
             else:
                 sorted_columns = df.columns.tolist()
-            
-            # Берем только топ-10 столбцов (или меньше, если столбцов меньше 10)
             top_columns = sorted_columns[:min(10, len(sorted_columns))]
             df = df[top_columns]
-            
-            # Заменяем символ '|' на '/' во всех строковых столбцах
             for col in df.select_dtypes(include=['object']).columns:
                 df[col] = df[col].astype(str).str.replace('|', '/')
-            
-            # Форматируем числа, чтобы избавиться от научной нотации (e+)
-            # Преобразуем все числовые столбцы к строкам с обычным форматом
             for col in df.select_dtypes(include=['number']).columns:
-                # Определяем, содержит ли столбец большие числа
                 max_val = df[col].abs().max()
-                if max_val >= 1e6:  # Если значения превышают миллион
-                    # Форматируем без десятичных знаков для больших чисел
+                if max_val >= 1e6:
                     df[col] = df[col].apply(lambda x: f"{int(x):,}" if pd.notnull(x) else "")
-                elif max_val >= 1000:  # Для средних чисел
-                    # Форматируем с одним десятичным знаком
+                elif max_val >= 1000:
                     df[col] = df[col].apply(lambda x: f"{x:,.1f}" if pd.notnull(x) else "")
-                else:  # Для малых чисел
-                    # Форматируем с четырьмя десятичными знаками
+                else:
                     df[col] = df[col].apply(lambda x: f"{x:.4f}" if pd.notnull(x) else "")
-        
-        # Транспонируем DataFrame перед выводом
         df_transposed = df.T
-        
-        # Заменяем символ '|' на '/' в названиях строк (индексе)
         df_transposed.index = df_transposed.index.map(lambda x: str(x).replace('|', '/'))
-        
-        # Если названия столбцов тоже могут содержать вертикальную черту
         if hasattr(df_transposed, 'columns'):
             df_transposed.columns = df_transposed.columns.map(lambda x: str(x).replace('|', '/'))
-        
-        # Используем to_markdown без дополнительного форматирования
         result.append(df_transposed.to_markdown() + "\n\n")
-        
     return "\n".join(result)
 
 
@@ -446,13 +346,8 @@ def label_dataframes(
     dfs: List[pd.DataFrame],
     labels: List[str]
 ) -> List[Dict[str, object]]:
-    """
-    Принимает список датафреймов (dfs) и список строк-меток (labels).
-    Возвращает список словарей [{ "label": <string>, "df": <DataFrame> }, ...].
-    """
     if len(dfs) != len(labels):
         raise ValueError("Количество DataFrame и количество меток не совпадает!")
-
     labeled_list = []
     for df, label in zip(dfs, labels):
         labeled_list.append({
@@ -462,38 +357,42 @@ def label_dataframes(
     return labeled_list
 
 
-def _ask_gigachat_mtls(messages, llm_cfg: dict) -> str:
-    gcfg = (llm_cfg or {}).get("gigachat", {})
-    api_base = gcfg.get("api_base_url", "https://gigachat.devices.sberbank.ru/api/v1").rstrip("/")
-    model_name = gcfg.get("model", llm_cfg.get("model", "GigaChat-Pro"))
+def _get_gigachat_client() -> LC_GigaChat:
+    global _gigachat_client
+    if _gigachat_client is not None:
+        return _gigachat_client
+    gcfg = CONFIG.get("llm", {}).get("gigachat", {})
+    base_url = gcfg.get("base_url") or gcfg.get("api_base_url")
+    model = gcfg.get("model", "GigaChat-Pro")
+    cert_file = gcfg.get("cert_file")
+    key_file = gcfg.get("key_file")
+    verify_param = gcfg.get("verify")
+    verify_ssl_certs = verify_param if isinstance(verify_param, bool) else True
+    if isinstance(verify_param, str):
+        os.environ["REQUESTS_CA_BUNDLE"] = verify_param
+        os.environ["SSL_CERT_FILE"] = verify_param
 
-    verify = gcfg.get("verify") or gcfg.get("ca_bundle_file") or gcfg.get("ca_bundle") or True
-    cert = None
-    if gcfg.get("cert_file") and gcfg.get("key_file"):
-        cert = (gcfg.get("cert_file"), gcfg.get("key_file"))
-    proxies = gcfg.get("proxies") or None
-
-    payload = {
-        "model": model_name,
-        "messages": messages,
-        "stream": False,
-    }
-
-    logger.info(f"GigaChat REST mTLS: url={api_base}/chat/completions model={model_name} verify={'path' if isinstance(verify, str) else verify} cert={'set' if cert else 'unset'}")
-
-    with _gigachat_lock:
-        resp = _http_post(
-            f"{api_base}/chat/completions",
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
-            json=payload,
-            timeout=60,
-            verify=verify,
-            cert=cert,
-            proxies=proxies,
-            log_context="gigachat_mtls_chat",
-        )
-    data = resp.json()
-    return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    logger.info(
+        """
+Инициализация подключения к GigaChat
+URL: %s
+Model: %s
+SSL: %s
+Debug: %s
+""",
+        base_url,
+        model,
+        True,
+        False,
+    )
+    _gigachat_client = LC_GigaChat(
+        model=model,
+        cert_file=cert_file,
+        key_file=key_file,
+        base_url=base_url,
+        verify_ssl_certs=verify_ssl_certs,
+    )
+    return _gigachat_client
 
 
 def ask_llm_with_text_data(
@@ -505,41 +404,35 @@ def ask_llm_with_text_data(
     base_url: str = None
 ) -> str:
     """
-    Отправляет запрос к GigaChat (REST mTLS) с подготовленными текстовыми данными.
+    Отправляет запрос к GigaChat (через langchain_gigachat) с подготовленными текстовыми данными.
     """
-    system_message = {
-        "role": "system",
-        "content": (
-            "Вы инженер по нагрузочному тестированию. Должны проанализирвать результаты ступенчатого нагрузочного теста поиска максимальной производительности."
-            "Пользователь предоставит данные и вопрос. "
-            "Используйте контекст этих данных, чтобы ответить на его вопрос."
-        )
-    }
-    user_message = {
-        "role": "user",
-        "content": user_prompt + f"\n\n{data_context}"
-    }
-    messages = [system_message, user_message]
-
-    if llm_config is None:
-        llm_config = CONFIG.get("llm", {})
-
-    gcfg = llm_config.get("gigachat", {})
+    gcfg = CONFIG.get("llm", {}).get("gigachat", {})
     _ensure_gigachat_env(gcfg)
     _gigachat_preflight(gcfg)
-    return _ask_gigachat_mtls(messages, llm_config)
+
+    system_text = (
+        "Вы инженер по нагрузочному тестированию. Должны проанализирвать результаты ступенчатого нагрузочного теста поиска максимальной производительности."
+        "Пользователь предоставит данные и вопрос. "
+        "Используйте контекст этих данных, чтобы ответить на его вопрос."
+    )
+    if SystemMessage and HumanMessage:
+        lc_messages = [SystemMessage(content=system_text), HumanMessage(content=user_prompt + f"\n\n{data_context}")]
+        with _gigachat_lock:
+            result = _get_gigachat_client().invoke(lc_messages)
+        return getattr(result, "content", str(result))
+    else:
+        # Fallback: одним запросом
+        with _gigachat_lock:
+            result = _get_gigachat_client().invoke(user_prompt + f"\n\n{data_context}")
+        return getattr(result, "content", str(result))
 
 
 def read_prompt_from_file(filename: str) -> str:
-    """Считывает текст промта из файла с учетом кодировки UTF-8."""
     with open(filename, 'r', encoding='utf-8') as f:
         return f.read()
 
 
-
 def uploadFromLLM(start_ts, end_ts):
-
-    # 1. Читаем конфигурацию
     _configure_logging()
     prometheus_url = CONFIG["prometheus"]["url"]
     src_type = (CONFIG.get("metrics_source", {}).get("type") or "prometheus").lower()
@@ -549,12 +442,9 @@ def uploadFromLLM(start_ts, end_ts):
     else:
         logger.info(f"Metrics source: Prometheus url={prometheus_url}")
     
-    llm_config = CONFIG["llm"]
-
     step = CONFIG["default_params"]["step"]
     resample = CONFIG["default_params"]["resample_interval"]
 
-    # 2. Получаем метрики JVM
     jvm_conf = CONFIG["queries"]["jvm"]
     dfs_jvm = fetch_and_aggregate_with_label_keys(
         prometheus_url,
@@ -567,7 +457,6 @@ def uploadFromLLM(start_ts, end_ts):
     )
     labeled_jvm = label_dataframes(dfs_jvm, jvm_conf["labels"])
 
-    # 3. Аналогично для ArangoDB
     arango_conf = CONFIG["queries"]["arangodb"]
     dfs_arangodb = fetch_and_aggregate_with_label_keys(
         prometheus_url,
@@ -580,7 +469,6 @@ def uploadFromLLM(start_ts, end_ts):
     )
     labeled_arangodb = label_dataframes(dfs_arangodb, arango_conf["labels"])
 
-    # 4. Аналогично для Kafka
     kafka_conf = CONFIG["queries"]["kafka"]
     dfs_kafka = fetch_and_aggregate_with_label_keys(
         prometheus_url,
@@ -593,7 +481,6 @@ def uploadFromLLM(start_ts, end_ts):
     )
     labeled_kafka = label_dataframes(dfs_kafka, kafka_conf["labels"])
 
-    # 5. Аналогично для Microservices
     ms_conf = CONFIG["queries"]["microservices"]
     dfs_ms = fetch_and_aggregate_with_label_keys(
         prometheus_url,
@@ -606,8 +493,7 @@ def uploadFromLLM(start_ts, end_ts):
     )
     labeled_ms = label_dataframes(dfs_ms, ms_conf["labels"])
 
-    # 6. Читаем промты из файлов
-    CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))  # путь к папке, где лежит main.py
+    CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
     prompts_dir = os.path.join(CURRENT_DIR, "prompts")
     
     prompt_jvm = read_prompt_from_file(os.path.join(prompts_dir, "jvm_prompt.txt"))
@@ -616,38 +502,16 @@ def uploadFromLLM(start_ts, end_ts):
     prompt_microservices = read_prompt_from_file(os.path.join(prompts_dir, "microservices_prompt.txt"))
     prompt_overall = read_prompt_from_file(os.path.join(prompts_dir, "overall_prompt.txt"))
 
-    # Создаем полные текстовые представления данных
     jvm_full_data = dataframes_to_markdown(labeled_jvm)
     arangodb_full_data = dataframes_to_markdown(labeled_arangodb)
     kafka_full_data = dataframes_to_markdown(labeled_kafka)
     ms_full_data = dataframes_to_markdown(labeled_ms)
 
-    # 7. Запрашиваем ответы у LLM (используя полные текстовые представления данных)
-    answer_jvm = ask_llm_with_text_data(
-        user_prompt=prompt_jvm,
-        data_context=jvm_full_data,
-        llm_config=llm_config
-    )
+    answer_jvm = ask_llm_with_text_data(user_prompt=prompt_jvm, data_context=jvm_full_data)
+    answer_arangodb = ask_llm_with_text_data(user_prompt=prompt_arangodb, data_context=arangodb_full_data)
+    answer_kafka = ask_llm_with_text_data(user_prompt=prompt_kafka, data_context=kafka_full_data)
+    answer_ms = ask_llm_with_text_data(user_prompt=prompt_microservices, data_context=ms_full_data)
 
-    answer_arangodb = ask_llm_with_text_data(
-        user_prompt=prompt_arangodb,
-        data_context=arangodb_full_data,
-        llm_config=llm_config
-    )
-
-    answer_kafka = ask_llm_with_text_data(
-        user_prompt=prompt_kafka,
-        data_context=kafka_full_data,
-        llm_config=llm_config
-    )
-
-    answer_ms = ask_llm_with_text_data(
-        user_prompt=prompt_microservices,
-        data_context=ms_full_data,
-        llm_config=llm_config
-    )
-
-    # 8. Формируем сводный отчёт (используем готовые ответы)
     merged_prompt_overall = (
         prompt_overall
         .replace("{answer_jvm}", answer_jvm)
@@ -656,13 +520,8 @@ def uploadFromLLM(start_ts, end_ts):
         .replace("{answer_microservices}", answer_ms)
     )
 
-    final_answer = ask_llm_with_text_data(
-        user_prompt=merged_prompt_overall,
-        data_context="",  # не передаём датафреймы, т.к. контекст уже в answer_*
-        llm_config=llm_config
-    )
+    final_answer = ask_llm_with_text_data(user_prompt=merged_prompt_overall, data_context="")
 
-    # Возвращаем результаты, включая полные данные таблиц
     return {
         "jvm": f"{jvm_full_data}\n\nАнализ JVM:\n{answer_jvm}",
         "arangodb": f"{arangodb_full_data}\n\nАнализ ArangoDB:\n{answer_arangodb}",
