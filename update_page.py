@@ -43,11 +43,18 @@ def update_report(start, end, service):
     def update_with_retry(url, username, password, page_id, data_to_find, replace_text, max_attempts=3):
         for attempt in range(max_attempts):
             try:
-                return update_confluence_page(url, username, password, page_id, data_to_find, replace_text)
+                res = update_confluence_page(url, username, password, page_id, data_to_find, replace_text)
+                # Обработка текстовых ошибок из update_confluence_page
+                if isinstance(res, str) and (res.startswith("Ошибка") or res == "Плейсхолдер не найден"):
+                    raise RuntimeError(res)
+                return res
             except Exception as e:
-                if "Attempted to update stale data" in str(e) and attempt < max_attempts-1:
+                if ("Attempted to update stale data" in str(e) or "conflict" in str(e).lower()) and attempt < max_attempts-1:
                     print(f"Попытка {attempt+1} не удалась, повторяем через 1 секунду...")
-                    time.sleep(1)  # Небольшая задержка перед повторной попыткой
+                    time.sleep(1)
+                elif attempt < max_attempts-1:
+                    print(f"Попытка {attempt+1} не удалась: {e}. Повтор через 1 секунду...")
+                    time.sleep(1)
                 else:
                     raise e
 

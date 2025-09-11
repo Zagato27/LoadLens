@@ -100,6 +100,10 @@ def _gigachat_preflight(gcfg: dict) -> None:
     else:
         logger.info("Preflight: proxies detected, skipping direct TCP checks")
 
+    if not bool(gcfg.get("enable_preflight_models", True)):
+        logger.info("Preflight: /models check disabled by config")
+        return
+
     verify = gcfg.get("verify") or gcfg.get("ca_bundle_file") or gcfg.get("ca_bundle") or True
     cert = None
     if gcfg.get("use_mtls") and gcfg.get("cert_file") and gcfg.get("key_file"):
