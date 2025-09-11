@@ -35,6 +35,17 @@ _gigachat_lock = threading.Lock()
 _gigachat_client = None
 
 
+def _normalize_gigachat_base_url(raw_url: str | None) -> str:
+    base = (raw_url or "https://gigachat.devices.sberbank.ru/api/v1").strip()
+    if not base:
+        return "https://gigachat.devices.sberbank.ru/api/v1"
+    base = base.rstrip("/")
+    # Убираем случайный суффикс /chat/completions, если администратор указал полноценный путь
+    if base.endswith("/chat/completions"):
+        base = base[: -len("/chat/completions")]
+    return base
+
+
 def _ensure_gigachat_env(gcfg: dict) -> None:
     """Применяет сетевые настройки (прокси/CA/инsecure) через переменные окружения."""
     proxies = (gcfg or {}).get("proxies", {}) or {}
@@ -71,7 +82,7 @@ def _gigachat_preflight(gcfg: dict) -> None:
     proxies = (gcfg or {}).get("proxies", {}) or {}
     has_proxy = bool(proxies.get("https") or proxies.get("http") or proxies.get("HTTPS") or proxies.get("HTTP"))
 
-    api_base = (gcfg.get("api_base_url") or gcfg.get("base_url") or "https://gigachat.devices.sberbank.ru/api/v1").rstrip("/")
+    api_base = _normalize_gigachat_base_url(gcfg.get("api_base_url") or gcfg.get("base_url"))
     parsed = urlparse(api_base)
     host = parsed.hostname or "gigachat.devices.sberbank.ru"
     port = parsed.port or (443 if (parsed.scheme or "https").lower() == "https" else 80)
@@ -362,7 +373,7 @@ def _get_gigachat_client() -> LC_GigaChat:
     if _gigachat_client is not None:
         return _gigachat_client
     gcfg = CONFIG.get("llm", {}).get("gigachat", {})
-    base_url = gcfg.get("base_url") or gcfg.get("api_base_url")
+    base_url = _normalize_gigachat_base_url(gcfg.get("base_url") or gcfg.get("api_base_url"))
     model = gcfg.get("model", "GigaChat-Pro")
     cert_file = gcfg.get("cert_file")
     key_file = gcfg.get("key_file")
