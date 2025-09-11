@@ -34,6 +34,9 @@ logger = logging.getLogger(__name__)
 _gigachat_lock = threading.Lock()
 _gigachat_client = None
 
+# httpx/requests таймаут через окружение для некоторых клиентов
+os.environ.setdefault("GIGACHAT_TIMEOUT", str(CONFIG.get("llm", {}).get("gigachat", {}).get("request_timeout_sec", 120)))
+
 
 def _normalize_gigachat_base_url(raw_url: str | None) -> str:
     base = (raw_url or "https://gigachat.devices.sberbank.ru/api/v1").strip()
@@ -402,6 +405,7 @@ Debug: %s
         key_file=key_file,
         base_url=base_url,
         verify_ssl_certs=verify_ssl_certs,
+        timeout=int(CONFIG.get("llm", {}).get("gigachat", {}).get("request_timeout_sec", 120)),
     )
     return _gigachat_client
 
@@ -429,12 +433,35 @@ def ask_llm_with_text_data(
     if SystemMessage and HumanMessage:
         lc_messages = [SystemMessage(content=system_text), HumanMessage(content=user_prompt + f"\n\n{data_context}")]
         with _gigachat_lock:
-            result = _get_gigachat_client().invoke(lc_messages)
-        return getattr(result, "content", str(result))
+            # простые ретраи при read timeout
+            attempts = 0
+            last_err = None
+            while attempts < 3:
+                try:
+                    result = _get_gigachat_client().invoke(lc_messages)
+                    break
+                except Exception as e:
+                    last_err = e
+                    attempts += 1
+                    logger.warning(f"GigaChat invoke retry {attempts}/3 due to: {e}")
+                    if attempts >= 3:
+                        raise
+            return getattr(result, "content", str(result))
     else:
         # Fallback: одним запросом
         with _gigachat_lock:
-            result = _get_gigachat_client().invoke(user_prompt + f"\n\n{data_context}")
+            attempts = 0
+            last_err = None
+            while attempts < 3:
+                try:
+                    result = _get_gigachat_client().invoke(user_prompt + f"\n\n{data_context}")
+                    break
+                except Exception as e:
+                    last_err = e
+                    attempts += 1
+                    logger.warning(f"GigaChat invoke retry {attempts}/3 due to: {e}")
+                    if attempts >= 3:
+                        raise
         return getattr(result, "content", str(result))
 
 
