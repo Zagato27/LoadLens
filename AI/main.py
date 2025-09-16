@@ -106,10 +106,21 @@ def _gigachat_preflight(gcfg: dict) -> None:
         logger.info("Preflight: /models check disabled by config")
         return
 
-    verify = gcfg.get("verify") or gcfg.get("ca_bundle_file") or gcfg.get("ca_bundle") or True
+    verify_cfg = gcfg.get("verify") or gcfg.get("ca_bundle_file") or gcfg.get("ca_bundle") or True
+    verify = True
+    if isinstance(verify_cfg, bool):
+        verify = verify_cfg
+    elif isinstance(verify_cfg, str) and verify_cfg.strip():
+        verify = verify_cfg.strip() if os.path.exists(verify_cfg.strip()) else True
+
     cert = None
-    if gcfg.get("use_mtls") and gcfg.get("cert_file") and gcfg.get("key_file"):
-        cert = (gcfg.get("cert_file"), gcfg.get("key_file"))
+    cfile = gcfg.get("cert_file"); kfile = gcfg.get("key_file")
+    if gcfg.get("use_mtls") and isinstance(cfile, str) and isinstance(kfile, str):
+        cfile = cfile.strip(); kfile = kfile.strip()
+        if cfile and kfile and os.path.exists(cfile) and os.path.exists(kfile):
+            cert = (cfile, kfile)
+        else:
+            logger.warning("mTLS включён, но cert/key файл(ы) не найдены. Пропускаю клиентский сертификат.")
 
     try:
         resp = requests.get(
@@ -624,13 +635,22 @@ def _get_gigachat_client() -> LC_GigaChat:
     gcfg = CONFIG.get("llm", {}).get("gigachat", {})
     base_url = _normalize_gigachat_base_url(gcfg.get("base_url") or gcfg.get("api_base_url"))
     model = gcfg.get("model", "GigaChat-Pro")
-    cert_file = gcfg.get("cert_file")
-    key_file = gcfg.get("key_file")
+    # приводим пустые строки к None, чтобы не пытаться открыть несуществующие файлы
+    raw_cert_file = gcfg.get("cert_file")
+    raw_key_file = gcfg.get("key_file")
+    cert_file = raw_cert_file if (isinstance(raw_cert_file, str) and raw_cert_file.strip()) else None
+    key_file = raw_key_file if (isinstance(raw_key_file, str) and raw_key_file.strip()) else None
+
     verify_param = gcfg.get("verify")
     verify_ssl_certs = verify_param if isinstance(verify_param, bool) else True
     if isinstance(verify_param, str):
-        os.environ["REQUESTS_CA_BUNDLE"] = verify_param
-        os.environ["SSL_CERT_FILE"] = verify_param
+        verify_path = verify_param.strip()
+        if verify_path:
+            if os.path.exists(verify_path):
+                os.environ["REQUESTS_CA_BUNDLE"] = verify_path
+                os.environ["SSL_CERT_FILE"] = verify_path
+            else:
+                logger.warning(f"CA bundle path not found: '{verify_path}'. Skipping SSL env vars.")
 
     logger.info(
         """
