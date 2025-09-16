@@ -442,6 +442,9 @@ def build_context_pack(labeled_dfs: List[Dict[str, object]], top_n: int = 10) ->
 
 class FindingItem(BaseModel):
     summary: str = Field(default="")
+    severity: Optional[str] = Field(default=None)  # critical|high|medium|low
+    component: Optional[str] = Field(default=None)
+    evidence: Optional[str] = Field(default=None)  # факт/метрика/окно времени
 
 
 class LLMAnalysis(BaseModel):
@@ -449,6 +452,7 @@ class LLMAnalysis(BaseModel):
     confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     findings: List[Union[str, FindingItem]] = Field(default_factory=list)
     recommended_actions: List[str] = Field(default_factory=list)
+    affected_components: Optional[List[str]] = Field(default=None)
 
     @root_validator(pre=True)
     def _normalize_fields(cls, values: Dict[str, object]) -> Dict[str, object]:
@@ -514,6 +518,40 @@ def parse_llm_analysis_strict(raw_text: str) -> Optional[LLMAnalysis]:
         return None
 
 
+def _build_domain_data(
+    domain_key: str,
+    domain_conf: dict,
+    prometheus_url: str,
+    start_ts: float,
+    end_ts: float,
+    step: str,
+    resample: str,
+    top_n: int
+) -> Dict[str, object]:
+    dfs = fetch_and_aggregate_with_label_keys(
+        prometheus_url,
+        start_ts,
+        end_ts,
+        domain_conf["promql_queries"],
+        domain_conf["label_keys_list"],
+        step=step,
+        resample_interval=resample
+    )
+    labeled = label_dataframes(dfs, domain_conf["labels"])
+    markdown = dataframes_to_markdown(labeled)
+    pack = build_context_pack(labeled, top_n=top_n)
+    ctx = json.dumps({
+        "domain": domain_key,
+        "time_range": {"start": start_ts, "end": end_ts},
+        **pack
+    }, ensure_ascii=False)
+    return {"labeled": labeled, "markdown": markdown, "pack": pack, "ctx": ctx}
+
+
+def _ask_domain_analysis(prompt_text: str, data_context: str) -> tuple[str, Optional[LLMAnalysis]]:
+    return llm_two_pass_self_consistency(user_prompt=prompt_text, data_context=data_context, k=3)
+
+
 def _build_critic_prompt(candidate_text: str) -> str:
     """Строит промпт-критику для исправления ответа в строгий JSON по схеме.
     Кандидат может содержать пояснения; задача критика — выдать ЧИСТЫЙ JSON.
@@ -565,6 +603,17 @@ def _format_parsed_as_text(p: LLMAnalysis) -> str:
         for f in p.findings:
             if isinstance(f, dict):
                 s = str(f.get("summary", "")).strip()
+                sev = f.get("severity")
+                comp = f.get("component")
+                ev = f.get("evidence")
+                parts = [s]
+                if sev:
+                    parts.append(f"[severity: {sev}]")
+                if comp:
+                    parts.append(f"[component: {comp}]")
+                if ev:
+                    parts.append(f"[evidence: {ev}]")
+                s = " ".join([x for x in parts if x])
             else:
                 s = str(f).strip()
             if s:
@@ -757,86 +806,45 @@ def uploadFromLLM(start_ts, end_ts):
     step = CONFIG["default_params"]["step"]
     resample = CONFIG["default_params"]["resample_interval"]
 
-    jvm_conf = CONFIG["queries"]["jvm"]
-    dfs_jvm = fetch_and_aggregate_with_label_keys(
-        prometheus_url,
-        start_ts,
-        end_ts,
-        jvm_conf["promql_queries"],
-        jvm_conf["label_keys_list"],
-        step=step,
-        resample_interval=resample
-    )
-    labeled_jvm = label_dataframes(dfs_jvm, jvm_conf["labels"])
-
-    arango_conf = CONFIG["queries"]["arangodb"]
-    dfs_arangodb = fetch_and_aggregate_with_label_keys(
-        prometheus_url,
-        start_ts,
-        end_ts,
-        arango_conf["promql_queries"],
-        arango_conf["label_keys_list"],
-        step=step,
-        resample_interval=resample
-    )
-    labeled_arangodb = label_dataframes(dfs_arangodb, arango_conf["labels"])
-
-    kafka_conf = CONFIG["queries"]["kafka"]
-    dfs_kafka = fetch_and_aggregate_with_label_keys(
-        prometheus_url,
-        start_ts,
-        end_ts,
-        kafka_conf["promql_queries"],
-        kafka_conf["label_keys_list"],
-        step=step,
-        resample_interval=resample
-    )
-    labeled_kafka = label_dataframes(dfs_kafka, kafka_conf["labels"])
-
-    ms_conf = CONFIG["queries"]["microservices"]
-    dfs_ms = fetch_and_aggregate_with_label_keys(
-        prometheus_url,
-        start_ts,
-        end_ts,
-        ms_conf["promql_queries"],
-        ms_conf["label_keys_list"],
-        step=step,
-        resample_interval=resample
-    )
-    labeled_ms = label_dataframes(dfs_ms, ms_conf["labels"])
+    queries = CONFIG["queries"]
+    domain_keys = ["jvm", "database", "kafka", "microservices"]
+    domain_data = {}
+    for key in domain_keys:
+        domain_data[key] = _build_domain_data(
+            domain_key=key,
+            domain_conf=queries[key],
+            prometheus_url=prometheus_url,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            step=step,
+            resample=resample,
+            top_n=15
+        )
 
     CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
     prompts_dir = os.path.join(CURRENT_DIR, "prompts")
     
     prompt_jvm = read_prompt_from_file(os.path.join(prompts_dir, "jvm_prompt.txt"))
-    prompt_arangodb = read_prompt_from_file(os.path.join(prompts_dir, "arangodb_prompt.txt"))
+    # Поддержка старого названия файла промпта на случай отсутствия database_prompt
+    db_prompt_path = os.path.join(prompts_dir, "database_prompt.txt")
+    if not os.path.exists(db_prompt_path):
+        db_prompt_path = os.path.join(prompts_dir, "arangodb_prompt.txt")
+    prompt_database = read_prompt_from_file(db_prompt_path)
     prompt_kafka = read_prompt_from_file(os.path.join(prompts_dir, "kafka_prompt.txt"))
     prompt_microservices = read_prompt_from_file(os.path.join(prompts_dir, "microservices_prompt.txt"))
     prompt_overall = read_prompt_from_file(os.path.join(prompts_dir, "overall_prompt.txt"))
 
-    # Витрины для отображения на странице (сохраняем для читаемости отчёта)
-    jvm_full_data = dataframes_to_markdown(labeled_jvm)
-    arangodb_full_data = dataframes_to_markdown(labeled_arangodb)
-    kafka_full_data = dataframes_to_markdown(labeled_kafka)
-    ms_full_data = dataframes_to_markdown(labeled_ms)
-
-    # Компактные JSON context packs для LLM (уменьшаем токены и повышаем фокус)
-    jvm_pack = build_context_pack(labeled_jvm, top_n=10)
-    arangodb_pack = build_context_pack(labeled_arangodb, top_n=10)
-    kafka_pack = build_context_pack(labeled_kafka, top_n=10)
-    ms_pack = build_context_pack(labeled_ms, top_n=10)
-
-    # Строки-контексты в JSON для подачи модели
-    jvm_ctx = json.dumps({"domain": "jvm", "time_range": {"start": start_ts, "end": end_ts}, **jvm_pack}, ensure_ascii=False)
-    arangodb_ctx = json.dumps({"domain": "arangodb", "time_range": {"start": start_ts, "end": end_ts}, **arangodb_pack}, ensure_ascii=False)
-    kafka_ctx = json.dumps({"domain": "kafka", "time_range": {"start": start_ts, "end": end_ts}, **kafka_pack}, ensure_ascii=False)
-    ms_ctx = json.dumps({"domain": "microservices", "time_range": {"start": start_ts, "end": end_ts}, **ms_pack}, ensure_ascii=False)
+    # Витрины и контексты для LLM
+    jvm_full_data = domain_data["jvm"]["markdown"]; jvm_pack = domain_data["jvm"]["pack"]; jvm_ctx = domain_data["jvm"]["ctx"]
+    arangodb_full_data = domain_data["database"]["markdown"]; arangodb_pack = domain_data["database"]["pack"]; arangodb_ctx = domain_data["database"]["ctx"]
+    kafka_full_data = domain_data["kafka"]["markdown"]; kafka_pack = domain_data["kafka"]["pack"]; kafka_ctx = domain_data["kafka"]["ctx"]
+    ms_full_data = domain_data["microservices"]["markdown"]; ms_pack = domain_data["microservices"]["pack"]; ms_ctx = domain_data["microservices"]["ctx"]
 
     # Two-pass + self-consistency (k=3)
-    answer_jvm, jvm_parsed = llm_two_pass_self_consistency(user_prompt=prompt_jvm, data_context=jvm_ctx, k=3)
-    answer_arangodb, arangodb_parsed = llm_two_pass_self_consistency(user_prompt=prompt_arangodb, data_context=arangodb_ctx, k=3)
-    answer_kafka, kafka_parsed = llm_two_pass_self_consistency(user_prompt=prompt_kafka, data_context=kafka_ctx, k=3)
-    answer_ms, ms_parsed = llm_two_pass_self_consistency(user_prompt=prompt_microservices, data_context=ms_ctx, k=3)
+    answer_jvm, jvm_parsed = _ask_domain_analysis(prompt_jvm, jvm_ctx)
+    answer_arangodb, arangodb_parsed = _ask_domain_analysis(prompt_database, arangodb_ctx)
+    answer_kafka, kafka_parsed = _ask_domain_analysis(prompt_kafka, kafka_ctx)
+    answer_ms, ms_parsed = _ask_domain_analysis(prompt_microservices, ms_ctx)
 
     merged_prompt_overall = (
         prompt_overall
@@ -846,18 +854,15 @@ def uploadFromLLM(start_ts, end_ts):
         .replace("{answer_microservices}", answer_ms)
     )
 
-    overall_ctx = json.dumps(
-        {
-            "time_range": {"start": start_ts, "end": end_ts},
-            "domains": {
-                "jvm": jvm_pack,
-                "arangodb": arangodb_pack,
-                "kafka": kafka_pack,
-                "microservices": ms_pack
-            }
-        },
-        ensure_ascii=False
-    )
+    overall_ctx = json.dumps({
+        "time_range": {"start": start_ts, "end": end_ts},
+        "domains": {
+            "jvm": jvm_pack,
+            "arangodb": arangodb_pack,
+            "kafka": kafka_pack,
+            "microservices": ms_pack
+        }
+    }, ensure_ascii=False)
     final_answer, final_parsed = llm_two_pass_self_consistency(user_prompt=merged_prompt_overall, data_context=overall_ctx, k=3)
 
     return {

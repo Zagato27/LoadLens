@@ -105,7 +105,8 @@ def update_report(start, end, service):
         llm_replacements = {
             "$$final_answer$$": results["final"],
             "$$answer_jvm$$": results["jvm"],
-            "$$answer_arangodb$$": results["arangodb"],
+            "$$answer_arangodb$$": results["arangodb"],  # backward compat
+            "$$answer_database$$": results.get("arangodb", ""),
             "$$answer_kafka$$": results["kafka"],
             "$$answer_ms$$": results["ms"],
         }

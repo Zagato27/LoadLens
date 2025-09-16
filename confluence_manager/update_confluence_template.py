@@ -159,8 +159,19 @@ def render_llm_report_placeholders(report: dict) -> dict:
     for f in findings:
         if isinstance(f, dict):
             summary = safe(f.get("summary"))
-            if summary:
-                items.append(f"<li>{summary}</li>")
+            sev = safe(f.get("severity"))
+            comp = safe(f.get("component"))
+            ev = safe(f.get("evidence"))
+            meta = []
+            if sev:
+                meta.append(f"<span style='color:#b00'><strong>{sev}</strong></span>")
+            if comp:
+                meta.append(f"<code>{comp}</code>")
+            if ev:
+                meta.append(f"<em>{ev}</em>")
+            meta_str = (" &middot; ".join(meta)) if meta else ""
+            if summary or meta_str:
+                items.append(f"<li>{summary} {('— ' + meta_str) if meta_str else ''}</li>")
         else:
             s = safe(f)
             if s:
@@ -175,10 +186,15 @@ def render_llm_report_placeholders(report: dict) -> dict:
             aitems.append(f"<li>{s}</li>")
     actions_html = "<ul>" + "".join(aitems) + "</ul>" if aitems else "<em>Нет рекомендаций</em>"
 
+    affected = (report or {}).get("affected_components") or []
+    affected_html = ""
+    if affected:
+        affected_html = "<p><strong>Затронутые компоненты:</strong> " + ", ".join([f"<code>{safe(a)}</code>" for a in affected]) + "</p>"
+
     return {
         "${LLM_VERDICT}": f"<strong>{verdict}</strong>",
         "${LLM_CONFIDENCE}": confidence_str,
-        "${LLM_FINDINGS}": findings_html,
+        "${LLM_FINDINGS}": affected_html + findings_html,
         "${LLM_ACTIONS}": actions_html,
     }
 
