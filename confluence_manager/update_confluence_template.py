@@ -199,6 +199,69 @@ def render_llm_report_placeholders(report: dict) -> dict:
     }
 
 
+def render_llm_markdown(report: dict) -> str:
+    """Генерирует markdown для единого плейсхолдера `$$answer_llm$$`.
+    Форматирует: вердикт/доверие, список находок с метаданными, список действий.
+    """
+    def safe(x):
+        return str(x).strip() if x is not None else ""
+
+    verdict = safe((report or {}).get("verdict") or "нет данных")
+    conf_val = (report or {}).get("confidence")
+    confidence_str = f"{int(conf_val*100)}%" if isinstance(conf_val, (int, float)) else "—"
+
+    md_lines = []
+    md_lines.append("### Итог LLM")
+    md_lines.append(f"- Вердикт: {verdict}")
+    md_lines.append(f"- Доверие: {confidence_str}")
+    md_lines.append("")
+
+    findings = (report or {}).get("findings") or []
+    md_lines.append("#### Ключевые находки")
+    if not findings:
+        md_lines.append("- Нет существенных находок")
+    else:
+        for f in findings:
+            if isinstance(f, dict):
+                summary = safe(f.get("summary"))
+                sev = safe(f.get("severity"))
+                comp = safe(f.get("component"))
+                ev = safe(f.get("evidence"))
+                meta = []
+                if sev:
+                    meta.append(f"severity: {sev}")
+                if comp:
+                    meta.append(f"component: {comp}")
+                if ev:
+                    meta.append(f"evidence: {ev}")
+                meta_str = "; ".join(meta)
+                if meta_str:
+                    md_lines.append(f"- {summary} ({meta_str})")
+                else:
+                    md_lines.append(f"- {summary}")
+            else:
+                md_lines.append(f"- {safe(f)}")
+
+    actions = (report or {}).get("recommended_actions") or (report or {}).get("actions") or []
+    md_lines.append("")
+    md_lines.append("#### Рекомендации")
+    if not actions:
+        md_lines.append("- Нет рекомендаций")
+    else:
+        for a in actions:
+            s = safe(a)
+            if s:
+                md_lines.append(f"- [ ] {s}")
+
+    affected = (report or {}).get("affected_components") or []
+    if affected:
+        md_lines.append("")
+        md_lines.append("#### Затронутые компоненты")
+        md_lines.append(", ".join([f"`{safe(x)}`" for x in affected]))
+
+    return "\n".join(md_lines)
+
+
 def update_confluence_page_multi(url, username, password, page_id, replacements: dict) -> str:
     """Один проход по странице: заменить несколько плейсхолдеров. Отсутствующие не считаем ошибкой."""
     confluence = Confluence(
@@ -217,6 +280,9 @@ def update_confluence_page_multi(url, username, password, page_id, replacements:
     html = page["body"]["storage"]["value"]
     replaced_any = False
     for placeholder, value in (replacements or {}).items():
+        if not isinstance(value, str) or not value.strip():
+            print(f"[warn] Пропускаю пустую замену для: {placeholder}")
+            continue
         if placeholder in html:
             html = html.replace(str(placeholder), str(value))
             replaced_any = True

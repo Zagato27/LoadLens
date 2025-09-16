@@ -825,31 +825,28 @@ def uploadFromLLM(start_ts, end_ts):
     prompts_dir = os.path.join(CURRENT_DIR, "prompts")
     
     prompt_jvm = read_prompt_from_file(os.path.join(prompts_dir, "jvm_prompt.txt"))
-    # Поддержка старого названия файла промпта на случай отсутствия database_prompt
-    db_prompt_path = os.path.join(prompts_dir, "database_prompt.txt")
-    if not os.path.exists(db_prompt_path):
-        db_prompt_path = os.path.join(prompts_dir, "arangodb_prompt.txt")
-    prompt_database = read_prompt_from_file(db_prompt_path)
+    # Промпт для домена Database (без обратной совместимости)
+    prompt_database = read_prompt_from_file(os.path.join(prompts_dir, "database_prompt.txt"))
     prompt_kafka = read_prompt_from_file(os.path.join(prompts_dir, "kafka_prompt.txt"))
     prompt_microservices = read_prompt_from_file(os.path.join(prompts_dir, "microservices_prompt.txt"))
     prompt_overall = read_prompt_from_file(os.path.join(prompts_dir, "overall_prompt.txt"))
 
     # Витрины и контексты для LLM
     jvm_full_data = domain_data["jvm"]["markdown"]; jvm_pack = domain_data["jvm"]["pack"]; jvm_ctx = domain_data["jvm"]["ctx"]
-    arangodb_full_data = domain_data["database"]["markdown"]; arangodb_pack = domain_data["database"]["pack"]; arangodb_ctx = domain_data["database"]["ctx"]
+    database_full_data = domain_data["database"]["markdown"]; database_pack = domain_data["database"]["pack"]; database_ctx = domain_data["database"]["ctx"]
     kafka_full_data = domain_data["kafka"]["markdown"]; kafka_pack = domain_data["kafka"]["pack"]; kafka_ctx = domain_data["kafka"]["ctx"]
     ms_full_data = domain_data["microservices"]["markdown"]; ms_pack = domain_data["microservices"]["pack"]; ms_ctx = domain_data["microservices"]["ctx"]
 
     # Two-pass + self-consistency (k=3)
     answer_jvm, jvm_parsed = _ask_domain_analysis(prompt_jvm, jvm_ctx)
-    answer_arangodb, arangodb_parsed = _ask_domain_analysis(prompt_database, arangodb_ctx)
+    answer_database, database_parsed = _ask_domain_analysis(prompt_database, database_ctx)
     answer_kafka, kafka_parsed = _ask_domain_analysis(prompt_kafka, kafka_ctx)
     answer_ms, ms_parsed = _ask_domain_analysis(prompt_microservices, ms_ctx)
 
     merged_prompt_overall = (
         prompt_overall
         .replace("{answer_jvm}", answer_jvm)
-        .replace("{answer_arangodb}", answer_arangodb)
+        .replace("{answer_database}", answer_database)
         .replace("{answer_kafka}", answer_kafka)
         .replace("{answer_microservices}", answer_ms)
     )
@@ -858,7 +855,7 @@ def uploadFromLLM(start_ts, end_ts):
         "time_range": {"start": start_ts, "end": end_ts},
         "domains": {
             "jvm": jvm_pack,
-            "arangodb": arangodb_pack,
+            "database": database_pack,
             "kafka": kafka_pack,
             "microservices": ms_pack
         }
@@ -867,12 +864,12 @@ def uploadFromLLM(start_ts, end_ts):
 
     return {
         "jvm": f"{jvm_full_data}\n\nАнализ JVM:\n{answer_jvm}",
-        "arangodb": f"{arangodb_full_data}\n\nАнализ ArangoDB:\n{answer_arangodb}",
+        "database": f"{database_full_data}\n\nАнализ Database:\n{answer_database}",
         "kafka": f"{kafka_full_data}\n\nАнализ Kafka:\n{answer_kafka}",
         "ms": f"{ms_full_data}\n\nАнализ микросервисов:\n{answer_ms}",
         "final": final_answer,
         "jvm_parsed": (jvm_parsed.dict() if jvm_parsed else None),
-        "arangodb_parsed": (arangodb_parsed.dict() if arangodb_parsed else None),
+        "database_parsed": (database_parsed.dict() if database_parsed else None),
         "kafka_parsed": (kafka_parsed.dict() if kafka_parsed else None),
         "ms_parsed": (ms_parsed.dict() if ms_parsed else None),
         "final_parsed": (final_parsed.dict() if final_parsed else None),

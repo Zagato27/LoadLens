@@ -1,4 +1,4 @@
-from confluence_manager.update_confluence_template import copy_confluence_page, update_confluence_page, update_confluence_page_multi, render_llm_report_placeholders
+from confluence_manager.update_confluence_template import copy_confluence_page, update_confluence_page, update_confluence_page_multi, render_llm_report_placeholders, render_llm_markdown
 from AI.main import uploadFromLLM
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -102,19 +102,25 @@ def update_report(start, end, service):
     # Мульти-обновление плейсхолдеров LLM за один проход
     try:
         print("Обновление данных LLM (одним проходом)...")
-        llm_replacements = {
-            "$$final_answer$$": results["final"],
-            "$$answer_jvm$$": results["jvm"],
-            "$$answer_arangodb$$": results["arangodb"],  # backward compat
-            "$$answer_database$$": results.get("arangodb", ""),
-            "$$answer_kafka$$": results["kafka"],
-            "$$answer_ms$$": results["ms"],
-        }
+        llm_replacements = {}
+        # Подставляем только те плейсхолдеры, для которых есть данные
+        def add_if_present(placeholder: str, key: str):
+            val = results.get(key)
+            if isinstance(val, str) and val.strip():
+                llm_replacements[placeholder] = val
+
+        add_if_present("$$final_answer$$", "final")
+        add_if_present("$$answer_jvm$$", "jvm")
+        add_if_present("$$answer_database$$", "database")
+        add_if_present("$$answer_kafka$$", "kafka")
+        add_if_present("$$answer_ms$$", "ms")
 
         # Добавляем структурированные плейсхолдеры, если есть JSON
         final_struct = results.get("final_parsed")
-        if final_struct:
-            llm_replacements.update(render_llm_report_placeholders(final_struct))
+        if isinstance(final_struct, dict) and final_struct:
+            md = render_llm_markdown(final_struct)
+            if md.strip():
+                llm_replacements["$$answer_llm$$"] = md
 
         update_confluence_page_multi(url_basic, user, password, copy_page_id, llm_replacements)
         print("✓ Плейсхолдеры LLM обновлены за один проход")
