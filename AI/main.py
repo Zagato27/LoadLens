@@ -2,7 +2,8 @@
 
 import requests
 import pandas as pd
-from typing import List, Dict
+from typing import List, Dict, Optional, Union
+import json
 import os
 from datetime import datetime
 from atlassian import Confluence
@@ -17,6 +18,7 @@ from urllib.parse import urlparse
 
 from requests.auth import HTTPBasicAuth
 from langchain_gigachat.chat_models import GigaChat as LC_GigaChat
+from pydantic import BaseModel, Field, ValidationError, root_validator
 try:
     from langchain_core.messages import SystemMessage, HumanMessage
 except Exception:
@@ -360,6 +362,246 @@ def dataframes_to_markdown(labeled_dfs):
     return "\n".join(result)
 
 
+def _summarize_time_series_dataframe(df: pd.DataFrame, top_n: int = 10) -> List[Dict[str, object]]:
+    """Возвращает компактное резюме по колонкам (сериям) DataFrame:
+    - series: имя серии (лейблы)
+    - mean/min/max/last: агрегаты по времени
+    Рекомендуется подавать сюда уже ресемплированный по времени pivot DataFrame.
+    """
+    summary: List[Dict[str, object]] = []
+    if df is None or df.empty:
+        return summary
+
+    numeric_columns = df.select_dtypes(include=["number"]).columns
+    if len(numeric_columns) == 0:
+        return summary
+
+    # сортируем по среднему за окно, берём Топ-N
+    column_means = df[numeric_columns].mean(numeric_only=True)
+    top_columns = (
+        column_means.sort_values(ascending=False)
+        .head(max(1, int(top_n)))
+        .index
+        .tolist()
+    )
+
+    for col in top_columns:
+        col_series = df[col]
+        if col_series.dropna().empty:
+            continue
+        try:
+            series_summary = {
+                "series": str(col),
+                "mean": float(col_series.mean(skipna=True)),
+                "min": float(col_series.min(skipna=True)),
+                "max": float(col_series.max(skipna=True)),
+                "last": float(col_series.dropna().iloc[-1]),
+            }
+        except Exception:
+            # в редких случаях встречаются нечисловые значения/пустые ряды
+            continue
+        summary.append(series_summary)
+
+    return summary
+
+
+def build_context_pack(labeled_dfs: List[Dict[str, object]], top_n: int = 10) -> Dict[str, object]:
+    """Строит компактный JSON-"context pack" по списку {label, df}.
+    Формат:
+    {
+      "sections": [
+        { "label": "...", "top_series": [{series, mean, min, max, last}, ...] },
+        ...
+      ]
+    }
+    """
+    sections = []
+    for item in labeled_dfs:
+        label = item.get("label")
+        df = item.get("df")
+        section_summary = _summarize_time_series_dataframe(df, top_n=top_n)
+        sections.append({
+            "label": label,
+            "top_series": section_summary
+        })
+    return {"sections": sections}
+
+
+# ======== Pydantic схемы ответа LLM (строгий парсинг с фолбэками) ========
+
+class FindingItem(BaseModel):
+    summary: str = Field(default="")
+
+
+class LLMAnalysis(BaseModel):
+    verdict: str = Field(default="нет данных")
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    findings: List[Union[str, FindingItem]] = Field(default_factory=list)
+    recommended_actions: List[str] = Field(default_factory=list)
+
+    @root_validator(pre=True)
+    def _normalize_fields(cls, values: Dict[str, object]) -> Dict[str, object]:
+        # alias: actions -> recommended_actions
+        actions = values.get("recommended_actions") or values.get("actions") or []
+        values["recommended_actions"] = actions
+        # findings может быть строкой, списком строк или списком объектов
+        findings = values.get("findings")
+        if findings is None:
+            values["findings"] = []
+        return values
+
+
+def _extract_json_like(text: str) -> Optional[dict]:
+    """Пытается вытащить JSON-объект из текста (включая случаи с пояснениями до/после)."""
+    if not text:
+        return None
+    # Быстрый поиск первого '{' и последней '}'
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start:end + 1]
+        try:
+            return json.loads(candidate)
+        except Exception:
+            pass
+    # Поиск в кодовых блоках ```json ... ```
+    fence = "```"
+    if fence in text:
+        parts = text.split(fence)
+        for i in range(len(parts) - 1):
+            block = parts[i + 1]
+            if block.strip().startswith("json"):
+                block_text = block.strip()[len("json"):].strip()
+            else:
+                block_text = block
+            try:
+                return json.loads(block_text)
+            except Exception:
+                continue
+    return None
+
+
+def parse_llm_analysis_strict(raw_text: str) -> Optional[LLMAnalysis]:
+    """Строгий парсинг JSON-ответа модели в LLMAnalysis.
+    1) Пробуем распарсить как JSON целиком
+    2) Пробуем выделить JSON-блок из свободного текста
+    3) Если не получилось — возвращаем None (в отчёт можно подставить фолбэк)
+    """
+    if not raw_text:
+        return None
+    try:
+        maybe_json = json.loads(raw_text)
+    except Exception:
+        maybe_json = _extract_json_like(raw_text)
+
+    if maybe_json is None:
+        return None
+
+    try:
+        return LLMAnalysis.parse_obj(maybe_json)
+    except ValidationError:
+        return None
+
+
+def _build_critic_prompt(candidate_text: str) -> str:
+    """Строит промпт-критику для исправления ответа в строгий JSON по схеме.
+    Кандидат может содержать пояснения; задача критика — выдать ЧИСТЫЙ JSON.
+    """
+    return (
+        "Вы выступаете как строгий валидатор отчёта. "
+        "Ниже дан проект ответа модели. Исправьте/нормализуйте его до СТРОГОГО JSON со схемой: "
+        "{verdict, confidence, findings[], recommended_actions[]}. "
+        "Никакого текста вне JSON. Если данных недостаточно — верните verdict='insufficient_data'.\n\n"
+        f"Проект ответа:\n{candidate_text}"
+    )
+
+
+def _choose_best_candidate(candidates: list) -> tuple[str, Optional[LLMAnalysis]]:
+    """Выбирает лучший из [(text, parsed)] по голосованию verdict и максимальной confidence."""
+    if not candidates:
+        return "", None
+    # Счётчик по verdict
+    from collections import Counter
+    parsed_list = [p for (_, p) in candidates if p is not None]
+    if not parsed_list:
+        return candidates[0]
+    verdicts = [p.verdict for p in parsed_list if p.verdict]
+    majority_verdict = Counter(verdicts).most_common(1)[0][0] if verdicts else None
+
+    def conf_val(p: Optional[LLMAnalysis]) -> float:
+        if p is None or p.confidence is None:
+            return 0.0
+        try:
+            return float(p.confidence)
+        except Exception:
+            return 0.0
+
+    filtered = [(t, p) for (t, p) in candidates if p is not None and p.verdict == majority_verdict] if majority_verdict else []
+    pool = filtered if filtered else candidates
+    best = max(pool, key=lambda tp: conf_val(tp[1]))
+    return best
+
+
+def _format_parsed_as_text(p: LLMAnalysis) -> str:
+    """Простое текстовое представление LLMAnalysis для человека."""
+    if p is None:
+        return "нет данных"
+    parts = []
+    parts.append(f"Вердикт: {p.verdict}")
+    parts.append(f"Доверие: {int(p.confidence*100)}%" if p.confidence is not None else "Доверие: —")
+    if p.findings:
+        lines = []
+        for f in p.findings:
+            if isinstance(f, dict):
+                s = str(f.get("summary", "")).strip()
+            else:
+                s = str(f).strip()
+            if s:
+                lines.append(f"- {s}")
+        if lines:
+            parts.append("Выводы:\n" + "\n".join(lines))
+    if p.recommended_actions:
+        acts = [str(a).strip() for a in p.recommended_actions if str(a).strip()]
+        if acts:
+            parts.append("Рекомендации:\n" + "\n".join([f"- {a}" for a in acts]))
+    return "\n".join(parts)
+
+
+def llm_two_pass_self_consistency(user_prompt: str, data_context: str, k: int = 3) -> tuple[str, Optional[LLMAnalysis]]:
+    """Двухпроходный режим: генерируем k кандидатов, критик исправляет до строгого JSON, выбираем лучший.
+    Возвращает (best_text, best_parsed). Текст — отформатированный JSON.
+    """
+    candidates: list[tuple[str, Optional[LLMAnalysis]]] = []
+    for _ in range(max(1, int(k))):
+        raw = ask_llm_with_text_data(user_prompt=user_prompt, data_context=data_context)
+        parsed = parse_llm_analysis_strict(raw)
+        if parsed is None:
+            # Критик с попыткой нормализовать
+            critic_prompt = _build_critic_prompt(raw)
+            crit = ask_llm_with_text_data(user_prompt=critic_prompt, data_context=data_context)
+            parsed = parse_llm_analysis_strict(crit)
+            if parsed is not None:
+                json_text = json.dumps(parsed.dict(), ensure_ascii=False, indent=2)
+                candidates.append((json_text, parsed))
+            else:
+                candidates.append((raw, None))
+        else:
+            json_text = json.dumps(parsed.dict(), ensure_ascii=False, indent=2)
+            candidates.append((json_text, parsed))
+
+    best_text, best_parsed = _choose_best_candidate(candidates)
+    # Если лучший без парсинга — сделаем мягкий фолбэк текстом без изменения
+    if best_parsed is None and best_text:
+        try:
+            mj = _extract_json_like(best_text)
+            if mj:
+                best_parsed = LLMAnalysis.parse_obj(mj)
+                best_text = json.dumps(best_parsed.dict(), ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+    return best_text, best_parsed
+
+
 def label_dataframes(
     dfs: List[pd.DataFrame],
     labels: List[str]
@@ -403,6 +645,7 @@ Debug: %s
         True,
         False,
     )
+    gen = (CONFIG.get("llm", {}).get("gigachat", {}).get("generation") or {})
     _gigachat_client = LC_GigaChat(
         model=model,
         cert_file=cert_file,
@@ -410,6 +653,10 @@ Debug: %s
         base_url=base_url,
         verify_ssl_certs=verify_ssl_certs,
         timeout=int(CONFIG.get("llm", {}).get("gigachat", {}).get("request_timeout_sec", 120)),
+        # Дополнительные параметры генерации (если клиент поддерживает)
+        temperature=float(gen.get("temperature", 0.2)),
+        top_p=float(gen.get("top_p", 0.9)),
+        max_tokens=int(gen.get("max_tokens", 1200)),
     )
     return _gigachat_client
 
@@ -429,10 +676,13 @@ def ask_llm_with_text_data(
     _ensure_gigachat_env(gcfg)
     _gigachat_preflight(gcfg)
 
+    gen = (CONFIG.get("llm", {}).get("gigachat", {}).get("generation") or {})
+    force_json = bool(gen.get("force_json_in_prompt", True))
     system_text = (
         "Вы инженер по нагрузочному тестированию. Должны проанализирвать результаты ступенчатого нагрузочного теста поиска максимальной производительности."
         "Пользователь предоставит данные и вопрос. "
-        "Используйте контекст этих данных, чтобы ответить на его вопрос."
+        "Используйте контекст этих данных, чтобы ответить на его вопрос." +
+        (" Отвечайте строго в JSON со схемой: {verdict, confidence, findings[], recommended_actions[]}." if force_json else "")
     )
     if SystemMessage and HumanMessage:
         lc_messages = [SystemMessage(content=system_text), HumanMessage(content=user_prompt + f"\n\n{data_context}")]
@@ -544,15 +794,29 @@ def uploadFromLLM(start_ts, end_ts):
     prompt_microservices = read_prompt_from_file(os.path.join(prompts_dir, "microservices_prompt.txt"))
     prompt_overall = read_prompt_from_file(os.path.join(prompts_dir, "overall_prompt.txt"))
 
+    # Витрины для отображения на странице (сохраняем для читаемости отчёта)
     jvm_full_data = dataframes_to_markdown(labeled_jvm)
     arangodb_full_data = dataframes_to_markdown(labeled_arangodb)
     kafka_full_data = dataframes_to_markdown(labeled_kafka)
     ms_full_data = dataframes_to_markdown(labeled_ms)
 
-    answer_jvm = ask_llm_with_text_data(user_prompt=prompt_jvm, data_context=jvm_full_data)
-    answer_arangodb = ask_llm_with_text_data(user_prompt=prompt_arangodb, data_context=arangodb_full_data)
-    answer_kafka = ask_llm_with_text_data(user_prompt=prompt_kafka, data_context=kafka_full_data)
-    answer_ms = ask_llm_with_text_data(user_prompt=prompt_microservices, data_context=ms_full_data)
+    # Компактные JSON context packs для LLM (уменьшаем токены и повышаем фокус)
+    jvm_pack = build_context_pack(labeled_jvm, top_n=10)
+    arangodb_pack = build_context_pack(labeled_arangodb, top_n=10)
+    kafka_pack = build_context_pack(labeled_kafka, top_n=10)
+    ms_pack = build_context_pack(labeled_ms, top_n=10)
+
+    # Строки-контексты в JSON для подачи модели
+    jvm_ctx = json.dumps({"domain": "jvm", "time_range": {"start": start_ts, "end": end_ts}, **jvm_pack}, ensure_ascii=False)
+    arangodb_ctx = json.dumps({"domain": "arangodb", "time_range": {"start": start_ts, "end": end_ts}, **arangodb_pack}, ensure_ascii=False)
+    kafka_ctx = json.dumps({"domain": "kafka", "time_range": {"start": start_ts, "end": end_ts}, **kafka_pack}, ensure_ascii=False)
+    ms_ctx = json.dumps({"domain": "microservices", "time_range": {"start": start_ts, "end": end_ts}, **ms_pack}, ensure_ascii=False)
+
+    # Two-pass + self-consistency (k=3)
+    answer_jvm, jvm_parsed = llm_two_pass_self_consistency(user_prompt=prompt_jvm, data_context=jvm_ctx, k=3)
+    answer_arangodb, arangodb_parsed = llm_two_pass_self_consistency(user_prompt=prompt_arangodb, data_context=arangodb_ctx, k=3)
+    answer_kafka, kafka_parsed = llm_two_pass_self_consistency(user_prompt=prompt_kafka, data_context=kafka_ctx, k=3)
+    answer_ms, ms_parsed = llm_two_pass_self_consistency(user_prompt=prompt_microservices, data_context=ms_ctx, k=3)
 
     merged_prompt_overall = (
         prompt_overall
@@ -562,14 +826,31 @@ def uploadFromLLM(start_ts, end_ts):
         .replace("{answer_microservices}", answer_ms)
     )
 
-    final_answer = ask_llm_with_text_data(user_prompt=merged_prompt_overall, data_context="")
+    overall_ctx = json.dumps(
+        {
+            "time_range": {"start": start_ts, "end": end_ts},
+            "domains": {
+                "jvm": jvm_pack,
+                "arangodb": arangodb_pack,
+                "kafka": kafka_pack,
+                "microservices": ms_pack
+            }
+        },
+        ensure_ascii=False
+    )
+    final_answer, final_parsed = llm_two_pass_self_consistency(user_prompt=merged_prompt_overall, data_context=overall_ctx, k=3)
 
     return {
         "jvm": f"{jvm_full_data}\n\nАнализ JVM:\n{answer_jvm}",
         "arangodb": f"{arangodb_full_data}\n\nАнализ ArangoDB:\n{answer_arangodb}",
         "kafka": f"{kafka_full_data}\n\nАнализ Kafka:\n{answer_kafka}",
         "ms": f"{ms_full_data}\n\nАнализ микросервисов:\n{answer_ms}",
-        "final": final_answer
+        "final": final_answer,
+        "jvm_parsed": (jvm_parsed.dict() if jvm_parsed else None),
+        "arangodb_parsed": (arangodb_parsed.dict() if arangodb_parsed else None),
+        "kafka_parsed": (kafka_parsed.dict() if kafka_parsed else None),
+        "ms_parsed": (ms_parsed.dict() if ms_parsed else None),
+        "final_parsed": (final_parsed.dict() if final_parsed else None),
     }
 
 

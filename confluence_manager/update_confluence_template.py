@@ -126,18 +126,101 @@ def update_confluence_page(url, username, password, page_id, data_to_find, repla
     # Простая замена без использования BeautifulSoup
     modified_html = original_html.replace(str(data_to_find), replace_content)
     
-    # Обновление версии
-    page["version"]["number"] += 1
-    
     # Обновление страницы с измененным содержимым
     try:
         confluence.update_page(
             page_id=page["id"],
             title=page["title"],
             body=modified_html,
+            type='page',
+            representation='storage',
             minor_edit=True
         )
         print("Страница успешно обновлена.")
+        return "Успешно"
+    except Exception as e:
+        print(f"Ошибка при обновлении страницы: {e}")
+        return f"Ошибка: {e}"
+
+
+def render_llm_report_placeholders(report: dict) -> dict:
+    """Формирует словарь {placeholder: html} с фолбэками из структурированного отчёта LLM.
+    Ожидается структура {verdict, confidence, findings[], recommended_actions[]}.
+    При отсутствии полей подставляются безопасные значения.
+    """
+    safe = lambda x: str(x).strip() if x is not None else ""
+
+    verdict = safe((report or {}).get("verdict") or "нет данных")
+    conf_val = (report or {}).get("confidence")
+    confidence_str = f"{int(conf_val * 100)}%" if isinstance(conf_val, (int, float)) else "—"
+
+    findings = (report or {}).get("findings") or []
+    items = []
+    for f in findings:
+        if isinstance(f, dict):
+            summary = safe(f.get("summary"))
+            if summary:
+                items.append(f"<li>{summary}</li>")
+        else:
+            s = safe(f)
+            if s:
+                items.append(f"<li>{s}</li>")
+    findings_html = "<ul>" + "".join(items) + "</ul>" if items else "<em>Нет существенных находок</em>"
+
+    actions = (report or {}).get("recommended_actions") or (report or {}).get("actions") or []
+    aitems = []
+    for a in actions:
+        s = safe(a)
+        if s:
+            aitems.append(f"<li>{s}</li>")
+    actions_html = "<ul>" + "".join(aitems) + "</ul>" if aitems else "<em>Нет рекомендаций</em>"
+
+    return {
+        "${LLM_VERDICT}": f"<strong>{verdict}</strong>",
+        "${LLM_CONFIDENCE}": confidence_str,
+        "${LLM_FINDINGS}": findings_html,
+        "${LLM_ACTIONS}": actions_html,
+    }
+
+
+def update_confluence_page_multi(url, username, password, page_id, replacements: dict) -> str:
+    """Один проход по странице: заменить несколько плейсхолдеров. Отсутствующие не считаем ошибкой."""
+    confluence = Confluence(
+        url=url,
+        username=username,
+        password=password,
+        verify_ssl=False
+    )
+
+    try:
+        page = confluence.get_page_by_id(page_id, expand='body.storage,history,space,version')
+    except Exception as e:
+        print(f"Ошибка при загрузке страницы: {e}")
+        return "Ошибка загрузки"
+
+    html = page["body"]["storage"]["value"]
+    replaced_any = False
+    for placeholder, value in (replacements or {}).items():
+        if placeholder in html:
+            html = html.replace(str(placeholder), str(value))
+            replaced_any = True
+        else:
+            print(f"[warn] Плейсхолдер '{placeholder}' не найден. Пропускаю.")
+
+    if not replaced_any:
+        print("Нет совпавших плейсхолдеров. Обновление не требуется.")
+        return "Нет замен"
+
+    try:
+        confluence.update_page(
+            page_id=page["id"],
+            title=page["title"],
+            body=html,
+            type='page',
+            representation='storage',
+            minor_edit=True
+        )
+        print("Страница успешно обновлена (мульти-замена).")
         return "Успешно"
     except Exception as e:
         print(f"Ошибка при обновлении страницы: {e}")

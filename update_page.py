@@ -1,4 +1,4 @@
-from confluence_manager.update_confluence_template import copy_confluence_page, update_confluence_page
+from confluence_manager.update_confluence_template import copy_confluence_page, update_confluence_page, update_confluence_page_multi, render_llm_report_placeholders
 from AI.main import uploadFromLLM
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -99,27 +99,24 @@ def update_report(start, end, service):
     # Получаем результаты LLM и обновляем их последовательно
     results = uploadFromLLM(start/1000, end/1000)
 
-    # Последовательное обновление для предотвращения конфликтов версий
+    # Мульти-обновление плейсхолдеров LLM за один проход
     try:
-        print("Обновление данных LLM...")
-        
-        # Последовательно обновляем каждый раздел с повторными попытками
-        update_with_retry(url_basic, user, password, copy_page_id, "$$final_answer$$", results["final"])
-        print("✓ Итоговый ответ обновлен")
-        
-        update_with_retry(url_basic, user, password, copy_page_id, "$$answer_jvm$$", results["jvm"])
-        print("✓ JVM обновлен")
-        
-        update_with_retry(url_basic, user, password, copy_page_id, "$$answer_arangodb$$", results["arangodb"])
-        print("✓ ArangoDB обновлен")
-        
-        update_with_retry(url_basic, user, password, copy_page_id, "$$answer_kafka$$", results["kafka"])
-        print("✓ Kafka обновлен")
-        
-        update_with_retry(url_basic, user, password, copy_page_id, "$$answer_ms$$", results["ms"])
-        print("✓ Microservices обновлен")
-        
-        print("Все данные LLM успешно обновлены")
+        print("Обновление данных LLM (одним проходом)...")
+        llm_replacements = {
+            "$$final_answer$$": results["final"],
+            "$$answer_jvm$$": results["jvm"],
+            "$$answer_arangodb$$": results["arangodb"],
+            "$$answer_kafka$$": results["kafka"],
+            "$$answer_ms$$": results["ms"],
+        }
+
+        # Добавляем структурированные плейсхолдеры, если есть JSON
+        final_struct = results.get("final_parsed")
+        if final_struct:
+            llm_replacements.update(render_llm_report_placeholders(final_struct))
+
+        update_confluence_page_multi(url_basic, user, password, copy_page_id, llm_replacements)
+        print("✓ Плейсхолдеры LLM обновлены за один проход")
     except Exception as e:
-        print(f"Ошибка при последовательном обновлении данных LLM: {e}")
+        print(f"Ошибка при мульти-обновлении данных LLM: {e}")
 
