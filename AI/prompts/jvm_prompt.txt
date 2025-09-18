@@ -84,6 +84,7 @@
 ФОРМАТ ОТВЕТА:
 - Отвечайте строго в JSON со схемой: {verdict, confidence, findings[], recommended_actions[]}.
 - Если данных недостаточно, верните verdict: "insufficient_data" и укажите причину в findings.
+- Для каждого findings в evidence указывайте интервал отклонения start–end и peak_time (время максимума), а также имя метрики/экземпляра.
 
 ПРИМЕР ОТВЕТА (JSON):
 ```json
@@ -91,7 +92,7 @@
   "verdict": "регресс",
   "confidence": 0.86,
   "findings": [
-    {"summary": "P99 GC pause вырос до 620мс на application=billing, instance=10.0.1.15 в 12:40–12:50"},
+    {"summary": "P99 GC pause вырос до 620мс", "evidence": "application=billing, instance=10.0.1.15, 12:40–12:50, peak_time=12:47"},
     "Heap usage стабильно >85% на нескольких инстансах в окне пиков"
   ],
   "recommended_actions": [

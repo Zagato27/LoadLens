@@ -401,12 +401,19 @@ def _summarize_time_series_dataframe(df: pd.DataFrame, top_n: int = 10) -> List[
         if col_series.dropna().empty:
             continue
         try:
+            # Вспомогательные экстремумы/времена
+            max_val = float(col_series.max(skipna=True))
+            min_val = float(col_series.min(skipna=True))
+            max_idx = col_series.idxmax()
+            min_idx = col_series.idxmin()
             series_summary = {
                 "series": str(col),
                 "mean": float(col_series.mean(skipna=True)),
-                "min": float(col_series.min(skipna=True)),
-                "max": float(col_series.max(skipna=True)),
+                "min": min_val,
+                "max": max_val,
                 "last": float(col_series.dropna().iloc[-1]),
+                "max_time": str(max_idx) if pd.notnull(max_idx) else None,
+                "min_time": str(min_idx) if pd.notnull(min_idx) else None,
             }
         except Exception:
             # в редких случаях встречаются нечисловые значения/пустые ряды
@@ -426,14 +433,69 @@ def build_context_pack(labeled_dfs: List[Dict[str, object]], top_n: int = 10) ->
       ]
     }
     """
+    def _detect_anomaly_windows(col_series: pd.Series, sigma: float = 2.0, max_windows: int = 2) -> List[Dict[str, object]]:
+        windows: List[Dict[str, object]] = []
+        try:
+            s = col_series.dropna()
+            if s.empty:
+                return windows
+            mu = float(s.mean())
+            sd = float(s.std(ddof=0))
+            if sd == 0 or not pd.notnull(sd):
+                return windows
+            thr = mu + sigma * sd
+            mask = (col_series > thr).fillna(False)
+            # Поиск контуров True-участков
+            shifted = mask.astype(int).diff().fillna(mask.iloc[0].astype(int))
+            starts = list(mask.index[shifted == 1])
+            # если начинается с True
+            if mask.iloc[0]:
+                starts = [mask.index[0]] + starts
+            ends = list(mask.index[shifted == -1])
+            if mask.iloc[-1]:
+                ends = ends + [mask.index[-1]]
+            for st, en in zip(starts, ends):
+                window_slice = col_series.loc[st:en].dropna()
+                if window_slice.empty:
+                    continue
+                peak_val = float(window_slice.max())
+                peak_ts = window_slice.idxmax()
+                windows.append({
+                    "start": str(st),
+                    "end": str(en),
+                    "peak_time": str(peak_ts),
+                    "peak": peak_val,
+                    "mean": mu,
+                    "threshold_high": thr
+                })
+            # ограничим количеством окон
+            if len(windows) > max_windows:
+                windows = sorted(windows, key=lambda w: w.get("peak", 0.0), reverse=True)[:max_windows]
+        except Exception:
+            return []
+        return windows
+
     sections = []
     for item in labeled_dfs:
         label = item.get("label")
         df = item.get("df")
         section_summary = _summarize_time_series_dataframe(df, top_n=top_n)
+        # Добавим окна аномалий для отобранных серий
+        anomalies: List[Dict[str, object]] = []
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            for s in section_summary:
+                series_name = s.get("series")
+                if series_name in df.columns:
+                    windows = _detect_anomaly_windows(df[series_name])
+                    if windows:
+                        anomalies.append({
+                            "series": series_name,
+                            "windows": windows
+                        })
         sections.append({
             "label": label,
-            "top_series": section_summary
+            "top_series": section_summary,
+            "anomalies": anomalies
         })
     return {"sections": sections}
 
@@ -835,7 +897,29 @@ def uploadFromLLM(start_ts, end_ts):
     jvm_full_data = domain_data["jvm"]["markdown"]; jvm_pack = domain_data["jvm"]["pack"]; jvm_ctx = domain_data["jvm"]["ctx"]
     database_full_data = domain_data["database"]["markdown"]; database_pack = domain_data["database"]["pack"]; database_ctx = domain_data["database"]["ctx"]
     kafka_full_data = domain_data["kafka"]["markdown"]; kafka_pack = domain_data["kafka"]["pack"]; kafka_ctx = domain_data["kafka"]["ctx"]
-    ms_full_data = domain_data["microservices"]["markdown"]; ms_pack = domain_data["microservices"]["pack"]; ms_ctx = domain_data["microservices"]["ctx"]
+    ms_full_data = domain_data["microservices"]["markdown"]; ms_pack = domain_data["microservices"]["pack"]
+    # Обогащаем контекст микросервисов ресурсными метриками из JVM (CPU/Memory)
+    cpu_sections = []
+    mem_sections = []
+    try:
+        for sec in jvm_pack.get("sections", []):
+            lbl = str(sec.get("label", ""))
+            if "Process CPU usage" in lbl:
+                cpu_sections.append(sec)
+            if "Heap used" in lbl or "Heap max" in lbl:
+                mem_sections.append(sec)
+    except Exception:
+        pass
+    ms_ctx_obj = {
+        "domain": "microservices",
+        "time_range": {"start": start_ts, "end": end_ts},
+        **ms_pack,
+        "aux_resources": {
+            "cpu_sections": cpu_sections,
+            "memory_sections": mem_sections
+        }
+    }
+    ms_ctx = json.dumps(ms_ctx_obj, ensure_ascii=False)
 
     # Two-pass + self-consistency (k=3)
     answer_jvm, jvm_parsed = _ask_domain_analysis(prompt_jvm, jvm_ctx)
