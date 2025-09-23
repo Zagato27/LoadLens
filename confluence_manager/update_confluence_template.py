@@ -8,6 +8,7 @@ from datetime import datetime
 from getpass import getpass
 
 from requests.auth import HTTPBasicAuth
+import re
 
 
 
@@ -306,7 +307,23 @@ def update_confluence_page_multi(url, username, password, page_id, replacements:
             html = html.replace(str(placeholder), str(value))
             replaced_any = True
         else:
-            print(f"[warn] Плейсхолдер '{placeholder}' не найден. Пропускаю.")
+            # Попробуем более гибкую замену с допуском пробелов внутри $$...$$
+            did_flexible = False
+            try:
+                ph = str(placeholder)
+                if ph.startswith("$$") and ph.endswith("$$"):
+                    inner = ph[2:-2].strip()
+                    if inner:
+                        pattern = r"\$\$\s*" + re.escape(inner) + r"\s*\$\$"
+                        new_html, num = re.subn(pattern, str(value), html)
+                        if num > 0:
+                            html = new_html
+                            replaced_any = True
+                            did_flexible = True
+            except Exception as e:
+                print(f"[warn] Ошибка при гибкой замене '{placeholder}': {e}")
+            if not did_flexible:
+                print(f"[warn] Плейсхолдер '{placeholder}' не найден. Пропускаю.")
 
     if not replaced_any:
         print("Нет совпавших плейсхолдеров. Обновление не требуется.")
