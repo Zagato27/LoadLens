@@ -216,6 +216,25 @@ def render_llm_markdown(report: dict) -> str:
     md_lines.append(f"- Доверие: {confidence_str}")
     md_lines.append("")
 
+    # Пиковая производительность (опционально)
+    peak = (report or {}).get("peak_performance") or (report or {}).get("peak_perfomance")
+    if isinstance(peak, dict):
+        max_rps = safe(peak.get("max_rps"))
+        max_time = safe(peak.get("max_time"))
+        drop_time = safe(peak.get("drop_time"))
+        method = safe(peak.get("method"))
+        if any([max_rps, max_time, drop_time, method]):
+            md_lines.append("#### Пиковая производительность")
+            if max_rps:
+                md_lines.append(f"- Максимальный RPS: {max_rps}")
+            if max_time:
+                md_lines.append(f"- Время пика: {max_time}")
+            if drop_time:
+                md_lines.append(f"- Время деградации: {drop_time}")
+            if method:
+                md_lines.append(f"- Метод оценки: {method}")
+            md_lines.append("")
+
     findings = (report or {}).get("findings") or []
     md_lines.append("#### Ключевые находки")
     if not findings:
