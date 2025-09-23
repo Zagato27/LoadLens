@@ -696,6 +696,24 @@ def _format_parsed_as_text(p: LLMAnalysis) -> str:
         acts = [str(a).strip() for a in p.recommended_actions if str(a).strip()]
         if acts:
             parts.append("Рекомендации:\n" + "\n".join([f"- {a}" for a in acts]))
+    # Пиковая производительность, если модель её вернула
+    try:
+        pp = getattr(p, "peak_performance", None)
+        if pp:
+            max_rps = getattr(pp, "max_rps", None)
+            max_time = getattr(pp, "max_time", None) or "—"
+            drop_time = getattr(pp, "drop_time", None) or "—"
+            method = getattr(pp, "method", None)
+            if isinstance(max_rps, (int, float)):
+                rps_str = f"{max_rps:.0f}"
+            else:
+                rps_str = "—"
+            line = f"Максимальная производительность: {rps_str} rps, время пика: {max_time}, падение: {drop_time}"
+            if isinstance(method, str) and method.strip():
+                line += f", метод: {method.strip()}"
+            parts.append(line)
+    except Exception:
+        pass
     return "\n".join(parts)
 
 
