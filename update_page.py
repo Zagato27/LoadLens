@@ -125,7 +125,9 @@ def update_report(start, end, service):
             # Фолбэк: если нет структурированного ответа, отдаем текст как markdown-блок
             final_text = results.get("final")
             if isinstance(final_text, str) and final_text.strip():
-                llm_replacements["$$final_answer$$"] = f"### Итог LLM\n\n{final_text}"
+                md_fallback = f"### Итог LLM\n\n{final_text}"
+                llm_replacements["$$final_answer$$"] = md_fallback
+                llm_replacements["$$answer_llm$$"] = md_fallback
 
         # Доменные секции в человекочитаемом markdown при наличии parsed
         jvm_struct = results.get("jvm_parsed")
