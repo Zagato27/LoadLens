@@ -81,7 +81,7 @@
 6. Включите в анализ абсолютно все значения из таблиц. Не опускайте данные, даже если они кажутся незначительными.
 
 
-ФОРМАТ ОТВЕТА:
+ФОРМАТ ОТВЕТА (ВСЕ ТЕКСТОВЫЕ ПОЛЯ — НА РУССКОМ):
 - Отвечайте строго в JSON со схемой: {verdict, confidence, findings[], recommended_actions[]}.
 - Каждый элемент findings ДОЛЖЕН содержать: summary, severity (critical/high/medium/low), component (имя сервиса/процесса/инстанса), evidence.
 - Если component не указан явно — извлеките его из evidence по лейблам application|service|job|pod|instance; если это невозможно, используйте "unknown".

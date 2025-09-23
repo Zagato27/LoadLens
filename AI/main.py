@@ -10,6 +10,7 @@ import logging
 import threading
 import socket
 import time
+import re
 from urllib.parse import urlparse
 
 from langchain_gigachat.chat_models import GigaChat as LC_GigaChat
@@ -626,6 +627,8 @@ def _build_critic_prompt(candidate_text: str) -> str:
     """
     return (
         "Вы выступаете как строгий валидатор отчёта. Отвечайте на русском языке. "
+        "Перефразируйте все ТЕКСТОВЫЕ поля на русский язык (verdict, findings.summary, findings.evidence, recommended_actions, affected_components). "
+        "Ключи JSON и значения поля severity оставьте на английском согласно схеме. "
         "Ниже дан проект ответа модели. Исправьте/нормализуйте его до СТРОГОГО JSON со схемой: "
         "{verdict, confidence, findings[], recommended_actions[]}. "
         "Каждый элемент findings ДОЛЖЕН содержать поля severity (critical|high|medium|low) и component (имя сервиса/процесса/инстанса). "
@@ -659,7 +662,52 @@ def _choose_best_candidate(candidates: list) -> tuple[str, Optional[LLMAnalysis]
 
     filtered = [(t, p) for (t, p) in candidates if p is not None and p.verdict == majority_verdict] if majority_verdict else []
     pool = filtered if filtered else candidates
-    best = max(pool, key=lambda tp: conf_val(tp[1]))
+
+    # Языковая эвристика: предпочесть кандидата с большей долей кириллицы в текстовых полях
+    def _extract_text_for_lang_score(p: Optional[LLMAnalysis]) -> str:
+        if p is None:
+            return ""
+        parts: list[str] = []
+        try:
+            if getattr(p, "verdict", None):
+                parts.append(str(p.verdict))
+            for f in (p.findings or []):
+                if isinstance(f, dict):
+                    for key in ("summary", "evidence", "component"):
+                        val = f.get(key)
+                        if isinstance(val, str) and val.strip():
+                            parts.append(val)
+                else:
+                    s = str(f).strip()
+                    if s:
+                        parts.append(s)
+            for a in (p.recommended_actions or []):
+                s = str(a).strip()
+                if s:
+                    parts.append(s)
+            if getattr(p, "affected_components", None):
+                parts.extend([str(x) for x in p.affected_components if str(x).strip()])
+        except Exception:
+            pass
+        return " \n".join(parts)
+
+    def _russian_ratio(text: str) -> float:
+        if not isinstance(text, str) or not text:
+            return 0.0
+        letters = re.findall(r"[A-Za-zА-Яа-яЁё]", text)
+        if not letters:
+            return 0.0
+        cyr = re.findall(r"[А-Яа-яЁё]", text)
+        return float(len(cyr)) / float(len(letters))
+
+    def lang_score(p: Optional[LLMAnalysis]) -> float:
+        try:
+            blob = _extract_text_for_lang_score(p)
+            return _russian_ratio(blob)
+        except Exception:
+            return 0.0
+
+    best = max(pool, key=lambda tp: (lang_score(tp[1]), conf_val(tp[1])))
     return best
 
 
@@ -854,7 +902,7 @@ def ask_llm_with_text_data(
         "Вы инженер по нагрузочному тестированию. Должны проанализировать результаты ступенчатого нагрузочного теста поиска максимальной производительности."
         "Пользователь предоставит данные и вопрос. "
         "Используйте контекст этих данных, чтобы ответить на его вопрос. "
-        "Отвечайте на русском языке. " +
+        "Отвечайте на русском языке. Все текстовые поля (verdict, findings.summary, findings.evidence, recommended_actions, affected_components) формулируйте по-русски; допускаются английские только ключи JSON, значения 'severity' и имена метрик/лейблов. " +
         (
             "Строго в JSON со схемой: {verdict, confidence, findings[], recommended_actions[]}. "
             "Каждый элемент findings обязан содержать: summary, severity (critical|high|medium|low), component, evidence. "
