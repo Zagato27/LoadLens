@@ -507,12 +507,20 @@ class FindingItem(BaseModel):
     evidence: Optional[str] = Field(default=None)  # факт/метрика/окно времени
 
 
+class PeakPerformance(BaseModel):
+    max_rps: Optional[float] = Field(default=None)
+    max_time: Optional[str] = Field(default=None)
+    drop_time: Optional[str] = Field(default=None)
+    method: Optional[str] = Field(default=None)
+
+
 class LLMAnalysis(BaseModel):
     verdict: str = Field(default="нет данных")
     confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     findings: List[Union[str, FindingItem]] = Field(default_factory=list)
     recommended_actions: List[str] = Field(default_factory=list)
     affected_components: Optional[List[str]] = Field(default=None)
+    peak_performance: Optional[PeakPerformance] = Field(default=None)
 
     @root_validator(pre=True)
     def _normalize_fields(cls, values: Dict[str, object]) -> Dict[str, object]:
