@@ -6,17 +6,13 @@ from typing import List, Dict, Optional, Union
 import json
 import os
 from datetime import datetime
-from atlassian import Confluence
-from datetime import datetime
-from getpass import getpass
-from bs4 import BeautifulSoup
-from tabulate import tabulate
 import logging
 import threading
 import socket
+import time
+import re
 from urllib.parse import urlparse
 
-from requests.auth import HTTPBasicAuth
 from langchain_gigachat.chat_models import GigaChat as LC_GigaChat
 from pydantic import BaseModel, Field, ValidationError, root_validator
 try:
@@ -35,6 +31,8 @@ from AI.config import CONFIG
 logger = logging.getLogger(__name__)
 _gigachat_lock = threading.Lock()
 _gigachat_client = None
+_gigachat_env_applied = False
+_gigachat_preflight_last_ts = 0.0
 
 # httpx/requests таймаут через окружение для некоторых клиентов
 os.environ.setdefault("GIGACHAT_TIMEOUT", str(CONFIG.get("llm", {}).get("gigachat", {}).get("request_timeout_sec", 120)))
@@ -145,7 +143,7 @@ def _configure_logging():
 
 
 # Вспомогательная функция для конвертации времени
-def convert_to_timestamp(date_str):
+def convert_to_timestamp(date_str: str) -> int:
     """Конвертирует строку даты и времени в миллисекундный timestamp."""
     dt = datetime.strptime(date_str, "%Y-%m-%dT%H:%M")
     return int(dt.timestamp())
@@ -195,9 +193,9 @@ def _resolve_grafana_prom_ds_id(g_cfg: dict) -> int:
     auth = None
     method = (auth_cfg.get("method") or "basic").lower()
     if method == "bearer" and auth_cfg.get("token"):
-        headers["Authorization"] = f"Bearer {auth_cfg['token']}"
+        headers["Authorization"] = f"Bearer {auth_cfg.get('token')}"
     elif method == "basic" and auth_cfg.get("username") and auth_cfg.get("password"):
-        auth = (auth_cfg["username"], auth_cfg["password"])
+        auth = (auth_cfg.get("username"), auth_cfg.get("password"))
 
     verify = g_cfg.get("verify_ssl", True)
 
@@ -247,11 +245,12 @@ def fetch_prometheus_data_via_grafana(
 
     headers = {}
     auth = None
-    method = (g_cfg.get("auth", {}).get("method") or "basic").lower()
-    if method == "bearer" and g_cfg["auth"].get("token"):
-        headers["Authorization"] = f"Bearer {g_cfg['auth']['token']}"
-    elif method == "basic" and g_cfg["auth"].get("username") and g_cfg["auth"].get("password"):
-        auth = (g_cfg["auth"]["username"], g_cfg["auth"]["password"])
+    auth_cfg = g_cfg.get("auth", {})
+    method = (auth_cfg.get("method") or "basic").lower()
+    if method == "bearer" and auth_cfg.get("token"):
+        headers["Authorization"] = f"Bearer {auth_cfg.get('token')}"
+    elif method == "basic" and auth_cfg.get("username") and auth_cfg.get("password"):
+        auth = (auth_cfg.get("username"), auth_cfg.get("password"))
 
     url = f"{base_url}/api/datasources/proxy/{ds_id}/api/v1/query_range"
     resp = requests.get(url, headers=headers, auth=auth, params=params, timeout=30, verify=g_cfg.get("verify_ssl", True))
@@ -337,7 +336,7 @@ def fetch_and_aggregate_with_label_keys(
     return dfs
 
 
-def dataframes_to_markdown(labeled_dfs):
+def dataframes_to_markdown(labeled_dfs: List[Dict[str, object]]) -> str:
     result = []
     for item in labeled_dfs:
         label = item['label']
@@ -446,7 +445,7 @@ def build_context_pack(labeled_dfs: List[Dict[str, object]], top_n: int = 10) ->
             thr = mu + sigma * sd
             mask = (col_series > thr).fillna(False)
             # Поиск контуров True-участков
-            shifted = mask.astype(int).diff().fillna(mask.iloc[0].astype(int))
+            shifted = mask.astype(int).diff().fillna(int(mask.iloc[0]))
             starts = list(mask.index[shifted == 1])
             # если начинается с True
             if mask.iloc[0]:
@@ -619,9 +618,12 @@ def _build_critic_prompt(candidate_text: str) -> str:
     Кандидат может содержать пояснения; задача критика — выдать ЧИСТЫЙ JSON.
     """
     return (
-        "Вы выступаете как строгий валидатор отчёта. "
+        "Вы выступаете как строгий валидатор отчёта. Отвечайте на русском языке. "
         "Ниже дан проект ответа модели. Исправьте/нормализуйте его до СТРОГОГО JSON со схемой: "
         "{verdict, confidence, findings[], recommended_actions[]}. "
+        "Каждый элемент findings ДОЛЖЕН содержать поля severity (critical|high|medium|low) и component (имя сервиса/процесса/инстанса). "
+        "Если component явно не указан, извлеките его из evidence по лейблам application|service|job|pod|instance; если не удаётся — поставьте 'unknown'. "
+        "Если severity не указана или не из списка — установите 'low'. "
         "Никакого текста вне JSON. Если данных недостаточно — верните verdict='insufficient_data'.\n\n"
         f"Проект ответа:\n{candidate_text}"
     )
@@ -668,14 +670,14 @@ def _format_parsed_as_text(p: LLMAnalysis) -> str:
                 sev = f.get("severity")
                 comp = f.get("component")
                 ev = f.get("evidence")
-                parts = [s]
+                frag = [s]
                 if sev:
-                    parts.append(f"[severity: {sev}]")
+                    frag.append(f"[severity: {sev}]")
                 if comp:
-                    parts.append(f"[component: {comp}]")
+                    frag.append(f"[component: {comp}]")
                 if ev:
-                    parts.append(f"[evidence: {ev}]")
-                s = " ".join([x for x in parts if x])
+                    frag.append(f"[evidence: {ev}]")
+                s = " ".join([x for x in frag if x])
             else:
                 s = str(f).strip()
             if s:
@@ -804,16 +806,36 @@ def ask_llm_with_text_data(
     Отправляет запрос к GigaChat (через langchain_gigachat) с подготовленными текстовыми данными.
     """
     gcfg = CONFIG.get("llm", {}).get("gigachat", {})
-    _ensure_gigachat_env(gcfg)
-    _gigachat_preflight(gcfg)
+    global _gigachat_env_applied, _gigachat_preflight_last_ts
+    # Кэшируем применение окружения на процесс
+    if not _gigachat_env_applied:
+        _ensure_gigachat_env(gcfg)
+        _gigachat_env_applied = True
+    # Префлайт выполняем не чаще, чем раз в 10 минут
+    now_ts = time.time()
+    if now_ts - _gigachat_preflight_last_ts > 600:
+        try:
+            _gigachat_preflight(gcfg)
+        finally:
+            _gigachat_preflight_last_ts = now_ts
 
     gen = (CONFIG.get("llm", {}).get("gigachat", {}).get("generation") or {})
+    # Можно переопределить требование JSON на уровне вызова (для overall)
     force_json = bool(gen.get("force_json_in_prompt", True))
+    if isinstance(llm_config, dict) and "force_json" in llm_config:
+        force_json = bool(llm_config.get("force_json"))
     system_text = (
-        "Вы инженер по нагрузочному тестированию. Должны проанализирвать результаты ступенчатого нагрузочного теста поиска максимальной производительности."
+        "Вы инженер по нагрузочному тестированию. Должны проанализировать результаты ступенчатого нагрузочного теста поиска максимальной производительности."
         "Пользователь предоставит данные и вопрос. "
-        "Используйте контекст этих данных, чтобы ответить на его вопрос." +
-        (" Отвечайте строго в JSON со схемой: {verdict, confidence, findings[], recommended_actions[]}." if force_json else "")
+        "Используйте контекст этих данных, чтобы ответить на его вопрос. "
+        "Отвечайте на русском языке. " +
+        (
+            "Строго в JSON со схемой: {verdict, confidence, findings[], recommended_actions[]}. "
+            "Каждый элемент findings обязан содержать: summary, severity (critical|high|medium|low), component, evidence. "
+            "Если component не указан — извлеките его из evidence по лейблам application|service|job|pod|instance, иначе 'unknown'. "
+            "Если severity не указана — используйте 'low'."
+            if force_json else ""
+        )
     )
     if SystemMessage and HumanMessage:
         lc_messages = [SystemMessage(content=system_text), HumanMessage(content=user_prompt + f"\n\n{data_context}")]
@@ -829,8 +851,10 @@ def ask_llm_with_text_data(
                     last_err = e
                     attempts += 1
                     logger.warning(f"GigaChat invoke retry {attempts}/3 due to: {e}")
-                    if attempts >= 3:
-                        raise
+                    if attempts < 3:
+                        time.sleep(min(2 ** attempts, 8))
+                    else:
+                        raise last_err
             return getattr(result, "content", str(result))
     else:
         # Fallback: одним запросом
@@ -839,14 +863,16 @@ def ask_llm_with_text_data(
             last_err = None
             while attempts < 3:
                 try:
-                    result = _get_gigachat_client().invoke(user_prompt + f"\n\n{data_context}")
+                    result = _get_gigachat_client().invoke(system_text + "\n\n" + user_prompt + f"\n\n{data_context}")
                     break
                 except Exception as e:
                     last_err = e
                     attempts += 1
                     logger.warning(f"GigaChat invoke retry {attempts}/3 due to: {e}")
-                    if attempts >= 3:
-                        raise
+                    if attempts < 3:
+                        time.sleep(min(2 ** attempts, 8))
+                    else:
+                        raise last_err
         return getattr(result, "content", str(result))
 
 
@@ -855,7 +881,7 @@ def read_prompt_from_file(filename: str) -> str:
         return f.read()
 
 
-def uploadFromLLM(start_ts, end_ts):
+def uploadFromLLM(start_ts: float, end_ts: float) -> Dict[str, object]:
     _configure_logging()
     prometheus_url = CONFIG["prometheus"]["url"]
     src_type = (CONFIG.get("metrics_source", {}).get("type") or "prometheus").lower()
@@ -872,16 +898,21 @@ def uploadFromLLM(start_ts, end_ts):
     domain_keys = ["jvm", "database", "kafka", "microservices"]
     domain_data = {}
     for key in domain_keys:
-        domain_data[key] = _build_domain_data(
-            domain_key=key,
-            domain_conf=queries[key],
-            prometheus_url=prometheus_url,
-            start_ts=start_ts,
-            end_ts=end_ts,
-            step=step,
-            resample=resample,
-            top_n=15
-        )
+        try:
+            domain_data[key] = _build_domain_data(
+                domain_key=key,
+                domain_conf=queries[key],
+                prometheus_url=prometheus_url,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                step=step,
+                resample=resample,
+                top_n=15
+            )
+        except Exception as e:
+            logger.error(f"Domain '{key}' build failed: {e}")
+            # продвигаемся дальше, формируя пустые структуры
+            domain_data[key] = {"labeled": [], "markdown": "", "pack": {"sections": []}, "ctx": json.dumps({"domain": key, "sections": []}, ensure_ascii=False)}
 
     CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
     prompts_dir = os.path.join(CURRENT_DIR, "prompts")
@@ -922,10 +953,26 @@ def uploadFromLLM(start_ts, end_ts):
     ms_ctx = json.dumps(ms_ctx_obj, ensure_ascii=False)
 
     # Two-pass + self-consistency (k=3)
-    answer_jvm, jvm_parsed = _ask_domain_analysis(prompt_jvm, jvm_ctx)
-    answer_database, database_parsed = _ask_domain_analysis(prompt_database, database_ctx)
-    answer_kafka, kafka_parsed = _ask_domain_analysis(prompt_kafka, kafka_ctx)
-    answer_ms, ms_parsed = _ask_domain_analysis(prompt_microservices, ms_ctx)
+    try:
+        answer_jvm, jvm_parsed = _ask_domain_analysis(prompt_jvm, jvm_ctx)
+    except Exception as e:
+        logger.error(f"LLM jvm analysis failed: {e}")
+        answer_jvm, jvm_parsed = ("{}", None)
+    try:
+        answer_database, database_parsed = _ask_domain_analysis(prompt_database, database_ctx)
+    except Exception as e:
+        logger.error(f"LLM database analysis failed: {e}")
+        answer_database, database_parsed = ("{}", None)
+    try:
+        answer_kafka, kafka_parsed = _ask_domain_analysis(prompt_kafka, kafka_ctx)
+    except Exception as e:
+        logger.error(f"LLM kafka analysis failed: {e}")
+        answer_kafka, kafka_parsed = ("{}", None)
+    try:
+        answer_ms, ms_parsed = _ask_domain_analysis(prompt_microservices, ms_ctx)
+    except Exception as e:
+        logger.error(f"LLM microservices analysis failed: {e}")
+        answer_ms, ms_parsed = ("{}", None)
 
     merged_prompt_overall = (
         prompt_overall

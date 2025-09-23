@@ -83,6 +83,9 @@
 
 ФОРМАТ ОТВЕТА:
 - Отвечайте строго в JSON со схемой: {verdict, confidence, findings[], recommended_actions[]}.
+- Каждый элемент findings ДОЛЖЕН содержать: summary, severity (critical/high/medium/low), component (имя сервиса/процесса/инстанса), evidence.
+- Если component не указан явно — извлеките его из evidence по лейблам application|service|job|pod|instance; если это невозможно, используйте "unknown".
+- Если severity не указана или вне списка — используйте "low".
 - Если данных недостаточно, верните verdict: "insufficient_data" и укажите причину в findings.
 - Для каждого findings в evidence указывайте интервал отклонения start–end и peak_time (время максимума), а также имя метрики/экземпляра.
 

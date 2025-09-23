@@ -109,7 +109,6 @@ def update_report(start, end, service):
             if isinstance(val, str) and val.strip():
                 llm_replacements[placeholder] = val
 
-        add_if_present("$$final_answer$$", "final")
         add_if_present("$$answer_jvm$$", "jvm")
         add_if_present("$$answer_database$$", "database")
         add_if_present("$$answer_kafka$$", "kafka")
@@ -121,6 +120,37 @@ def update_report(start, end, service):
             md = render_llm_markdown(final_struct)
             if md.strip():
                 llm_replacements["$$answer_llm$$"] = md
+                llm_replacements["$$final_answer$$"] = md
+        else:
+            # Фолбэк: если нет структурированного ответа, отдаем текст как markdown-блок
+            final_text = results.get("final")
+            if isinstance(final_text, str) and final_text.strip():
+                llm_replacements["$$final_answer$$"] = f"### Итог LLM\n\n{final_text}"
+
+        # Доменные секции в человекочитаемом markdown при наличии parsed
+        jvm_struct = results.get("jvm_parsed")
+        if isinstance(jvm_struct, dict) and jvm_struct:
+            md = render_llm_markdown(jvm_struct)
+            if md.strip():
+                llm_replacements["$$answer_jvm$$"] = md
+
+        db_struct = results.get("database_parsed")
+        if isinstance(db_struct, dict) and db_struct:
+            md = render_llm_markdown(db_struct)
+            if md.strip():
+                llm_replacements["$$answer_database$$"] = md
+
+        kafka_struct = results.get("kafka_parsed")
+        if isinstance(kafka_struct, dict) and kafka_struct:
+            md = render_llm_markdown(kafka_struct)
+            if md.strip():
+                llm_replacements["$$answer_kafka$$"] = md
+
+        ms_struct = results.get("ms_parsed")
+        if isinstance(ms_struct, dict) and ms_struct:
+            md = render_llm_markdown(ms_struct)
+            if md.strip():
+                llm_replacements["$$answer_ms$$"] = md
 
         update_confluence_page_multi(url_basic, user, password, copy_page_id, llm_replacements)
         print("✓ Плейсхолдеры LLM обновлены за один проход")
