@@ -10,7 +10,6 @@ import logging
 import threading
 import socket
 import time
-import re
 from urllib.parse import urlparse
 
 from langchain_gigachat.chat_models import GigaChat as LC_GigaChat
@@ -624,6 +623,7 @@ def _build_critic_prompt(candidate_text: str) -> str:
         "Каждый элемент findings ДОЛЖЕН содержать поля severity (critical|high|medium|low) и component (имя сервиса/процесса/инстанса). "
         "Если component явно не указан, извлеките его из evidence по лейблам application|service|job|pod|instance; если не удаётся — поставьте 'unknown'. "
         "Если severity не указана или не из списка — установите 'low'. "
+        "Дополнительно допускается поле peak_performance: {max_rps, max_time, drop_time, method}, если оно упомянуто в проекте ответа. "
         "Никакого текста вне JSON. Если данных недостаточно — верните verdict='insufficient_data'.\n\n"
         f"Проект ответа:\n{candidate_text}"
     )
@@ -833,7 +833,8 @@ def ask_llm_with_text_data(
             "Строго в JSON со схемой: {verdict, confidence, findings[], recommended_actions[]}. "
             "Каждый элемент findings обязан содержать: summary, severity (critical|high|medium|low), component, evidence. "
             "Если component не указан — извлеките его из evidence по лейблам application|service|job|pod|instance, иначе 'unknown'. "
-            "Если severity не указана — используйте 'low'."
+            "Если severity не указана — используйте 'low'. "
+            "Если данные содержат общий RPS на входной точке, включите поле peak_performance: {max_rps, max_time, drop_time, method='max_step_before_drop'}."
             if force_json else ""
         )
     )

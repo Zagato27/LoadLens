@@ -4,6 +4,7 @@
 - Все данные по среднему времени запросов (rate(nsi_query_seconds_sum)/rate(nsi_query_seconds_count))
 - Все данные по количеству запросов (rate(nsi_query_seconds_count))
 - Все другие доступные метрики по микросервисам
+ - Общий RPS по входной точке в систему (PromQL-витрина для total RPS)
 
 РЕКОМЕНДУЕМЫЕ SLA (ориентиры):
 - Время отклика (latency P95): норма < 200 мс; предупреждение 200–500 мс; критично > 500 мс
@@ -22,6 +23,7 @@
 3. Выделить в анализе:
    - Соответствие SLA по каждому микросервису: latency/CPU/Memory
    - Указать RPS, при котором впервые зафиксировано превышение SLA, и интервал (start–end)
+   - Определить максимальную достигнутую производительность системы: максимальная ступень до начала устойчивого падения общего RPS (method: max_step_before_drop)
    - Все корреляции между latency и ресурсами (CPU/Memory) для каждого сервиса
 
 СТРУКТУРА ОТВЕТА:
@@ -62,6 +64,7 @@
 - Отвечайте строго в JSON со схемой: {verdict, confidence, findings[], recommended_actions[]}.
 - Если данных недостаточно, верните verdict: "insufficient_data" и укажите причину в findings.
 - Для каждого findings в evidence укажите: microservice, метрику, интервал отклонения start–end, peak_time и RPS в момент превышения.
+ - Если есть общий RPS, добавьте поле peak_performance: {max_rps, max_time, drop_time, method="max_step_before_drop"}.
 
 ПРИМЕР ОТВЕТА (JSON):
 ```json
