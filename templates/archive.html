@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Архив отчётов</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,400;0,500;0,600;0,700;1,600&display=swap" rel="stylesheet">
+  <style>
+    body { background: #121212; color: #fff; font-family: 'Montserrat', Arial, sans-serif; margin: 0; }
+    .container { width: 90%; max-width: 1400px; margin: 0 auto; padding: 16px; }
+    h2 { margin: 8px 0 16px; }
+    a { color: #9bbcff; text-decoration: none; }
+    .app-header { position: sticky; top: 0; display: flex; align-items: center; justify-content: flex-start; gap: 12px; z-index: 2000; width: 100%; max-width: 1400px; margin: 0 auto; padding: 8px 12px; --brandSize: 40px; background: #121212; border-bottom: 1px solid #2a2a2a; }
+    .app-header .logo { width: var(--brandSize); height: var(--brandSize); object-fit: contain; }
+    .app-header .brand { font-size: var(--brandSize); line-height: var(--brandSize); font-weight: 600; font-style: italic; letter-spacing: 0.2px; color: #eaeaea; }
+    .app-nav { display: flex; gap: 16px; margin-left: auto; flex-wrap: nowrap; white-space: nowrap; }
+    .app-nav a.nav-btn { height: 36px; padding: 8px 4px; background: transparent; border: none; color: #eaeaea; border-bottom: 2px solid transparent; border-radius: 0; cursor: pointer; font-family: 'Montserrat', Arial, sans-serif; font-weight: 600; font-style: italic; text-decoration: none; display: inline-flex; align-items: center; }
+    .app-nav a.nav-btn:hover { color: #ffffff; border-bottom-color: #3700b3; }
+    .app-nav a.nav-btn.active { color: #ffffff; border-bottom-color: #6200ee; }
+
+    .toolbar { display:flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .toolbar input[type="search"] { height: 36px; padding: 6px 10px; border-radius: 6px; border: 1px solid #444; background: #1e1e1e; color: #fff; min-width: 280px; }
+    .btn { height: 36px; padding: 6px 10px; background: #2b2b2b; border: 1px solid #444; color: #fff; border-radius: 6px; cursor: pointer; }
+    .btn:hover { background: #3700b3; border-color: #6200ee; }
+
+    /* Метки вердиктов */
+    .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+    .pill.ok { background: #1f3d1f; color: #6be66b; border: 1px solid #2e6b2e; }
+    .pill.warn { background: #3d341f; color: #f4c66a; border: 1px solid #6b582e; }
+    .pill.fail { background: #3d1f1f; color: #f17878; border: 1px solid #6b2e2e; }
+    .pill.na { background: #2a2a2a; color: #cfcfcf; border: 1px solid #444; }
+
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { border-bottom: 1px solid #2a2a2a; padding: 10px; text-align: left; }
+    th { cursor: pointer; user-select:none; }
+    tr.data-row { cursor: pointer; }
+    tr.data-row:hover { background: #1a1a1a; }
+    .actions { display:flex; gap: 8px; }
+    .pager { display:flex; gap:8px; align-items:center; margin-top:12px; }
+    .pager button { height: 32px; }
+  </style>
+</head>
+<body>
+  <div class="app-header">
+    <img class="logo" src="/assets/logo.png" alt="LoadLens" />
+    <span class="brand">LoadLens</span>
+    <div class="app-nav">
+      <a class="nav-btn" href="/">Дэшборд</a>
+      <a class="nav-btn" href="/new">Новый отчёт</a>
+      <a class="nav-btn active" href="/reports">Архив</a>
+      <a class="nav-btn" href="/compare">Сравнение тестов</a>
+    </div>
+  </div>
+  <div class="container">
+    <h2>Архив отчётов</h2>
+    <div class="toolbar">
+      <input type="search" id="searchInput" placeholder="Найдите запуск по имени или сервису…" />
+      <button class="btn" id="searchBtn">Искать</button>
+      <button class="btn" id="clearBtn">Сброс</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th data-sort="run_name">Запуск</th>
+          <th data-sort="service">Сервис</th>
+          <th data-sort="end_time">Дата/время</th>
+          <th>Создан отчёт</th>
+          <th>Вердикт</th>
+          <th data-sort="duration">Длительность</th>
+          <th>Действия</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div class="pager">
+      <button class="btn" id="prevBtn">Назад</button>
+      <span id="pageInfo"></span>
+      <button class="btn" id="nextBtn">Вперед</button>
+    </div>
+  </div>
+
+  <script>
+    let currentPage=1, pageSize=20, currentSort='end_time', currentDir='desc', currentQ='';
+    function fmtDate(iso){ try{ const d=new Date(iso); const yyyy=d.getFullYear(); const MM=String(d.getMonth()+1).padStart(2,'0'); const dd=String(d.getDate()).padStart(2,'0'); const hh=String(d.getHours()).padStart(2,'0'); const mm=String(d.getMinutes()).padStart(2,'0'); return `${yyyy}-${MM}-${dd} ${hh}:${mm}`; }catch(e){ return iso||''; } }
+    function fmtDuration(startIso, endIso){ try{ const s=new Date(startIso).getTime(); const e=new Date(endIso).getTime(); const ms=Math.max(0,e-s); const m=Math.floor(ms/60000); const h=Math.floor(m/60); const mm=String(m%60).padStart(2,'0'); return h? `${h}ч ${mm}м` : `${m}м`; }catch(e){ return '—'; } }
+    function verdictClass(v){ try{ const t=String(v||'').toLowerCase(); if(!t) return 'na'; if(t.includes('усп')) return 'ok'; if(t.includes('риск')) return 'warn'; if(t.includes('провал')) return 'fail'; if(t.includes('недостат')) return 'na'; return 'na'; }catch(e){ return 'na'; } }
+    async function loadPage(){ const offset=(currentPage-1)*pageSize; const u=new URL('/runs', location.origin); if(currentQ) u.searchParams.set('q', currentQ); u.searchParams.set('offset', String(offset)); u.searchParams.set('limit', String(pageSize)); u.searchParams.set('sort', currentSort); u.searchParams.set('dir', currentDir); const resp=await fetch(u); const rows=await resp.json(); const tbody=document.getElementById('tbody'); tbody.innerHTML=''; (rows||[]).forEach(r=>{ const tr=document.createElement('tr'); tr.className='data-row'; const dt=fmtDate(r.end_time||r.start_time); const created=fmtDate(r.report_created_at||''); const dur=fmtDuration(r.start_time, r.end_time); const v=(r.verdict||'Недостаточно данных'); const vc=verdictClass(v); const verdictHtml = `<span class=\"pill ${vc}\">${v}</span>`; tr.innerHTML=`<td>${r.run_name}</td><td>${r.service||''}</td><td>${dt}</td><td>${created}</td><td>${verdictHtml}</td><td>${dur}</td><td class=\"actions\"><button class=\"btn act-view\">Открыть</button><button class=\"btn act-compare\">Сравнить</button><button class=\"btn act-copy\">Скопировать ссылку</button></td>`; tr.addEventListener('click', (e)=>{ if(!(e.target && (e.target.classList.contains('btn')))){ location.href='/reports/'+encodeURIComponent(r.run_name); } }); tr.querySelector('.act-view').addEventListener('click', (e)=>{ e.stopPropagation(); location.href='/reports/'+encodeURIComponent(r.run_name); }); tr.querySelector('.act-compare').addEventListener('click', (e)=>{ e.stopPropagation(); location.href='/compare?run_a='+encodeURIComponent(r.run_name); }); tr.querySelector('.act-copy').addEventListener('click', async (e)=>{ e.stopPropagation(); try{ await navigator.clipboard.writeText(location.origin+'/reports/'+encodeURIComponent(r.run_name)); }catch(err){} }); tbody.appendChild(tr); }); document.getElementById('pageInfo').textContent = `Стр. ${currentPage}`; document.getElementById('prevBtn').disabled = currentPage<=1; document.getElementById('nextBtn').disabled = (rows||[]).length < pageSize; }
+    document.getElementById('searchBtn').addEventListener('click', ()=>{ currentQ=String(document.getElementById('searchInput').value||'').trim(); currentPage=1; loadPage(); });
+    document.getElementById('clearBtn').addEventListener('click', ()=>{ document.getElementById('searchInput').value=''; currentQ=''; currentPage=1; loadPage(); });
+    document.getElementById('searchInput').addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ currentQ=String(e.target.value||'').trim(); currentPage=1; loadPage(); }});
+    document.getElementById('prevBtn').addEventListener('click', ()=>{ if(currentPage>1){ currentPage--; loadPage(); }});
+    document.getElementById('nextBtn').addEventListener('click', ()=>{ currentPage++; loadPage(); });
+    document.querySelectorAll('th[data-sort]').forEach(th=>{ th.addEventListener('click', ()=>{ const by=th.getAttribute('data-sort'); if(by==='duration'){ by='end_time'; } if(currentSort===by){ currentDir = (currentDir==='asc') ? 'desc' : 'asc'; } else { currentSort=by; currentDir = by==='end_time'? 'desc':'asc'; } loadPage(); }); });
+    (async function(){ await loadPage(); })();
+  </script>
+</body>
+</html>
+
+

@@ -1,29 +1,80 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Создание отчета</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,400;0,500;0,600;0,700;1,600&display=swap" rel="stylesheet">
   <style>
     body {
-      display: flex;
-      justify-content: center;
-      align-items: center;
+      display: block;
       min-height: 100vh;
       margin: 0;
-      font-family: Arial, sans-serif;
+      font-family: 'Montserrat', Arial, sans-serif;
       background-color: #121212;
       color: #ffffff;
+      padding: 0;
+      box-sizing: border-box;
     }
+    .app-header { position: sticky; top: 0; display: flex; align-items: center; justify-content: flex-start; gap: 12px; z-index: 2000; width: 100%; max-width: 1400px; margin: 0 auto; padding: 8px 12px; --brandSize: 40px; background: #121212; border-bottom: 1px solid #2a2a2a; }
+    .app-header .logo { width: var(--brandSize); height: var(--brandSize); object-fit: contain; }
+    .app-header .brand { font-size: var(--brandSize); line-height: var(--brandSize); font-weight: 600; font-style: italic; letter-spacing: 0.2px; color: #eaeaea; }
+    .app-nav { display: flex; gap: 16px; margin-left: auto; flex-wrap: nowrap; white-space: nowrap; }
+    .app-nav .nav-btn { height: 36px; padding: 8px 4px; background: transparent; border: none; color: #eaeaea; border-bottom: 2px solid transparent; border-radius: 0; cursor: pointer; font-family: 'Montserrat', Arial, sans-serif; font-weight: 600; font-style: italic; }
+    .app-nav a.nav-btn { display: inline-flex; align-items: center; text-decoration: none; }
+    .app-nav .nav-btn:hover { color: #ffffff; border-bottom-color: #3700b3; }
+    .app-nav .nav-btn.active { color: #ffffff; border-bottom-color: #6200ee; }
+    /* Унификация размеров контролов */
+    select, input, button { height: 40px; font-size: 14px; border-radius: 6px; }
+    /* Явно выравниваем высоту datetime полей под селектор */
+    #reportForm input[type="datetime-local"] { height: 40px; line-height: 40px; padding: 0 8px; box-sizing: border-box; }
+    .tab-btn { height: 36px; font-size: 14px; }
+    h1, h2, h3, h4 { font-weight: 600; font-style: italic; }
     
     #form-container {
-      background-color: #1e1e1e;
+      background-color: transparent;
       padding: 20px 30px;
-      border-radius: 8px;
-      box-shadow: 0px 4px 8px rgba(0, 0, 0, 0.2);
-      width: 300px;
+      border-radius: 0;
+      box-shadow: none;
+      width: 90%;
+      max-width: 1400px;
+      margin: 0 auto;
       text-align: center;
     }
+
+    /* Панели */
+    .panel { display: none; text-align: left; }
+    .panel.active { display: block; }
+    /* --- Compare styles --- */
+    .cmp-row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+    .cmp-accordion { margin-top: 16px; }
+    .cmp-acc-item { background: #1e1e1e; border: 1px solid #333; border-radius: 6px; margin-bottom: 8px; }
+    .cmp-acc-header { padding: 10px 12px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+    .cmp-acc-content { display: none; padding: 10px 12px; border-top: 1px solid #333; }
+    .cmp-pill { display: inline-block; padding: 4px 8px; background: #2b2b2b; border: 1px solid #444; border-radius: 14px; margin: 4px; cursor: pointer; }
+    .cmp-chart-wrap { background: #0f0f0f; border: 1px solid #333; border-radius: 6px; padding: 10px; margin-top: 12px; display: flex; gap: 12px; }
+    .cmp-chart-canvas { flex: 1; min-width: 0; }
+    .cmp-legend-panel { width: 360px; max-width: 45%; background: #1b1b1b; border-left: 1px solid #333; border-radius: 6px; padding: 10px; overflow-y: auto; overflow-x: hidden; white-space: normal; }
+    .cmp-row { gap: 12px; }
+    .cmp-legend-controls { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+    .cmp-legend-controls button { width: auto; flex: 0 0 auto; display: inline-flex; }
+    .cmp-legend-panel h4 { margin: 0 0 8px; font-weight: normal; color: #ddd; }
+    .cmp-legend-table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; display: table; }
+    .cmp-legend-table thead { display: table-header-group; }
+    .cmp-legend-table tbody { display: table-row-group; }
+    .cmp-legend-table tr { display: table-row; }
+    .cmp-legend-table th, .cmp-legend-table td { display: table-cell; }
+    .cmp-legend-table th, .cmp-legend-table td { border-bottom: 1px solid #2a2a2a; padding: 6px 8px; text-align: left; white-space: normal; word-break: break-word; }
+    .cmp-legend-color { width: 14px; height: 14px; border-radius: 3px; display: inline-block; margin-right: 6px; vertical-align: middle; border: 1px solid #444; }
+    .cmp-legend-row { cursor: pointer; }
+    .cmp-legend-row.hidden { opacity: 0.5; }
+    /* Увеличенная ширина селекторов Run A / Run B */
+    #cmpRunAWrapper, #cmpRunBWrapper { width: clamp(500px, 80vw, 500px); display: block; }
 
     label {
       display: block;
@@ -62,6 +113,111 @@
       color: #b3b3b3;
     }
 
+    /* Прогресс */
+    #progressContainer {
+      margin-top: 15px;
+      display: none;
+      text-align: left;
+    }
+    #progressBarWrap {
+      width: 100%;
+      height: 8px;
+      background: #2b2b2b;
+      border-radius: 4px;
+      overflow: hidden;
+      margin-top: 6px;
+    }
+    #progressBarFill {
+      width: 0%;
+      height: 100%;
+      background: #6200ee; /* основной цвет, как у кнопки */
+      transition: width 0.3s ease;
+    }
+    /* Многоразовые стили для нескольких прогресс-веток */
+    .progressBarWrap { width: 100%; height: 8px; background: #2b2b2b; border-radius: 4px; overflow: hidden; margin-top: 6px; }
+    .progressBarFill { width: 0%; height: 100%; background: #6200ee; transition: width 0.3s ease; }
+    #reportLink {
+      display: none;
+      width: 100%;
+      margin-top: 20px; /* как у кнопки создать отчёт */
+      text-decoration: none;
+      background-color: #6200ee; /* тот же цвет, что и у кнопки */
+      color: #ffffff;
+      padding: 8px;
+      border-radius: 4px;
+      border: none;
+      cursor: pointer;
+      text-align: center;
+      font-size: 1rem;
+      box-sizing: border-box;
+    }
+    #reportLink:hover {
+      background-color: #3700b3; /* hover, как у кнопки */
+    }
+    .reportLink { display: none; width: 100%; margin-top: 20px; text-decoration: none; background-color: #6200ee; color: #ffffff; padding: 8px; border-radius: 4px; border: none; cursor: pointer; text-align: center; font-size: 1rem; box-sizing: border-box; }
+    .reportLink:hover { background-color: #3700b3; }
+
+    /* ---------- Тумблер (toggle) для LLM ---------- */
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 15px;
+    }
+
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 46px;
+      height: 24px;
+    }
+
+    .switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: #555;
+      transition: 0.2s;
+      border-radius: 24px;
+    }
+
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 18px;
+      width: 18px;
+      left: 3px;
+      bottom: 3px;
+      background-color: #ffffff;
+      transition: 0.2s;
+      border-radius: 50%;
+    }
+
+    /* Сегментные кнопки выбора цели */
+    .seg-group { display: inline-flex; gap: 8px; }
+    .seg-btn { height: 36px; padding: 0 12px; background: #2b2b2b; border: 1px solid #444; color: #eaeaea; border-radius: 6px; cursor: pointer; font-family: 'Montserrat', Arial, sans-serif; font-weight: 600; font-style: italic; }
+    .seg-btn.active { background: #6200ee; border-color: #6200ee; color: #ffffff; }
+
+    /* Поле названия запуска — как выпадающий список сервиса по размеру */
+    #runNameContainer input#run_name { width: 100%; height: 40px; min-height: 40px; padding: 0 8px; box-sizing: border-box; }
+
+    .switch input:checked + .slider {
+      background-color: #6200ee;
+    }
+
+    .switch input:checked + .slider:before {
+      transform: translateX(22px);
+    }
+
     /* ---------- Кастомный выпадающий список ---------- */
     .custom-select-wrapper {
       position: relative;
@@ -72,12 +228,18 @@
       border-radius: 4px;
       margin-top: 5px;
       cursor: pointer;
+      width: 100%; /* как у input */
     }
 
     /* Сам "видимый" селект (надпись) */
     .custom-select {
-      padding: 8px;
+      padding: 0 8px;
       position: relative;
+      min-height: 40px; /* как у input */
+      display: flex;
+      align-items: center;
+      width: 100%;
+      box-sizing: border-box;
     }
 
     /* Стрелочка справа */
@@ -133,38 +295,451 @@
   </style>
 </head>
 <body>
+  <div class="app-header">
+    <img class="logo" src="/assets/logo.png" alt="LoadLens" />
+    <span class="brand">LoadLens</span>
+    <div class="app-nav">
+      <a id="navDashboard" class="nav-btn" href="/">Дэшборд</a>
+      <a id="navReport" class="nav-btn active" href="/new">Новый отчёт</a>
+      <a id="navReports" class="nav-btn" href="/reports">Архив</a>
+      <a id="navCompare" class="nav-btn" href="/compare">Сравнение тестов</a>
+    </div>
+  </div>
   <div id="form-container">
+    <div id="panelReport" class="panel active">
     <h2>Создание отчета</h2>
     <form id="reportForm">
-      <label for="start">Start Time</label>
-      <input type="datetime-local" id="start" name="start" required />
-
-      <label for="end">End Time</label>
-      <input type="datetime-local" id="end" name="end" required />
-
-      <label for="service">Service</label>
-      <!-- Родительский контейнер для "шапки" и списка -->
-      <div class="custom-select-wrapper" id="serviceWrapper">
-        <!-- Шапка, на которую кликают для раскрытия списка -->
-        <div class="custom-select" id="serviceSelect">
-          Выберите сервис
+      <div class="toggle-row">
+        <label>Куда сохранить отчёт?</label>
+        <div class="seg-group" id="targetGroup">
+          <button type="button" class="seg-btn" id="target_btn_conf" data-value="confluence">Confluence</button>
+          <button type="button" class="seg-btn" id="target_btn_web" data-value="web">LoadLens</button>
         </div>
-        <!-- Сами опции, появятся при .open у родителя -->
-        <div class="custom-options" id="serviceOptions">
-          <!-- Опции добавятся динамически из JS -->
+        <input type="hidden" id="target_mode" value="" />
+      </div>
+
+      <div id="stepStart" style="display:none">
+        <label for="start">Время начала</label>
+        <input type="datetime-local" id="start" name="start" required />
+      </div>
+
+      <div id="stepEnd" style="display:none">
+        <label for="end">Время окончания</label>
+        <input type="datetime-local" id="end" name="end" required />
+      </div>
+
+      <div id="stepService" style="display:none">
+        <label for="service">Сервис</label>
+        <!-- Родительский контейнер для "шапки" и списка -->
+        <div class="custom-select-wrapper" id="serviceWrapper">
+          <!-- Шапка, на которую кликают для раскрытия списка -->
+          <div class="custom-select" id="serviceSelect">
+            Выберите сервис
+          </div>
+          <!-- Сами опции, появятся при .open у родителя -->
+          <div class="custom-options" id="serviceOptions">
+            <!-- Опции добавятся динамически из JS -->
+          </div>
         </div>
       </div>
 
-      <button type="button" onclick="createReport()">Создать отчет</button>
+      <div id="stepLLM" class="toggle-row" style="display:none">
+        <label>Включить анализ результатов ИИ?</label>
+        <div class="seg-group" id="llmGroup">
+          <button type="button" class="seg-btn active" id="use_llm_btn_yes" data-value="yes">Да</button>
+          <button type="button" class="seg-btn" id="use_llm_btn_no" data-value="no">Нет</button>
+        </div>
+        <input type="hidden" id="use_llm_mode" value="yes" />
+      </div>
+
+      <div id="runNameContainer" style="display:none">
+        <label for="run_name">Название запуска</label>
+        <input type="text" id="run_name" name="run_name" placeholder="Напр.: Nightly-2025-10-30" />
+      </div>
+
+      <button id="createBtn" type="button" style="display:none" onclick="createReport()">Создать отчет</button>
     </form>
+    <div id="progressContainer">
+      <div id="progressBranchConfluence" style="display:none; margin-top:8px; text-align:left;">
+        <div id="progressConfluenceText">Прогресс (Confluence): 0% — Инициализация…</div>
+        <div class="progressBarWrap"><div id="progressConfluenceBarFill" class="progressBarFill"></div></div>
+        <a id="confluenceLink" class="reportLink" href="#" target="_blank">Открыть в Confluence</a>
+      </div>
+      <div id="progressBranchWeb" style="display:none; margin-top:12px; text-align:left;">
+        <div id="progressWebText">Прогресс (LoadLens): 0% — Инициализация…</div>
+        <div class="progressBarWrap"><div id="progressWebBarFill" class="progressBarFill"></div></div>
+        <a id="webLink" class="reportLink" href="#" target="_blank">Открыть в LoadLens</a>
+      </div>
+    </div>
     <p id="responseMessage"></p>
+    </div>
+
   </div>
 
   <script>
     // При загрузке страницы получаем сервисы
     document.addEventListener('DOMContentLoaded', loadServices);
+    // ===== Compare logic (встроенная страница) =====
+    let cmpChart;
+    let cmpLegendSortBy = 'avg';
+    let cmpLegendSortDir = 'desc';
+    const cmpBgPlugin = { id:'cmpBg', beforeDraw(chart, args, opts){ const {ctx, chartArea} = chart; if(!chartArea) return; ctx.save(); ctx.fillStyle = (opts&&opts.color)||'#151515'; ctx.fillRect(chartArea.left, chartArea.top, chartArea.right-chartArea.left, chartArea.bottom-chartArea.top); ctx.restore(); } };
+    if (window.Chart && Chart.register) Chart.register(cmpBgPlugin);
 
+    function randColor(alpha=0.7){
+      const r = Math.floor(100 + Math.random()*155);
+      const g = Math.floor(100 + Math.random()*155);
+      const b = Math.floor(100 + Math.random()*155);
+      return `rgba(${r},${g},${b},${alpha})`;
+    }
 
+    async function compareLoadRuns(){
+      const runs = await (await fetch('/runs')).json();
+      const aOpts=document.getElementById('cmpRunAOptions');
+      const bOpts=document.getElementById('cmpRunBOptions');
+      aOpts.innerHTML=''; bOpts.innerHTML='';
+      runs.forEach(r=>{ const d1=document.createElement('div'); d1.className='custom-option'; d1.textContent=r.run_name; d1.dataset.value=r.run_name; aOpts.appendChild(d1); const d2=document.createElement('div'); d2.className='custom-option'; d2.textContent=r.run_name; d2.dataset.value=r.run_name; bOpts.appendChild(d2); });
+      if (runs.length>=2){ document.getElementById('cmpRunASelect').textContent=runs[0].run_name; document.getElementById('cmpRunBSelect').textContent=runs[1].run_name; }
+    }
+
+    async function compareLoadSchema(){
+      const schema = await (await fetch('/domains_schema')).json();
+      const root = document.getElementById('cmp-accRoot');
+      root.innerHTML='';
+      Object.keys(schema).forEach(domain=>{
+        const item=document.createElement('div'); item.className='cmp-acc-item';
+        const header=document.createElement('div'); header.className='cmp-acc-header'; header.innerHTML=`<div>${domain}</div><div>▼</div>`;
+        const content=document.createElement('div'); content.className='cmp-acc-content';
+        schema[domain].forEach(ql=>{ const pill=document.createElement('span'); pill.className='cmp-pill'; pill.textContent=ql.query_label; pill.addEventListener('click', ()=>compareRenderOverlay(domain, ql.query_label)); content.appendChild(pill); });
+        header.addEventListener('click', ()=>{ content.style.display = content.style.display==='block'?'none':'block'; });
+        item.appendChild(header); item.appendChild(content); root.appendChild(item);
+      });
+    }
+
+    async function compareRenderOverlay(domain, queryLabel){
+      const runA=document.getElementById('cmpRunASelect').textContent;
+      const runB=document.getElementById('cmpRunBSelect').textContent;
+      const align='offset';
+      const u=new URL('/compare_series', location.origin);
+      // Поручаем серверу подобрать ключ серии по домену и query_label
+      u.searchParams.set('run_a', runA); u.searchParams.set('run_b', runB); u.searchParams.set('domain', domain); u.searchParams.set('query_label', queryLabel); u.searchParams.set('series_key', 'auto'); u.searchParams.set('align', align);
+      const resp=await fetch(u); const data=await resp.json(); if(!data||!data.points) return;
+
+      const keyT=(align==='absolute')?'t':'t_offset_sec';
+      const xMap=new Map(); const seriesMap=new Map();
+      data.points.forEach(p=>{ const x=p[keyT]; xMap.set(x,true); const k=`${p.run_name} / ${p.series}`; if(!seriesMap.has(k)) seriesMap.set(k,new Map()); seriesMap.get(k).set(x,p.value); });
+
+      const labels=Array.from(xMap.keys()).sort((a,b)=> align==='absolute'? (new Date(a)-new Date(b)) : ((parseInt(a,10)||0)-(parseInt(b,10)||0)));
+      const datasets=[]; seriesMap.forEach((m,name)=>{ const color=randColor(); const arr=labels.map(x=> m.has(x)?m.get(x):null); datasets.push({label:name, data:arr, borderColor:color, backgroundColor:color, pointRadius:0, borderWidth:2, spanGaps:true}); });
+
+      const ctx=document.getElementById('cmp-chart').getContext('2d'); if(cmpChart) cmpChart.destroy();
+      cmpChart=new Chart(ctx,{ type:'line', data:{labels, datasets}, options:{ responsive:true, interaction:{mode:'nearest', intersect:false}, scales:{ x:{ title:{display:true, text:(align==='absolute')?'Время':'Время от старта (чч:мм)', color:'#ccc'}, ticks:{ color:'#bbb', callback:function(value){ const raw=this.getLabelForValue(value); if(align==='absolute'){ const d=new Date(raw); const hh=String(d.getHours()).padStart(2,'0'); const mm=String(d.getMinutes()).padStart(2,'0'); return `${hh}:${mm}`;} const sec=parseInt(raw,10)||0; const h=Math.floor(sec/3600); const m=Math.floor((sec%3600)/60); return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`; } }, grid:{ color:'#2f2f2f', drawBorder:true, borderColor:'#444' } }, y:{ title:{display:true, text:queryLabel, color:'#ccc'}, ticks:{color:'#bbb'}, grid:{ color:'#2f2f2f', drawBorder:true, borderColor:'#444' } } }, plugins:{ legend:{display:false}, cmpBg:{ color:'#151515' } } } });
+
+      compareSyncLegendHeight();
+      compareRenderLegendTable();
+    }
+
+    function compareRenderLegendTable(){
+      const box=document.getElementById('cmp-legend'); box.innerHTML='';
+      const tbl=document.createElement('table'); tbl.className='cmp-legend-table';
+      const thead=document.createElement('thead'); thead.innerHTML='<tr><th data-sort="name" style="cursor:pointer">Серия</th><th>Цвет</th><th data-sort="avg" style="cursor:pointer">Среднее</th><th>Вкл</th></tr>';
+      tbl.appendChild(thead); const tbody=document.createElement('tbody');
+      const rows=(cmpChart?.data?.datasets||[]).map((ds,i)=>{ const vals=(ds.data||[]).filter(v=>v!=null&&!isNaN(v)); const avg=vals.length?(vals.reduce((a,b)=>a+b,0)/vals.length):0; return { idx:i, label:ds.label, color:ds.borderColor, avg:avg, visible: cmpChart.isDatasetVisible(i)}; });
+      rows.sort((a,b)=> cmpLegendSortBy==='name' ? (cmpLegendSortDir==='asc'? a.label.localeCompare(b.label): b.label.localeCompare(a.label)) : (cmpLegendSortDir==='asc'? (a.avg-b.avg):(b.avg-a.avg)) );
+      rows.forEach(row=>{ const tr=document.createElement('tr'); tr.className='cmp-legend-row'+(row.visible?'':' hidden'); const tdName=document.createElement('td'); tdName.textContent=row.label; const tdColor=document.createElement('td'); const sw=document.createElement('span'); sw.className='cmp-legend-color'; sw.style.background=row.color; tdColor.appendChild(sw); const tdAvg=document.createElement('td'); tdAvg.textContent=isFinite(row.avg)? row.avg.toFixed(2):'—'; const tdToggle=document.createElement('td'); tdToggle.textContent=row.visible?'✓':'✕'; tr.appendChild(tdName); tr.appendChild(tdColor); tr.appendChild(tdAvg); tr.appendChild(tdToggle); tr.addEventListener('click',()=>{ const vis=cmpChart.isDatasetVisible(row.idx); cmpChart.setDatasetVisibility(row.idx, !vis); cmpChart.update(); tr.classList.toggle('hidden', vis); tdToggle.textContent=vis?'✕':'✓'; }); tbody.appendChild(tr); });
+      tbl.appendChild(tbody); box.appendChild(tbl);
+      thead.addEventListener('click', (e)=>{ const th=e.target.closest('[data-sort]'); if(!th) return; const by=th.getAttribute('data-sort'); if(cmpLegendSortBy===by){ cmpLegendSortDir=(cmpLegendSortDir==='asc')?'desc':'asc'; } else { cmpLegendSortBy=by; cmpLegendSortDir=(by==='avg')?'desc':'asc'; } compareRenderLegendTable(); });
+      const hideBtn=document.getElementById('cmp-legendHideAll'); const showBtn=document.getElementById('cmp-legendShowAll');
+      if (hideBtn) hideBtn.onclick=()=>{ for(let i=0;i<cmpChart.data.datasets.length;i++){ cmpChart.setDatasetVisibility(i,false);} cmpChart.update(); compareRenderLegendTable(); };
+      if (showBtn) showBtn.onclick=()=>{ for(let i=0;i<cmpChart.data.datasets.length;i++){ cmpChart.setDatasetVisibility(i,true);} cmpChart.update(); compareRenderLegendTable(); };
+    }
+
+    function compareSyncLegendHeight(){ try{ const canvas=document.getElementById('cmp-chart'); const legend=document.querySelector('.cmp-legend-panel'); const rect=canvas.getBoundingClientRect(); legend.style.height=Math.max(160, Math.floor(rect.height))+'px'; }catch(e){} }
+    window.addEventListener('resize', compareSyncLegendHeight);
+
+    async function compareInit(){
+      await compareLoadRuns(); await compareLoadSchema();
+      document.getElementById('cmp-refresh').addEventListener('click', async()=>{ await compareLoadRuns(); await compareLoadSchema(); });
+      // Custom select behavior
+      document.getElementById('cmpRunASelect').addEventListener('click', (e)=>{ e.stopPropagation(); document.getElementById('cmpRunAWrapper').classList.toggle('open'); });
+      document.getElementById('cmpRunBSelect').addEventListener('click', (e)=>{ e.stopPropagation(); document.getElementById('cmpRunBWrapper').classList.toggle('open'); });
+      document.getElementById('cmpRunAOptions').addEventListener('click', (e)=>{ const opt=e.target.closest('.custom-option'); if(!opt) return; document.getElementById('cmpRunASelect').textContent=opt.dataset.value||opt.textContent; document.getElementById('cmpRunAWrapper').classList.remove('open'); });
+      document.getElementById('cmpRunBOptions').addEventListener('click', (e)=>{ const opt=e.target.closest('.custom-option'); if(!opt) return; document.getElementById('cmpRunBSelect').textContent=opt.dataset.value||opt.textContent; document.getElementById('cmpRunBWrapper').classList.remove('open'); });
+      window.addEventListener('click', (e)=>{ const w1=document.getElementById('cmpRunAWrapper'); if(w1 && !w1.contains(e.target)) w1.classList.remove('open'); const w2=document.getElementById('cmpRunBWrapper'); if(w2 && !w2.contains(e.target)) w2.classList.remove('open'); });
+    }
+
+    // ===== Reports logic =====
+    async function reportsInit(){
+      await reportsLoadRuns();
+      await reportsLoadSchema();
+      document.getElementById('repRunSelect').addEventListener('change', async()=>{ await reportsLoadLlm(); await reportsRenderDomains(); });
+      await reportsLoadLlm();
+      await reportsRenderDomains();
+    }
+
+    async function reportsLoadRuns(){
+      const sel=document.getElementById('repRunSelect'); sel.innerHTML='';
+      const runs = await (await fetch('/runs')).json();
+      runs.forEach(r=>{ const o=document.createElement('option'); o.value=r.run_name; o.textContent=r.run_name; sel.appendChild(o); });
+    }
+
+    let _schemaCache=null;
+    async function reportsLoadSchema(){
+      _schemaCache = await (await fetch('/domains_schema')).json();
+    }
+
+    async function reportsLoadLlm(){
+      const run=document.getElementById('repRunSelect').value;
+      if(!run) return;
+      const resp=await fetch('/llm_reports?run_name='+encodeURIComponent(run));
+      const arr=await resp.json();
+      // Время запуска вверху страницы
+      try{
+        const infoBox=document.getElementById('repRunInfo');
+        const starts=(Array.isArray(arr)?arr:[]).map(x=>parseInt(x.start_ms,10)).filter(v=>Number.isFinite(v));
+        if (starts.length){
+          const ms=Math.min.apply(null, starts);
+          const d=new Date(ms);
+          const yyyy=d.getFullYear();
+          const MM=String(d.getMonth()+1).padStart(2,'0');
+          const dd=String(d.getDate()).padStart(2,'0');
+          const hh=String(d.getHours()).padStart(2,'0');
+          const mm=String(d.getMinutes()).padStart(2,'0');
+          infoBox.textContent=`Время запуска: ${yyyy}-${MM}-${dd} ${hh}:${mm}`;
+        } else {
+          infoBox.textContent='';
+        }
+      }catch(e){ /* noop */ }
+      const box=document.getElementById('rep-llm-tabs');
+      if(!Array.isArray(arr)){ box.textContent='Нет данных'; return; }
+      const domainsOrder=['final','jvm','database','kafka','microservices','hard_resources'];
+      arr.sort((a,b)=> domainsOrder.indexOf(a.domain)-domainsOrder.indexOf(b.domain));
+      const tabsNav = document.createElement('div'); tabsNav.className='app-nav';
+      const tabsBody = document.createElement('div');
+      const idBase = 'rep-llm-tab-';
+      // Рендер LLM как Markdown (из parsed при наличии, иначе из text)
+      arr.forEach((x,idx)=>{
+        const btn=document.createElement('button'); btn.className='nav-btn'+(idx===0?' active':''); btn.textContent=(x.domain==='final'?'Итог':x.domain);
+        btn.dataset.target=idBase+idx;
+        tabsNav.appendChild(btn);
+        const pane=document.createElement('div'); pane.id=idBase+idx; pane.className='panel'+(idx===0?' active':'');
+        let md='';
+        try{
+          let parsed = x ? x.parsed : null;
+          if (parsed && typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch(e){} }
+          let sc = x ? x.scores : null; if (sc && typeof sc === 'string'){ try{ sc = JSON.parse(sc);}catch(e){} }
+          if (parsed && typeof parsed === 'object'){
+            md = renderLlmParsedToMarkdown(parsed, sc);
+          } else {
+            const raw = String(x && x.text ? x.text : '');
+            // Пытаемся разобрать JSON из текста
+            let fallbackParsed = null;
+            if (raw.trim().startsWith('{')){
+              try { fallbackParsed = JSON.parse(raw); } catch(e){}
+            }
+            if (!fallbackParsed && raw.includes('"verdict"')){
+              try { const start=raw.indexOf('{'); const end=raw.lastIndexOf('}'); if(start>=0 && end>start){ fallbackParsed = JSON.parse(raw.slice(start, end+1)); } } catch(e){}
+            }
+            md = (fallbackParsed && typeof fallbackParsed==='object') ? renderLlmParsedToMarkdown(fallbackParsed, sc) : raw;
+          }
+        }catch(e){ md = String(x && x.text ? x.text : ''); }
+        // Добавляем блок "Доверие (судья)"
+        try{
+          let sc = x ? x.scores : null;
+          if (sc && typeof sc === 'string'){ try { sc = JSON.parse(sc); } catch(e){} }
+          md += judgeMarkdown(sc);
+        }catch(e){}
+        let html = (window.marked && typeof marked.parse === 'function') ? marked.parse(md) : md;
+        try { if (window.DOMPurify) html = DOMPurify.sanitize(html); } catch(e){}
+        pane.innerHTML = `<div style="background:#1e1e1e; border:1px solid #333; border-radius:6px; padding:12px;">${html}</div>`;
+        tabsBody.appendChild(pane);
+      });
+      box.innerHTML=''; box.appendChild(tabsNav); box.appendChild(tabsBody);
+      tabsNav.querySelectorAll('.nav-btn').forEach(btn=>{
+        btn.addEventListener('click',()=>{
+          tabsNav.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
+          tabsBody.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+          btn.classList.add('active');
+          const t=btn.dataset.target; const pane=tabsBody.querySelector('#'+t); if(pane) pane.classList.add('active');
+          // Пересчёт высот легенды после переключения таба
+          setTimeout(reportsSyncLegendHeights, 0);
+        });
+      });
+    }
+
+    function reportsDefaultSeriesKey(domain){ if(domain==='kafka') return 'client_id'; if(domain==='database') return 'service'; if(domain==='hard_resources') return 'node'; return 'application'; }
+
+    // Рендерит parsed-LLM в Markdown (упрощённая версия Python-функции)
+    function renderLlmParsedToMarkdown(report, scores){
+      const safe = (x)=> (x===undefined||x===null)?'':String(x).trim();
+      const standardizeVerdict=(vRaw)=>{
+        const v=(safe(vRaw)||'').toLowerCase();
+        if(!v) return 'Недостаточно данных';
+        const ok=['ok','okay','успех','успешно','success','passed','green'];
+        const warn=['warn','warning','есть риски','риски','risk','risks','degrad','degraded','предупреждение'];
+        const crit=['critical','критично','fail','failed','ошибка','error','red','провал'];
+        const na=['insufficient','нет данных','недостаточно','no data','unknown','n/a'];
+        if(ok.some(x=>v.includes(x))) return 'Успешно';
+        if(warn.some(x=>v.includes(x))) return 'Есть риски';
+        if(crit.some(x=>v.includes(x))) return 'Провал';
+        if(na.some(x=>v.includes(x))) return 'Недостаточно данных';
+        return 'Недостаточно данных';
+      };
+      const lines=[];
+      const verdict = standardizeVerdict((report||{}).verdict || '');
+      // Доверие показываем по судье (overall)
+      let judgeOverall = undefined;
+      try{ if(scores && scores.judge && typeof scores.judge.overall==='number'){ judgeOverall = scores.judge.overall; } }catch(e){}
+      const confStr = (typeof judgeOverall==='number' && isFinite(judgeOverall)) ? `${Math.round(judgeOverall*100)}%` : '—';
+      lines.push('### Итог LLM');
+      lines.push(`- Вердикт: ${verdict}`);
+      lines.push(`- Доверие: ${confStr}`);
+      lines.push('');
+      const peak = (report||{}).peak_performance || (report||{}).peak_perfomance;
+      if (peak && typeof peak==='object'){
+        const max_rps=safe(peak.max_rps), max_time=safe(peak.max_time), drop_time=safe(peak.drop_time), method=safe(peak.method);
+        if (max_rps||max_time||drop_time||method){
+          lines.push('#### Пиковая производительность');
+          if (max_rps) lines.push(`- Максимальный RPS: ${max_rps}`);
+          if (max_time) lines.push(`- Время пика: ${max_time}`);
+          if (drop_time) lines.push(`- Время деградации: ${drop_time}`);
+          if (method) lines.push(`- Метод оценки: ${method}`);
+          lines.push('');
+        }
+      }
+      const findings = (report||{}).findings || [];
+      lines.push('#### Ключевые находки');
+      if (!findings.length){
+        lines.push('- Нет существенных находок');
+      } else {
+        findings.forEach(f=>{
+          if (f && typeof f==='object'){
+            const summary=safe(f.summary);
+            const sev=safe(f.severity), comp=safe(f.component), ev=safe(f.evidence);
+            const meta=[]; if(sev) meta.push(`severity: ${sev}`); if(comp) meta.push(`component: ${comp}`); if(ev) meta.push(`evidence: ${ev}`);
+            const metaStr=meta.join('; ');
+            lines.push(metaStr? `- ${summary} (${metaStr})` : `- ${summary}`);
+          } else {
+            lines.push(`- ${safe(f)}`);
+          }
+        });
+      }
+      const actions = (report||{}).recommended_actions || (report||{}).actions || [];
+      lines.push('');
+      lines.push('#### Рекомендации');
+      if (!actions.length){
+        lines.push('- Нет рекомендаций');
+      } else {
+        actions.forEach(a=>{ const s=safe(a); if(s) lines.push(`- ${s}`); });
+      }
+      const affected=(report||{}).affected_components || [];
+      if (affected && affected.length){
+        lines.push('');
+        lines.push('#### Затронутые компоненты');
+        lines.push(affected.map(x=>`\`${safe(x)}\``).join(', '));
+      }
+      return lines.join('\n');
+    }
+
+    function pct(x){ try{ if(x===undefined||x===null) return '—'; const v=Number(x); if(!isFinite(v)) return '—'; return `${Math.round(v*100)}%`; }catch(e){ return '—'; } }
+    function judgeMarkdown(scores){
+      try{
+        const s = scores || {};
+        const j = (s.judge)||{};
+        const overall=j.overall, factual=j.factual, completeness=j.completeness, specificity=j.specificity;
+        const dataScore=s.data_score, finalScore=s.final_score, conf=s.confidence;
+        const lines=['', '#### Доверие (судья)'];
+        lines.push(`- Итог: ${pct(overall)}`);
+        lines.push(`- Согласованность (factual): ${pct(factual)}`);
+        lines.push(`- Полнота (completeness): ${pct(completeness)}`);
+        lines.push(`- Конкретика (specificity): ${pct(specificity)}`);
+        lines.push(`- По данным: ${pct(dataScore)}`);
+        lines.push(`- Агрегат: ${pct(finalScore)}`);
+        if (typeof conf==='number') lines.push(`- Доверие модели: ${pct(conf)}`);
+        lines.push('');
+        lines.push('_Пояснения: итог = 0.6·factual + 0.3·completeness + 0.2·specificity._');
+        return '\n'+lines.join('\n');
+      }catch(e){ return ''; }
+    }
+    async function reportsRenderDomains(){
+      const run=document.getElementById('repRunSelect').value; if(!run) return;
+      const root=document.getElementById('rep-domain-tabs'); root.innerHTML='';
+      const domains = Object.keys(_schemaCache||{});
+      const tabsNav=document.createElement('div'); tabsNav.className='app-nav';
+      const tabsBody=document.createElement('div');
+      const idBase='rep-dom-tab-';
+      domains.forEach((domain,di)=>{
+        const btn=document.createElement('button'); btn.className='nav-btn'+(di===0?' active':''); btn.textContent=domain; btn.dataset.target=idBase+di; tabsNav.appendChild(btn);
+        const pane=document.createElement('div'); pane.id=idBase+di; pane.className='panel'+(di===0?' active':'');
+        const list = (_schemaCache[domain]||[]).map(x=>x.query_label);
+        list.forEach((ql,qi)=>{
+          const wrap=document.createElement('div'); wrap.className='cmp-chart-wrap'; wrap.style.marginTop='12px';
+          const canvasBox=document.createElement('div'); canvasBox.className='cmp-chart-canvas';
+          const title=document.createElement('div'); title.style.padding='8px 0'; title.style.fontWeight='600'; title.textContent=ql;
+          const cnv=document.createElement('canvas'); cnv.id=`rep-chart-${di}-${qi}`; cnv.height=120; canvasBox.appendChild(title); canvasBox.appendChild(cnv);
+          const legend=document.createElement('div'); legend.className='cmp-legend-panel'; legend.innerHTML='<h4>Легенда</h4><div class="cmp-legend-controls"><button class="hideAll">Выключить все</button><button class="showAll">Включить все</button></div><div class="table"></div>';
+          wrap.appendChild(canvasBox); wrap.appendChild(legend); pane.appendChild(wrap);
+          setTimeout(async()=>{ await reportsDrawOne(run, domain, ql, cnv.id, legend); }, 0);
+        });
+        tabsBody.appendChild(pane);
+      });
+      root.appendChild(tabsNav); root.appendChild(tabsBody);
+      tabsNav.querySelectorAll('.nav-btn').forEach(btn=>{
+        btn.addEventListener('click',()=>{
+          tabsNav.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
+          tabsBody.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+          btn.classList.add('active');
+          const t=btn.dataset.target; const pane=tabsBody.querySelector('#'+t); if(pane) pane.classList.add('active');
+          // Пересчёт высоты легенды после переключения доменного таба
+          setTimeout(reportsSyncLegendHeights, 0);
+        });
+      });
+    }
+
+    async function reportsDrawOne(run, domain, ql, canvasId, legendRoot){
+      const seriesKey=reportsDefaultSeriesKey(domain);
+      const u=new URL('/run_series', location.origin);
+      // Используем шкалу времени от старта теста и авто-определение ключа серии сервером
+      u.searchParams.set('run_name', run); u.searchParams.set('domain', domain); u.searchParams.set('query_label', ql); u.searchParams.set('series_key', 'auto'); u.searchParams.set('align','offset');
+      const resp=await fetch(u); const data=await resp.json(); if(!data||!data.points) return;
+      const labels=[]; const map={};
+      // берём смещение в секундах от старта (t_offset_sec)
+      data.points.forEach(p=>{ const t=p.t_offset_sec; if(labels.indexOf(t)<0) labels.push(t); const k=p.series; if(!map[k]) map[k]=new Map(); map[k].set(t,p.value); });
+      labels.sort((a,b)=> (parseInt(a,10)||0)-(parseInt(b,10)||0));
+      const datasets=Object.keys(map).map(k=>{ const color=randColor(); return {label:k, data:labels.map(t=> map[k].has(t)?map[k].get(t):null), borderColor:color, backgroundColor:color, pointRadius:0, borderWidth:2, spanGaps:true}; });
+      const ctx=document.getElementById(canvasId).getContext('2d');
+      const chart=new Chart(ctx,{ type:'line', data:{labels, datasets}, options:{ responsive:true, interaction:{mode:'nearest', intersect:false}, plugins:{ legend:{display:false}, cmpBg:{ color:'#151515'} }, scales:{ x:{ title:{display:true, text:'Время от старта (чч:мм)', color:'#ccc'}, ticks:{color:'#bbb', callback:function(value){ const raw=this.getLabelForValue(value); const sec=parseInt(raw,10)||0; const h=Math.floor(sec/3600); const m=Math.floor((sec%3600)/60); return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`; }}, grid:{color:'#2f2f2f', drawBorder:true, borderColor:'#444'}}, y:{ ticks:{color:'#bbb'}, grid:{color:'#2f2f2f', drawBorder:true, borderColor:'#444'} } } } });
+      buildLegendFor(chart, legendRoot);
+      // Легенда прокручивается и не растягивает график — фиксируем её высоту = высоте канваса
+      try{ const canvasEl=document.getElementById(canvasId); const rect=canvasEl.getBoundingClientRect(); legendRoot.style.height=Math.max(160, Math.floor(rect.height))+'px'; }catch(e){}
+    }
+
+    function buildLegendFor(chart, root){
+      const box=root.querySelector('.table'); if(!box) return; box.innerHTML='';
+      const tbl=document.createElement('table'); tbl.className='cmp-legend-table';
+      const thead=document.createElement('thead'); thead.innerHTML='<tr><th>Серия</th><th>Цвет</th><th>Среднее</th><th>Вкл</th></tr>';
+      tbl.appendChild(thead); const tbody=document.createElement('tbody');
+      const rows=(chart?.data?.datasets||[]).map((ds,i)=>{ const vals=(ds.data||[]).filter(v=>v!=null&&!isNaN(v)); const avg=vals.length?(vals.reduce((a,b)=>a+b,0)/vals.length):0; return { idx:i, label:ds.label, color:ds.borderColor, avg:avg, visible: chart.isDatasetVisible(i)}; });
+      rows.forEach(row=>{ const tr=document.createElement('tr'); tr.className='cmp-legend-row'+(row.visible?'':' hidden'); const tdName=document.createElement('td'); tdName.textContent=row.label; const tdColor=document.createElement('td'); const sw=document.createElement('span'); sw.className='cmp-legend-color'; sw.style.background=row.color; tdColor.appendChild(sw); const tdAvg=document.createElement('td'); tdAvg.textContent=isFinite(row.avg)? row.avg.toFixed(2):'—'; const tdToggle=document.createElement('td'); tdToggle.textContent=row.visible?'✓':'✕'; tr.appendChild(tdName); tr.appendChild(tdColor); tr.appendChild(tdAvg); tr.appendChild(tdToggle); tr.addEventListener('click',()=>{ const vis=chart.isDatasetVisible(row.idx); chart.setDatasetVisibility(row.idx, !vis); chart.update(); tr.classList.toggle('hidden', vis); tdToggle.textContent=vis?'✕':'✓'; }); tbody.appendChild(tr); });
+      tbl.appendChild(tbody); box.appendChild(tbl);
+      const hideBtn=root.querySelector('.hideAll'); const showBtn=root.querySelector('.showAll');
+      if (hideBtn) hideBtn.onclick=()=>{ for(let i=0;i<chart.data.datasets.length;i++){ chart.setDatasetVisibility(i,false);} chart.update(); buildLegendFor(chart, root); };
+      if (showBtn) showBtn.onclick=()=>{ for(let i=0;i<chart.data.datasets.length;i++){ chart.setDatasetVisibility(i,true);} chart.update(); buildLegendFor(chart, root); };
+    }
+
+    // Синхронизация высоты легенд с высотой соответствующих графиков (Reports)
+    function reportsSyncLegendHeights(){
+      try{
+        document.querySelectorAll('#panelReports .cmp-chart-wrap').forEach(w=>{
+          const canvas=w.querySelector('canvas');
+          const legend=w.querySelector('.cmp-legend-panel');
+          if(!canvas || !legend) return;
+          const rect=canvas.getBoundingClientRect();
+          legend.style.height=Math.max(160, Math.floor(rect.height))+'px';
+        });
+      }catch(e){}
+    }
+    window.addEventListener('resize', reportsSyncLegendHeights);
     // При клике на надпись .custom-select
     // переключаем класс .open у родителя #serviceWrapper
     document.getElementById("serviceSelect").addEventListener("click", function(e) {
@@ -182,14 +757,13 @@
   
       // Обработка клика по опции
       document.getElementById("serviceOptions").addEventListener("click", function(e) {
-        if (e.target.classList.contains('custom-option')) {
-          // Получаем значение опции
-          const selectedService = e.target.dataset.value;
-          // Ставим в текст "шапки" выбранный сервис
-          document.getElementById("serviceSelect").textContent = selectedService;
-          // Закрываем список
-          document.getElementById("serviceWrapper").classList.remove("open");
-        }
+        const opt = e.target.closest('.custom-option');
+        if (!opt) return;
+        const selectedService = opt.dataset.value || opt.textContent || '';
+        if (!selectedService) return;
+        document.getElementById("serviceSelect").textContent = selectedService;
+        document.getElementById("serviceWrapper").classList.remove("open");
+        try{ if (typeof syncSteps === 'function') syncSteps(); }catch(e){}
       });
   
       // Загружаем список сервисов из бэкенда
@@ -213,38 +787,181 @@
           console.error("Ошибка загрузки сервисов:", error);
         }
       }
+
+      // Пошаговое раскрытие полей формы
+      function syncSteps(){
+        try{
+          const targetVal = (document.getElementById('target_mode') && document.getElementById('target_mode').value) || '';
+          const anyTarget = !!targetVal;
+          const startEl = document.getElementById('start');
+          const endEl = document.getElementById('end');
+          const serviceLabel = document.getElementById('serviceSelect');
+
+          const stepStart = document.getElementById('stepStart');
+          const stepEnd = document.getElementById('stepEnd');
+          const stepService = document.getElementById('stepService');
+          const stepLLM = document.getElementById('stepLLM');
+          const runNameBlock = document.getElementById('runNameContainer');
+          const createBtn = document.getElementById('createBtn');
+          const runNameInput = document.getElementById('run_name');
+
+          if (stepStart) stepStart.style.display = anyTarget ? 'block' : 'none';
+          const hasStart = !!(startEl && startEl.value);
+          if (stepEnd) stepEnd.style.display = (anyTarget && hasStart) ? 'block' : 'none';
+          const hasEnd = !!(endEl && endEl.value);
+          if (stepService) stepService.style.display = (anyTarget && hasStart && hasEnd) ? 'block' : 'none';
+          const serviceChosen = !!(serviceLabel && (serviceLabel.textContent||'').trim() !== 'Выберите сервис');
+          const tail = (anyTarget && hasStart && hasEnd && serviceChosen);
+          if (stepLLM) stepLLM.style.display = tail ? 'flex' : 'none';
+          if (runNameBlock) runNameBlock.style.display = tail ? 'block' : 'none';
+          const hasName = !!(runNameInput && (runNameInput.value||'').trim());
+          if (createBtn) createBtn.style.display = (tail && hasName) ? 'inline-block' : 'none';
+        }catch(e){}
+      }
+
+      function selectTarget(val){
+        const inp=document.getElementById('target_mode');
+        if(inp) inp.value = (val||'');
+        const b1=document.getElementById('target_btn_conf');
+        const b2=document.getElementById('target_btn_web');
+        if(b1) b1.classList.toggle('active', val==='confluence');
+        if(b2) b2.classList.toggle('active', val==='web');
+        syncSteps();
+      }
+
+      function selectLlm(val){
+        const inp=document.getElementById('use_llm_mode');
+        if(inp) inp.value = (val||'no');
+        const y=document.getElementById('use_llm_btn_yes');
+        const n=document.getElementById('use_llm_btn_no');
+        if(y) y.classList.toggle('active', val==='yes');
+        if(n) n.classList.toggle('active', val==='no');
+      }
+
+      document.addEventListener('DOMContentLoaded', function(){
+        const b1=document.getElementById('target_btn_conf');
+        const b2=document.getElementById('target_btn_web');
+        if(b1) b1.addEventListener('click', ()=>selectTarget('confluence'));
+        if(b2) b2.addEventListener('click', ()=>selectTarget('web'));
+        ['start','end'].forEach(id=>{ const el=document.getElementById(id); if(el) el.addEventListener('change', syncSteps); });
+        const rn=document.getElementById('run_name'); if(rn) rn.addEventListener('input', syncSteps);
+        const ly=document.getElementById('use_llm_btn_yes');
+        const ln=document.getElementById('use_llm_btn_no');
+        if(ly) ly.addEventListener('click', ()=>selectLlm('yes'));
+        if(ln) ln.addEventListener('click', ()=>selectLlm('no'));
+        syncSteps();
+      });
   
       // Отправка запроса на создание отчета
+      // Независимые таймеры прогресса по веткам
+      const progressTimers = { confluence: null, web: null };
+
       async function createReport() {
+        document.getElementById("responseMessage").innerText = "";
         const start = document.getElementById("start").value;
         const end = document.getElementById("end").value;
         const selectedText = document.getElementById("serviceSelect").textContent;
-        
-        // Если пользователь не выбрал сервис
+
         if (selectedText === "Выберите сервис") {
           document.getElementById("responseMessage").innerText = "Пожалуйста, выберите сервис.";
           return;
         }
-  
-        const formData = {
+
+        const target = (document.getElementById('target_mode')?.value || '').trim();
+        const toConfluence = target === 'confluence';
+        const toWeb = (target === 'web' || target === 'confluence');
+        if (!toWeb && !toConfluence) {
+          document.getElementById("responseMessage").innerText = "Выберите хотя бы одно направление публикации.";
+          return;
+        }
+
+        const common = {
           start: start,
           end: end,
-          service: selectedText
+          service: selectedText,
+          use_llm: ((document.getElementById('use_llm_mode')?.value || 'yes') === 'yes'),
+          run_name: (document.getElementById('run_name').value || '').trim()
         };
-  
-        try {
-          const response = await fetch("/create_report", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify(formData)
-          });
-          const result = await response.json();
-          document.getElementById("responseMessage").innerText = result.message;
-        } catch (error) {
-          document.getElementById("responseMessage").innerText = "Ошибка создания отчета: " + error.message;
+
+        const progressBox = document.getElementById('progressContainer');
+        progressBox.style.display = 'block';
+
+        // Helper to start job
+        const startJob = async (scope, payload) => {
+          try {
+            const resp = await fetch("/create_report", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload)
+            });
+            const result = await resp.json();
+            if (result.status === "accepted" && result.job_id) {
+              document.getElementById("responseMessage").innerText = result.message || "Задача принята.";
+              startProgressBranch(scope, result.job_id);
+            } else if (result.status === "success") {
+              // редкий путь
+              const link = scope === 'confluence' ? document.getElementById('confluenceLink') : document.getElementById('webLink');
+              if (result.report_url) { link.href = result.report_url; link.style.display = 'inline-block'; }
+            } else {
+              const textEl = scope === 'confluence' ? document.getElementById('progressConfluenceText') : document.getElementById('progressWebText');
+              textEl.textContent = (result.message || 'Ошибка запуска задачи');
+            }
+          } catch (error) {
+            const textEl = scope === 'confluence' ? document.getElementById('progressConfluenceText') : document.getElementById('progressWebText');
+            textEl.textContent = 'Ошибка создания отчёта: ' + error.message;
+          }
+        };
+
+        if (toConfluence) {
+          document.getElementById('progressBranchConfluence').style.display = 'block';
+          // Конфлюенс выполняет ИИ-анализ и сохраняет ИИ-результаты в БД
+          await startJob('confluence', { ...common, web_only: false, save_to_db: true });
         }
+        if (toWeb) {
+          document.getElementById('progressBranchWeb').style.display = 'block';
+          // Если выбрана Конфлюенс, веб-ветка пишет только метрики (без ИИ), иначе — как выбрано пользователем
+          const useLlmForWeb = toConfluence ? false : common.use_llm;
+          await startJob('web', { ...common, use_llm: useLlmForWeb, web_only: true, save_to_db: true });
+        }
+      }
+
+      async function startProgressBranch(scope, jobId) {
+        const isConf = scope === 'confluence';
+        const bar = document.getElementById(isConf ? 'progressConfluenceBarFill' : 'progressWebBarFill');
+        const text = document.getElementById(isConf ? 'progressConfluenceText' : 'progressWebText');
+        const link = document.getElementById(isConf ? 'confluenceLink' : 'webLink');
+
+        link.style.display = 'none';
+        link.removeAttribute('href');
+
+        if (progressTimers[scope]) clearInterval(progressTimers[scope]);
+        progressTimers[scope] = setInterval(async () => {
+          try {
+            const r = await fetch(`/job_status/${jobId}`);
+            if (!r.ok) return;
+            const j = await r.json();
+            const p = Math.max(0, Math.min(100, j.progress || 0));
+            bar.style.width = p + '%';
+            const msg = j.message ? (' — ' + j.message) : '';
+            text.textContent = `Прогресс${isConf?' (Confluence)':' (LoadLens)'}: ${p}%${msg}`;
+            if (j.report_url && (!link.href || link.href !== j.report_url)) {
+              link.href = j.report_url;
+              link.style.display = 'inline-block';
+            }
+            if (j.status === 'done') {
+              clearInterval(progressTimers[scope]);
+              if (j.report_url) {
+                link.href = j.report_url;
+                link.style.display = 'inline-block';
+              }
+            } else if (j.status === 'error') {
+              clearInterval(progressTimers[scope]);
+              text.textContent = 'Ошибка: ' + (j.error || 'unknown');
+            }
+          } catch (e) {
+            // игнорируем временные ошибки
+          }
+        }, 1000);
       }
     </script>
   </body>

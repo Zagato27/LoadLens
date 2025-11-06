@@ -1,0 +1,11 @@
+# Пример YAML-конфига для utils/config.py. Скопируйте как utils/config.yaml и заполните.
+
+confluence:
+  url: "https://confluence.example.com"
+  username: "your_login"
+  password: "your_password"
+
+grafana:
+  base_url: "http://grafana:3000"
+  api_key: ""
+

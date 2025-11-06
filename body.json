@@ -1,0 +1,10 @@
+{
+  "model": "deepseek-r1-0528-qwen3-8b-TEST",
+  "messages": [
+    { "role": "user", "content": "ping" }
+  ],
+  "temperature": 0,
+  "top_p": 1,
+  "max_tokens": 256,
+  "stream": false
+}

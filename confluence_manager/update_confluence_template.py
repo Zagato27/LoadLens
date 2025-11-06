@@ -271,7 +271,7 @@ def render_llm_markdown(report: dict) -> str:
         for a in actions:
             s = safe(a)
             if s:
-                md_lines.append(f"- [ ] {s}")
+                md_lines.append(f"- {s}")
 
     affected = (report or {}).get("affected_components") or []
     if affected:
@@ -280,6 +280,90 @@ def render_llm_markdown(report: dict) -> str:
         md_lines.append(", ".join([f"`{safe(x)}`" for x in affected]))
 
     return "\n".join(md_lines)
+
+
+def render_llm_html(report: dict) -> str:
+    """HTML-версия рендера LLM-ответа для вставки в Confluence (storage)."""
+    def safe(x: object) -> str:
+        return str(x).strip() if x is not None else ""
+
+    verdict = safe((report or {}).get("verdict") or "нет данных")
+    conf_val = (report or {}).get("confidence")
+    confidence_str = f"{int(conf_val*100)}%" if isinstance(conf_val, (int, float)) else "—"
+
+    parts: list[str] = []
+    parts.append("<h3>Итог LLM</h3>")
+    parts.append("<ul>")
+    parts.append(f"<li><strong>Вердикт:</strong> {verdict}</li>")
+    parts.append(f"<li><strong>Доверие:</strong> {confidence_str}</li>")
+    parts.append("</ul>")
+
+    peak = (report or {}).get("peak_performance") or (report or {}).get("peak_perfomance")
+    if isinstance(peak, dict):
+        max_rps = safe(peak.get("max_rps"))
+        max_time = safe(peak.get("max_time"))
+        drop_time = safe(peak.get("drop_time"))
+        method = safe(peak.get("method"))
+        if any([max_rps, max_time, drop_time, method]):
+            parts.append("<h4>Пиковая производительность</h4>")
+            parts.append("<ul>")
+            if max_rps:
+                parts.append(f"<li>Максимальный RPS: {max_rps}</li>")
+            if max_time:
+                parts.append(f"<li>Время пика: {max_time}</li>")
+            if drop_time:
+                parts.append(f"<li>Время деградации: {drop_time}</li>")
+            if method:
+                parts.append(f"<li>Метод оценки: {method}</li>")
+            parts.append("</ul>")
+
+    findings = (report or {}).get("findings") or []
+    parts.append("<h4>Ключевые находки</h4>")
+    if not findings:
+        parts.append("<p><em>Нет существенных находок</em></p>")
+    else:
+        parts.append("<ul>")
+        for f in findings:
+            if isinstance(f, dict):
+                summary = safe(f.get("summary"))
+                sev = safe(f.get("severity"))
+                comp = safe(f.get("component"))
+                ev = safe(f.get("evidence"))
+                meta = []
+                if sev:
+                    meta.append(f"severity: {sev}")
+                if comp:
+                    meta.append(f"component: {comp}")
+                if ev:
+                    meta.append(f"evidence: {ev}")
+                meta_str = "; ".join(meta)
+                text = f"{summary} ({meta_str})" if meta_str else summary
+                parts.append(f"<li>{text}</li>")
+            else:
+                s = safe(f)
+                if s:
+                    parts.append(f"<li>{s}</li>")
+        parts.append("</ul>")
+
+    actions = (report or {}).get("recommended_actions") or (report or {}).get("actions") or []
+    parts.append("<h4>Рекомендации</h4>")
+    if not actions:
+        parts.append("<p><em>Нет рекомендаций</em></p>")
+    else:
+        parts.append("<ul>")
+        for a in actions:
+            s = safe(a)
+            if s:
+                parts.append(f"<li>{s}</li>")
+        parts.append("</ul>")
+
+    affected = (report or {}).get("affected_components") or []
+    if affected:
+        parts.append("<h4>Затронутые компоненты</h4>")
+        codes = ", ".join([f"<code>{safe(x)}</code>" for x in affected])
+        parts.append(f"<p>{codes}</p>")
+
+    return "\n".join(parts)
 
 
 def update_confluence_page_multi(url, username, password, page_id, replacements: dict) -> str:

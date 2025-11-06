@@ -2,7 +2,7 @@
 
 # Подсистема AI для отчётов по нагрузочному тестированию
 
-Модуль `AI/` выполняет доменный анализ метрик (JVM/Database/Kafka/Microservices) и формирует строгий JSON‑ответ, который далее конвертируется в публикабельный markdown для Confluence. Итоговые блоки подставляются в плейсхолдеры `$$answer_*$$` и `$$final_answer$$/$$answer_llm$$`.
+Модуль `AI/` выполняет доменный анализ метрик (JVM/Database/Kafka/Microservices/Hard Resources) и формирует строгий JSON‑ответ, который далее конвертируется в публикабельный markdown для Confluence. Итоговые блоки подставляются в плейсхолдеры доменов `$$answer_*$$` и финальный `$$final_answer$$`.
 
 ---
 
@@ -24,7 +24,8 @@
 
 - **Доменный анализ**: `JVM`, `Database` (в т.ч. ArangoDB), `Kafka`, `Microservices` + общий итог.
 - **Context pack**: компактные JSON‑сводки измерений (выбор top‑окон, пики, средние, пороги), вместо «сырых» временных рядов.
-- **Двухпроходный инференс**: генерация нескольких кандидатов → критик приводит к строгому JSON → выбор лучшего по голосованию verdict и уверенности (self‑consistency, k=3).
+- **Двухпроходный инференс**: генерация нескольких кандидатов → критик приводит к строгому JSON → выбор лучшего с участием LLM‑судьи и программной проверки по данным (self‑consistency, k=3).
+- **LLM‑судья + data‑score**: независимый судья оценивает `factual/completeness/specificity/overall`, а программная проверка сверяет численные утверждения с данными; итог — агрегатная метрика выбора. В веб‑интерфейсе «Доверие» для итогового блока отображается по `judge.overall`.
 - **Строгая валидация**: JSON приводится к модели `LLMAnalysis` со всеми обязательными полями; русская локализация текстовых полей.
 - **Markdown‑рендер**: генерация человекочитаемых блоков, включая «Пиковую производительность», при наличии соответствующих данных [[memory:8657199]].
 
@@ -33,7 +34,7 @@
 ## Требования
 
 - Python 3.12+
-- Зависимости из корневого `requirements.txt` (включая `requests`, `pandas`, `atlassian-python-api`, `beautifulsoup4`, драйвер LLM `gigachat`).
+- Зависимости из корневого `requirements.txt` (включая `requests`, `pandas`, `atlassian-python-api`, `beautifulsoup4`).
 
 > Убедитесь в наличии и заполненности `AI/config.py`.
 
@@ -43,8 +44,7 @@
 
 - `prometheus.url` — источник метрик (или используйте `metrics_source.grafana_proxy`).
 - `time_range.start_ts|end_ts` — примеры временных меток; в веб‑приложении берётся из POST‑тела.
-- `llm.provider=gigachat` — прямые REST‑вызовы по mTLS:
-  - `use_mtls`, `cert_file`, `key_file`, `verify`, `proxies`, таймауты.
+- `llm.provider` — `perplexity` | `openai` | `anthropic`; настройте ключи/endpoint/модель в соответствующем разделе.
   - `generation`: `temperature`, `top_p`, `max_tokens`, `force_json_in_prompt`.
 - `default_params`: `step`, `resample_interval` — управление плотностью данных и ресемплированием.
 - `metrics_source.{type,grafana}` — получение метрик напрямую из Prometheus или через Grafana‑прокси.
@@ -59,31 +59,31 @@
 - `kafka_prompt.txt` — throughput, lag по группам/топикам/клиентам; обязательны интервалы и `peak_time`.
 - `microservices_prompt.txt` — RPS по сервисам, пиковые значения, сравнение с пропускной способностью; допускается `peak_performance`.
 - `overall_prompt.txt` — агрегирует доменные выводы, допускает `peak_performance` как часть общего итога.
+- Во всех промтах и в fallback‑критике принудительно ограничено поле `verdict` значениями: `Успешно | Есть риски | Провал | Недостаточно данных`.
 
 ---
 
 ## Как работает конвейер
 
-Высокоуровнево конвейер реализован в `AI/main.py`:
+Высокоуровнево конвейер реализован в `AI/pipeline.py` (экспорт `uploadFromLLM` прокинут через `AI/main.py`):
 
 1. Сбор данных: PromQL‑запросы по доменам → DataFrame → ресемплирование → выявление окон и пиков.
 2. Формирование context pack по каждому домену (сжатая, но информативная сводка).
-3. Инференс по доменам: `llm_two_pass_self_consistency(user_prompt, data_context, k=3)` возвращает `(text, parsed)`.
-4. Общий итог: слияние доменных контекстов + общий промт → `(final_text, final_parsed)`.
-5. Возврат результата в веб‑слой: сырые тексты и распарсенные структуры для `update_page.py`.
+3. Инференс по доменам: `llm_two_pass_self_consistency(user_prompt, data_context, k=3)` возвращает `(text, parsed, score_info)`.
+4. Общий итог: слияние доменных контекстов + общий промт → `(final_text, final_parsed, final_score)`.
+5. Возврат результата в веб‑слой: тексты/структуры и `scores` для добавления раздела «Доверие (судья)».
 
 Ключевые функции и модели:
-- `LLMAnalysis` — pydantic‑модель строгого ответа: `{ verdict, confidence, findings[], recommended_actions[], affected_components?, peak_performance? }`.
+- `LLMAnalysis` — pydantic‑модель строгого ответа: `{ verdict, confidence, findings[], recommended_actions[], affected_components?, peak_performance? }` (см. `AI/scoring.py`).
 - `parse_llm_analysis_strict()` — извлечение/нормализация JSON в `LLMAnalysis`.
-- `_format_parsed_as_text()` — человекочитаемый текст при необходимости фолбэка.
-- `llm_two_pass_self_consistency()` — генерация кандидатов → строгий JSON критиком → выбор лучшего по majority verdict и confidence.
+- `llm_two_pass_self_consistency()` — генерация кандидатов → строгий JSON критиком → судья + data‑score → выбор лучшего.
 
 ---
 
 ## Строгая схема JSON‑ответа
 
 Обязательные поля:
-- `verdict: string` — краткий вердикт по домену/в целом (на русском);
+- `verdict: string` — краткий вердикт по домену/в целом (на русском) из множества: `Успешно | Есть риски | Провал | Недостаточно данных`;
 - `confidence: number [0..1]` — уверенность модели;
 - `findings: (string | { summary, severity, component, evidence })[]` — список находок; для объектов обязательны `severity` и `component`, `evidence` должен содержать метрику и интервал `start–end` и `peak_time` при наличии;
 - `recommended_actions: string[]` — конкретные действия;
@@ -91,6 +91,8 @@
 - `peak_performance?: { max_rps, max_time, drop_time, method }` — общий пик производительности, если применимо.
 
 Все текстовые поля приводятся к русскому языку, ключи JSON остаются на английском. Отсутствующие не критичные поля нормализуются.
+
+Примечание: хотя модель возвращает `confidence`, для пользовательского интерфейса используется итог судьи `scores.judge.overall` как показатель доверия.
 
 ---
 
@@ -102,7 +104,7 @@
 - `Время деградации (drop_time)`
 - `Метод оценки (method)`
 
-Это касается как общего блока (`$$answer_llm$$`/`$$final_answer$$`), так и доменных, если они содержат такой раздел [[memory:8657199]].
+Это касается как общего блока (`$$final_answer$$`), так и доменных, если они содержат такой раздел [[memory:8657199]].
 
 ---
 
@@ -116,7 +118,7 @@ start_ts = 1740126600
 end_ts = 1740136200
 
 results = uploadFromLLM(start_ts, end_ts)
-print(results.keys())  # jvm, database, kafka, ms, final, jvm_parsed, ..., final_parsed
+print(results.keys())  # jvm, database, kafka, ms, hard_resources, final, *_parsed, scores
 ```
 
 Возвращается словарь c текстовыми и структурированными полями. Веб‑слой затем вызывает рендер и массовую подстановку в Confluence.

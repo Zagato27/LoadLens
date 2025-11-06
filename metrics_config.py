@@ -15,12 +15,31 @@ METRICS_CONFIG = {
             },
             {
                 "name": "RPSGroups",
-                "grafana_url": "/render/d-solo/XKhgaUpikugieq/k6-load-testing-results?orgId=1&panelId=71&width=2000&height=500&tz=Europe%2FMoscow"
+                "grafana_url": "/render/d-solo/XKhgaUpikugieq/k6-load-testing-results?orgId=1&panelId=89&width=2000&height=500&tz=Europe%2FMoscow"
+            },
+            {
+                "name": "RPSURL",
+                "grafana_url": "/render/d-solo/XKhgaUpikugieq/k6-load-testing-results?orgId=1&panelId=90&width=2000&height=500&tz=Europe%2FMoscow"
+            },
+            
+            
+            {
+                "name": "ResponseTime",
+                "grafana_url": "/render/d-solo/XKhgaUpikugieq/k6-load-testing-results?orgId=1&panelId=5&width=1000&height=500&tz=Europe%2FMoscow"
+            },
+            {
+                "name": "ResponseTimeGroups",
+                "grafana_url": "/render/d-solo/XKhgaUpikugieq/k6-load-testing-results?orgId=1&panelId=71&width=1000&height=500&tz=Europe%2FMoscow"
+            },
+            {
+                "name": "ResponseTimeURL",
+                "grafana_url": "/render/d-solo/XKhgaUpikugieq/k6-load-testing-results?orgId=1&panelId=74&width=1000&height=500&tz=Europe%2FMoscow"
             },
             {
                 "name": "ResponseTimeBatch",
                 "grafana_url": "/render/d-solo/XKhgaUpikugieq/k6-load-testing-results?orgId=1&panelId=8&width=1000&height=500&tz=Europe%2FMoscow"
             },
+            
             {
                 "name": "Errors",
                 "grafana_url": "/render/d-solo/XKhgaUpikugieq/k6-load-testing-results?orgId=1&panelId=7&width=1000&height=500&tz=Europe%2FMoscow"
@@ -31,11 +50,11 @@ METRICS_CONFIG = {
             
             {
                 "name": "RPSKafka",
-                "grafana_url": "/render/d-solo/XKhgaUpikugigf/k6-kafka?orgId=1&panelId=84&width=1000&height=500&tz=Europe%2FMoscow&var-DATASOURCE=c821f414-4bcf-4a76-910b-13ccf2d3f9b5"             
+                "grafana_url": "/render/d-solo/XKhgaUpikugigf/k6-kafka?orgId=1&panelId=84&width=1000&height=500&tz=Europe%2FMoscow&var-DATASOURCE=c74f072f-466c-4ee8-98dc-61053f644d05"             
             },
             {
                 "name": "kafkarequest",
-                "grafana_url": "/render/d-solo/XKhgaUpikugigf/k6-kafka?orgId=1&panelId=79&width=1000&height=500&tz=Europe%2FMoscow&var-DATASOURCE=c821f414-4bcf-4a76-910b-13ccf2d3f9b5"      
+                "grafana_url": "/render/d-solo/XKhgaUpikugigf/k6-kafka?orgId=1&panelId=79&width=1000&height=500&tz=Europe%2FMoscow&var-DATASOURCE=c74f072f-466c-4ee8-98dc-61053f644d05"      
             },
             
             
@@ -71,11 +90,11 @@ METRICS_CONFIG = {
             
             {
                 "name": "global_cpu",
-                "grafana_url": "/render/d-solo/e1RXnCbVz/kubernetes-dashboard?orgId=1&var-datasource=c821f414-4bcf-4a76-910b-13ccf2d3f9b5&var-namespace=All&var-pod=All&var-netface=All&panelId=35&width=1000&height=500&tz=Europe%2FMoscow"
+                "grafana_url": "/render/d-solo/e1RXnCbVz/kubernetes-dashboard?orgId=1&var-datasource=c74f072f-466c-4ee8-98dc-61053f644d05&var-namespace=All&var-pod=All&var-netface=All&panelId=35&width=1000&height=500&tz=Europe%2FMoscow"
             },
             {
                 "name": "global_mem",
-                "grafana_url": "/render/d-solo/e1RXnCbVz/kubernetes-dashboard?orgId=1&var-datasource=c821f414-4bcf-4a76-910b-13ccf2d3f9b5&var-namespace=All&var-pod=All&var-netface=All&panelId=37&width=1000&height=500&tz=Europe%2FMoscow"
+                "grafana_url": "/render/d-solo/e1RXnCbVz/kubernetes-dashboard?orgId=1&var-datasource=c74f072f-466c-4ee8-98dc-61053f644d05&var-namespace=All&var-pod=All&var-netface=All&panelId=37&width=1000&height=500&tz=Europe%2FMoscow"
             },
             {
                 "name": "nodes_cpu",
@@ -87,102 +106,102 @@ METRICS_CONFIG = {
             },
             {
                 "name": "namespace_cpu",
-                "grafana_url": "/render/d-solo/e1RXnCbVz/kubernetes-dashboard?orgId=1&var-datasource=c821f414-4bcf-4a76-910b-13ccf2d3f9b5&var-namespace=All&var-pod=All&var-netface=All&panelId=16&width=1000&height=500&tz=Europe%2FMoscow"
+                "grafana_url": "/render/d-solo/e1RXnCbVz/kubernetes-dashboard?orgId=1&var-datasource=c74f072f-466c-4ee8-98dc-61053f644d05&var-namespace=All&var-pod=All&var-netface=All&panelId=16&width=1000&height=500&tz=Europe%2FMoscow"
             },
             {
                 "name": "namespace_mem",
-                "grafana_url": "/render/d-solo/e1RXnCbVz/kubernetes-dashboard?orgId=1&var-datasource=c821f414-4bcf-4a76-910b-13ccf2d3f9b5&var-namespace=All&var-pod=All&var-netface=All&panelId=22&width=1000&height=500&tz=Europe%2FMoscow"
+                "grafana_url": "/render/d-solo/e1RXnCbVz/kubernetes-dashboard?orgId=1&var-datasource=c74f072f-466c-4ee8-98dc-61053f644d05&var-namespace=All&var-pod=All&var-netface=All&panelId=22&width=1000&height=500&tz=Europe%2FMoscow"
             },
             
             
             
             {
                 "name": "micro-registry-address_cpu",
-                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c821f414-4bcf-4a76-910b-13ccf2d3f9b5&var-cluster=&var-namespace=apps&var-type=deployment&var-workload=micro-registry-address&panelId=1&width=1000&height=500&tz=Europe%2FMoscow"
+                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c74f072f-466c-4ee8-98dc-61053f644d05&var-cluster=&var-namespace=apps&var-type=deployment&var-workload=micro-registry-address&panelId=1&width=1000&height=500&tz=Europe%2FMoscow"
             },
             {
                 "name": "micro-registry-address_mem",
-                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c821f414-4bcf-4a76-910b-13ccf2d3f9b5&var-cluster=&var-namespace=apps&var-type=deployment&var-workload=micro-registry-address&panelId=3&width=1000&height=500&tz=Europe%2FMoscow"
+                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c74f072f-466c-4ee8-98dc-61053f644d05&var-cluster=&var-namespace=apps&var-type=deployment&var-workload=micro-registry-address&panelId=3&width=1000&height=500&tz=Europe%2FMoscow"
             },
             {
                 "name": "micro-registry-nsi_cpu",
-                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c821f414-4bcf-4a76-910b-13ccf2d3f9b5&var-cluster=&var-namespace=apps&var-type=deployment&var-workload=micro-registry-nsi&panelId=1&width=1000&height=500&tz=Europe%2FMoscow"
+                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c74f072f-466c-4ee8-98dc-61053f644d05&var-cluster=&var-namespace=apps&var-type=deployment&var-workload=micro-registry-nsi&panelId=1&width=1000&height=500&tz=Europe%2FMoscow"
             },
             {
                 "name": "micro-registry-nsi_mem",
-                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c821f414-4bcf-4a76-910b-13ccf2d3f9b5&var-cluster=&var-namespace=apps&var-type=deployment&var-workload=micro-registry-nsi&panelId=3&width=1000&height=500&tz=Europe%2FMoscow"
+                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c74f072f-466c-4ee8-98dc-61053f644d05&var-cluster=&var-namespace=apps&var-type=deployment&var-workload=micro-registry-nsi&panelId=3&width=1000&height=500&tz=Europe%2FMoscow"
             },
             {
                 "name": "micro-address-search-node_cpu",
-                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c821f414-4bcf-4a76-910b-13ccf2d3f9b5&var-cluster=&var-namespace=apps&var-type=statefulset&var-workload=micro-address-search-node&panelId=1&width=1000&height=500&tz=Europe%2FMoscow"
+                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c74f072f-466c-4ee8-98dc-61053f644d05&var-cluster=&var-namespace=apps&var-type=statefulset&var-workload=micro-address-search-node&panelId=1&width=1000&height=500&tz=Europe%2FMoscow"
             },
             {
                 "name": "micro-address-search-node_mem",
-                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c821f414-4bcf-4a76-910b-13ccf2d3f9b5&var-cluster=&var-namespace=apps&var-type=statefulset&var-workload=micro-address-search-node&panelId=3&width=1000&height=500&tz=Europe%2FMoscow"
+                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c74f072f-466c-4ee8-98dc-61053f644d05&var-cluster=&var-namespace=apps&var-type=statefulset&var-workload=micro-address-search-node&panelId=3&width=1000&height=500&tz=Europe%2FMoscow"
             },
             {
                 "name": "micro-registry-incident_cpu",
-                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c821f414-4bcf-4a76-910b-13ccf2d3f9b5&var-cluster=&var-namespace=apps&var-type=deployment&var-workload=micro-registry-incident&panelId=1&width=1000&height=500&tz=Europe%2FMoscow"
+                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c74f072f-466c-4ee8-98dc-61053f644d05&var-cluster=&var-namespace=apps&var-type=deployment&var-workload=micro-registry-incident&panelId=1&width=1000&height=500&tz=Europe%2FMoscow"
             },
             {
                 "name": "micro-registry-incident_mem",
-                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c821f414-4bcf-4a76-910b-13ccf2d3f9b5&var-cluster=&var-namespace=apps&var-type=deployment&var-workload=micro-registry-incident&panelId=3&width=1000&height=500&tz=Europe%2FMoscow"
+                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c74f072f-466c-4ee8-98dc-61053f644d05&var-cluster=&var-namespace=apps&var-type=deployment&var-workload=micro-registry-incident&panelId=3&width=1000&height=500&tz=Europe%2FMoscow"
             },
             {
                 "name": "micro-address-search-node-kafka_cpu",
-                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c821f414-4bcf-4a76-910b-13ccf2d3f9b5&var-cluster=&var-namespace=apps&var-type=statefulset&var-workload=micro-address-search-node-kafka&panelId=1&width=1000&height=500&tz=Europe%2FMoscow"
+                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c74f072f-466c-4ee8-98dc-61053f644d05&var-cluster=&var-namespace=apps&var-type=statefulset&var-workload=micro-address-search-node-kafka&panelId=1&width=1000&height=500&tz=Europe%2FMoscow"
             },
             {
                 "name": "micro-address-search-node-kafka_mem",
-                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c821f414-4bcf-4a76-910b-13ccf2d3f9b5&var-cluster=&var-namespace=apps&var-type=statefulset&var-workload=micro-address-search-node-kafka&panelId=3&width=1000&height=500&tz=Europe%2FMoscow"
+                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c74f072f-466c-4ee8-98dc-61053f644d05&var-cluster=&var-namespace=apps&var-type=statefulset&var-workload=micro-address-search-node-kafka&panelId=3&width=1000&height=500&tz=Europe%2FMoscow"
             },
             {
                 "name": "micro-address-search-node-custom_cpu",
-                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c821f414-4bcf-4a76-910b-13ccf2d3f9b5&var-cluster=&var-namespace=apps&var-type=statefulset&var-workload=micro-address-search-node-custom&panelId=1&width=1000&height=500&tz=Europe%2FMoscow"
+                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c74f072f-466c-4ee8-98dc-61053f644d05&var-cluster=&var-namespace=apps&var-type=statefulset&var-workload=micro-address-search-node-custom&panelId=1&width=1000&height=500&tz=Europe%2FMoscow"
             },
             {
                 "name": "micro-address-search-node-custom_mem",
-                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c821f414-4bcf-4a76-910b-13ccf2d3f9b5&var-cluster=&var-namespace=apps&var-type=statefulset&var-workload=micro-address-search-node-custom&panelId=3&width=1000&height=500&tz=Europe%2FMoscow"
+                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c74f072f-466c-4ee8-98dc-61053f644d05&var-cluster=&var-namespace=apps&var-type=statefulset&var-workload=micro-address-search-node-custom&panelId=3&width=1000&height=500&tz=Europe%2FMoscow"
             },
              {
                 "name": "micro-registry-incident-schedule_cpu",
-                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c821f414-4bcf-4a76-910b-13ccf2d3f9b5&var-cluster=&var-namespace=apps&var-type=deployment&var-workload=micro-registry-incident-schedule&panelId=1&width=1000&height=500&tz=Europe%2FMoscow"
+                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c74f072f-466c-4ee8-98dc-61053f644d05&var-cluster=&var-namespace=apps&var-type=deployment&var-workload=micro-registry-incident-schedule&panelId=1&width=1000&height=500&tz=Europe%2FMoscow"
             },
             {
                 "name": "micro-registry-incident-schedule_mem",
-                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c821f414-4bcf-4a76-910b-13ccf2d3f9b5&var-cluster=&var-namespace=apps&var-type=deployment&var-workload=micro-registry-incident-schedule&panelId=3&width=1000&height=500&tz=Europe%2FMoscow"
+                "grafana_url": "/render/d-solo/a164a7f0339f99e89cea5cb47e9be617/kubernetes-compute-resources-workload?orgId=1&var-datasource=c74f072f-466c-4ee8-98dc-61053f644d05&var-cluster=&var-namespace=apps&var-type=deployment&var-workload=micro-registry-incident-schedule&panelId=3&width=1000&height=500&tz=Europe%2FMoscow"
             },
-        ],
-        "logs": [
-            {
-                "placeholder": "micro-address-search-node",
-                "filter_query": '{namespace=~"apps", service_name=~"micro-address-search-node"} |= "ERROR"'
-            },
-            {
-                "placeholder": "micro-registry-address",
-                "filter_query": '{namespace=~"apps", service_name=~"micro-registry-address"} |= "ERROR"'
-            },
-            {
-                "placeholder": "micro-registry-nsi",
-                "filter_query": '{namespace=~"apps", service_name=~"micro-registry-nsi"} |= "ERROR"'
-            },
-            {
-                "placeholder": "micro-address-search-node-kafka",
-                "filter_query": '{namespace=~"apps", service_name=~"micro-address-search-node-kafka"} |= "ERROR"'
-            },
-            {
-                "placeholder": "micro-address-search-node-custom",
-                "filter_query": '{namespace=~"apps", service_name=~"micro-address-search-node-custom"} |= "ERROR"'
-            },
-            {
-                "placeholder": "micro-registry-incident-schedule",
-                "filter_query": '{namespace=~"apps", service_name=~"micro-registry-incident-schedule"} |= "ERROR"'
-            },
-            {
-                "placeholder": "micro-registry-incident",
-                "filter_query": '{namespace=~"apps", service_name=~"micro-registry-incident"} |= "ERROR"'
-            }
         ]
+        # "logs": [
+        #     {
+        #         "placeholder": "micro-address-search-node",
+        #         "filter_query": '{namespace=~"apps", service_name=~"micro-address-search-node"} |= "ERROR"'
+        #     },
+        #     {
+        #         "placeholder": "micro-registry-address",
+        #         "filter_query": '{namespace=~"apps", service_name=~"micro-registry-address"} |= "ERROR"'
+        #     },
+        #     {
+        #         "placeholder": "micro-registry-nsi",
+        #         "filter_query": '{namespace=~"apps", service_name=~"micro-registry-nsi"} |= "ERROR"'
+        #     },
+        #     {
+        #         "placeholder": "micro-address-search-node-kafka",
+        #         "filter_query": '{namespace=~"apps", service_name=~"micro-address-search-node-kafka"} |= "ERROR"'
+        #     },
+        #     {
+        #         "placeholder": "micro-address-search-node-custom",
+        #         "filter_query": '{namespace=~"apps", service_name=~"micro-address-search-node-custom"} |= "ERROR"'
+        #     },
+        #     {
+        #         "placeholder": "micro-registry-incident-schedule",
+        #         "filter_query": '{namespace=~"apps", service_name=~"micro-registry-incident-schedule"} |= "ERROR"'
+        #     },
+        #     {
+        #         "placeholder": "micro-registry-incident",
+        #         "filter_query": '{namespace=~"apps", service_name=~"micro-registry-incident"} |= "ERROR"'
+        #     }
+        # ]
 
     },
     "service_2": { # Сокращенное наименование СПО на английском например INP, PAIP, RUIP, нужно также ввести название в СПО в шаблон веб страницы(templates\index.html)
