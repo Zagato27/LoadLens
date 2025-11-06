@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Сравнение тестов</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,400;0,500;0,600;0,700;1,600&display=swap" rel="stylesheet">
+  <style>
+    body { background: #121212; color: #fff; font-family: 'Montserrat', Arial, sans-serif; margin: 0; }
+    .container { width: 90%; max-width: 1400px; margin: 0 auto; padding: 16px; }
+    h2 { margin: 8px 0 16px; }
+    .row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+    select, button { padding: 8px; background: #2b2b2b; color: #fff; border: 1px solid #444; border-radius: 6px; font-family: 'Montserrat', Arial, sans-serif; font-size: 14px; }
+    .accordion { margin-top: 16px; }
+    .acc-item { background: #1e1e1e; border: 1px solid #333; border-radius: 6px; margin-bottom: 8px; }
+    .acc-header { padding: 10px 12px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+    .acc-content { display: none; padding: 10px 12px; border-top: 1px solid #333; }
+    .pill { display: inline-block; padding: 4px 8px; background: #2b2b2b; border: 1px solid #444; border-radius: 14px; margin: 4px; cursor: pointer; }
+    .controls { margin-top: 8px; display: flex; gap: 12px; align-items: center; }
+    .chart-wrap { background: #0f0f0f; border: 1px solid #333; border-radius: 6px; padding: 10px; margin-top: 12px; display: flex; gap: 12px; }
+    .chart-canvas { flex: 1; min-width: 0; }
+    .legend-panel { width: 360px; max-width: 45%; background: #1b1b1b; border-left: 1px solid #333; border-radius: 6px; padding: 10px; overflow-y: auto; min-height: 160px; }
+    .legend-controls { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+    .legend-panel h4 { margin: 0 0 8px; font-weight: normal; color: #ddd; }
+    .legend-table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+    .legend-table th, .legend-table td { white-space: normal; word-break: break-word; }
+    .legend-table th, .legend-table td { border-bottom: 1px solid #2a2a2a; padding: 6px 8px; text-align: left; }
+    .legend-color { width: 14px; height: 14px; border-radius: 3px; display: inline-block; margin-right: 6px; vertical-align: middle; border: 1px solid #444; }
+    .legend-row { cursor: pointer; }
+    .legend-row.hidden { opacity: 0.5; }
+    a { color: #9bbcff; text-decoration: none; }
+    .app-header { position: sticky; top: 0; display: flex; align-items: center; justify-content: flex-start; gap: 12px; z-index: 2000; width: 100%; max-width: 1400px; margin: 0 auto; padding: 8px 12px; --brandSize: 40px; background: #121212; border-bottom: 1px solid #2a2a2a; }
+    .app-nav { display: flex; gap: 16px; margin-left: auto; flex-wrap: nowrap; white-space: nowrap; }
+    .app-nav a.nav-btn { height: 36px; padding: 8px 4px; background: transparent; border: none; color: #eaeaea; border-bottom: 2px solid transparent; border-radius: 0; cursor: pointer; font-family: 'Montserrat', Arial, sans-serif; font-weight: 600; font-style: italic; text-decoration: none; display: inline-flex; align-items: center; }
+    .app-nav a.nav-btn:hover { color: #ffffff; border-bottom-color: #3700b3; }
+    .app-nav a.nav-btn.active { color: #ffffff; border-bottom-color: #6200ee; }
+    .app-header .logo { width: var(--brandSize); height: var(--brandSize); object-fit: contain; }
+    .app-header .brand { font-size: var(--brandSize); line-height: var(--brandSize); font-weight: 600; font-style: italic; letter-spacing: 0.2px; color: #eaeaea; }
+    select, button { height: 40px; }
+    h1, h2, h3, h4 { font-weight: 600; font-style: italic; }
+    /* Кастомный селект как на странице создания отчёта */
+    .custom-select-wrapper { position: relative; display: block; background-color: #2b2b2b; color: #ffffff; border: 1px solid #444; border-radius: 4px; margin-top: 5px; cursor: pointer; }
+    .custom-select { padding: 8px; position: relative; }
+    .custom-select::after { content: ''; position: absolute; top: 50%; right: 10px; width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 5px solid #ffffff; transform: translateY(-50%); }
+    .custom-options { position: absolute; top: 100%; left: 0; right: 0; background-color: #2b2b2b; border: 1px solid #444; border-top: none; max-height: 200px; overflow-y: auto; z-index: 1000; display: none; }
+    .custom-option { padding: 8px; cursor: pointer; border-bottom: 1px solid #444; }
+    .custom-option:last-child { border-bottom: none; }
+    .custom-option:hover { background-color: #444; }
+    .custom-select-wrapper.open .custom-options { display: block; }
+    /* Увеличенная ширина селекторов Run A / Run B */
+    #runAWrapper, #runBWrapper { width: clamp(500px, 80vw, 500px); display: block; }
+    /* Адаптив: легенда под графиком на узких экранах */
+    @media (max-width: 900px) {
+      .chart-wrap { flex-wrap: wrap; }
+      .legend-panel { width: 100%; max-width: none; }
+    }
+    /* Hover-подсветка кнопок в легенде */
+    .legend-controls button { background: #2b2b2b; border: 1px solid #444; color: #fff; transition: background-color 0.2s ease, border-color 0.2s ease; }
+    .legend-controls button:hover { background: #3700b3; border-color: #6200ee; }
+    .btn-compare { background:#6200ee; border:1px solid #6f35e3; color:#fff; }
+    .btn-compare.active { background:#3700b3; border-color:#8a5cf2; }
+    /* Таблица p95 сравнения */
+    /* Таблица p95 сравнения */
+    .cmp-summary { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+    .cmp-summary th, .cmp-summary td { border-bottom: 1px solid #2a2a2a; padding: 6px 8px; text-align: left; }
+    .trend { font-weight: 700; }
+    .trend.up { color: #e57373; } /* красный */
+    .trend.down { color: #6be66b; } /* зелёный */
+    .cmp-summary-wrap { margin-bottom: 12px; }
+    .charts-header { margin: 8px 0 6px; font-weight: 600; color: #ddd; }
+    .charts-pills { display: flex; flex-wrap: wrap; gap: 6px; }
+  </style>
+  </head>
+<body>
+  <div class="app-header">
+    <img class="logo" src="/assets/logo.png" alt="LoadLens" />
+    <span class="brand">LoadLens</span>
+    <div class="app-nav">
+      <a class="nav-btn" href="/">Дэшборд</a>
+      <a class="nav-btn" href="/new">Новый отчёт</a>
+      <a class="nav-btn" href="/reports">Архив</a>
+      <a class="nav-btn active" href="/compare">Сравнение тестов</a>
+    </div>
+  </div>
+  <div class="container">
+    
+
+    <div class="row">
+      <div>
+        <div>Run A</div>
+        <div class="custom-select-wrapper" id="runAWrapper">
+          <div class="custom-select" id="runASelect">Выберите запуск A</div>
+          <div class="custom-options" id="runAOptions"></div>
+        </div>
+      </div>
+      <div>
+        <div>Run B</div>
+        <div class="custom-select-wrapper" id="runBWrapper">
+          <div class="custom-select" id="runBSelect">Выберите запуск B</div>
+          <div class="custom-options" id="runBOptions"></div>
+        </div>
+      </div>
+      
+      <div style="align-self: flex-end;">
+        <button id="compareBtn" class="btn-compare">Сравнить</button>
+      </div>
+    </div>
+
+    <div class="accordion" id="accRoot"></div>
+
+    <div class="chart-wrap">
+      <div class="chart-canvas">
+        <canvas id="chart" height="120"></canvas>
+      </div>
+      <div class="legend-panel">
+        <h4>Легенда</h4>
+        <div class="legend-controls">
+          <button id="legendHideAll">Выключить все</button>
+          <button id="legendShowAll">Включить все</button>
+          <button id="legendDownloadPng">Скачать PNG</button>
+        </div>
+        <div id="legend"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let chart;
+    let legendSortBy = 'avg';  // 'name' | 'avg'
+    let legendSortDir = 'desc'; // 'asc' | 'desc'
+    let lastQueryLabel = '';
+    // Плагин заливки фона области построения
+    const backgroundPlugin = {
+      id: 'customBackground',
+      beforeDraw(chart, args, opts){
+        const {ctx, chartArea} = chart;
+        if (!chartArea) return;
+        ctx.save();
+        ctx.fillStyle = (opts && opts.color) || '#151515';
+        ctx.fillRect(chartArea.left, chartArea.top, chartArea.right - chartArea.left, chartArea.bottom - chartArea.top);
+        ctx.restore();
+      }
+    };
+    Chart.register(backgroundPlugin);
+    function randColor(alpha=0.7){
+      const r = Math.floor(100+Math.random()*155);
+      const g = Math.floor(100+Math.random()*155);
+      const b = Math.floor(100+Math.random()*155);
+      return `rgba(${r},${g},${b},${alpha})`;
+    }
+
+    async function loadRuns(){
+      // Состояние загрузки для селектов
+      try{ document.getElementById('runASelect').textContent = 'Загрузка…'; document.getElementById('runBSelect').textContent = 'Загрузка…'; }catch(e){}
+      const runs = await (await fetch('/runs')).json();
+      const runAOpts = document.getElementById('runAOptions');
+      const runBOpts = document.getElementById('runBOptions');
+      runAOpts.innerHTML = '';
+      runBOpts.innerHTML = '';
+      runs.forEach(r => {
+        const d1 = document.createElement('div'); d1.className='custom-option'; d1.textContent=r.run_name; d1.dataset.value=r.run_name; runAOpts.appendChild(d1);
+        const d2 = document.createElement('div'); d2.className='custom-option'; d2.textContent=r.run_name; d2.dataset.value=r.run_name; runBOpts.appendChild(d2);
+      });
+      if (runs.length >= 2){
+        document.getElementById('runASelect').textContent = runs[0].run_name;
+        document.getElementById('runBSelect').textContent = runs[1].run_name;
+      }
+    }
+
+    async function loadSchema(){
+      const root = document.getElementById('accRoot');
+      root.innerHTML = 'Загрузка…';
+      const schema = await (await fetch('/domains_schema')).json();
+      root.innerHTML = '';
+      Object.keys(schema).forEach(domain => {
+        const item = document.createElement('div'); item.className = 'acc-item';
+        const header = document.createElement('div'); header.className = 'acc-header'; header.innerHTML = `<div>${domain}</div><div>▼</div>`;
+        const content = document.createElement('div'); content.className = 'acc-content'; content.dataset.domain = domain;
+        // Заголовок для сводной таблицы
+        const summaryHeader = document.createElement('div'); summaryHeader.className = 'charts-header'; summaryHeader.textContent = 'Сводная таблица'; content.appendChild(summaryHeader);
+        // Контейнер для таблицы p95 сравнения
+        const tableWrap = document.createElement('div'); tableWrap.className = 'cmp-summary-wrap'; content.appendChild(tableWrap);
+        // Заголовок для блока графиков
+        const chartsHeader = document.createElement('div'); chartsHeader.className = 'charts-header'; chartsHeader.textContent = 'Графики'; content.appendChild(chartsHeader);
+        // Контейнер для кнопок-графиков
+        const pillsWrap = document.createElement('div'); pillsWrap.className = 'charts-pills'; content.appendChild(pillsWrap);
+        schema[domain].forEach(ql => {
+          const pill = document.createElement('span'); pill.className = 'pill'; pill.textContent = ql.query_label;
+          pill.addEventListener('click', () => renderOverlay(domain, ql.query_label));
+          pillsWrap.appendChild(pill);
+        });
+        header.addEventListener('click', async ()=>{
+          const opening = content.style.display !== 'block';
+          content.style.display = opening ? 'block' : 'none';
+          if (opening) {
+            await loadDomainSummary(domain, tableWrap);
+          }
+        });
+        item.appendChild(header); item.appendChild(content); root.appendChild(item);
+      });
+      if (!Object.keys(schema||{}).length){ root.textContent = 'Нет данных'; }
+    }
+
+    async function renderOverlay(domain, queryLabel){
+      lastQueryLabel = queryLabel || '';
+      const runA = document.getElementById('runASelect').textContent;
+      const runB = document.getElementById('runBSelect').textContent;
+      const align = 'offset';
+
+      // эвристика series_key по домену
+      let seriesKey = 'application';
+      if (domain === 'kafka') seriesKey = 'client_id';
+      if (domain === 'database') seriesKey = 'service';
+      if (domain === 'hard_resources') seriesKey = 'node';
+
+      const u = new URL('/compare_series', location.origin);
+      u.searchParams.set('run_a', runA);
+      u.searchParams.set('run_b', runB);
+      u.searchParams.set('domain', domain);
+      u.searchParams.set('query_label', queryLabel);
+      u.searchParams.set('series_key', seriesKey);
+      u.searchParams.set('align', align);
+
+      const resp = await fetch(u);
+      const data = await resp.json();
+      if (!data || !data.points || !data.points.length){
+        try{ document.getElementById('legend').innerHTML = 'Нет данных для выбранной метрики'; }catch(e){}
+        if (chart) { try{ chart.destroy(); }catch(e){} }
+        return;
+      }
+
+      // Группируем по ключу времени
+      const keyT = 't_offset_sec';
+      const xMap = new Map();
+      const seriesMap = new Map(); // key: run/series
+      data.points.forEach(p => {
+        const x = p[keyT];
+        xMap.set(x, true);
+        const k = `${p.run_name} / ${p.series}`;
+        if (!seriesMap.has(k)) seriesMap.set(k, new Map());
+        seriesMap.get(k).set(x, p.value);
+      });
+
+      const labels = Array.from(xMap.keys()).sort((a,b)=> (parseInt(a,10)||0) - (parseInt(b,10)||0));
+      const datasets = [];
+      seriesMap.forEach((m, name)=>{
+        const color = randColor();
+        const arr = labels.map(x => m.has(x) ? m.get(x) : null);
+        const isRunB = (typeof name === 'string') && name.startsWith((runB||'') + ' /');
+        const ds = { label: name, data: arr, borderColor: color, backgroundColor: color, pointRadius: 0, borderWidth: 2, spanGaps: true };
+        if (isRunB) { ds.borderDash = [6,4]; }
+        datasets.push(ds);
+      });
+
+      const ctx = document.getElementById('chart').getContext('2d');
+      if (chart) chart.destroy();
+      chart = new Chart(ctx, {
+        type: 'line',
+        data: { labels, datasets },
+        options: {
+          responsive: true,
+          interaction: { mode: 'nearest', intersect: false },
+          scales: {
+            x: {
+              title: { display: true, text: 'Время от старта (чч:мм)', color: '#ccc' },
+              ticks: {
+                color: '#bbb',
+                callback: function(value){
+                  const raw = this.getLabelForValue(value);
+                  const sec = parseInt(raw, 10) || 0;
+                  const h = Math.floor(sec/3600);
+                  const m = Math.floor((sec%3600)/60);
+                  const hh = String(h).padStart(2,'0');
+                  const mm = String(m).padStart(2,'0');
+                  return `${hh}:${mm}`;
+                }
+              },
+              grid: { color: '#2f2f2f', drawBorder: true, borderColor: '#444' }
+            },
+            y: {
+              title: { display: true, text: queryLabel, color: '#ccc' },
+              ticks: { color: '#bbb' },
+              grid: { color: '#2f2f2f', drawBorder: true, borderColor: '#444' }
+            }
+          },
+          plugins: {
+            legend: { display: false },
+            customBackground: { color: '#151515' }
+          }
+        }
+      });
+
+      syncLegendHeight();
+      renderLegendTable(chart);
+    }
+
+    async function loadDomainSummary(domain, container){
+      try{
+        container.innerHTML = 'Загрузка сводки…';
+        const runA = document.getElementById('runASelect').textContent;
+        const runB = document.getElementById('runBSelect').textContent;
+        const u = new URL('/compare_summary', location.origin);
+        u.searchParams.set('run_a', runA);
+        u.searchParams.set('run_b', runB);
+        u.searchParams.set('domain', domain);
+        const resp = await fetch(u);
+        const arr = await resp.json();
+        const rows = Array.isArray(arr) ? arr : [];
+        const tbl = document.createElement('table'); tbl.className = 'cmp-summary';
+        tbl.innerHTML = '<thead><tr><th>Метрика</th><th>Тест A (P95)</th><th>Тест B (P95)</th><th>Тенденция</th></tr></thead>';
+        const tb = document.createElement('tbody');
+        rows.forEach(r=>{
+          const tr = document.createElement('tr');
+          const a = (typeof r.p95_a === 'number' && isFinite(r.p95_a)) ? r.p95_a : null;
+          const b = (typeof r.p95_b === 'number' && isFinite(r.p95_b)) ? r.p95_b : null;
+          const fmt = (v)=> (typeof v==='number' && isFinite(v)) ? v.toFixed(2) : '—';
+          let trendStr='—'; let cls='';
+          if (typeof r.trend_pct === 'number' && isFinite(r.trend_pct)){
+            const sign = r.trend_pct >= 0 ? 1 : -1;
+            cls = (sign>0) ? 'up' : 'down';
+            const abs = Math.abs(r.trend_pct).toFixed(1);
+            const arrow = (sign>0) ? '↑' : '↓';
+            trendStr = `${arrow} ${abs}%`;
+          }
+          tr.innerHTML = `<td>${r.query_label}</td><td>${fmt(a)}</td><td>${fmt(b)}</td><td class="trend ${cls}">${trendStr}</td>`;
+          tb.appendChild(tr);
+        });
+        tbl.appendChild(tb);
+        container.innerHTML = '';
+        container.appendChild(tbl);
+      }catch(e){ container.innerHTML = 'Не удалось загрузить сводку'; }
+    }
+
+    function renderLegendTable(chart){
+      const box = document.getElementById('legend');
+      box.innerHTML = '';
+      const tbl = document.createElement('table');
+      tbl.className = 'legend-table';
+      const thead = document.createElement('thead');
+      thead.innerHTML = '<tr>'+
+        '<th data-sort="name" style="cursor:pointer">Серия</th>'+
+        '<th>Цвет</th>'+
+        '<th data-sort="avg" style="cursor:pointer">Среднее</th>'+
+        '<th>Вкл</th>'+
+      '</tr>';
+      tbl.appendChild(thead);
+      const tbody = document.createElement('tbody');
+
+      // Подготовим строки с расчётом среднего
+      const rows = chart.data.datasets.map((ds, i) => {
+        const vals = (ds.data || []).filter(v => v != null && !isNaN(v));
+        const avg = vals.length ? (vals.reduce((a,b)=>a+b,0)/vals.length) : 0;
+        return {
+          idx: i,
+          label: ds.label,
+          color: ds.borderColor,
+          avg: avg,
+          visible: chart.isDatasetVisible(i)
+        };
+      });
+
+      // Сортировка
+      rows.sort((a,b)=>{
+        if (legendSortBy === 'name') {
+          return legendSortDir === 'asc' ? a.label.localeCompare(b.label) : b.label.localeCompare(a.label);
+        } else {
+          return legendSortDir === 'asc' ? (a.avg - b.avg) : (b.avg - a.avg);
+        }
+      });
+
+      rows.forEach(row => {
+        const tr = document.createElement('tr');
+        tr.className = 'legend-row' + (row.visible ? '' : ' hidden');
+        const tdName = document.createElement('td'); tdName.textContent = row.label;
+        const tdColor = document.createElement('td'); const sw = document.createElement('span'); sw.className = 'legend-color'; sw.style.background = row.color; tdColor.appendChild(sw);
+        const tdAvg = document.createElement('td'); tdAvg.textContent = (isFinite(row.avg) ? row.avg.toFixed(2) : '—');
+        const tdToggle = document.createElement('td'); tdToggle.textContent = row.visible ? '✓' : '✕';
+
+        tr.appendChild(tdName); tr.appendChild(tdColor); tr.appendChild(tdAvg); tr.appendChild(tdToggle);
+        tr.addEventListener('click', ()=>{
+          const vis = chart.isDatasetVisible(row.idx);
+          chart.setDatasetVisibility(row.idx, !vis);
+          chart.update();
+          tr.classList.toggle('hidden', vis);
+          tdToggle.textContent = vis ? '✕' : '✓';
+        });
+        tbody.appendChild(tr);
+      });
+
+      tbl.appendChild(tbody);
+      box.appendChild(tbl);
+
+      // Обработчик сортировки по клику на заголовках
+      thead.addEventListener('click', (e)=>{
+        const th = e.target.closest('[data-sort]');
+        if (!th) return;
+        const by = th.getAttribute('data-sort');
+        if (legendSortBy === by) {
+          legendSortDir = (legendSortDir === 'asc') ? 'desc' : 'asc';
+        } else {
+          legendSortBy = by;
+          legendSortDir = (by === 'avg') ? 'desc' : 'asc';
+        }
+        renderLegendTable(chart);
+      });
+
+      // Кнопки включить/выключить все серии
+      const hideBtn = document.getElementById('legendHideAll');
+      const showBtn = document.getElementById('legendShowAll');
+      if (hideBtn) hideBtn.onclick = ()=>{
+        for (let i=0; i<chart.data.datasets.length; i++) {
+          chart.setDatasetVisibility(i, false);
+        }
+        chart.update();
+        renderLegendTable(chart);
+      };
+      if (showBtn) showBtn.onclick = ()=>{
+        for (let i=0; i<chart.data.datasets.length; i++) {
+          chart.setDatasetVisibility(i, true);
+        }
+        chart.update();
+        renderLegendTable(chart);
+      };
+    }
+
+    function syncLegendHeight(){
+      try{
+        const canvas = document.getElementById('chart');
+        const legend = document.querySelector('.legend-panel');
+        if(!canvas || !legend) return;
+        const doSync=()=>{
+          legend.style.height = 'auto';
+          const rect = canvas.getBoundingClientRect();
+          const attrH = (canvas.height || parseInt(canvas.getAttribute('height')||'0',10)) || 0;
+          const h = Math.max(160, Math.floor((rect && rect.height) || attrH || 0));
+          legend.style.height = h + 'px';
+        };
+        doSync();
+        if (window.requestAnimationFrame) requestAnimationFrame(()=> doSync());
+      }catch(e){}
+    }
+
+    window.addEventListener('resize', syncLegendHeight);
+    // Экспорт: график + легенда в один PNG
+    function downloadChartWithLegend(currentChart, fileBase){
+      if (!currentChart) return;
+      const canvas = currentChart.canvas;
+      const chartW = canvas.width;
+      const chartH = canvas.height;
+      const rows = (currentChart.data?.datasets||[]).map((ds,i)=>{
+        const vals=(ds.data||[]).filter(v=>v!=null&&!isNaN(v));
+        const avg=vals.length?(vals.reduce((a,b)=>a+b,0)/vals.length):0;
+        return { idx:i, label:ds.label, color:ds.borderColor, avg:avg, visible: currentChart.isDatasetVisible(i)};
+      }).filter(r=>r.visible);
+      const pad = 16; const rowH = 24; const titleH = 22; const hdrH = rows.length? (titleH + 10): 0;
+      const legendH = rows.length ? (hdrH + rows.length*rowH + pad) : 0;
+      const outH = chartH + (legendH? (legendH + pad) : 0);
+      const out = document.createElement('canvas');
+      out.width = chartW; out.height = outH;
+      const ctx = out.getContext('2d');
+      ctx.fillStyle = '#0f0f0f';
+      ctx.fillRect(0,0,out.width,out.height);
+      ctx.drawImage(canvas, 0, 0);
+      if (rows.length){
+        let y = chartH + pad;
+        ctx.fillStyle = '#ddd'; ctx.font = '16px Montserrat, Arial, sans-serif';
+        ctx.fillText('Легенда', pad, y);
+        y += titleH;
+        ctx.font = '13px Montserrat, Arial, sans-serif';
+        rows.forEach(r=>{
+          ctx.fillStyle = r.color || '#888';
+          ctx.fillRect(pad, y - 12, 14, 14);
+          ctx.strokeStyle = '#444'; ctx.strokeRect(pad, y - 12, 14, 14);
+          ctx.fillStyle = '#ddd';
+          const label = String(r.label||'');
+          ctx.fillText(label, pad + 20, y);
+          const avgStr = Number.isFinite(r.avg) ? r.avg.toFixed(2) : '—';
+          const right = out.width - pad;
+          const text = `Среднее: ${avgStr}`;
+          const tw = ctx.measureText(text).width;
+          ctx.fillText(text, right - tw, y);
+          y += rowH;
+        });
+      }
+      const url = out.toDataURL('image/png');
+      const a = document.createElement('a');
+      a.href = url; a.download = `${fileBase||'chart'}.png`;
+      document.body.appendChild(a); a.click(); a.remove();
+    }
+    document.getElementById('legendDownloadPng').addEventListener('click', ()=>{
+      if (!chart) return;
+      downloadChartWithLegend(chart, `compare-${(lastQueryLabel||'chart')}`);
+    });
+
+    document.getElementById('compareBtn').addEventListener('click', async ()=>{
+      const btn = document.getElementById('compareBtn');
+      try{ btn.classList.add('active'); }catch(e){}
+      // Перестраиваем список доменов (актуальные метрики)
+      await loadSchema();
+      // Обновляем сводные таблицы в открытых доменах
+      try{
+        document.querySelectorAll('.acc-content').forEach(async content=>{
+          if (content && content.style.display === 'block'){
+            const domain = content.dataset ? content.dataset.domain : null;
+            const wrap = content.querySelector('.cmp-summary-wrap');
+            if (domain && wrap){ await loadDomainSummary(domain, wrap); }
+          }
+        });
+      }catch(e){}
+      // Подсветка на короткое время
+      setTimeout(()=>{ try{ btn.classList.remove('active'); }catch(e){} }, 300);
+    });
+
+    (async function init(){
+      await loadRuns(); await loadSchema();
+      // Префилл run_a/run_b из query string
+      try{
+        const p=new URLSearchParams(location.search);
+        const ra=p.get('run_a'); const rb=p.get('run_b');
+        if (ra){ document.getElementById('runASelect').textContent = ra; }
+        if (rb){ document.getElementById('runBSelect').textContent = rb; }
+      }catch(e){}
+    })();
+    // Клик по шапке селекта — открыть/закрыть
+    document.getElementById('runASelect').addEventListener('click', function(e){ e.stopPropagation(); document.getElementById('runAWrapper').classList.toggle('open'); });
+    document.getElementById('runBSelect').addEventListener('click', function(e){ e.stopPropagation(); document.getElementById('runBWrapper').classList.toggle('open'); });
+    // Выбор опции
+    document.getElementById('runAOptions').addEventListener('click', function(e){ const opt=e.target.closest('.custom-option'); if(!opt) return; document.getElementById('runASelect').textContent = opt.dataset.value || opt.textContent; document.getElementById('runAWrapper').classList.remove('open'); });
+    document.getElementById('runBOptions').addEventListener('click', function(e){ const opt=e.target.closest('.custom-option'); if(!opt) return; document.getElementById('runBSelect').textContent = opt.dataset.value || opt.textContent; document.getElementById('runBWrapper').classList.remove('open'); });
+    // Закрытие при клике вне
+    window.addEventListener('click', function(e){ const w1=document.getElementById('runAWrapper'); if(w1 && !w1.contains(e.target)) w1.classList.remove('open'); const w2=document.getElementById('runBWrapper'); if(w2 && !w2.contains(e.target)) w2.classList.remove('open'); });
+  </script>
+  </body>
+  </html>
+
+

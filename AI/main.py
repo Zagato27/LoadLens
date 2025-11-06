@@ -2,7 +2,7 @@
 
 import requests
 import pandas as pd
-from typing import List, Dict, Optional, Union
+from typing import List, Dict, Optional, Union, Tuple, Any
 import json
 import os
 from datetime import datetime
@@ -12,44 +12,39 @@ import socket
 import time
 import re
 from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from langchain_gigachat.chat_models import GigaChat as LC_GigaChat
 from pydantic import BaseModel, Field, ValidationError, root_validator
-try:
-    from langchain_core.messages import SystemMessage, HumanMessage
-except Exception:
-    try:
-        from langchain.schema import SystemMessage, HumanMessage  # старые версии langchain
-    except Exception:
-        SystemMessage = None
-        HumanMessage = None
 
 
-# Импортируем CONFIG из config.py
-from AI.config import CONFIG
+# Unified settings
+from settings import CONFIG
+from AI.db_store import save_domain_labeled
 
 logger = logging.getLogger(__name__)
-_gigachat_lock = threading.Lock()
-_gigachat_client = None
-_gigachat_env_applied = False
-_gigachat_preflight_last_ts = 0.0
+_llm_env_init_lock = threading.Lock()
+_llm_env_applied = False
+_llm_provider_name = (CONFIG.get("llm", {}) or {}).get("provider", "perplexity").lower()
+_llm_provider_cfg = (CONFIG.get("llm", {}) or {}).get(_llm_provider_name, {})
+_llm_semaphore = threading.Semaphore(int(_llm_provider_cfg.get("max_concurrent", 4)))
+_llm_preflight_last_ts = 0.0
 
-# httpx/requests таймаут через окружение для некоторых клиентов
-os.environ.setdefault("GIGACHAT_TIMEOUT", str(CONFIG.get("llm", {}).get("gigachat", {}).get("request_timeout_sec", 120)))
+# httpx/requests таймаут через окружение (общий для LLM)
+os.environ.setdefault("PPLX_TIMEOUT", str(CONFIG.get("llm", {}).get("perplexity", {}).get("request_timeout_sec", 120)))
 
 
-def _normalize_gigachat_base_url(raw_url: str | None) -> str:
-    base = (raw_url or "https://gigachat.devices.sberbank.ru/api/v1").strip()
+def _normalize_llm_base_url(raw_url: str | None) -> str:
+    # Универсальная нормализация базового URL для LLM API
+    base = (raw_url or "https://api.perplexity.ai").strip()
     if not base:
-        return "https://gigachat.devices.sberbank.ru/api/v1"
+        return "https://api.perplexity.ai"
     base = base.rstrip("/")
-    # Убираем случайный суффикс /chat/completions, если администратор указал полноценный путь
     if base.endswith("/chat/completions"):
         base = base[: -len("/chat/completions")]
     return base
 
 
-def _ensure_gigachat_env(gcfg: dict) -> None:
+def _ensure_llm_network_env(gcfg: dict) -> None:
     """Применяет сетевые настройки (прокси/CA/инsecure) через переменные окружения."""
     proxies = (gcfg or {}).get("proxies", {}) or {}
     ca_bundle = (gcfg or {}).get("ca_bundle")
@@ -73,65 +68,33 @@ def _ensure_gigachat_env(gcfg: dict) -> None:
         os.environ.pop("SSL_CERT_FILE", None)
 
     logger.info(
-        f"GigaChat net env set: HTTPS_PROXY={'set' if https_proxy else 'unset'} "
+        f"LLM net env set: HTTPS_PROXY={'set' if https_proxy else 'unset'} "
         f"HTTP_PROXY={'set' if http_proxy else 'unset'} CA_BUNDLE={'set' if (ca_bundle and not insecure) else 'unset'} "
         f"INSECURE={'on' if insecure else 'off'}"
     )
 
 
-def _gigachat_preflight(gcfg: dict) -> None:
-    """Быстрая проверка доступности GigaChat API (mTLS)."""
-    timeout = float((gcfg or {}).get("connect_timeout_sec") or 5)
-    proxies = (gcfg or {}).get("proxies", {}) or {}
-    has_proxy = bool(proxies.get("https") or proxies.get("http") or proxies.get("HTTPS") or proxies.get("HTTP"))
-
-    api_base = _normalize_gigachat_base_url(gcfg.get("api_base_url") or gcfg.get("base_url"))
-    parsed = urlparse(api_base)
-    host = parsed.hostname or "gigachat.devices.sberbank.ru"
-    port = parsed.port or (443 if (parsed.scheme or "https").lower() == "https" else 80)
-    models_url = f"{api_base}/models"
-
-    if not has_proxy:
-        try:
-            with socket.create_connection((host, port), timeout=timeout):
-                logger.info(f"Preflight ok: api_host {host}:{port}")
-        except Exception as e:
-            logger.error(f"Preflight FAIL: api_host {host}:{port} -> {e}")
-    else:
-        logger.info("Preflight: proxies detected, skipping direct TCP checks")
-
-    if not bool(gcfg.get("enable_preflight_models", True)):
-        logger.info("Preflight: /models check disabled by config")
-        return
-
-    verify_cfg = gcfg.get("verify") or gcfg.get("ca_bundle_file") or gcfg.get("ca_bundle") or True
-    verify = True
-    if isinstance(verify_cfg, bool):
-        verify = verify_cfg
-    elif isinstance(verify_cfg, str) and verify_cfg.strip():
-        verify = verify_cfg.strip() if os.path.exists(verify_cfg.strip()) else True
-
-    cert = None
-    cfile = gcfg.get("cert_file"); kfile = gcfg.get("key_file")
-    if gcfg.get("use_mtls") and isinstance(cfile, str) and isinstance(kfile, str):
-        cfile = cfile.strip(); kfile = kfile.strip()
-        if cfile and kfile and os.path.exists(cfile) and os.path.exists(kfile):
-            cert = (cfile, kfile)
-        else:
-            logger.warning("mTLS включён, но cert/key файл(ы) не найдены. Пропускаю клиентский сертификат.")
-
+def _llm_preflight(gcfg: dict) -> None:
+    """Заглушка префлайта (для Perplexity не требуется отдельная проверка)."""
     try:
-        resp = requests.get(
-            models_url,
-            headers={"Accept": "application/json"},
-            timeout=timeout,
-            verify=verify,
-            cert=cert,
-            proxies=proxies if proxies else None,
-        )
-        logger.info(f"Preflight GET {models_url} status={resp.status_code}")
+        api_base = _normalize_llm_base_url(gcfg.get("api_base_url") or gcfg.get("base_url"))
+        parsed = urlparse(api_base)
+        host = parsed.hostname or "api.perplexity.ai"
+        port = parsed.port or 443
+        with socket.create_connection((host, port), timeout=float((gcfg or {}).get("connect_timeout_sec") or 5)):
+            logger.info(f"Preflight ok: api_host {host}:{port}")
     except Exception as e:
-        logger.error(f"Preflight HTTP to API failed: {e}")
+        logger.warning(f"Preflight skipped/failed: {e}")
+
+
+def _strip_think(text: str) -> str:
+    """Удаляет блоки <think>...</think> из ответа модели."""
+    if not isinstance(text, str) or not text:
+        return text
+    try:
+        return re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE)
+    except Exception:
+        return text
 
 
 def _configure_logging():
@@ -156,6 +119,58 @@ def parse_step_to_seconds(step: str) -> int:
         return int(step[:-1])
     else:
         return int(step)
+
+
+PROMPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
+_PROMPT_CACHE: Dict[str, str] = {}
+
+
+def read_prompt_from_file(filename: str) -> str:
+    with open(filename, 'r', encoding='utf-8') as f:
+        return f.read()
+
+
+CRITIC_PROMPT_FALLBACK = (
+    "Вы выступаете как строгий валидатор отчёта. Отвечайте на русском языке. "
+    "Перефразируйте все ТЕКСТОВЫЕ поля на русский язык (verdict, findings.summary, findings.evidence, recommended_actions, affected_components). "
+    "Ключи JSON и значения поля severity оставьте на английском согласно схеме. "
+    "Ниже дан проект ответа. Исправьте/нормализуйте его до СТРОГОГО JSON со схемой: "
+    "{verdict, confidence, findings[], recommended_actions[]}. Каждый элемент findings обязан содержать severity (critical|high|medium|low) и component. "
+    "Если component не указан — извлеките его из evidence по лейблам application|service|job|pod|instance, иначе 'unknown'. "
+    "Если severity отсутствует — используйте 'low'. Дополнительно допускается поле peak_performance: {max_rps, max_time, drop_time, method}. "
+    "Никакого текста вне JSON. Если данных недостаточно — верните verdict='insufficient_data'.\n\nПроект ответа:\n{{CANDIDATE}}"
+)
+
+
+JUDGE_PROMPT_FALLBACK = (
+    "Вы выступаете как независимый арбитр отчётов по нагрузочному тестированию. "
+    "У вас есть агрегированные данные теста и несколько кандидатов ответов модели (каждый в JSON). "
+    "Для каждого кандидата оцените три аспекта (0..1) и общий балл: factual, completeness, specificity. "
+    "Рассчитайте overall = 0.5*factual + 0.3*completeness + 0.2*specificity. "
+    "Ответьте СТРОГО JSON формата {\"scores\": [{\"index\": int, \"factual\": float, \"completeness\": float, \"specificity\": float, \"overall\": float}, ...]}. "
+    "Если данных недостаточно для оценки, укажите 0. Контекст приведён ниже.\n\nКонтекст:\n{{DATA_CONTEXT}}\n\nКандидаты:\n{{CANDIDATES_JSON}}"
+)
+
+
+JUDGE_SYSTEM_PROMPT = (
+    "Вы опытный инженер по нагрузочному тестированию и выступаете независимым судьёй. "
+    "Используйте предоставленный контекст метрик, чтобы беспристрастно оценить кандидатов. "
+    "Верните только JSON согласно запросу."
+)
+
+
+def _get_prompt_template(filename: str, fallback: str) -> str:
+    cache_key = filename
+    if cache_key in _PROMPT_CACHE:
+        return _PROMPT_CACHE[cache_key]
+    path = os.path.join(PROMPTS_DIR, filename)
+    try:
+        text = read_prompt_from_file(path)
+    except Exception as e:
+        logger.warning(f"Не удалось загрузить шаблон {filename}: {e}. Использую fallback.")
+        text = fallback
+    _PROMPT_CACHE[cache_key] = text
+    return text
 
 
 def fetch_prometheus_data(
@@ -539,6 +554,11 @@ def _extract_json_like(text: str) -> Optional[dict]:
     """Пытается вытащить JSON-объект из текста (включая случаи с пояснениями до/после)."""
     if not text:
         return None
+    # Удаляем служебные блоки рассуждений (<think>..</think>) если присутствуют
+    try:
+        text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE)
+    except Exception:
+        pass
     # Быстрый поиск первого '{' и последней '}'
     start = text.find("{")
     end = text.rfind("}")
@@ -617,27 +637,14 @@ def _build_domain_data(
     return {"labeled": labeled, "markdown": markdown, "pack": pack, "ctx": ctx}
 
 
-def _ask_domain_analysis(prompt_text: str, data_context: str) -> tuple[str, Optional[LLMAnalysis]]:
-    return llm_two_pass_self_consistency(user_prompt=prompt_text, data_context=data_context, k=3)
+def _ask_domain_analysis(prompt_text: str, data_context: str) -> tuple[str, Optional[LLMAnalysis], Dict[str, Any]]:
+    return llm_two_pass_self_consistency(user_prompt=prompt_text, data_context=data_context, k=3, return_scores=True)
 
 
 def _build_critic_prompt(candidate_text: str) -> str:
-    """Строит промпт-критику для исправления ответа в строгий JSON по схеме.
-    Кандидат может содержать пояснения; задача критика — выдать ЧИСТЫЙ JSON.
-    """
-    return (
-        "Вы выступаете как строгий валидатор отчёта. Отвечайте на русском языке. "
-        "Перефразируйте все ТЕКСТОВЫЕ поля на русский язык (verdict, findings.summary, findings.evidence, recommended_actions, affected_components). "
-        "Ключи JSON и значения поля severity оставьте на английском согласно схеме. "
-        "Ниже дан проект ответа модели. Исправьте/нормализуйте его до СТРОГОГО JSON со схемой: "
-        "{verdict, confidence, findings[], recommended_actions[]}. "
-        "Каждый элемент findings ДОЛЖЕН содержать поля severity (critical|high|medium|low) и component (имя сервиса/процесса/инстанса). "
-        "Если component явно не указан, извлеките его из evidence по лейблам application|service|job|pod|instance; если не удаётся — поставьте 'unknown'. "
-        "Если severity не указана или не из списка — установите 'low'. "
-        "Дополнительно допускается поле peak_performance: {max_rps, max_time, drop_time, method}, если оно упомянуто в проекте ответа. "
-        "Никакого текста вне JSON. Если данных недостаточно — верните verdict='insufficient_data'.\n\n"
-        f"Проект ответа:\n{candidate_text}"
-    )
+    """Строит промпт-критику для исправления ответа в строгий JSON по схеме."""
+    template = _get_prompt_template("critic_prompt.txt", CRITIC_PROMPT_FALLBACK)
+    return template.replace("{{CANDIDATE}}", candidate_text)
 
 
 def _choose_best_candidate(candidates: list) -> tuple[str, Optional[LLMAnalysis]]:
@@ -711,6 +718,227 @@ def _choose_best_candidate(candidates: list) -> tuple[str, Optional[LLMAnalysis]
     return best
 
 
+def judge_candidates_with_llm(candidates_texts: List[str], data_context: str) -> Dict[int, Dict[str, float]]:
+    if not candidates_texts:
+        return {}
+    template = _get_prompt_template("judge_prompt.txt", JUDGE_PROMPT_FALLBACK)
+    candidates_payload = [{"index": idx, "text": text} for idx, text in enumerate(candidates_texts)]
+    prompt_text = template.replace("{{CANDIDATES_JSON}}", json.dumps(candidates_payload, ensure_ascii=False))
+    prompt_text = prompt_text.replace("{{DATA_CONTEXT}}", data_context or "нет данных")
+
+    try:
+        raw = ask_llm_with_text_data(
+            user_prompt=prompt_text,
+            data_context="",
+            llm_config={"force_json": True},
+            system_prompt=JUDGE_SYSTEM_PROMPT
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось получить оценку судьи LLM: {e}")
+        return {}
+
+    parsed = None
+    try:
+        parsed = _extract_json_like(raw) or json.loads(raw)
+    except Exception:
+        parsed = None
+
+    if not isinstance(parsed, dict):
+        return {}
+    scores = parsed.get("scores")
+    if not isinstance(scores, list):
+        return {}
+
+    result: Dict[int, Dict[str, float]] = {}
+    for item in scores:
+        if not isinstance(item, dict):
+            continue
+        idx_raw = item.get("index")
+        try:
+            idx = int(idx_raw)
+        except Exception:
+            continue
+        result[idx] = {
+            "factual": float(item.get("factual", 0.0) or 0.0),
+            "completeness": float(item.get("completeness", 0.0) or 0.0),
+            "specificity": float(item.get("specificity", 0.0) or 0.0),
+            "overall": float(item.get("overall", 0.0) or 0.0),
+        }
+    return result
+
+
+def _extract_sections_from_context(ctx_obj: Any) -> List[Dict[str, Any]]:
+    if not isinstance(ctx_obj, dict):
+        return []
+    sections: List[Dict[str, Any]] = []
+    if isinstance(ctx_obj.get("sections"), list):
+        sections.extend(ctx_obj["sections"])
+    domains = ctx_obj.get("domains")
+    if isinstance(domains, dict):
+        for val in domains.values():
+            if isinstance(val, dict) and isinstance(val.get("sections"), list):
+                sections.extend(val["sections"])
+    return sections
+
+
+def _collect_label_vocab(sections: List[Dict[str, Any]]) -> set[str]:
+    labels: set[str] = set()
+    for section in sections:
+        label = section.get("label")
+        if label:
+            labels.add(str(label).lower())
+        for series in section.get("top_series", []) or []:
+            series_name = series.get("series")
+            if series_name:
+                labels.add(str(series_name).lower())
+    return labels
+
+
+def _extract_peak_estimate(sections: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    best: Optional[Dict[str, Any]] = None
+    for section in sections:
+        for series in section.get("top_series", []) or []:
+            max_val = series.get("max")
+            if max_val is None:
+                continue
+            try:
+                max_float = float(max_val)
+            except Exception:
+                continue
+            if best is None or max_float > best.get("max", float("-inf")):
+                best = {
+                    "max": max_float,
+                    "max_time": series.get("max_time"),
+                    "series": series.get("series")
+                }
+    return best
+
+
+def _finding_matches_labels(finding: Any, labels: set[str]) -> bool:
+    if not labels:
+        return False
+    text_parts: List[str] = []
+    try:
+        if isinstance(finding, FindingItem):
+            text_parts.extend([
+                getattr(finding, "summary", ""),
+                getattr(finding, "component", ""),
+                getattr(finding, "evidence", ""),
+            ])
+        elif isinstance(finding, dict):
+            text_parts.extend([
+                str(finding.get("summary", "")),
+                str(finding.get("component", "")),
+                str(finding.get("evidence", "")),
+            ])
+        else:
+            text_parts.append(str(finding))
+    except Exception:
+        text_parts.append(str(finding))
+
+    blob = " ".join([part for part in text_parts if isinstance(part, str)])
+    blob_lower = blob.lower()
+    return any(label in blob_lower for label in labels if label)
+
+
+def score_candidate_by_data(parsed: Optional[LLMAnalysis], context_obj: Dict[str, Any]) -> float:
+    if not isinstance(parsed, LLMAnalysis):
+        return 0.0
+
+    sections = _extract_sections_from_context(context_obj)
+    labels = _collect_label_vocab(sections)
+    score = 0.15  # базовый балл за структурированный ответ
+
+    findings = parsed.findings or []
+    if findings:
+        matches = sum(1 for f in findings if _finding_matches_labels(f, labels))
+        coverage = matches / max(len(findings), 1)
+        score += 0.35 * max(0.0, min(coverage, 1.0))
+
+    peak_estimate = _extract_peak_estimate(sections)
+    peak = getattr(parsed, "peak_performance", None)
+    if peak_estimate and peak and getattr(peak, "max_rps", None) is not None:
+        try:
+            claimed = float(peak.max_rps)
+            actual = float(peak_estimate.get("max", 0.0))
+            if actual > 0:
+                rel_error = abs(claimed - actual) / max(actual, 1e-9)
+                score += 0.35 * max(0.0, 1.0 - min(rel_error, 1.0))
+        except Exception:
+            pass
+
+    actions = parsed.recommended_actions or []
+    if actions:
+        score += 0.15 * max(0.0, min(len(actions) / 3.0, 1.0))
+
+    return max(0.0, min(score, 1.0))
+
+
+def _select_best_candidate(
+    candidates: List[Tuple[str, Optional[LLMAnalysis]]],
+    data_context: str
+) -> Tuple[str, Optional[LLMAnalysis], Dict[str, Any]]:
+    if not candidates:
+        return "", None, {}
+
+    try:
+        context_obj = json.loads(data_context) if data_context else {}
+    except Exception:
+        context_obj = {}
+
+    try:
+        judge_scores = judge_candidates_with_llm([text for (text, _) in candidates], data_context)
+    except Exception as e:
+        logger.warning(f"Judge scoring failed: {e}")
+        judge_scores = {}
+
+    scored: List[Tuple[float, int]] = []
+    for idx, (text, parsed) in enumerate(candidates):
+        judge_entry = judge_scores.get(idx) or judge_scores.get(str(idx)) or {}
+        judge_overall = float(judge_entry.get("overall", 0.0) or 0.0)
+        data_score = score_candidate_by_data(parsed, context_obj)
+        conf = 0.0
+        if isinstance(parsed, LLMAnalysis) and parsed.confidence is not None:
+            try:
+                conf = float(parsed.confidence)
+            except Exception:
+                conf = 0.0
+        final_score = 0.6 * judge_overall + 0.35 * data_score + 0.05 * max(0.0, min(conf, 1.0))
+        scored.append((final_score, idx))
+
+    if scored:
+        scored.sort(key=lambda x: x[0], reverse=True)
+        best_idx = scored[0][1]
+        # Восстановим метрики для лучшего
+        best_text, best_parsed = candidates[best_idx]
+        judge_entry = judge_scores.get(best_idx) or judge_scores.get(str(best_idx)) or {}
+        data_score_best = score_candidate_by_data(best_parsed, context_obj)
+        conf_best = 0.0
+        if isinstance(best_parsed, LLMAnalysis) and best_parsed.confidence is not None:
+            try:
+                conf_best = float(best_parsed.confidence)
+            except Exception:
+                conf_best = 0.0
+        final_score_best = [s for s in scored if s[1] == best_idx][0][0]
+        score_info = {
+            "selected_index": best_idx,
+            "judge": {
+                "overall": float(judge_entry.get("overall", 0.0) or 0.0),
+                "factual": float(judge_entry.get("factual", 0.0) or 0.0),
+                "completeness": float(judge_entry.get("completeness", 0.0) or 0.0),
+                "specificity": float(judge_entry.get("specificity", 0.0) or 0.0),
+            },
+            "data_score": float(data_score_best),
+            "confidence": float(max(0.0, min(conf_best, 1.0))),
+            "final_score": float(final_score_best),
+        }
+        return best_text, best_parsed, score_info
+
+    # Фолбэк на старую стратегию выбора
+    best_text, best_parsed = _choose_best_candidate(candidates)
+    return best_text, best_parsed, {}
+
+
 def _format_parsed_as_text(p: LLMAnalysis) -> str:
     """Простое текстовое представление LLMAnalysis для человека."""
     if p is None:
@@ -765,29 +993,52 @@ def _format_parsed_as_text(p: LLMAnalysis) -> str:
     return "\n".join(parts)
 
 
-def llm_two_pass_self_consistency(user_prompt: str, data_context: str, k: int = 3) -> tuple[str, Optional[LLMAnalysis]]:
+def llm_two_pass_self_consistency(user_prompt: str, data_context: str, k: int = 3, return_scores: bool = False) -> tuple:
     """Двухпроходный режим: генерируем k кандидатов, критик исправляет до строгого JSON, выбираем лучший.
     Возвращает (best_text, best_parsed). Текст — отформатированный JSON.
     """
     candidates: list[tuple[str, Optional[LLMAnalysis]]] = []
-    for _ in range(max(1, int(k))):
-        raw = ask_llm_with_text_data(user_prompt=user_prompt, data_context=data_context)
-        parsed = parse_llm_analysis_strict(raw)
-        if parsed is None:
-            # Критик с попыткой нормализовать
-            critic_prompt = _build_critic_prompt(raw)
-            crit = ask_llm_with_text_data(user_prompt=critic_prompt, data_context=data_context)
-            parsed = parse_llm_analysis_strict(crit)
-            if parsed is not None:
-                json_text = json.dumps(parsed.dict(), ensure_ascii=False, indent=2)
-                candidates.append((json_text, parsed))
-            else:
-                candidates.append((raw, None))
-        else:
-            json_text = json.dumps(parsed.dict(), ensure_ascii=False, indent=2)
-            candidates.append((json_text, parsed))
+    gen_count = max(1, int(k))
+    # Параллельная генерация k кандидатов
+    with ThreadPoolExecutor(max_workers=gen_count) as executor:
+        futures = [executor.submit(ask_llm_with_text_data, user_prompt, data_context) for _ in range(gen_count)]
+        raw_results = [f.result() for f in futures]
 
-    best_text, best_parsed = _choose_best_candidate(candidates)
+    # Пытаемся распарсить, для неуспешных — параллельный критик
+    need_critics = []
+    parsed_or_raw: list[tuple[Optional[LLMAnalysis], str]] = []
+    for raw in raw_results:
+        p = parse_llm_analysis_strict(raw)
+        if p is None:
+            need_critics.append(raw)
+            parsed_or_raw.append((None, raw))
+        else:
+            parsed_or_raw.append((p, raw))
+
+    if need_critics:
+        with ThreadPoolExecutor(max_workers=len(need_critics)) as executor:
+            critic_prompts = [_build_critic_prompt(r) for r in need_critics]
+            critic_futs = [executor.submit(ask_llm_with_text_data, cp, data_context) for cp in critic_prompts]
+            critic_results = [f.result() for f in critic_futs]
+        # заместим соответствующие None на результаты критика (в порядке обхода)
+        ci = 0
+        for p, raw in parsed_or_raw:
+            if p is None:
+                crit = critic_results[ci]
+                ci += 1
+                p2 = parse_llm_analysis_strict(crit)
+                if p2 is not None:
+                    candidates.append((json.dumps(p2.dict(), ensure_ascii=False, indent=2), p2))
+                else:
+                    candidates.append((raw, None))
+            else:
+                candidates.append((json.dumps(p.dict(), ensure_ascii=False, indent=2), p))
+    else:
+        for p, _raw in parsed_or_raw:
+            if p is not None:
+                candidates.append((json.dumps(p.dict(), ensure_ascii=False, indent=2), p))
+
+    best_text, best_parsed, score_info = _select_best_candidate(candidates, data_context)
     # Если лучший без парсинга — сделаем мягкий фолбэк текстом без изменения
     if best_parsed is None and best_text:
         try:
@@ -797,6 +1048,8 @@ def llm_two_pass_self_consistency(user_prompt: str, data_context: str, k: int = 
                 best_text = json.dumps(best_parsed.dict(), ensure_ascii=False, indent=2)
         except Exception:
             pass
+    if return_scores:
+        return best_text, best_parsed, score_info
     return best_text, best_parsed
 
 
@@ -815,57 +1068,169 @@ def label_dataframes(
     return labeled_list
 
 
-def _get_gigachat_client() -> LC_GigaChat:
-    global _gigachat_client
-    if _gigachat_client is not None:
-        return _gigachat_client
-    gcfg = CONFIG.get("llm", {}).get("gigachat", {})
-    base_url = _normalize_gigachat_base_url(gcfg.get("base_url") or gcfg.get("api_base_url"))
-    model = gcfg.get("model", "GigaChat-Pro")
-    # приводим пустые строки к None, чтобы не пытаться открыть несуществующие файлы
-    raw_cert_file = gcfg.get("cert_file")
-    raw_key_file = gcfg.get("key_file")
-    cert_file = raw_cert_file if (isinstance(raw_cert_file, str) and raw_cert_file.strip()) else None
-    key_file = raw_key_file if (isinstance(raw_key_file, str) and raw_key_file.strip()) else None
+def _perplexity_call(messages: list[dict], pcfg: dict) -> str:
+    base_url = _normalize_llm_base_url(pcfg.get("base_url") or pcfg.get("api_base_url"))
+    # Если запрещён веб-поиск, используем оффлайн-инструкционную модель по умолчанию
+    disable_web = bool(pcfg.get("disable_web_search", True))
+    default_model = "llama-3.1-70b-instruct"
+    offline_default = "llama-3.1-70b-instruct"  # та же, без web-search
+    model = pcfg.get("model", offline_default if disable_web else default_model)
+    gen = (pcfg.get("generation") or {})
+    url = f"{base_url}/chat/completions"
 
-    verify_param = gcfg.get("verify")
-    verify_ssl_certs = verify_param if isinstance(verify_param, bool) else True
-    if isinstance(verify_param, str):
-        verify_path = verify_param.strip()
-        if verify_path:
-            if os.path.exists(verify_path):
-                os.environ["REQUESTS_CA_BUNDLE"] = verify_path
-                os.environ["SSL_CERT_FILE"] = verify_path
-            else:
-                logger.warning(f"CA bundle path not found: '{verify_path}'. Skipping SSL env vars.")
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": f"Bearer {os.getenv('PPLX_API_KEY') or os.getenv('PERPLEXITY_API_KEY') or pcfg.get('api_key', '')}",
+    }
 
-    logger.info(
-        """
-Инициализация подключения к GigaChat
-URL: %s
-Model: %s
-SSL: %s
-Debug: %s
-""",
-        base_url,
-        model,
-        True,
-        False,
+    proxies = (pcfg or {}).get("proxies", {}) or None
+    verify_cfg = pcfg.get("verify", True)
+    verify = True
+    if isinstance(verify_cfg, bool):
+        verify = verify_cfg
+    elif isinstance(verify_cfg, str) and verify_cfg.strip():
+        verify = verify_cfg.strip() if os.path.exists(verify_cfg.strip()) else True
+
+    req_max_tokens = int(gen.get("max_tokens", 1200))
+    try:
+        cap = int(pcfg.get("max_tokens_cap", 8192))
+        if req_max_tokens > cap:
+            logger.warning(f"perplexity.max_tokens={req_max_tokens} > cap={cap}, снижаю до cap")
+            req_max_tokens = cap
+    except Exception:
+        pass
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": float(gen.get("temperature", 0.2)),
+        "top_p": float(gen.get("top_p", 0.9)),
+        "max_tokens": req_max_tokens,
+    }
+    if disable_web:
+        # Явно отключаем веб-поиск в Perplexity API (см. docs)
+        payload["disable_search"] = True
+
+    resp = requests.post(
+        url,
+        headers=headers,
+        json=payload,
+        timeout=int(pcfg.get("request_timeout_sec", 120)),
+        verify=verify,
+        proxies=proxies,
     )
-    gen = (CONFIG.get("llm", {}).get("gigachat", {}).get("generation") or {})
-    _gigachat_client = LC_GigaChat(
-        model=model,
-        cert_file=cert_file,
-        key_file=key_file,
-        base_url=base_url,
-        verify_ssl_certs=verify_ssl_certs,
-        timeout=int(CONFIG.get("llm", {}).get("gigachat", {}).get("request_timeout_sec", 120)),
-        # Дополнительные параметры генерации (если клиент поддерживает)
-        temperature=float(gen.get("temperature", 0.2)),
-        top_p=float(gen.get("top_p", 0.9)),
-        max_tokens=int(gen.get("max_tokens", 1200)),
-    )
-    return _gigachat_client
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as e:
+        try:
+            logger.warning(f"Perplexity HTTP {resp.status_code}: {resp.text[:500]}")
+        except Exception:
+            pass
+        raise e
+    data = resp.json()
+    try:
+        return _strip_think(data["choices"][0]["message"]["content"]) 
+    except Exception:
+        # вернём сырой json как текст
+        return _strip_think(json.dumps(data, ensure_ascii=False))
+
+
+def _openai_call(messages: list[dict], pcfg: dict) -> str:
+    base_url = (_normalize_llm_base_url(pcfg.get("api_base_url") or pcfg.get("base_url")))
+    url = f"{base_url}/chat/completions"
+    gen = (pcfg.get("generation") or {})
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY') or pcfg.get('api_key', '')}",
+    }
+    proxies = (pcfg or {}).get("proxies", {}) or None
+    verify_cfg = pcfg.get("verify", True)
+    verify = True if isinstance(verify_cfg, bool) else (verify_cfg.strip() if isinstance(verify_cfg, str) and verify_cfg.strip() else True)
+    req_max_tokens = int(gen.get("max_tokens", 1200))
+    try:
+        cap = int(pcfg.get("max_tokens_cap", 8192))
+        if req_max_tokens > cap:
+            logger.warning(f"openai.max_tokens={req_max_tokens} > cap={cap}, снижаю до cap")
+            req_max_tokens = cap
+    except Exception:
+        pass
+    payload = {
+        "model": pcfg.get("model", "gpt-4o-mini"),
+        "messages": messages,
+        "temperature": float(gen.get("temperature", 0.2)),
+        "top_p": float(gen.get("top_p", 0.9)),
+        "max_tokens": req_max_tokens,
+    }
+    resp = requests.post(url, headers=headers, json=payload, timeout=int(pcfg.get("request_timeout_sec", 120)), verify=verify, proxies=proxies)
+    resp.raise_for_status()
+    data = resp.json()
+    try:
+        return _strip_think(data["choices"][0]["message"]["content"]) 
+    except Exception:
+        return _strip_think(json.dumps(data, ensure_ascii=False))
+
+
+def _anthropic_call(messages: list[dict], pcfg: dict, system_text: str) -> str:
+    base_url = (pcfg.get("api_base_url") or pcfg.get("base_url") or "https://api.anthropic.com").rstrip("/")
+    url = f"{base_url}/v1/messages"
+    gen = (pcfg.get("generation") or {})
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "x-api-key": os.getenv('ANTHROPIC_API_KEY') or pcfg.get('api_key', ''),
+        "anthropic-version": "2023-06-01",
+    }
+    proxies = (pcfg or {}).get("proxies", {}) or None
+    verify_cfg = pcfg.get("verify", True)
+    verify = True if isinstance(verify_cfg, bool) else (verify_cfg.strip() if isinstance(verify_cfg, str) and verify_cfg.strip() else True)
+    # Схема сообщений Anthropic: system + messages (user)
+    # Объединяем наши сообщения в один блок user
+    user_content_parts = []
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content", "")
+        if role == "user":
+            user_content_parts.append(str(content))
+        elif role == "system":
+            # system_text уже отдельно передаём
+            pass
+        else:
+            user_content_parts.append(str(content))
+    user_combined = "\n\n".join(user_content_parts)
+    req_max_tokens = int(gen.get("max_tokens", 1200))
+    try:
+        cap = int(pcfg.get("max_tokens_cap", 4096))
+        if req_max_tokens > cap:
+            logger.warning(f"anthropic.max_tokens={req_max_tokens} > cap={cap}, снижаю до cap")
+            req_max_tokens = cap
+    except Exception:
+        pass
+    payload = {
+        "model": pcfg.get("model", "claude-3-5-sonnet-latest"),
+        "system": system_text,
+        "max_tokens": req_max_tokens,
+        "temperature": float(gen.get("temperature", 0.2)),
+        "messages": [
+            {"role": "user", "content": user_combined}
+        ],
+    }
+    resp = requests.post(url, headers=headers, json=payload, timeout=int(pcfg.get("request_timeout_sec", 120)), verify=verify, proxies=proxies)
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as e:
+        try:
+            logger.warning(f"Anthropic-compatible HTTP {resp.status_code}: {resp.text[:500]}")
+        except Exception:
+            pass
+        raise e
+    data = resp.json()
+    try:
+        blocks = data.get("content", [])
+        texts = [b.get("text", "") for b in blocks if isinstance(b, dict)]
+        return _strip_think("\n".join([t for t in texts if t]))
+    except Exception:
+        return _strip_think(json.dumps(data, ensure_ascii=False))
 
 
 def ask_llm_with_text_data(
@@ -874,27 +1239,24 @@ def ask_llm_with_text_data(
     llm_config: dict = None,
     api_key: str = None,
     model: str = None,
-    base_url: str = None
+    base_url: str = None,
+    system_prompt: Optional[str] = None
 ) -> str:
     """
-    Отправляет запрос к GigaChat (через langchain_gigachat) с подготовленными текстовыми данными.
+    Отправляет запрос к Perplexity Chat Completions API с подготовленными текстовыми данными.
     """
-    gcfg = CONFIG.get("llm", {}).get("gigachat", {})
-    global _gigachat_env_applied, _gigachat_preflight_last_ts
-    # Кэшируем применение окружения на процесс
-    if not _gigachat_env_applied:
-        _ensure_gigachat_env(gcfg)
-        _gigachat_env_applied = True
-    # Префлайт выполняем не чаще, чем раз в 10 минут
-    now_ts = time.time()
-    if now_ts - _gigachat_preflight_last_ts > 600:
-        try:
-            _gigachat_preflight(gcfg)
-        finally:
-            _gigachat_preflight_last_ts = now_ts
+    llm_root = CONFIG.get("llm", {}) or {}
+    provider = (llm_config or {}).get("provider") if isinstance(llm_config, dict) else None
+    provider = (provider or llm_root.get("provider") or "perplexity").lower()
+    pcfg = llm_root.get(provider, {})
+    global _llm_env_applied
+    if not _llm_env_applied:
+        with _llm_env_init_lock:
+            if not _llm_env_applied:
+                _ensure_llm_network_env(pcfg)
+                _llm_env_applied = True
 
-    gen = (CONFIG.get("llm", {}).get("gigachat", {}).get("generation") or {})
-    # Можно переопределить требование JSON на уровне вызова (для overall)
+    gen = (pcfg.get("generation") or {})
     force_json = bool(gen.get("force_json_in_prompt", True))
     if isinstance(llm_config, dict) and "force_json" in llm_config:
         force_json = bool(llm_config.get("force_json"))
@@ -912,173 +1274,49 @@ def ask_llm_with_text_data(
             if force_json else ""
         )
     )
-    if SystemMessage and HumanMessage:
-        lc_messages = [SystemMessage(content=system_text), HumanMessage(content=user_prompt + f"\n\n{data_context}")]
-        with _gigachat_lock:
-            # простые ретраи при read timeout
-            attempts = 0
-            last_err = None
-            while attempts < 3:
-                try:
-                    result = _get_gigachat_client().invoke(lc_messages)
-                    break
-                except Exception as e:
-                    last_err = e
-                    attempts += 1
-                    logger.warning(f"GigaChat invoke retry {attempts}/3 due to: {e}")
-                    if attempts < 3:
-                        time.sleep(min(2 ** attempts, 8))
-                    else:
-                        raise last_err
-            return getattr(result, "content", str(result))
-    else:
-        # Fallback: одним запросом
-        with _gigachat_lock:
-            attempts = 0
-            last_err = None
-            while attempts < 3:
-                try:
-                    result = _get_gigachat_client().invoke(system_text + "\n\n" + user_prompt + f"\n\n{data_context}")
-                    break
-                except Exception as e:
-                    last_err = e
-                    attempts += 1
-                    logger.warning(f"GigaChat invoke retry {attempts}/3 due to: {e}")
-                    if attempts < 3:
-                        time.sleep(min(2 ** attempts, 8))
-                    else:
-                        raise last_err
-        return getattr(result, "content", str(result))
+    if isinstance(system_prompt, str) and system_prompt.strip():
+        system_text = system_prompt.strip()
 
+    user_content = user_prompt if not data_context else f"{user_prompt}\n\n{data_context}"
 
-def read_prompt_from_file(filename: str) -> str:
-    with open(filename, 'r', encoding='utf-8') as f:
-        return f.read()
+    messages = [
+        {"role": "system", "content": system_text},
+        {"role": "user", "content": user_content},
+    ]
 
+    # Переопределения на уровне аргументов
+    if isinstance(model, str) and model.strip():
+        pcfg = {**pcfg, "model": model.strip()}
+    if isinstance(base_url, str) and base_url.strip():
+        pcfg = {**pcfg, "api_base_url": base_url.strip()}
+    if isinstance(api_key, str) and api_key.strip():
+        pcfg = {**pcfg, "api_key": api_key.strip()}
 
-def uploadFromLLM(start_ts: float, end_ts: float) -> Dict[str, object]:
-    _configure_logging()
-    prometheus_url = CONFIG["prometheus"]["url"]
-    src_type = (CONFIG.get("metrics_source", {}).get("type") or "prometheus").lower()
-    if src_type == "grafana_proxy":
-        g = CONFIG.get("metrics_source", {}).get("grafana", {})
-        logger.info(f"Metrics source: Grafana proxy base_url={g.get('base_url')} auth_method={(g.get('auth', {}).get('method'))} verify_ssl={g.get('verify_ssl')} ds_hint={g.get('prometheus_datasource')}")
-    else:
-        logger.info(f"Metrics source: Prometheus url={prometheus_url}")
-    
-    step = CONFIG["default_params"]["step"]
-    resample = CONFIG["default_params"]["resample_interval"]
-
-    queries = CONFIG["queries"]
-    domain_keys = ["jvm", "database", "kafka", "microservices"]
-    domain_data = {}
-    for key in domain_keys:
+    attempts = 0
+    last_err = None
+    while attempts < 3:
         try:
-            domain_data[key] = _build_domain_data(
-                domain_key=key,
-                domain_conf=queries[key],
-                prometheus_url=prometheus_url,
-                start_ts=start_ts,
-                end_ts=end_ts,
-                step=step,
-                resample=resample,
-                top_n=15
-            )
+            with _llm_semaphore:
+                if provider == "perplexity":
+                    return _perplexity_call(messages, pcfg)
+                elif provider == "openai":
+                    return _openai_call(messages, pcfg)
+                elif provider == "anthropic":
+                    return _anthropic_call(messages, pcfg, system_text)
+                else:
+                    return _perplexity_call(messages, pcfg)
         except Exception as e:
-            logger.error(f"Domain '{key}' build failed: {e}")
-            # продвигаемся дальше, формируя пустые структуры
-            domain_data[key] = {"labeled": [], "markdown": "", "pack": {"sections": []}, "ctx": json.dumps({"domain": key, "sections": []}, ensure_ascii=False)}
+            last_err = e
+            attempts += 1
+            logger.warning(f"LLM call retry {attempts}/3 due to: {e}")
+            if attempts < 3:
+                time.sleep(min(2 ** attempts, 8))
+            else:
+                raise last_err
 
-    CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-    prompts_dir = os.path.join(CURRENT_DIR, "prompts")
-    
-    prompt_jvm = read_prompt_from_file(os.path.join(prompts_dir, "jvm_prompt.txt"))
-    # Промпт для домена Database (без обратной совместимости)
-    prompt_database = read_prompt_from_file(os.path.join(prompts_dir, "database_prompt.txt"))
-    prompt_kafka = read_prompt_from_file(os.path.join(prompts_dir, "kafka_prompt.txt"))
-    prompt_microservices = read_prompt_from_file(os.path.join(prompts_dir, "microservices_prompt.txt"))
-    prompt_overall = read_prompt_from_file(os.path.join(prompts_dir, "overall_prompt.txt"))
 
-    # Витрины и контексты для LLM
-    jvm_full_data = domain_data["jvm"]["markdown"]; jvm_pack = domain_data["jvm"]["pack"]; jvm_ctx = domain_data["jvm"]["ctx"]
-    database_full_data = domain_data["database"]["markdown"]; database_pack = domain_data["database"]["pack"]; database_ctx = domain_data["database"]["ctx"]
-    kafka_full_data = domain_data["kafka"]["markdown"]; kafka_pack = domain_data["kafka"]["pack"]; kafka_ctx = domain_data["kafka"]["ctx"]
-    ms_full_data = domain_data["microservices"]["markdown"]; ms_pack = domain_data["microservices"]["pack"]
-    # Обогащаем контекст микросервисов ресурсными метриками из JVM (CPU/Memory)
-    cpu_sections = []
-    mem_sections = []
-    try:
-        for sec in jvm_pack.get("sections", []):
-            lbl = str(sec.get("label", ""))
-            if "Process CPU usage" in lbl:
-                cpu_sections.append(sec)
-            if "Heap used" in lbl or "Heap max" in lbl:
-                mem_sections.append(sec)
-    except Exception:
-        pass
-    ms_ctx_obj = {
-        "domain": "microservices",
-        "time_range": {"start": start_ts, "end": end_ts},
-        **ms_pack,
-        "aux_resources": {
-            "cpu_sections": cpu_sections,
-            "memory_sections": mem_sections
-        }
-    }
-    ms_ctx = json.dumps(ms_ctx_obj, ensure_ascii=False)
-
-    # Two-pass + self-consistency (k=3)
-    try:
-        answer_jvm, jvm_parsed = _ask_domain_analysis(prompt_jvm, jvm_ctx)
-    except Exception as e:
-        logger.error(f"LLM jvm analysis failed: {e}")
-        answer_jvm, jvm_parsed = ("{}", None)
-    try:
-        answer_database, database_parsed = _ask_domain_analysis(prompt_database, database_ctx)
-    except Exception as e:
-        logger.error(f"LLM database analysis failed: {e}")
-        answer_database, database_parsed = ("{}", None)
-    try:
-        answer_kafka, kafka_parsed = _ask_domain_analysis(prompt_kafka, kafka_ctx)
-    except Exception as e:
-        logger.error(f"LLM kafka analysis failed: {e}")
-        answer_kafka, kafka_parsed = ("{}", None)
-    try:
-        answer_ms, ms_parsed = _ask_domain_analysis(prompt_microservices, ms_ctx)
-    except Exception as e:
-        logger.error(f"LLM microservices analysis failed: {e}")
-        answer_ms, ms_parsed = ("{}", None)
-
-    merged_prompt_overall = (
-        prompt_overall
-        .replace("{answer_jvm}", answer_jvm)
-        .replace("{answer_database}", answer_database)
-        .replace("{answer_kafka}", answer_kafka)
-        .replace("{answer_microservices}", answer_ms)
-    )
-
-    overall_ctx = json.dumps({
-        "time_range": {"start": start_ts, "end": end_ts},
-        "domains": {
-            "jvm": jvm_pack,
-            "database": database_pack,
-            "kafka": kafka_pack,
-            "microservices": ms_pack
-        }
-    }, ensure_ascii=False)
-    final_answer, final_parsed = llm_two_pass_self_consistency(user_prompt=merged_prompt_overall, data_context=overall_ctx, k=3)
-
-    return {
-        "jvm": f"{jvm_full_data}\n\nАнализ JVM:\n{answer_jvm}",
-        "database": f"{database_full_data}\n\nАнализ Database:\n{answer_database}",
-        "kafka": f"{kafka_full_data}\n\nАнализ Kafka:\n{answer_kafka}",
-        "ms": f"{ms_full_data}\n\nАнализ микросервисов:\n{answer_ms}",
-        "final": final_answer,
-        "jvm_parsed": (jvm_parsed.dict() if jvm_parsed else None),
-        "database_parsed": (database_parsed.dict() if database_parsed else None),
-        "kafka_parsed": (kafka_parsed.dict() if kafka_parsed else None),
-        "ms_parsed": (ms_parsed.dict() if ms_parsed else None),
-        "final_parsed": (final_parsed.dict() if final_parsed else None),
-    }
+def uploadFromLLM(start_ts: float, end_ts: float, save_to_db: bool = False, run_meta: dict | None = None, only_collect: bool = False) -> Dict[str, object]:
+	from AI.pipeline import uploadFromLLM as _pipeline_upload
+	return _pipeline_upload(start_ts, end_ts, save_to_db=save_to_db, run_meta=run_meta, only_collect=only_collect)
 
 

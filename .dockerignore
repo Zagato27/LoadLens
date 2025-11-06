@@ -1,3 +1,35 @@
+# VCS
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Environments/IDEs
+.venv/
+venv/
+.idea/
+.vscode/
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# App temp data
+data_collectors/temporary_files/
+
+# Local overrides
+*.local.*
+*.secrets.*
+
 metrics_config.py
 .git
 __pycache__/
