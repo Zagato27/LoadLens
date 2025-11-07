@@ -1,148 +1,129 @@
-# Автоматическое создание отчётов по нагрузочному тестированию в Confluence
+# Автоматические отчёты по нагрузочному тестированию (LoadLens + Confluence)
 
-Автоматизирует публикацию результатов нагрузочного тестирования: скачивание графиков из Grafana, выгрузку логов из Loki, AI‑аналитику по доменам и обновление страницы Confluence из шаблона в один проход.
+Создание отчётов в два клика: сбор метрик/логов, AI‑аналитика по доменам, публикация в Confluence и/или локальный «LoadLens» (веб‑интерфейс). Поддерживаются Prometheus напрямую и через Grafana‑прокси, а также InfluxDB (напрямую и через Grafana‑прокси) для метрик генератора нагрузки (lt_framework).
 
 ## Оглавление
-- [Общее описание](#общее-описание)
-- [Архитектура и поток данных](#архитектура-и-поток-данных)
-- [Компоненты проекта](#компоненты-проекта)
+- [Что нового](#что-нового)
+- [Архитектура](#архитектура)
+- [Компоненты](#компоненты)
 - [Плейсхолдеры шаблона Confluence](#плейсхолдеры-шаблона-confluence)
 - [Конфигурация](#конфигурация)
-- [Установка и запуск](#установка-и-запуск)
-- [Docker](#docker)
+- [Запуск и Docker](#запуск-и-docker)
 - [REST API](#rest-api)
-- [Примеры](#примеры)
+- [Особенности UI](#особенности-ui)
 - [Безопасность и сеть](#безопасность-и-сеть)
 - [Устранение неполадок](#устранение-неполадок)
 
-## Общее описание
-Сервис поднимает легкий веб‑интерфейс (Flask) для запуска отчёта за заданный интервал и сервис. По конфигурации берутся идентификаторы шаблона и родительской страницы Confluence, создаётся копия шаблона, после чего в неё массово подставляются данные: графики из Grafana, виджеты с логами из Loki и markdown‑блоки с AI‑аналитикой. Один проход по странице позволяет избежать гонок версий и гарантировать целостность результата.
+## Что нового
+- Две ветки публикации: Confluence и LoadLens (можно выбрать обе; LLM вызывается один раз, без дублирования для веб‑ветки).
+- Пошаговая форма «Новый отчёт»: цель сохранения → время начала/окончания → проектная область → тип теста → LLM → название запуска. Кнопка «Создать отчёт» появляется только после ввода названия.
+- Поддержка типов тестов: ступенчатый (step), soak, spike, stress — профиль автоматически внедряется в промпты общего и доменных анализов.
+- Новая доменная область `lt_framework`: анализ метрик инструмента нагрузочного тестирования (RPS, checks, p95 по URL/транзакции и т.д.). Источники: Prometheus/InfluxDB напрямую или через Grafana‑прокси.
+- Прямой доступ к Prometheus: `metrics_source.type="prometheus"`.
+- Прямой и прокси‑доступ к InfluxDB для `lt_framework`: `lt_metrics_source.type="influxdb"` или `grafana_proxy`.
+- Страница «Отчёт»: блок «Итоги от инженера» с редактором (по умолчанию read‑only, редактирование по кнопке), хранится в отдельной таблице TimescaleDB.
+- Проектные области (service): фильтрация всего UI и данных по выбранной области; рантайм‑оверрайды конфигов и промптов по областям.
+- Уникальность `run_name` в пределах выбранной области проверяется на бэкенде при создании отчёта.
+- Архив: удаление отчётов, колонка «Тип теста», ссылки `/reports/{service}/{run_name}`.
+- Сравнение тестов: сводные таблицы p95 по домену и отдельно «по каждой метрике» (расширяемые по клику) с сортировкой по колонкам.
 
-## Архитектура и поток данных
-1. Веб‑UI: 
-   - дэшборд (`/`, `templates/dashboard.html`) — сводка последнего запуска, распределение вердиктов, быстрые действия;
-   - создание отчёта (`/new`, `templates/index.html`);
-   - архив (`/reports`);
-   - сравнение тестов (`/compare`).
-   UI вызывает `POST /create_report` с диапазоном времени и именем сервиса.
-2. Оркестратор (`update_page.update_report`) копирует шаблон в Confluence и параллельно загружает метрики/логи:
-   - метрики: `data_collectors/grafana_collector.uploadFromGrafana` рендерит панели Grafana и прикрепляет изображения к странице;
-   - логи: `data_collectors/loki_collector.uploadFromLoki` сохраняет `.log` и прикрепляет как `view-file`‑виджет.
-3. После сбора метрик/логов выполняется AI‑аналитика (`AI/pipeline.uploadFromLLM`, экспортируется как `AI/main.uploadFromLLM`) по доменам (JVM, Database, Kafka, Microservices, Hard Resources) и общий итог. В выборе итогов участвуют: LLM‑критик (строгий JSON), LLM‑судья (оценки) и программная проверка по данным (data‑score).
-4. Результаты LLM преобразуются в markdown (`confluence_manager/update_confluence_template.render_llm_markdown`) и вставляются в плейсхолдеры одним вызовом `update_confluence_page_multi`.
+## Архитектура
+1. Веб‑UI (Flask + Jinja): дэшборд (`/`), «Новый отчёт» (`/new`), архив (`/reports`), сравнение (`/compare`), настройки (`/settings`).
+2. Оркестратор (`update_page.update_report`): копирование шаблона Confluence, сбор метрик/логов, запуск AI конвейера, единичная массовая подстановка плейсхолдеров.
+3. Источники данных:
+   - Метрики тестируемой системы (SUT): `metrics_source` (Prometheus напрямую или Grafana‑прокси).
+   - Метрики генератора нагрузки: `lt_metrics_source` (Prometheus/InfluxDB напрямую или через Grafana‑прокси).
+   - Логи: Loki (по ссылкам из `metrics_config`).
+4. Хранилище (TimescaleDB): метрики (`metrics`), LLM‑результаты (`llm_reports`), итоги инженера (`engineer_reports`).
+5. Рантайм‑оверрайды: `settings_runtime.json`, `metrics_config_runtime.json` — применяются «на лету» и переживают перезапуск.
 
-## Компоненты проекта
-- `app.py` — Flask‑приложение: маршруты `/` (дэшборд), `/new` (форма создания отчёта), `/reports` (архив), `/compare` (сравнение), `GET /services`, `POST /create_report`, а также вспомогательные API: `/dashboard_data`, `/llm_reports`, `/runs`, `/run_series`, `/compare_series`, `/domains_schema`. Конвертация времени: `YYYY-MM-DDTHH:MM` → timestamp в мс.
-  - `/dashboard_data` — сводка последнего запуска и распределение вердиктов.
-  - `/runs` — список запусков с полями: `run_name, start_time, end_time, service, verdict, report_created_at` (вердикт и время создания отчёта берутся из последнего `final` в `public.llm_reports`).
-- `update_page.py` — основной оркестратор: копирование шаблона, параллельная выгрузка метрик/логов, LLM‑часть, мульти‑обновление плейсхолдеров. Есть повторные попытки при конфликте версий страницы.
-- `confluence_manager/update_confluence_template.py` — работа с Confluence: `copy_confluence_page`, `update_confluence_page`, `update_confluence_page_multi`, а также форматтер `render_llm_markdown`, который помимо вердикта/доверия/находок/рекомендаций выводит раздел «Пиковая производительность» при наличии данных `peak_performance` [[memory:8657199]].
-- `data_collectors/grafana_collector.py` — скачивание изображений панелей Grafana (basic auth), загрузка во вложения Confluence и вставка `<ac:image>`.
-- `data_collectors/loki_collector.py` — запрос логов в Loki (`/loki/api/v1/query_range`), сохранение во временный `.log`, загрузка во вложения Confluence и вставка `<ac:structured-macro ac:name="view-file">`.
-- `metrics_config.py` — описание сервисов: ID шаблона/родителя Confluence, список метрик (имя → `$$<name>$$` плейсхолдер) и список логов (placeholder + Loki‑фильтр).
-- `config.py` — базовые параметры доступа (Confluence/Grafana/Loki).
-- `AI/` — подсистема AI и промты; подробности см. `AI/README.md`.
-  - `AI/providers.py` — вызовы LLM (perplexity/openai/anthropic), окружение/прокси, ретраи, семафор.
-  - `AI/scoring.py` — строгая схема `LLMAnalysis`, критик, судья, программная проверка по данным, выбор кандидата, `llm_two_pass_self_consistency`.
-  - `AI/pipeline.py` — сбор метрик из Prometheus/Grafana, построение контекста и полный конвейер домены → итог (`uploadFromLLM`).
+## Компоненты
+- `app.py` — Flask‑маршруты и API:
+  - Страницы: `/`, `/new`, `/reports`, `/reports/<service>/<run_name>`, `/compare`, `/settings`.
+  - API: `/create_report`, `/job_status/<id>`, `/runs` (список архивов c `test_type`), `/runs/<run_name> [DELETE]`, `/llm_reports`, `/domains_schema`, `/run_series`, `/compare_series`, `/compare_summary`, `/compare_metric_summary`, `/engineer_summary [GET/POST]`, `/config [GET/POST]`, `/prompts [GET/POST]`, `/project_area [POST]`, `/current_project_area`, `/services`.
+- `update_page.py` — оркестрация публикации; передаёт `test_type`, подставляет все домены (включая `lt_framework`) в Confluence.
+- `AI/pipeline.py` — сбор данных из источников (Prometheus/InfluxDB, напрямую/через Grafana), формирование доменных контекстов, инъекция профиля `test_type`, запуск LLM, объединение результатов в итог.
+- `AI/db_store.py` — сохранение LLM‑результатов и создание таблиц; поддержка колонки `test_type` (в `final`), отдельная таблица для «Итогов инженера».
+- `confluence_manager/update_confluence_template.py` — массовое обновление плейсхолдеров и преобразование LLM‑JSON в markdown.
+- `metrics_config.py` — ссылки на панели Grafana/фильтры Loki для Confluence‑отчётов по областям (service).
+- `settings.py` / `settings.example.py` — основная конфигурация приложения (см. ниже).
 
 ## Плейсхолдеры шаблона Confluence
-- **Метрики**: `$$<name>$$` — имя берётся из `METRICS_CONFIG[service].metrics[].name`. На их место вставляются изображения соответствующих панелей Grafana.
-- **Логи**: `$$<placeholder>$$` — плейсхолдеры из `METRICS_CONFIG[service].logs[].placeholder`. На их место вставляется виджет просмотра вложенного `.log`.
-- **AI‑аналитика**:
-  - `$$answer_jvm$$`, `$$answer_database$$`, `$$answer_kafka$$`, `$$answer_ms$$` — доменные markdown‑блоки, если есть данные.
-  - `$$final_answer$$` — сводный markdown, формируется из строго валидированного JSON (схема LLMAnalysis). Если строгого JSON нет — фолбэк: публикуется текстовый итог. Плейсхолдер `$$answer_llm$$` больше не используется.
-  - Если в ответе LLM присутствует `peak_performance` (`{max_rps, max_time, drop_time, method}`), то он выводится отдельным подразделом внутри `$$final_answer$$` [[memory:8657199]].
-  - В конце каждого блока добавляется раздел «Доверие (судья)» со сводной оценкой: итог, согласованность (factual), полнота (completeness), конкретика (specificity), по данным (programmatic), агрегат.
+- Метрики: `$$<name>$$` — подставляются изображения панелей Grafana (имя берётся из `metrics_config`).
+- Логи: `$$<placeholder>$$` — вставляется виджет просмотра вложенного `.log`.
+- AI‑аналитика:
+  - `$$answer_jvm$$`, `$$answer_database$$`, `$$answer_kafka$$`, `$$answer_ms$$`, `$$answer_hard_resources$$`, `$$answer_lt_framework$$`.
+  - `$$final_answer$$` — общий сводный блок. Если LLM вернул `peak_performance`, раздел выводится автоматически [[memory:8657199]].
 
-Пропуск плейсхолдеров не считается ошибкой: отсутствующие значения не ломают отчёт и аккуратно игнорируются.
+Отсутствующие данные пропускаются безопасно.
 
 ## Конфигурация
-- `config.py` (Confluence/Grafana/Loki):
-  - `user`, `password` — учётные данные Confluence;
-  - `grafana_login`, `grafana_pass` — доступ к Grafana для рендера изображений;
-  - `url_basic` — базовый URL Confluence;
-  - `space_conf` — ключ пространства Confluence;
-  - `grafana_base_url` — базовый URL Grafana для рендера `/render/d-solo/...`;
-  - `loki_url` — endpoint Loki `.../loki/api/v1/query_range`.
-- `metrics_config.py` (пер‑сервисная конфигурация):
-  - `page_sample_id` — ID шаблонной страницы;
-  - `page_parent_id` — ID родительской страницы, куда будет кладться копия;
-  - `metrics[]` — список панелей Grafana: `{ name, grafana_url }` → плейсхолдер `$$name$$`;
-  - `logs[]` — список логов: `{ placeholder, filter_query }` → плейсхолдер `$$placeholder$$`.
-- `AI/config.py` (AI и источник метрик):
-  - `prometheus.url` — адрес Prometheus;
-  - `metrics_source.type` — `prometheus` или `grafana_proxy`;
-  - при `grafana_proxy` — задайте `metrics_source.grafana.{base_url, verify_ssl, auth, prometheus_datasource}`;
-  - `llm.provider` — `perplexity` | `openai` | `anthropic` (параметры и ключи в одноимённых секциях);
-  - доменные `queries` (PromQL), `default_params.step`, `default_params.resample_interval`.
+Основной файл: `settings.py` (создайте из `settings.example.py`).
 
-## Установка и запуск
-1. Установите Python 3.12+ и зависимости:
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. Заполните `config.py`, `metrics_config.py`, `AI/config.py`.
-3. Запустите приложение:
-   ```bash
-   python app.py
-   ```
-4. Откройте браузер: дэшборд по адресу из консоли (по умолчанию `http://localhost:5000/`). Страница создания отчёта: `/new`.
-5. Либо вызовите REST `POST /create_report` (см. раздел «REST API»).
+- Базовые доступы: `user/password/url_basic/space_conf/grafana_base_url/loki_url`.
+- `llm` — провайдер (`perplexity|openai|anthropic`), лимиты/ретраи, опция `include_markdown_tables_in_context`.
+- `default_params` — `step` (шаг выборки), `resample_interval` (ресемплирование).
+- Источники метрик:
+  - `metrics_source` — метрики тестируемой системы:
+    - `type`: `prometheus` | `grafana_proxy`.
+    - `prometheus.url`: прямой PromQL.
+    - `grafana.{base_url, verify_ssl, auth, prometheus_datasource}`: доступ к /api/datasources/proxy/.../api/v1/query_range.
+  - `lt_metrics_source` — метрики генератора нагрузки:
+    - `type`: `prometheus` | `grafana_proxy` | `influxdb`.
+    - `prometheus.url`: прямой PromQL.
+    - `grafana.{prometheus_datasource|influxdb_datasource}`: проксирование Prometheus/InfluxDB.
+    - `influxdb.{url, org, bucket, database, token}`: прямые Flux/InfluxQL запросы.
+- `storage.timescale` — параметры TimescaleDB (включая `engineer_table`).
+- `queries` — список доменных запросов и подписи:
+  - Для Prometheus: `promql_queries`, `label_keys_list`, `labels`.
+  - Для InfluxDB (Flux): `flux_queries`, `label_tag_keys_list` (какие теги попадут в подпись серии), `labels`. Плейсхолдеры: `{bucket}`, `{start}`, `{end}` (ISO‑8601 UTC).
+  - Для InfluxDB (InfluxQL): `influxql_queries`, `label_tag_keys_list`, `labels`. Плейсхолдеры Grafana: `$timeFilter`, `$__interval`, `$Group/$Tag/$URL/$Measurement` (в коде приводятся к разумным значениям).
+- Рантайм‑оверрайды:
+  - `settings_runtime.json` — перезаписывает секции `llm/metrics_source/lt_metrics_source/default_params/queries` точечно; поддерживает `per_area[<service>]` для областей.
+  - `metrics_config_runtime.json` — перезаписывает `metrics_config` по областям.
+- Проектные области: список доступных областей берётся из `metrics_config` (ключи верхнего уровня); активная область хранится в cookie `project_area`.
 
-## Docker
-Сборка и запуск:
-```bash
-docker build -t load-testing-auto-reports .
-docker run --rm -p 5000:5000 \
-  -v $(pwd)/AI/config.py:/app/AI/config.py \
-  -v $(pwd)/config.py:/app/config.py \
-  -v $(pwd)/metrics_config.py:/app/metrics_config.py \
-  load-testing-auto-reports
-```
+См. также `settings.example.py` с подробными комментариями к каждому полю.
+
+## Запуск и Docker
+- Локально:
+  ```bash
+  pip install -r requirements.txt
+  python app.py
+  ```
+  Откройте `http://localhost:5000/`.
+
+- Docker / Compose: см. подробную инструкцию в `DOCKER_SETUP.md` (поднятие `app` + `timescaledb`, пример `.env`, копирование `settings.example.py`).
 
 ## REST API
-- `GET /services` — список доступных сервисов из `metrics_config.py`.
-- `POST /create_report` — создание отчёта.
-  - Тело запроса (JSON):
-    ```json
-    {
-      "start": "2025-02-21T11:30",
-      "end": "2025-02-21T14:10",
-      "service": "NSI"
-    }
-    ```
-  - Ответ: `{ status: "success" | "error", message: string }`.
-- `GET /dashboard_data` — `{ last_run: {run_name, service, start_ms, end_ms, verdict, created_at}, verdict_counts: {"Успешно":n, "Есть риски":n, "Провал":n, "Недостаточно данных":n} }`.
-- `GET /runs` — список запусков `{ run_name, start_time, end_time, service, verdict, report_created_at }`.
-- `GET /llm_reports?run_name=...` — массив доменных/финальных ответов LLM c полями `domain, text, parsed, scores, verdict`.
-- `GET /domains_schema` — агрегированные доступные домены/метрики.
-- `GET /run_series` — данные по одному запуску/метрике.
-- `GET /compare_series` — данные для сравнения двух запусков по одной метрике.
+- `POST /create_report` — запуск отчёта (поля: `start`, `end`, `service`, `use_llm`, `run_name`, `test_type`; при выборе Confluence и LoadLens LLM выполняется один раз).
+- `GET /runs` — список запусков (включая `test_type`, `verdict`, `report_created_at`).
+- `DELETE /runs/<run_name>` — удалить отчёт (метрики, результаты LLM и «итоги инженера»).
+- `GET /llm_reports?run_name=...&service=...` — доменные/финальные результаты.
+- `GET /domains_schema` — доступные домены и их метрики.
+- `GET /compare_summary` — p95 сводка по метрикам в домене.
+- `GET /compare_metric_summary` — p95 сводка по всем сериям конкретной метрики.
+- `GET /run_series`, `GET /compare_series` — временные ряды (абсолют/смещение).
+- `GET/POST /engineer_summary` — чтение/сохранение блока «Итоги от инженера».
+- `GET/POST /config` — чтение/изменение конфигурации (с поддержкой `per_area`).
+- `GET/POST /prompts` — чтение/изменение промптов по доменам и областям.
 
-### TimescaleDB: хранение LLM‑итогов
-- Таблица `public.llm_reports` создаётся автоматически при первом сохранении.
-- Содержит поля: `id, created_at, run_id, run_name, service, start_ms, end_ms, domain, text, parsed, scores, verdict`.
-- Колонка `verdict` заполняется для домена `final` стандартизированным значением из набора: `Успешно | Есть риски | Провал | Недостаточно данных`.
-
-## Примеры
-- Пример соответствия метрики и плейсхолдера:
-  - `metrics_config.py`: `{ "name": "RPS", "grafana_url": "/render/d-solo/...&panelId=17" }`
-  - В шаблоне Confluence должен быть плейсхолдер `$$RPS$$`.
-- Пример плейсхолдера логов:
-  - `logs[].placeholder = "micro-registry-nsi"` → `$$micro-registry-nsi$$` в шаблоне.
-- Пример блока AI (итог): будет подставлен в `$$final_answer$$`. Если в JSON LLM есть `peak_performance`, раздел «Пиковая производительность» будет выведен автоматически [[memory:8657199]].
+## Особенности UI
+- Новый отчёт: пошаговая форма, выбор цели публикации (Confluence/LoadLens), тип теста, LLM «Да/Нет», валидация уникальности `run_name` по области.
+- Архив: удаление, колонка `Тип теста`, ссылки `/reports/{service}/{run_name}`.
+- Страница отчёта: заголовок H1 «Отчёт по тесту {run_name}», ниже H1 «Время теста: ... – ...», блок «Итоги от инженера» под заголовком, редактор по кнопке «Редактировать».
+- Сравнение: по каждому домену — сводная p95‑таблица; дополнительно — раскрывающиеся «сводные таблицы по метрикам» со значениями для всех серий; в обоих таблицах доступна сортировка по колонкам.
+- Настройки: Accordion‑страница с редакторами JSON (Ace): разделы LoadLens (LLM, Источник метрик, Хранилище, Параметры, Запросы, Промпты по доменам, включая `lt_framework`) и Confluence (Confluence‑доступы и ссылки на графики/логи). Редактирование — по кнопке, с валидацией и возможностью отмены.
 
 ## Безопасность и сеть
-- Соединения к Confluence/Grafana/Loki используют простой HTTP(S); проверка сертификатов в некоторых вызовах отключена (`verify=False`). Настройте корпоративные сертификаты там, где это требуется.
-- Для GigaChat включается mTLS: укажите `cert_file`, `key_file`, `verify` в `AI/config.py`.
-- Не храните реальные пароли в репозитории. Используйте переменные окружения/секреты и монтирование конфигов в контейнер.
+- Не храните секреты в git. Пользуйтесь `settings.example.py` / `settings.py` локально, `.env` для compose, или секретами CI/CD.
+- В Grafana/Loki используйте отдельные сервисные учётки и ограниченные токены.
+- При прямом доступе к Prometheus/InfluxDB учитывайте требования к TLS/MTLS (см. параметры `verify` и сертификаты, если нужно).
 
 ## Устранение неполадок
-- «Плейсхолдер не найден»: проверьте, что в шаблоне есть `$$<name>$$` и он совпадает с `metrics[].name` или `logs[].placeholder`.
-- Конфликт версий Confluence: оркестратор повторит попытку; при массовом редактировании избегайте ручных изменений страницы во время обновления.
-- Grafana 401/403: проверьте `grafana_login/grafana_pass` и доступ к `/render/d-solo/...`.
-- Loki ошибки: проверьте `loki_url` и корректность `filter_query`.
-- LLM «Недостаточно данных»: означает, что для анализа не хватило данных; проверьте метрики за указанный интервал.
+- Пустые разделы отчёта: проверьте корректность источников (`metrics_source`, `lt_metrics_source`), доступность датасорсов Grafana и фильтров временного интервала.
+- InfluxQL p95 пустой: убедитесь, что значения колонок — числа (в конвейере предусмотрено принудительное приведение).
+- Ошибка TimescaleDB «current transaction is aborted»: бэкенд выполняет `rollback` после неудачных запросов; воспроизведите проблему, проверьте схему таблиц.
+- LLM вернул «Недостаточно данных»: чаще всего не хватает метрик за интервал — проверьте настройки и окна агрегаций.
 
-Подсистема AI описана подробно в `AI/README.md`.
+Подсистема AI и промпты подробно описаны в `AI/README.md`.

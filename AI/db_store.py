@@ -270,6 +270,7 @@ def _ensure_llm_reports_table(conn, storage_cfg: Dict[str, object]) -> None:
                             run_id      TEXT,
                             run_name    TEXT,
                             service     TEXT,
+                            test_type   TEXT,
                             start_ms    BIGINT,
                             end_ms      BIGINT,
                             domain      TEXT NOT NULL,
@@ -295,6 +296,61 @@ def _ensure_llm_reports_table(conn, storage_cfg: Dict[str, object]) -> None:
                 cur.execute(
                     sql.SQL("ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS verdict TEXT;").format(
                         sql.Identifier(schema), sql.Identifier(table)
+                    )
+                )
+            except Exception:
+                pass
+            # Добавляем колонку test_type, если её ещё нет
+            try:
+                cur.execute(
+                    sql.SQL("ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS test_type TEXT;").format(
+                        sql.Identifier(schema), sql.Identifier(table)
+                    )
+                )
+            except Exception:
+                pass
+    finally:
+        try:
+            conn.autocommit = prev_autocommit
+        except Exception:
+            pass
+    _ENSURED_TABLES.add(key)
+
+
+def _ensure_engineer_reports_table(conn, storage_cfg: Dict[str, object]) -> None:
+    """Создаёт таблицу для итогов инженера (если отсутствует).
+    Схема: id, created_at, run_id, run_name, service, content_html.
+    """
+    schema = storage_cfg.get("schema", "public")
+    table = storage_cfg.get("engineer_table", "engineer_reports")
+    key = (schema, table)
+    if key in _ENSURED_TABLES:
+        return
+    prev_autocommit = getattr(conn, "autocommit", False)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            try:
+                cur.execute(
+                    sql.SQL(
+                        """
+                        CREATE TABLE IF NOT EXISTS {}.{} (
+                            id           BIGSERIAL PRIMARY KEY,
+                            created_at   TIMESTAMPTZ DEFAULT now(),
+                            run_id       TEXT,
+                            run_name     TEXT NOT NULL,
+                            service      TEXT,
+                            content_html TEXT
+                        );
+                        """
+                    ).format(sql.Identifier(schema), sql.Identifier(table))
+                )
+            except Exception as e:
+                logger.warning("Не удалось создать таблицу %s.%s (engineer): %s", schema, table, e)
+            try:
+                cur.execute(
+                    sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {}.{} (run_name, created_at DESC);").format(
+                        sql.Identifier(f"idx_{table}_run_created"), sql.Identifier(schema), sql.Identifier(table)
                     )
                 )
             except Exception:
@@ -349,14 +405,15 @@ def save_llm_results(
         insert_sql = sql.SQL(
             """
             INSERT INTO {}.{} (
-                run_id, run_name, service, start_ms, end_ms, domain, text, parsed, scores, verdict
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);
+                run_id, run_name, service, test_type, start_ms, end_ms, domain, text, parsed, scores, verdict
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);
             """
         ).format(sql.Identifier(schema), sql.Identifier(table))
 
         run_id = str((run_meta or {}).get("run_id") or "")
         run_name = str((run_meta or {}).get("run_name") or "")
         service = str((run_meta or {}).get("service") or "")
+        test_type = str((run_meta or {}).get("test_type") or "")
         start_ms = int((run_meta or {}).get("start_ms") or 0)
         end_ms = int((run_meta or {}).get("end_ms") or 0)
 
@@ -369,6 +426,12 @@ def save_llm_results(
             ("hard_resources", results.get("hard_resources"), results.get("hard_resources_parsed"), (results.get("scores", {}) or {}).get("hard_resources")),
             ("final", results.get("final"), results.get("final_parsed"), (results.get("scores", {}) or {}).get("final")),
         ]
+        # Дополнительно сохраняем lt_framework, если присутствует
+        try:
+            if "lt_framework" in results:
+                domains.insert(-1, ("lt_framework", results.get("lt_framework"), results.get("lt_framework_parsed"), (results.get("scores", {}) or {}).get("lt_framework")))
+        except Exception:
+            pass
 
         # Стандартизированный вердикт рассчитываем один раз для финального домена
         final_parsed = results.get("final_parsed") if isinstance(results, dict) else None
@@ -385,7 +448,7 @@ def save_llm_results(
             # сохраняем даже пустые тексты, чтобы фиксировать сам факт попытки
             rows.append(
                 (
-                    run_id, run_name, service, start_ms, end_ms, domain,
+                    run_id, run_name, service, test_type, start_ms, end_ms, domain,
                     str(text_val) if text_val is not None else None,
                     json.dumps(parsed_val) if parsed_val is not None else None,
                     json.dumps(scores_val) if scores_val is not None else None,

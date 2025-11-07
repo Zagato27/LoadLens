@@ -1,4 +1,13 @@
 # Пример конфигурации (обезличено). Скопируйте в settings.py и заполните свои значения.
+# Поддерживаются рантайм‑оверрайды (settings_runtime.json), в т.ч. по проектным областям через блок per_area.
+# Ключевые разделы:
+#  - llm — провайдер и параметры генерации
+#  - default_params — шаг выборки и ресемплирование
+#  - metrics_source — метрики тестируемой системы (SUT): Prometheus напрямую или через Grafana‑прокси
+#  - lt_metrics_source — метрики инструмента нагрузки (k6/JMeter): Prometheus/InfluxDB напрямую или через Grafana‑прокси
+#  - storage.timescale — параметры TimescaleDB (в т.ч. таблица engineer_reports)
+#  - queries — набор доменных запросов и подписей (PromQL/Flux/InfluxQL)
+#  - per_area (в settings_runtime.json) — переопределения разделов по областям (service)
 
 CONFIG = {
     'user': 'your_login',
@@ -11,8 +20,10 @@ CONFIG = {
     'loki_url': 'http://loki:3100/loki/api/v1/query_range',
 
     "llm": {
+        # Включать ли markdown‑таблицы в контекст для LLM (увеличивает объём prompt)
         "include_markdown_tables_in_context": False,
-        "provider": "openai",  # perplexity | openai | anthropic
+        # Провайдер LLM: perplexity | openai | anthropic
+        "provider": "openai",
         "perplexity": {
             "api_base_url": "https://api.perplexity.ai",
             "model": "sonar-reasoning-pro",
@@ -49,15 +60,54 @@ CONFIG = {
         }
     },
 
-    "default_params": {"step": "1m", "resample_interval": "10T"},
+    # Параметры по умолчанию для построения рядов/агрегаций
+    "default_params": {
+        # step — шаг выборки (гранулярность измерений, напр. 1m)
+        "step": "1m",
+        # resample_interval — интервал ресемплинга (напр. 10T ≈ 10 минут)
+        "resample_interval": "10T"
+    },
 
     "metrics_source": {
+        # Метрики тестируемой системы (SUT)
+        # Режим: "grafana_proxy" ИЛИ "prometheus"
+        # Для прямого доступа к Prometheus укажите: "type": "prometheus"
         "type": "grafana_proxy",
+        # Прямой Prometheus (используется при type="prometheus")
+        "prometheus": {
+            "url": "http://prometheus:9090"
+        },
+        # Grafana Proxy (используется при type="grafana_proxy")
         "grafana": {
             "base_url": "http://grafana:3000",
             "verify_ssl": False,
             "auth": {"method": "basic", "username": "admin", "password": "admin", "token": ""},
             "prometheus_datasource": {"id": None, "uid": "your-datasource-uid", "name": "Prometheus"}
+        }
+    },
+    "lt_metrics_source": {
+        # Источник метрик инструмента нагрузочного тестирования (lt_framework)
+        # Возможные значения: "prometheus" | "grafana_proxy" | "influxdb"
+        "type": "prometheus",
+        # Прямой Prometheus для lt_framework
+        "prometheus": {"url": "http://prometheus:9090"},
+        # Grafana‑прокси: можно использовать и Prometheus, и InfluxDB datasource
+        "grafana": {
+            "base_url": "http://grafana:3000",
+            "verify_ssl": False,
+            "auth": {"method": "basic", "username": "admin", "password": "admin", "token": ""},
+            "prometheus_datasource": {"id": None, "uid": "your-datasource-uid", "name": "Prometheus"},
+            # Если используете InfluxDB через Grafana: укажите uid/name соответствующего datasource
+            "influxdb_datasource": {"id": None, "uid": "your-influxdb-uid", "name": "InfluxDB-k6"}
+        },
+        # Прямой InfluxDB: поддерживаются Flux и InfluxQL
+        "influxdb": {
+            "url": "http://influxdb:8086",
+            "org": "your_org",
+            # bucket — для Flux запросов; database — для InfluxQL
+            "bucket": "your_bucket",
+            "database": "k6",
+            "token": "your_token"
         }
     },
 
@@ -75,11 +125,16 @@ CONFIG = {
             "make_hypertable": True,
             "ensure_extension": True,
             "chunk_interval": "1 day",
-            "llm_table": "llm_reports"
+            "llm_table": "llm_reports",
+            # Отдельная таблица для «Итогов от инженера»
+            "engineer_table": "engineer_reports"
         }
     },
 
-    # Ниже примерная структура запросов — адаптируйте под свои метрики
+    # Ниже примерная структура запросов — адаптируйте под свои метрики.
+    # Для Prometheus используйте promql_queries + label_keys_list.
+    # Для InfluxDB (Flux) используйте flux_queries + label_tag_keys_list. Плейсхолдеры: {bucket}, {start}, {end} (ISO8601 UTC).
+    # Для InfluxDB (InfluxQL) используйте influxql_queries + label_tag_keys_list. Плейсхолдеры: $timeFilter, $__interval, а также $Group/$Tag/$URL/$Measurement.
     "queries": {
         "jvm": {
             "promql_queries": [
@@ -119,8 +174,50 @@ CONFIG = {
             ],
             "label_keys_list": [["node"]],
             "labels": ["Nodes: CPU usage by node"]
+        },
+        "lt_framework": {
+            # LT Framework — метрики инструмента нагрузки (пример Prometheus):
+            "promql_queries": [
+                'sum by (scenario) (rate(lt_requests_total[1m]))',
+                'histogram_quantile(0.95, sum(rate(lt_http_req_duration_seconds_bucket[5m])) by (le, scenario))',
+                'sum by (scenario, status) (rate(lt_http_requests_total[1m]))'
+            ],
+            "label_keys_list": [
+                ["scenario"],
+                ["scenario"],
+                ["scenario", "status"]
+            ],
+            "labels": [
+                "LT: Requests per second by scenario",
+                "LT: http_req_duration p95 by scenario",
+                "LT: http requests by scenario & status"
+            ],
+            # Пример InfluxDB (Flux). Плейсхолдеры {bucket} {start} {end} будут подставлены автоматически.
+            "flux_queries": [
+                'from(bucket: "{bucket}") |> range(start: {start}, stop: {end}) |> filter(fn: (r) => r._measurement == "k6" and r._field == "http_reqs") |> aggregateWindow(every: 1m, fn: sum) |> keep(columns: ["_time","_value","scenario"])',
+                'from(bucket: "{bucket}") |> range(start: {start}, stop: {end}) |> filter(fn: (r) => r._measurement == "k6" and r._field == "http_req_duration") |> aggregateWindow(every: 1m, fn: mean) |> keep(columns: ["_time","_value","scenario"])'
+            ],
+            "label_tag_keys_list": [
+                ["scenario"],
+                ["scenario"]
+            ],
+            # Пример InfluxDB (InfluxQL) напрямую или через Grafana Proxy — допускаются шаблонные переменные Grafana.
+            "influxql_queries": [
+                'SELECT sum("value") FROM "http_reqs" WHERE ("group" =~ /^$Group$/ AND "name" =~ /^$Tag$/) AND $timeFilter GROUP BY time(1s), "group"::tag, "name"::tag fill(null)',
+                'SELECT sum("value") FROM "checks" WHERE ("group" =~ /^$Group$/) AND $timeFilter GROUP BY time(1s), "check", "group"::tag fill(none)',
+                'SELECT percentile("value", 95) FROM /^$Measurement$/ WHERE ("name" =~ /^$URL$/ AND "group" =~ /^$Group$/ AND "name" =~ /^$Tag$/) AND $timeFilter GROUP BY time($__interval), "group", "name"::tag fill(null)'
+            ],
+            # Для influxql_queries укажите теги, которые попадут в подпись серии (по порядку):
+            "label_tag_keys_list": [
+                ["group","name"],
+                ["group","check"],
+                ["group","name"]
+            ],
+            "labels": [
+                "LT (InfluxQL): RPS by group & name",
+                "LT (InfluxQL): checks per second by group & check",
+                "LT (InfluxQL): http_req_duration p95 by group & name"
+            ]
         }
     }
 }
-
-

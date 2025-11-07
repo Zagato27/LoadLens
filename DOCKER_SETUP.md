@@ -36,7 +36,7 @@
    - `APP_PORT` — порт приложения на хосте (по умолчанию 5000)
    - `TSDB_PORT` — порт БД на хосте (по умолчанию 5432)
 
-3. Отредактируйте `settings.py` (используется приложением):
+3. Отредактируйте `settings.py` (используется приложением). Рекомендуется начать с `settings.example.py`:
    - Блок `storage.timescale`:
      - `host`: `timescaledb` (это имя сервиса в `docker-compose.yml`)
      - `port`: `5432`
@@ -47,6 +47,16 @@
      - `table`: `metrics`
      - `llm_table`: `llm_reports`
      - `ensure_extension`: `True` (на всякий случай; расширение также создаётся скриптом инициализации)
+   - Блок `metrics_source` — источник метрик тестируемой системы (SUT):
+     - Режим `type`: `prometheus` (прямой доступ) или `grafana_proxy` (через `/api/datasources/proxy/...`).
+     - Для `prometheus`: укажите `prometheus.url`.
+     - Для `grafana_proxy`: укажите `grafana.base_url`, `auth` и `prometheus_datasource` (uid/name/id).
+   - Блок `lt_metrics_source` — источник метрик инструмента нагрузки (например, k6/JMeter):
+     - Режим `type`: `prometheus` | `grafana_proxy` | `influxdb`.
+     - `prometheus.url` — прямой PromQL.
+     - `grafana.influxdb_datasource` — использование InfluxDB через Grafana‑прокси.
+     - `influxdb.{url,org,bucket,database,token}` — прямой доступ к InfluxDB (Flux/InfluxQL).
+   - Блок `queries.lt_framework` — примеры запросов для Prometheus/InfluxDB и наборы ключей меток/тегов для подписи серий.
 
    При необходимости обновите блоки `llm`, `metrics_source`, `grafana_base_url`, `loki_url` — используйте безопасные ключи/URL.
 
@@ -133,6 +143,12 @@ git commit -m "chore: stop tracking local configs; add examples"
 ### 7) Подключение приложения к внешней БД (не из compose)
 
 В `settings.py` укажите реальные `host`, `port`, `dbname`, `user`, `password` целевой TimescaleDB. В таком случае сервис `timescaledb` из compose можно не поднимать (или удалить из `docker-compose.yml`).
+
+### 8) Рантайм‑оверрайды и области (per‑area)
+
+- `settings_runtime.json` — позволяет изменить разделы `llm`, `metrics_source`, `lt_metrics_source`, `default_params`, `queries` без пересборки/перезапуска. Поддерживает блок `per_area`: можно задать отличающиеся настройки для разных проектных областей.
+- `metrics_config_runtime.json` — аналогично для ссылок на панели/логи Confluence в разрезе областей.
+- Оба файла можно редактировать из вкладки «Настройки» в приложении. Изменения применяются динамически.
 
 ---
 

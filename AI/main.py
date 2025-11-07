@@ -1315,8 +1315,8 @@ def ask_llm_with_text_data(
                 raise last_err
 
 
-def uploadFromLLM(start_ts: float, end_ts: float, save_to_db: bool = False, run_meta: dict | None = None, only_collect: bool = False) -> Dict[str, object]:
+def uploadFromLLM(start_ts: float, end_ts: float, save_to_db: bool = False, run_meta: dict | None = None, only_collect: bool = False, ef_config: dict | None = None, prompts_override: dict | None = None) -> Dict[str, object]:
 	from AI.pipeline import uploadFromLLM as _pipeline_upload
-	return _pipeline_upload(start_ts, end_ts, save_to_db=save_to_db, run_meta=run_meta, only_collect=only_collect)
+	return _pipeline_upload(start_ts, end_ts, save_to_db=save_to_db, run_meta=run_meta, only_collect=only_collect, ef_config=ef_config, prompts_override=prompts_override)
 
 

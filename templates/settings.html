@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Настройки</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,400;0,500;0,600;0,700;1,600&display=swap" rel="stylesheet">
+  <style>
+    body { background:#121212; color:#fff; font-family:'Montserrat', Arial, sans-serif; margin:0; }
+    .app-header { position:sticky; top:0; display:flex; align-items:center; gap:12px; z-index:2000; width:100%; max-width:1400px; margin:0 auto; padding:8px 12px; --brandSize:40px; background:#121212; border-bottom:1px solid #2a2a2a; }
+    .app-header .logo { width:var(--brandSize); height:var(--brandSize); object-fit:contain; }
+    .app-header .brand { font-size:var(--brandSize); line-height:var(--brandSize); font-weight:600; font-style:italic; letter-spacing:.2px; color:#eaeaea; }
+    .app-nav { display:flex; gap:16px; margin-left:auto; white-space:nowrap; align-items:center; }
+    .app-nav a.nav-btn { height:36px; padding:8px 4px; background:transparent; border:none; color:#eaeaea; border-bottom:2px solid transparent; cursor:pointer; font-weight:600; font-style:italic; text-decoration:none; display:inline-flex; align-items:center; }
+    .app-nav a.nav-btn:hover { color:#fff; border-bottom-color:#3700b3; }
+    .app-nav a.nav-btn.active { color:#fff; border-bottom-color:#6200ee; }
+    .container { width:90%; max-width:1400px; margin:16px auto; }
+    h2 { margin:8px 0 16px; font-weight:600; font-style:italic; }
+    details { background:#1e1e1e; border:1px solid #333; border-radius:8px; margin-bottom:10px; }
+    summary { cursor:pointer; padding:10px 12px; font-weight:600; outline:none; }
+    .panel { padding: 0 12px 12px 12px; }
+    .editor-wrap { border:1px solid #333; border-radius:8px; background:#0f0f0f; margin:8px 0 10px 0; overflow:hidden; }
+    .editor-header { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 10px; background:#151515; border-bottom:1px solid #333; }
+    .editor-title { font-weight:600; color:#ddd; font-size:13px; }
+    .editor-status { color:#bbb; font-size:12px; }
+    .editor { width:100%; min-height:240px; background:#0f0f0f; }
+    .help { color:#bbbbbb; font-size:13px; line-height:1.5; margin: 8px 0 10px 0; }
+    .btn { height:36px; padding:0 12px; background:#6200ee; border:1px solid #6200ee; color:#fff; border-radius:6px; cursor:pointer; margin-top:8px; }
+    .btn-secondary { background:#2b2b2b; border:1px solid #444; }
+    .btn:hover { background:#3700b3; border-color:#3700b3; }
+    .row { display:flex; gap:8px; align-items:center; }
+    .status { color:#bbb; font-size:13px; margin-left:8px; }
+  </style>
+</head>
+<body>
+  <div class="app-header">
+    <img class="logo" src="/assets/logo.png" alt="LoadLens" />
+    <span class="brand">LoadLens</span>
+    <div class="app-nav">
+      <a class="nav-btn" href="/">Дэшборд</a>
+      <a class="nav-btn" href="/new">Новый отчёт</a>
+      <a class="nav-btn" href="/reports">Архив</a>
+      <a class="nav-btn" href="/compare">Сравнение тестов</a>
+      <a class="nav-btn active" href="/settings">Настройки</a>
+    </div>
+  </div>
+  <div class="container">
+    <h2>Настройки</h2>
+    <div class="row" style="margin:8px 0 14px 0; gap:12px; align-items:center;">
+      <label for="areaSelect" style="min-width:160px; color:#ccc;">Проектная область:</label>
+      <select id="areaSelect" style="height:36px; background:#1e1e1e; color:#eaeaea; border:1px solid #333; border-radius:6px; padding:6px 10px; min-width:200px;"></select>
+      <button class="btn btn-secondary" id="addAreaBtn" type="button">Добавить область</button>
+      <span id="areaStatus" class="status"></span>
+    </div>
+
+    <details open>
+      <summary>Конфигурация отчётов в LoadLens</summary>
+      <div class="panel">
+        <details>
+          <summary>LLM</summary>
+          <div class="panel">
+            <div class="help">Настройка провайдера LLM (perplexity/openai/anthropic), параметры генерации, таймауты и параллелизм. Изменения применяются сразу к новым отчётам.</div>
+            <div class="editor-wrap">
+              <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_llm"></span></div>
+              <div id="ed_llm" class="editor"></div>
+            </div>
+            <div class="row"><button class="btn btn-secondary" data-edit="llm">Редактировать</button><button class="btn" data-save="llm" style="display:none;">Сохранить</button></div>
+          </div>
+        </details>
+        <details>
+          <summary>Источник метрик</summary>
+          <div class="panel">
+            <div class="help">Выберите режим: <code>prometheus</code> (прямое подключение) или <code>grafana_proxy</code> (через Grafana). Укажите URL Prometheus или базовый URL Grafana и параметры доступа/датасорса.</div>
+            <div class="editor-wrap">
+              <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_metrics_source"></span></div>
+              <div id="ed_metrics_source" class="editor"></div>
+            </div>
+            <div class="row"><button class="btn btn-secondary" data-edit="metrics_source">Редактировать</button><button class="btn" data-save="metrics_source" style="display:none;">Сохранить</button></div>
+          </div>
+        </details>
+    <details>
+      <summary>Источник метрик LT (нагрузочное ПО)</summary>
+      <div class="panel">
+        <div class="help">Конфигурация чтения метрик самого инструмента нагрузочного тестирования (lt_framework): <code>prometheus</code> (прямо), <code>grafana_proxy</code> или <code>influxdb</code> (прямое подключение к InfluxDB v2).</div>
+        <div class="editor-wrap">
+          <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_lt_metrics_source"></span></div>
+          <div id="ed_lt_metrics_source" class="editor"></div>
+        </div>
+        <div class="row"><button class="btn btn-secondary" data-edit="lt_metrics_source">Редактировать</button><button class="btn" data-save="lt_metrics_source" style="display:none;">Сохранить</button></div>
+      </div>
+    </details>
+        <details>
+          <summary>Хранилище (TimescaleDB)</summary>
+          <div class="panel">
+            <div class="help">Параметры подключения TimescaleDB, имена таблиц (<code>metrics</code>, <code>llm_reports</code>, <code>engineer_reports</code>), батч и настройки гипертаблицы.</div>
+            <div class="editor-wrap">
+              <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_storage_timescale"></span></div>
+              <div id="ed_storage_timescale" class="editor"></div>
+            </div>
+            <div class="row"><button class="btn btn-secondary" data-edit="storage.timescale">Редактировать</button><button class="btn" data-save="storage.timescale" style="display:none;">Сохранить</button></div>
+          </div>
+        </details>
+        <details>
+          <summary>Параметры по умолчанию</summary>
+          <div class="panel">
+            <div class="help">Шаг выборки (<code>step</code>) и интервал ресемплинга (<code>resample_interval</code>) для агрегации временных рядов.</div>
+            <div class="editor-wrap">
+              <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_default_params"></span></div>
+              <div id="ed_default_params" class="editor"></div>
+            </div>
+            <div class="row"><button class="btn btn-secondary" data-edit="default_params">Редактировать</button><button class="btn" data-save="default_params" style="display:none;">Сохранить</button></div>
+          </div>
+        </details>
+        <details>
+          <summary>Запросы</summary>
+          <div class="panel">
+            <div class="help">
+              <p>Домены и запросы для формирования отчёта.</p>
+              <ul>
+                <li><code>promql_queries</code>/<code>label_keys_list</code>/<code>labels</code> — для источника Prometheus или Grafana Proxy.</li>
+                <li><code>flux_queries</code>/<code>label_tag_keys_list</code>/<code>labels</code> — для источника InfluxDB (Flux). В Flux допускаются плейсхолдеры <code>{bucket}</code>, <code>{start}</code>, <code>{end}</code> (ISO8601 UTC).</li>
+              </ul>
+              <p>Домен <code>lt_framework</code> — метрики инструмента нагрузочного тестирования:</p>
+              <ul>
+                <li>Prometheus: задайте <code>promql_queries</code> (например, RPS и p95 по <code>scenario</code>), <code>label_keys_list</code>, <code>labels</code>.</li>
+                <li>InfluxDB: задайте <code>flux_queries</code> с <code>from(bucket: \"{bucket}\") |> range(start: {start}, stop: {end})</code>, укажите теги для серий в <code>label_tag_keys_list</code> и подписи в <code>labels</code>.</li>
+                <li>Рекомендуется использовать тег <code>scenario</code> как основной ключ серии.</li>
+              </ul>
+            </div>
+            <div class="editor-wrap">
+              <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_queries"></span></div>
+              <div id="ed_queries" class="editor"></div>
+            </div>
+            <div class="row"><button class="btn btn-secondary" data-edit="queries">Редактировать</button><button class="btn" data-save="queries" style="display:none;">Сохранить</button></div>
+          </div>
+        </details>
+        <details>
+          <summary>Промпты для LLM отчёта</summary>
+          <div class="panel">
+            <div class="help">Редактируйте тексты подсказок (prompts) для разных доменов анализа. Эти значения могут отличаться по проектным областям.</div>
+            <details>
+              <summary>overall</summary>
+              <div class="panel">
+                <div class="editor-wrap">
+                  <div class="editor-header"><div class="editor-title">Prompt: overall</div><span class="editor-status status" id="st_prompt_overall"></span></div>
+                  <div id="ed_prompt_overall" class="editor"></div>
+                </div>
+                <div class="row"><button class="btn btn-secondary" data-prompt-edit="overall">Редактировать</button><button class="btn" data-prompt-save="overall" style="display:none;">Сохранить</button></div>
+              </div>
+            </details>
+            <details>
+              <summary>judge</summary>
+              <div class="panel">
+                <div class="editor-wrap">
+                  <div class="editor-header"><div class="editor-title">Prompt: judge</div><span class="editor-status status" id="st_prompt_judge"></span></div>
+                  <div id="ed_prompt_judge" class="editor"></div>
+                </div>
+                <div class="row"><button class="btn btn-secondary" data-prompt-edit="judge">Редактировать</button><button class="btn" data-prompt-save="judge" style="display:none;">Сохранить</button></div>
+              </div>
+            </details>
+            <details>
+              <summary>critic</summary>
+              <div class="panel">
+                <div class="editor-wrap">
+                  <div class="editor-header"><div class="editor-title">Prompt: critic</div><span class="editor-status status" id="st_prompt_critic"></span></div>
+                  <div id="ed_prompt_critic" class="editor"></div>
+                </div>
+                <div class="row"><button class="btn btn-secondary" data-prompt-edit="critic">Редактировать</button><button class="btn" data-prompt-save="critic" style="display:none;">Сохранить</button></div>
+              </div>
+            </details>
+            <details>
+              <summary>database</summary>
+              <div class="panel">
+                <div class="editor-wrap">
+                  <div class="editor-header"><div class="editor-title">Prompt: database</div><span class="editor-status status" id="st_prompt_database"></span></div>
+                  <div id="ed_prompt_database" class="editor"></div>
+                </div>
+                <div class="row"><button class="btn btn-secondary" data-prompt-edit="database">Редактировать</button><button class="btn" data-prompt-save="database" style="display:none;">Сохранить</button></div>
+              </div>
+            </details>
+            <details>
+              <summary>kafka</summary>
+              <div class="panel">
+                <div class="editor-wrap">
+                  <div class="editor-header"><div class="editor-title">Prompt: kafka</div><span class="editor-status status" id="st_prompt_kafka"></span></div>
+                  <div id="ed_prompt_kafka" class="editor"></div>
+                </div>
+                <div class="row"><button class="btn btn-secondary" data-prompt-edit="kafka">Редактировать</button><button class="btn" data-prompt-save="kafka" style="display:none;">Сохранить</button></div>
+              </div>
+            </details>
+            <details>
+              <summary>microservices</summary>
+              <div class="panel">
+                <div class="editor-wrap">
+                  <div class="editor-header"><div class="editor-title">Prompt: microservices</div><span class="editor-status status" id="st_prompt_microservices"></span></div>
+                  <div id="ed_prompt_microservices" class="editor"></div>
+                </div>
+                <div class="row"><button class="btn btn-secondary" data-prompt-edit="microservices">Редактировать</button><button class="btn" data-prompt-save="microservices" style="display:none;">Сохранить</button></div>
+              </div>
+            </details>
+            <details>
+              <summary>jvm</summary>
+              <div class="panel">
+                <div class="editor-wrap">
+                  <div class="editor-header"><div class="editor-title">Prompt: jvm</div><span class="editor-status status" id="st_prompt_jvm"></span></div>
+                  <div id="ed_prompt_jvm" class="editor"></div>
+                </div>
+                <div class="row"><button class="btn btn-secondary" data-prompt-edit="jvm">Редактировать</button><button class="btn" data-prompt-save="jvm" style="display:none;">Сохранить</button></div>
+              </div>
+            </details>
+            <details>
+              <summary>hard_resources</summary>
+              <div class="panel">
+                <div class="editor-wrap">
+                  <div class="editor-header"><div class="editor-title">Prompt: hard_resources</div><span class="editor-status status" id="st_prompt_hard_resources"></span></div>
+                  <div id="ed_prompt_hard_resources" class="editor"></div>
+                </div>
+                <div class="row"><button class="btn btn-secondary" data-prompt-edit="hard_resources">Редактировать</button><button class="btn" data-prompt-save="hard_resources" style="display:none;">Сохранить</button></div>
+              </div>
+            </details>
+          </div>
+        </details>
+      </div>
+    </details>
+
+    <details>
+      <summary>Конфигурация отчётов в Confluence</summary>
+      <div class="panel">
+        <details>
+          <summary>Confluence</summary>
+          <div class="panel">
+            <div class="help">Публикация отчёта: настройки Confluence (базовый URL, пространство, логин/пароль), а также параметры доступа к Grafana (рендер изображений панелей) и Loki (выгрузка логов).</div>
+            <div class="editor-wrap">
+              <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_confluence"></span></div>
+              <div id="ed_confluence" class="editor"></div>
+            </div>
+            <div class="row"><button class="btn btn-secondary" data-edit="confluence">Редактировать</button><button class="btn" data-save="confluence" style="display:none;">Сохранить</button></div>
+          </div>
+        </details>
+        <details>
+          <summary>Ссылки на графики для отчётов</summary>
+          <div class="panel">
+            <div class="help">Перечень сервисов для публикации: ID шаблонной и родительской страницы Confluence, список метрик (панелей Grafana) и логов (Loki), используемых при сборке отчёта. Изменение структуры требует внимательности.</div>
+            <div class="editor-wrap">
+              <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_metrics_config"></span></div>
+              <div id="ed_metrics_config" class="editor"></div>
+            </div>
+            <div class="row"><button class="btn btn-secondary" data-edit="metrics_config">Редактировать</button><button class="btn" data-save="metrics_config" style="display:none;">Сохранить</button></div>
+          </div>
+        </details>
+      </div>
+    </details>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/ace-builds@1.32.3/src-min-noconflict/ace.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/ace-builds@1.32.3/src-min-noconflict/mode-json.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/ace-builds@1.32.3/src-min-noconflict/theme-twilight.js"></script>
+  <script>
+    const editors = {};
+    const originalData = {};
+    let currentArea = '';
+    function makeEditor(id){
+      const ed = ace.edit(id);
+      ed.setTheme('ace/theme/twilight');
+      // Определяем режим: prompts — обычный текст, остальные — JSON
+      if(id.startsWith('ed_prompt_')){
+        ed.session.setMode(null);
+      } else {
+        ed.session.setMode('ace/mode/json');
+      }
+      ed.setShowPrintMargin(false);
+      ed.session.setUseWrapMode(true);
+      ed.setReadOnly(true);
+      editors[id] = ed;
+      // live-check JSON
+      ed.session.on('change', ()=>{
+        const st = document.getElementById('st_'+id.replace('ed_',''));
+        if(id.startsWith('ed_prompt_')){
+          if(st) st.textContent='';
+        } else {
+          try{ JSON.parse(ed.getValue()||'{}'); if(st) st.textContent='OK'; }catch(e){ if(st) st.textContent='Ошибка JSON'; }
+        }
+      });
+      return ed;
+    }
+    function sectionIdToEditorId(section){
+      return {
+        'llm':'ed_llm',
+        'confluence':'ed_confluence',
+        'metrics_source':'ed_metrics_source',
+        'lt_metrics_source':'ed_lt_metrics_source',
+        'metrics_config':'ed_metrics_config',
+        'storage.timescale':'ed_storage_timescale',
+        'default_params':'ed_default_params',
+        'queries':'ed_queries'
+      }[section];
+    }
+    function setEditing(section, on){
+      const edId = sectionIdToEditorId(section);
+      const ed = editors[edId]; if(!ed) return;
+      ed.setReadOnly(!on);
+      const saveBtn = document.querySelector(`button[data-save="${section}"]`);
+      const editBtn = document.querySelector(`button[data-edit="${section}"]`);
+      if(saveBtn) saveBtn.style.display = on ? '' : 'none';
+      if(editBtn) editBtn.textContent = on ? 'Завершить' : 'Редактировать';
+    }
+    function promptEditorId(domain){ return 'ed_prompt_'+domain; }
+    function setPromptEditing(domain, on){
+      const edId = promptEditorId(domain);
+      const ed = editors[edId]; if(!ed) return;
+      ed.setReadOnly(!on);
+      const saveBtn = document.querySelector(`button[data-prompt-save="${domain}"]`);
+      const editBtn = document.querySelector(`button[data-prompt-edit="${domain}"]`);
+      if(saveBtn) saveBtn.style.display = on ? '' : 'none';
+      if(editBtn) editBtn.textContent = on ? 'Завершить' : 'Редактировать';
+    }
+    async function loadPrompts(){
+      try{
+        const r = await fetch('/prompts'+(currentArea? ('?area='+encodeURIComponent(currentArea)) : ''));
+        const j = await r.json();
+        const dom = j.domains||{};
+        const setText = (edId, txt)=>{ const ed=editors[edId]; if(ed) ed.setValue(String(txt||''), -1); };
+        setText('ed_prompt_overall', dom.overall||'');
+        setText('ed_prompt_judge', dom.judge||'');
+        setText('ed_prompt_critic', dom.critic||'');
+        setText('ed_prompt_database', dom.database||'');
+        setText('ed_prompt_kafka', dom.kafka||'');
+        setText('ed_prompt_microservices', dom.microservices||'');
+        setText('ed_prompt_jvm', dom.jvm||'');
+        setText('ed_prompt_hard_resources', dom.hard_resources||'');
+      }catch(e){}
+    }
+    async function savePrompt(domain){
+      try{
+        const ed = editors[promptEditorId(domain)]; if(!ed) return;
+        const st = document.getElementById('st_prompt_'+domain); if(st) st.textContent='Сохранение…';
+        const body = { area: currentArea, domain, text: ed.getValue()||'' };
+        const resp = await fetch('/prompts', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+        const j = await resp.json();
+        if(resp.ok){ if(st) st.textContent='Сохранено'; setPromptEditing(domain, false); setTimeout(()=>{ if(st) st.textContent=''; }, 1500); }
+        else { if(st) st.textContent=j.error||'Ошибка'; }
+      }catch(e){ const st=document.getElementById('st_prompt_'+domain); if(st) st.textContent='Ошибка'; }
+    }
+    async function loadConfig(){
+      try{
+        const r = await fetch('/config'+(currentArea? ('?area='+encodeURIComponent(currentArea)) : ''));
+        const j = await r.json();
+        // areas & selector
+        const sel = document.getElementById('areaSelect');
+        if(Array.isArray(j.areas)){
+          sel.innerHTML = '';
+          j.areas.forEach(a=>{
+            const opt = document.createElement('option'); opt.value=a; opt.textContent=a; sel.appendChild(opt);
+          });
+        }
+        if(j.active_area){ currentArea = j.active_area; }
+        if(currentArea){ const o=[...document.getElementById('areaSelect').options].find(x=>x.value===currentArea); if(o) o.selected=true; }
+        const set = (edId, obj)=>{ const ed=editors[edId]; if(ed) ed.setValue(JSON.stringify(obj||{}, null, 2), -1); };
+        set('ed_llm', j.llm);
+        set('ed_metrics_source', j.metrics_source);
+        set('ed_lt_metrics_source', j.lt_metrics_source);
+        set('ed_confluence', j.confluence);
+        set('ed_storage_timescale', (j.storage||{}).timescale||{});
+        set('ed_default_params', j.default_params);
+        set('ed_queries', j.queries);
+        set('ed_metrics_config', j.metrics_config);
+      }catch(e){}
+    }
+    async function saveSection(section){
+      try{
+        const edId = sectionIdToEditorId(section);
+        const ed = editors[edId]; if(!ed) return;
+        const stId = 'st_'+section.replace('.', '_');
+        const st=document.getElementById(stId); if(st) st.textContent='Сохранение…';
+        let data={};
+        try{ data = JSON.parse(ed.getValue()||'{}'); }
+        catch(e){ if(st) st.textContent='Ошибка: некорректный JSON'; return; }
+        const areaSections = new Set(['llm','metrics_source','default_params','queries','metrics_config']);
+        areaSections.add('lt_metrics_source');
+        const body = { section, data };
+        if(areaSections.has(section) && currentArea){ body.area = currentArea; }
+        const resp = await fetch('/config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+        const j = await resp.json();
+        if(resp.ok){ if(st) st.textContent='Сохранено'; setEditing(section, false); setTimeout(()=>{ if(st) st.textContent=''; }, 1500); }
+        else { if(st) st.textContent=j.error||'Ошибка'; }
+      }catch(e){ const st=document.getElementById('st_'+section.replace('.','_')); if(st) st.textContent='Ошибка'; }
+    }
+    (function(){
+      // init editors
+      ['ed_llm','ed_confluence','ed_metrics_source','ed_lt_metrics_source','ed_metrics_config','ed_default_params','ed_queries','ed_storage_timescale',
+       'ed_prompt_overall','ed_prompt_judge','ed_prompt_critic','ed_prompt_database','ed_prompt_kafka','ed_prompt_microservices','ed_prompt_jvm','ed_prompt_hard_resources']
+       .forEach(makeEditor);
+      // buttons
+      document.querySelectorAll('button[data-save]').forEach(b=>{ b.addEventListener('click', ()=> saveSection(b.getAttribute('data-save'))); });
+      document.querySelectorAll('button[data-edit]').forEach(b=>{ b.addEventListener('click', ()=>{
+        const s=b.getAttribute('data-edit');
+        const edId=sectionIdToEditorId(s);
+        const ed=editors[edId];
+        if(!ed) return;
+        const isEditing = ed.getReadOnly ? (ed.getReadOnly() === false) : false;
+        if(!isEditing){
+          // Enter edit mode: snapshot original content
+          originalData[s] = ed.getValue();
+          setEditing(s, true);
+        } else {
+          // Exit edit without saving: restore snapshot
+          if(originalData.hasOwnProperty(s)){
+            ed.setValue(originalData[s] || '', -1);
+          }
+          const st = document.getElementById('st_'+s.replace('.', '_'));
+          if(st) st.textContent='';
+          setEditing(s, false);
+        }
+      }); });
+      document.querySelectorAll('button[data-prompt-save]').forEach(b=>{ b.addEventListener('click', ()=> savePrompt(b.getAttribute('data-prompt-save'))); });
+      document.querySelectorAll('button[data-prompt-edit]').forEach(b=>{ b.addEventListener('click', ()=>{
+        const d=b.getAttribute('data-prompt-edit');
+        const ed=editors[promptEditorId(d)]; if(!ed) return;
+        const isEditing = ed.getReadOnly ? (ed.getReadOnly() === false) : false;
+        if(!isEditing){ originalData['prompt:'+d] = ed.getValue(); setPromptEditing(d, true); }
+        else { if(Object.prototype.hasOwnProperty.call(originalData,'prompt:'+d)) ed.setValue(originalData['prompt:'+d]||'', -1); const st=document.getElementById('st_prompt_'+d); if(st) st.textContent=''; setPromptEditing(d, false); }
+      }); });
+      // area select
+      const sel = document.getElementById('areaSelect');
+      sel.addEventListener('change', async ()=>{ currentArea = sel.value || ''; await loadConfig(); await loadPrompts(); });
+      const addBtn = document.getElementById('addAreaBtn');
+      const areaStatus = document.getElementById('areaStatus');
+      addBtn.addEventListener('click', async ()=>{
+        const name = (prompt('Введите идентификатор новой проектной области (латиницей, без пробелов):')||'').trim();
+        if(!name) return;
+        areaStatus.textContent='Создание…';
+        try{
+          const resp = await fetch('/areas', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name }) });
+          const j = await resp.json();
+          if(!resp.ok){ areaStatus.textContent=j.error||'Ошибка'; return; }
+          currentArea = name; areaStatus.textContent='Создано'; setTimeout(()=> areaStatus.textContent='', 1200);
+          await loadConfig(); await loadPrompts();
+        }catch(e){ areaStatus.textContent='Ошибка'; setTimeout(()=> areaStatus.textContent='', 1200); }
+      });
+    })();
+    (async function(){ await loadConfig(); await loadPrompts(); })();
+  </script>
+</body>
+</html>
+
+

@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from data_collectors.grafana_collector import downloadImagesLogin, send_file_to_attachment
 from data_collectors.loki_collector import fetch_loki_logs, send_loki_file_to_attachment
 from settings import CONFIG  # Импорт базовой конфигурации
-from metrics_config import METRICS_CONFIG  # Импорт конфигурации метрик
+from metrics_config import METRICS_CONFIG  # Базовая конфигурация метрик
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 from datetime import datetime  # если ещё не импортирован
@@ -15,9 +15,69 @@ import os
 from requests.auth import HTTPBasicAuth
 import json
 import ast
+import json as _json
+
+# Поддержка runtime-оверрайда metrics_config
+_METRICS_RUNTIME_PATH = os.path.join(os.path.dirname(__file__), 'metrics_config_runtime.json')
+
+def _deep_merge_dicts(_a: dict, _b: dict) -> dict:
+    out = dict(_a or {})
+    for k, v in (_b or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge_dicts(out.get(k) or {}, v)
+        else:
+            out[k] = v
+    return out
+
+def _active_metrics_config_now() -> dict:
+    try:
+        from metrics_config import METRICS_CONFIG as BASE
+    except Exception:
+        BASE = {}
+    try:
+        if os.path.exists(_METRICS_RUNTIME_PATH):
+            with open(_METRICS_RUNTIME_PATH, 'r', encoding='utf-8') as _f:
+                _override = _json.load(_f)
+            if isinstance(_override, dict):
+                return _deep_merge_dicts(BASE, _override)
+    except Exception:
+        return BASE
+    return BASE
+
+_SETTINGS_RUNTIME_PATH = os.path.join(os.path.dirname(__file__), 'settings_runtime.json')
+
+def _load_area_overrides(area_name: str) -> dict:
+    try:
+        if not area_name:
+            return {}
+        if os.path.exists(_SETTINGS_RUNTIME_PATH):
+            with open(_SETTINGS_RUNTIME_PATH, 'r', encoding='utf-8') as f:
+                rt = _json.load(f)
+            per_area = (rt.get('per_area') or {}) if isinstance(rt, dict) else {}
+            area = (per_area.get(area_name) or {}) if isinstance(per_area, dict) else {}
+            return area if isinstance(area, dict) else {}
+    except Exception:
+        return {}
+    return {}
+
+def _effective_config_for_area(area_name: str) -> dict:
+    # Собираем ef_config: берём глобальные CONFIG и поверх per_area overrides
+    area = _load_area_overrides(area_name)
+    eff = dict(CONFIG)
+    for key in ("llm", "metrics_source", "lt_metrics_source", "default_params", "queries"):
+        base = (CONFIG.get(key) or {}) if isinstance(CONFIG.get(key), dict) else (CONFIG.get(key) if key == 'queries' else {})
+        over = (area.get(key) or {}) if isinstance(area.get(key), dict) else {}
+        eff[key] = _deep_merge_dicts(base, over)
+    # storage оставляем глобальным
+    return eff
+
+def _prompts_override_for_area(area_name: str) -> dict:
+    area = _load_area_overrides(area_name)
+    prompts = area.get('prompts') if isinstance(area, dict) else None
+    return prompts if isinstance(prompts, dict) else {}
 
 
-def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = False, web_only: bool = False, run_name: str | None = None, progress_callback=None):
+def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = False, web_only: bool = False, run_name: str | None = None, test_type: str | None = None, progress_callback=None):
     # Получение параметров из `config.py`
     user = CONFIG['user']
     password = CONFIG['password']
@@ -29,8 +89,9 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
     loki_url = CONFIG['loki_url']
 
     
-    # Получаем конфигурацию сервиса и проверяем наличие метрик
-    service_config = METRICS_CONFIG.get(service)
+    # Получаем конфигурацию сервиса и проверяем наличие метрик (горячее чтение runtime)
+    _mc = _active_metrics_config_now()
+    service_config = _mc.get(service)
     if not service_config:
         raise ValueError(f"Конфигурация для сервиса '{service}' не найдена.")
 
@@ -59,6 +120,7 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
             "run_id": uuid.uuid4().hex,
             "run_name": (run_name or "").strip() or datetime.now().strftime("run-%Y%m%d-%H%M%S"),
             "service": service,
+            "test_type": (test_type or '').strip(),
             "start_ms": start,
             "end_ms": end,
         }
@@ -66,18 +128,104 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
         _progress("Сбор метрик для веб-отчёта…", 30)
         results = None
         if use_llm or save_to_db_effective:
+            ef_cfg = _effective_config_for_area(service)
+            # Сформируем финальные промпты: базовые + пер-областные + профиль по типу теста
+            def _load_base_prompts() -> dict:
+                root = os.path.join(os.path.dirname(__file__), 'AI', 'prompts')
+                files = {
+                    'overall': 'overall_prompt.txt',
+                    'jvm': 'jvm_prompt.txt',
+                    'database': 'database_prompt.txt',
+                    'kafka': 'kafka_prompt.txt',
+                    'microservices': 'microservices_prompt.txt',
+                    'hard_resources': 'hard_resources_prompt.txt',
+                }
+                out = {}
+                for k, fname in files.items():
+                    p = os.path.join(root, fname)
+                    try:
+                        with open(p, 'r', encoding='utf-8') as f:
+                            out[k] = f.read()
+                    except Exception:
+                        out[k] = ''
+                return out
+
+            def _test_type_overlays(tt: str) -> dict:
+                t = (tt or '').strip().lower()
+                step = (
+                    "[Профиль теста: Ступенчатый поиск максимальной производительности]\n"
+                    "- Цели: найти точку насыщения/предел (max_rps), момент деградации.\n"
+                    "- KPI: max_rps, время пика, момент падения, доля ошибок у порога.\n"
+                    "- Проверки: SLA p95/p99, рост ошибок/таймаутов у порога, узкие места ресурсов.\n"
+                    "- Вывод: peak_performance {max_rps, max_time, drop_time, method='max_step_before_drop'}.\n"
+                )
+                soak = (
+                    "[Профиль теста: Долговременная стабильность (soak)]\n"
+                    "- Цели: стабильность под длительной нагрузкой, отсутствие деградации.\n"
+                    "- KPI: тренды p95/p99, ошибок/час, дрейф CPU/MEM/GC, утечки (рост памяти/дескрипторов).\n"
+                    "- Проверки: дрейф метрик (<=X%/ч), отсутствие накопления очередей, устойчивость RPS.\n"
+                    "- Вывод: признаки leak_suspect, drift_metrics, стабильность пропускной способности.\n"
+                )
+                spike = (
+                    "[Профиль теста: Всплески (spike)]\n"
+                    "- Цели: реакция на резкий рост/падение нагрузки и восстановление.\n"
+                    "- KPI: overshoot латентности, время восстановления t_recovery, ошибки в окне спайка, реакция авто-масштабирования.\n"
+                    "- Проверки: просадки RPS, рост очередей, время стабилизации.\n"
+                    "- Вывод: recovery_time_s, autoscaling_reaction_s, overshoot_pct, уязвимые компоненты.\n"
+                )
+                stress = (
+                    "[Профиль теста: Стресс]\n"
+                    "- Цели: поведение за пределами проектной мощности.\n"
+                    "- KPI: saturation_rps, точка деградации/отказа, наклон деградации, типы ошибок.\n"
+                    "- Проверки: лимитирующие ресурсы/бутылочные горлышки, устойчивость деградации.\n"
+                    "- Вывод: saturation_point, failure_mode, limiting_resource, запас до предела.\n"
+                )
+                if t in ('step','ступенчатый','поиск максимальной производительности','max'):
+                    block = step
+                elif t in ('soak','endurance','долговременный','стабильность'):
+                    block = soak
+                elif t in ('spike','всплеск','всплески'):
+                    block = spike
+                elif t in ('stress','стресс'):
+                    block = stress
+                else:
+                    block = ''
+                dom_overlay = ("\n\n"+block) if block else ''
+                return {
+                    'overall': block,
+                    'jvm': dom_overlay,
+                    'database': dom_overlay,
+                    'kafka': dom_overlay,
+                    'microservices': dom_overlay,
+                    'hard_resources': dom_overlay,
+                }
+
+            base_prompts = _load_base_prompts()
+            area_prompts = _prompts_override_for_area(service)
+            overlays = _test_type_overlays(test_type)
+            final_prompts = {}
+            for k in ('overall','jvm','database','kafka','microservices','hard_resources'):
+                base = area_prompts.get(k) if isinstance(area_prompts.get(k), str) and area_prompts.get(k).strip() else base_prompts.get(k, '')
+                ov = overlays.get(k, '') or ''
+                if k == 'overall':
+                    final_prompts[k] = (ov + ("\n\n" if ov and base else '') + (base or '')).strip()
+                else:
+                    final_prompts[k] = ((base or '') + ov).strip()
+
             results = uploadFromLLM(
                 start/1000,
                 end/1000,
                 save_to_db=save_to_db_effective,
                 run_meta=run_meta,
-                only_collect=not use_llm
+                only_collect=not use_llm,
+                ef_config=ef_cfg,
+                prompts_override=final_prompts
             )
         else:
             _progress("Пропускаем LLM-анализ и сбор доменных данных по запросу пользователя")
 
         _progress("Финализация веб-отчёта…", 95)
-        page_url = f"/reports/{run_meta['run_name']}"
+        page_url = f"/reports/{service}/{run_meta['run_name']}"
         _progress("Отчёт (веб) готов ✅", 100)
         return {"page_id": None, "page_url": page_url, "run_name": run_meta["run_name"]}
 
@@ -307,12 +455,95 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
             "end_ms": end,
         }
     if use_llm or save_to_db:
+        ef_cfg = _effective_config_for_area(service)
+        # Сформируем финальные промпты с учётом типа теста
+        def _load_base_prompts() -> dict:
+            root = os.path.join(os.path.dirname(__file__), 'AI', 'prompts')
+            files = {
+                'overall': 'overall_prompt.txt',
+                'jvm': 'jvm_prompt.txt',
+                'database': 'database_prompt.txt',
+                'kafka': 'kafka_prompt.txt',
+                'microservices': 'microservices_prompt.txt',
+                'hard_resources': 'hard_resources_prompt.txt',
+            }
+            out = {}
+            for k, fname in files.items():
+                p = os.path.join(root, fname)
+                try:
+                    with open(p, 'r', encoding='utf-8') as f:
+                        out[k] = f.read()
+                except Exception:
+                    out[k] = ''
+            return out
+        def _test_type_overlays(tt: str) -> dict:
+            t = (tt or '').strip().lower()
+            step = (
+                "[Профиль теста: Ступенчатый поиск максимальной производительности]\n"
+                "- Цели: найти точку насыщения/предел (max_rps), момент деградации.\n"
+                "- KPI: max_rps, время пика, момент падения, доля ошибок у порога.\n"
+                "- Проверки: SLA p95/p99, рост ошибок/таймаутов у порога, узкие места ресурсов.\n"
+                "- Вывод: peak_performance {max_rps, max_time, drop_time, method='max_step_before_drop'}.\n"
+            )
+            soak = (
+                "[Профиль теста: Долговременная стабильность (soak)]\n"
+                "- Цели: стабильность под длительной нагрузкой, отсутствие деградации.\n"
+                "- KPI: тренды p95/p99, ошибок/час, дрейф CPU/MEM/GC, утечки (рост памяти/дескрипторов).\n"
+                "- Проверки: дрейф метрик (<=X%/ч), отсутствие накопления очередей, устойчивость RPS.\n"
+                "- Вывод: признаки leak_suspect, drift_metrics, стабильность пропускной способности.\n"
+            )
+            spike = (
+                "[Профиль теста: Всплески (spike)]\n"
+                "- Цели: реакция на резкий рост/падение нагрузки и восстановление.\n"
+                "- KPI: overshoot латентности, время восстановления t_recovery, ошибки в окне спайка, реакция авто-масштабирования.\n"
+                "- Проверки: просадки RPS, рост очередей, время стабилизации.\n"
+                "- Вывод: recovery_time_s, autoscaling_reaction_s, overshoot_pct, уязвимые компоненты.\n"
+            )
+            stress = (
+                "[Профиль теста: Стресс]\n"
+                "- Цели: поведение за пределами проектной мощности.\n"
+                "- KPI: saturation_rps, точка деградации/отказа, наклон деградации, типы ошибок.\n"
+                "- Проверки: лимитирующие ресурсы/бутылочные горлышки, устойчивость деградации.\n"
+                "- Вывод: saturation_point, failure_mode, limiting_resource, запас до предела.\n"
+            )
+            if t in ('step','ступенчатый','поиск максимальной производительности','max'):
+                block = step
+            elif t in ('soak','endurance','долговременный','стабильность'):
+                block = soak
+            elif t in ('spike','всплеск','всплески'):
+                block = spike
+            elif t in ('stress','стресс'):
+                block = stress
+            else:
+                block = ''
+            dom_overlay = ("\n\n"+block) if block else ''
+            return {
+                'overall': block,
+                'jvm': dom_overlay,
+                'database': dom_overlay,
+                'kafka': dom_overlay,
+                'microservices': dom_overlay,
+                'hard_resources': dom_overlay,
+            }
+        base_prompts = _load_base_prompts()
+        area_prompts = _prompts_override_for_area(service)
+        overlays = _test_type_overlays(test_type)
+        final_prompts = {}
+        for k in ('overall','jvm','database','kafka','microservices','hard_resources'):
+            base = area_prompts.get(k) if isinstance(area_prompts.get(k), str) and area_prompts.get(k).strip() else base_prompts.get(k, '')
+            ov = overlays.get(k, '') or ''
+            if k == 'overall':
+                final_prompts[k] = (ov + ("\n\n" if ov and base else '') + (base or '')).strip()
+            else:
+                final_prompts[k] = ((base or '') + ov).strip()
         results = uploadFromLLM(
             start/1000,
             end/1000,
             save_to_db=save_to_db,
-            run_meta=run_meta,
-            only_collect=not use_llm
+            run_meta={"run_id": (run_meta or {}).get("run_id"), "run_name": (run_meta or {}).get("run_name"), "service": service, "test_type": (test_type or '').strip(), "start_ms": start, "end_ms": end},
+            only_collect=not use_llm,
+            ef_config=ef_cfg,
+            prompts_override=final_prompts
         )
     else:
         _progress("Пропускаем LLM-анализ и сбор доменных данных по запросу пользователя")
@@ -334,6 +565,7 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
         add_if_present("$$answer_kafka$$", "kafka")
         add_if_present("$$answer_ms$$", "ms")
         add_if_present("$$answer_hard_resources$$", "hard_resources")
+        add_if_present("$$answer_lt_framework$$", "lt_framework")
 
         # Добавляем финальный плейсхолдер только как $$final_answer$$
         final_struct = (results or {}).get("final_parsed")
@@ -474,6 +706,7 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
             _append_judge("$$answer_kafka$$", "kafka")
             _append_judge("$$answer_ms$$", "microservices")
             _append_judge("$$answer_hard_resources$$", "hard_resources")
+            _append_judge("$$answer_lt_framework$$", "lt_framework")
             _append_judge("$$final_answer$$", "final")
         except Exception as e:
             print(f"[warn] Не удалось добавить оценки судьи: {e}")
