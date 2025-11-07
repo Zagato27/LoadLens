@@ -21,6 +21,7 @@ dist/
 
 # Действующие конфиги (игнорируем секреты)
 settings.py
+settings_runtime.json
 utils/config.yaml
 AI/config.py
 
