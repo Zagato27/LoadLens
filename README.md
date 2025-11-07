@@ -87,10 +87,10 @@
 
 ## Запуск и Docker
 - Локально:
-  ```bash
-  pip install -r requirements.txt
-  python app.py
-  ```
+   ```bash
+   pip install -r requirements.txt
+   python app.py
+   ```
   Откройте `http://localhost:5000/`.
 
 - Docker / Compose: см. подробную инструкцию в `DOCKER_SETUP.md` (поднятие `app` + `timescaledb`, пример `.env`, копирование `settings.example.py`).
