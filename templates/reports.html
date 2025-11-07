@@ -20,6 +20,8 @@
     .app-header .brand { font-size: var(--brandSize); line-height: var(--brandSize); font-weight: 600; font-style: italic; letter-spacing: 0.2px; color: #eaeaea; }
     .app-nav { display: flex; gap: 16px; margin-left: auto; flex-wrap: nowrap; white-space: nowrap; }
     .app-nav a.nav-btn { height: 36px; padding: 8px 4px; background: transparent; border: none; color: #eaeaea; border-bottom: 2px solid transparent; border-radius: 0; cursor: pointer; font-family: 'Montserrat', Arial, sans-serif; font-weight: 600; font-style: italic; text-decoration: none; display: inline-flex; align-items: center; }
+    .app-nav { align-items: center; }
+    .pa-select { height: 36px; padding: 0 10px; background: #2b2b2b; border: 1px solid #444; border-radius: 6px; color: #eaeaea; font-family: 'Montserrat', Arial, sans-serif; font-weight: 600; font-style: italic; font-size: 14px; }
     .app-nav a.nav-btn:hover { color: #ffffff; border-bottom-color: #3700b3; }
     .app-nav a.nav-btn.active { color: #ffffff; border-bottom-color: #6200ee; }
 
@@ -61,6 +63,15 @@
     /* Hover-подсветка кнопок легенды */
     .cmp-legend-controls button { background: #2b2b2b; border: 1px solid #444; color: #fff; transition: background-color 0.2s ease, border-color 0.2s ease; }
     .cmp-legend-controls button:hover { background: #3700b3; border-color: #6200ee; }
+    /* Editor: Итоги от инженера */
+    .editor-card { background:#1e1e1e; border:1px solid #333; border-radius:6px; padding:12px; margin-top:16px; }
+    .editor-toolbar { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
+    .editor-toolbar button { height:32px; padding:0 10px; background:#2b2b2b; color:#fff; border:1px solid #444; border-radius:6px; cursor:pointer; }
+    .editor-toolbar button:hover { background:#3700b3; border-color:#6200ee; }
+    .editor-area { min-height:140px; background:#0f0f0f; border:1px solid #333; border-radius:6px; padding:10px; outline:none; }
+    .editor-actions { display:flex; gap:8px; margin-top:10px; }
+    .btn-primary { background:#6200ee; border:1px solid #6200ee; }
+    .btn-primary:hover { background:#3700b3; border-color:#3700b3; }
   </style>
 </head>
 <body>
@@ -68,15 +79,43 @@
     <img class="logo" src="/assets/logo.png" alt="LoadLens" />
     <span class="brand">LoadLens</span>
     <div class="app-nav">
+      <select id="projectAreaSelect" class="pa-select">
+        <option value="">Все области</option>
+      </select>
       <a class="nav-btn" href="/">Дэшборд</a>
       <a class="nav-btn" href="/new">Новый отчёт</a>
       <a class="nav-btn active" href="/reports">Архив</a>
       <a class="nav-btn" href="/compare">Сравнение тестов</a>
+      <a class="nav-btn" href="/settings">Настройки</a>
     </div>
   </div>
   <div class="container">
-    <h2>Отчёт</h2>
-    <div id="repRunInfo" style="margin:6px 0 12px 0; font-size:13px; color:#bbb;"></div>
+    <h1 id="pageTitle">Отчет по тесту</h1>
+    <div id="pageTimeRange" style="margin:6px 0 12px 0; font-size:14px; color:#bbb;">Время теста: —</div>
+    <div id="engineerBox" class="editor-card">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px;">
+        <h3 style="margin:0;">Итоги от инженера</h3>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <small id="engineerUpdated" style="color:#aaa;"></small>
+          <button type="button" id="editEngineer">Редактировать</button>
+        </div>
+      </div>
+      <div class="editor-toolbar" id="engineerToolbar" style="display:none;">
+        <button type="button" data-cmd="bold"><b>B</b></button>
+        <button type="button" data-cmd="italic"><i>I</i></button>
+        <button type="button" data-cmd="underline"><u>U</u></button>
+        <button type="button" data-cmd="insertUnorderedList">• Список</button>
+        <button type="button" data-cmd="insertOrderedList">1. Список</button>
+        <button type="button" data-cmd="h3">H3</button>
+        <button type="button" data-cmd="h4">H4</button>
+        <button type="button" id="cmdLink">Ссылка</button>
+      </div>
+      <div id="engineerEditor" class="editor-area" contenteditable="false" spellcheck="false"></div>
+      <div class="editor-actions">
+        <button type="button" id="saveEngineer" class="btn-primary" style="display:none;">Сохранить</button>
+        <span id="engineerStatus" style="color:#bbb; font-size:13px;"></span>
+      </div>
+    </div>
     <div id="rep-llm-tabs" style="margin:12px 0;"></div>
     <div id="rep-domain-tabs"></div>
   </div>
@@ -144,11 +183,27 @@
     function pct(x){ try{ if(x===undefined||x===null) return '—'; const v=Number(x); if(!isFinite(v)) return '—'; return `${Math.round(v*100)}%`; }catch(e){ return '—'; } }
     function judgeMarkdown(scores){ try{ const s=scores||{}; const j=(s.judge)||{}; const overall=j.overall,factual=j.factual,completeness=j.completeness,specificity=j.specificity; const dataScore=s.data_score,finalScore=s.final_score,conf=s.confidence; const lines=['','#### Доверие (судья)']; lines.push(`- Итог: ${pct(overall)}`); lines.push(`- Согласованность (factual): ${pct(factual)}`); lines.push(`- Полнота (completeness): ${pct(completeness)}`); lines.push(`- Конкретика (specificity): ${pct(specificity)}`); lines.push(`- По данным: ${pct(dataScore)}`); lines.push(`- Агрегат: ${pct(finalScore)}`); if(typeof conf==='number') lines.push(`- Доверие модели: ${pct(conf)}`); lines.push(''); lines.push('_Пояснения: итог = 0.6·factual + 0.3·completeness + 0.2·specificity._'); return '\n'+lines.join('\n'); }catch(e){ return ''; } }
 
-    function getRunFromPath(){ try{ const parts=location.pathname.split('/').filter(Boolean); const idx=parts.indexOf('reports'); if(idx>=0 && parts[idx+1]){ return decodeURIComponent(parts[idx+1]); } }catch(e){} return null; }
-    async function reportsLoadLlm(){ const run=getRunFromPath(); if(!run) return; const box=document.getElementById('rep-llm-tabs'); box.textContent='Загрузка…'; const resp=await fetch('/llm_reports?run_name='+encodeURIComponent(run)); const arr=await resp.json(); try{ const infoBox=document.getElementById('repRunInfo'); const starts=(Array.isArray(arr)?arr:[]).map(x=>parseInt(x.start_ms,10)).filter(v=>Number.isFinite(v)); if(starts.length){ const ms=Math.min.apply(null,starts); const d=new Date(ms); const yyyy=d.getFullYear(); const MM=String(d.getMonth()+1).padStart(2,'0'); const dd=String(d.getDate()).padStart(2,'0'); const hh=String(d.getHours()).padStart(2,'0'); const mm=String(d.getMinutes()).padStart(2,'0'); infoBox.textContent=`Запуск: ${run} — Время старта: ${yyyy}-${MM}-${dd} ${hh}:${mm}`; } else { infoBox.textContent=`Запуск: ${run}`; } }catch(e){}
-      if(!Array.isArray(arr)){ box.textContent='Нет данных'; return; } const domainsOrder=['final','jvm','database','kafka','microservices','hard_resources']; arr.sort((a,b)=> domainsOrder.indexOf(a.domain)-domainsOrder.indexOf(b.domain)); const tabsNav=document.createElement('div'); tabsNav.className='app-nav-inner'; const tabsBody=document.createElement('div'); const idBase='rep-llm-tab-'; arr.forEach((x,idx)=>{ const btn=document.createElement('button'); btn.className='nav-btn'+(idx===0?' active':''); btn.textContent=(x.domain==='final'?'Итог':x.domain); btn.dataset.target=idBase+idx; tabsNav.appendChild(btn); const pane=document.createElement('div'); pane.id=idBase+idx; pane.className='panel'+(idx===0?' active':''); let md=''; let sc=x?x.scores:null; if(sc&&typeof sc==='string'){ try{ sc=JSON.parse(sc);}catch(e){} } try{ let parsed=x?x.parsed:null; if(parsed&&typeof parsed==='string'){ try{ parsed=JSON.parse(parsed);}catch(e){} } if(parsed&&typeof parsed==='object'){ md=renderLlmParsedToMarkdown(parsed, sc);} else { const raw=String(x&&x.text?x.text:''); let fallbackParsed=null; if(raw.trim().startsWith('{')){ try{ fallbackParsed=JSON.parse(raw);}catch(e){} } if(!fallbackParsed && raw.includes('"verdict"')){ try{ const start=raw.indexOf('{'); const end=raw.lastIndexOf('}'); if(start>=0&&end>start){ fallbackParsed=JSON.parse(raw.slice(start,end+1)); } }catch(e){} } md=(fallbackParsed&&typeof fallbackParsed==='object')?renderLlmParsedToMarkdown(fallbackParsed, sc):raw; } }catch(e){ md=String(x&&x.text?x.text:''); } try{ md+=judgeMarkdown(sc);}catch(e){} let html=(window.marked && typeof marked.parse==='function')? marked.parse(md): md; try{ if(window.DOMPurify) html=DOMPurify.sanitize(html);}catch(e){} pane.innerHTML=`<div style="background:#1e1e1e; border:1px solid #333; border-radius:6px; padding:12px;">${html}</div>`; tabsBody.appendChild(pane); }); box.innerHTML=''; box.appendChild(tabsNav); box.appendChild(tabsBody); tabsNav.querySelectorAll('.nav-btn').forEach(btn=>{ btn.addEventListener('click',()=>{ tabsNav.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active')); tabsBody.querySelectorAll('.panel').forEach(p=>p.classList.remove('active')); btn.classList.add('active'); const t=btn.dataset.target; const pane=tabsBody.querySelector('#'+t); if(pane) pane.classList.add('active'); setTimeout(syncLegends, 0); }); }); }
+    function getRunFromPath(){
+      try{
+        const parts=location.pathname.split('/').filter(Boolean);
+        const idx=parts.indexOf('reports');
+        if(idx>=0){
+          // ожидаем /reports/{service}/{run}
+          if(parts[idx+2]) return decodeURIComponent(parts[idx+2]);
+          if(parts[idx+1]) return decodeURIComponent(parts[idx+1]);
+        }
+      }catch(e){}
+      return null;
+    }
+    async function reportsLoadLlm(){ const run=getRunFromPath(); if(!run) return; const box=document.getElementById('rep-llm-tabs'); box.textContent='Загрузка…'; const resp=await fetch('/llm_reports?run_name='+encodeURIComponent(run)); let arr=await resp.json(); try{ const title=document.getElementById('pageTitle'); if(title) title.textContent = `Отчет по тесту ${run}`; const list=(Array.isArray(arr)?arr:[]); const starts=list.map(x=>parseInt(x.start_ms,10)).filter(v=>Number.isFinite(v)); const ends=list.map(x=>parseInt(x.end_ms,10)).filter(v=>Number.isFinite(v)); let startStr='—', endStr='—'; if(starts.length){ const ms=Math.min.apply(null,starts); const d=new Date(ms); const yyyy=d.getFullYear(); const MM=String(d.getMonth()+1).padStart(2,'0'); const dd=String(d.getDate()).padStart(2,'0'); const hh=String(d.getHours()).padStart(2,'0'); const mm=String(d.getMinutes()).padStart(2,'0'); startStr=`${yyyy}-${MM}-${dd} ${hh}:${mm}`; } if(ends.length){ const me=Math.max.apply(null,ends); const de=new Date(me); const yyyy=de.getFullYear(); const MM=String(de.getMonth()+1).padStart(2,'0'); const dd=String(de.getDate()).padStart(2,'0'); const hh=String(de.getHours()).padStart(2,'0'); const mm=String(de.getMinutes()).padStart(2,'0'); endStr=`${yyyy}-${MM}-${dd} ${hh}:${mm}`; } const range=document.getElementById('pageTimeRange'); if(range) range.textContent = `Время теста: ${startStr} - ${endStr}`; }catch(e){}
+      if(!Array.isArray(arr)){ box.textContent='Нет данных'; return; }
+      // На всякий случай отфильтруем домен engineer, даже если бэкенд уже его исключил
+      arr = arr.filter(x=> (x && x.domain && x.domain !== 'engineer'));
+      const domainsOrder=['final','jvm','database','kafka','microservices','hard_resources','lt_framework'];
+      arr.sort((a,b)=> domainsOrder.indexOf(a.domain)-domainsOrder.indexOf(b.domain));
+      const tabsNav=document.createElement('div'); tabsNav.className='app-nav-inner'; const tabsBody=document.createElement('div'); const idBase='rep-llm-tab-'; arr.forEach((x,idx)=>{ const btn=document.createElement('button'); btn.className='nav-btn'+(idx===0?' active':''); btn.textContent=(x.domain==='final'?'Итог':x.domain); btn.dataset.target=idBase+idx; tabsNav.appendChild(btn); const pane=document.createElement('div'); pane.id=idBase+idx; pane.className='panel'+(idx===0?' active':''); let md=''; let sc=x?x.scores:null; if(sc&&typeof sc==='string'){ try{ sc=JSON.parse(sc);}catch(e){} } try{ let parsed=x?x.parsed:null; if(parsed&&typeof parsed==='string'){ try{ parsed=JSON.parse(parsed);}catch(e){} } if(parsed&&typeof parsed==='object'){ md=renderLlmParsedToMarkdown(parsed, sc);} else { const raw=String(x&&x.text?x.text:''); let fallbackParsed=null; if(raw.trim().startsWith('{')){ try{ fallbackParsed=JSON.parse(raw);}catch(e){} } if(!fallbackParsed && raw.includes('"verdict"')){ try{ const start=raw.indexOf('{'); const end=raw.lastIndexOf('}'); if(start>=0&&end>start){ fallbackParsed=JSON.parse(raw.slice(start,end+1)); } }catch(e){} } md=(fallbackParsed&&typeof fallbackParsed==='object')?renderLlmParsedToMarkdown(fallbackParsed, sc):raw; } }catch(e){ md=String(x&&x.text?x.text:''); } try{ md+=judgeMarkdown(sc);}catch(e){} let html=(window.marked && typeof marked.parse==='function')? marked.parse(md): md; try{ if(window.DOMPurify) html=DOMPurify.sanitize(html);}catch(e){} pane.innerHTML=`<div style="background:#1e1e1e; border:1px solid #333; border-radius:6px; padding:12px;">${html}</div>`; tabsBody.appendChild(pane); }); box.innerHTML=''; box.appendChild(tabsNav); box.appendChild(tabsBody); tabsNav.querySelectorAll('.nav-btn').forEach(btn=>{ btn.addEventListener('click',()=>{ tabsNav.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active')); tabsBody.querySelectorAll('.panel').forEach(p=>p.classList.remove('active')); btn.classList.add('active'); const t=btn.dataset.target; const pane=tabsBody.querySelector('#'+t); if(pane) pane.classList.add('active'); setTimeout(syncLegends, 0); }); }); }
 
-    function reportsDefaultSeriesKey(domain){ if(domain==='kafka') return 'client_id'; if(domain==='database') return 'service'; if(domain==='hard_resources') return 'node'; return 'application'; }
+    function reportsDefaultSeriesKey(domain){ if(domain==='kafka') return 'client_id'; if(domain==='database') return 'service'; if(domain==='hard_resources') return 'node'; if(domain==='lt_framework') return 'scenario'; return 'application'; }
     async function reportsRenderDomains(){ const run=getRunFromPath(); if(!run) return; const root=document.getElementById('rep-domain-tabs'); root.innerHTML='Загрузка…'; const domains=Object.keys(_schemaCache||{}); const tabsNav=document.createElement('div'); tabsNav.className='app-nav-inner'; const tabsBody=document.createElement('div'); const idBase='rep-dom-tab-'; domains.forEach((domain,di)=>{ const btn=document.createElement('button'); btn.className='nav-btn'+(di===0?' active':''); btn.textContent=domain; btn.dataset.target=idBase+di; tabsNav.appendChild(btn); const pane=document.createElement('div'); pane.id=idBase+di; pane.className='panel'+(di===0?' active':''); const list=(_schemaCache[domain]||[]).map(x=>x.query_label); list.forEach((ql,qi)=>{ const wrap=document.createElement('div'); wrap.className='cmp-chart-wrap'; wrap.style.marginTop='12px'; const canvasBox=document.createElement('div'); canvasBox.className='cmp-chart-canvas'; const title=document.createElement('div'); title.style.padding='8px 0'; title.style.fontWeight='600'; title.textContent=ql; const cnv=document.createElement('canvas'); cnv.id=`rep-chart-${di}-${qi}`; cnv.height=120; canvasBox.appendChild(title); canvasBox.appendChild(cnv); const legend=document.createElement('div'); legend.className='cmp-legend-panel'; legend.innerHTML='<h4>Легенда</h4><div class="cmp-legend-controls"><button class="hideAll">Выключить все</button><button class="showAll">Включить все</button><button class="downloadPng">Скачать PNG</button></div><div class="table"></div>'; wrap.appendChild(canvasBox); wrap.appendChild(legend); pane.appendChild(wrap); setTimeout(async()=>{ await reportsDrawOne(run, domain, ql, cnv.id, legend); }, 0); }); tabsBody.appendChild(pane); }); root.innerHTML=''; root.appendChild(tabsNav); root.appendChild(tabsBody); tabsNav.querySelectorAll('.nav-btn').forEach(btn=>{ btn.addEventListener('click',()=>{ tabsNav.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active')); tabsBody.querySelectorAll('.panel').forEach(p=>p.classList.remove('active')); btn.classList.add('active'); const t=btn.dataset.target; const pane=tabsBody.querySelector('#'+t); if(pane) pane.classList.add('active'); setTimeout(syncLegends, 0); }); }); if(!domains.length){ root.textContent='Нет данных'; } }
     async function reportsDrawOne(run, domain, ql, canvasId, legendRoot){
       const u=new URL('/run_series', location.origin);
@@ -242,7 +297,79 @@
     window.addEventListener('resize', syncLegends);
 
     async function reportsInit(){ await reportsLoadSchema(); await reportsLoadLlm(); await reportsRenderDomains(); }
-    (async function(){ await reportsInit(); })();
+    async function initProjectArea(){
+      try{
+        const sel=document.getElementById('projectAreaSelect'); if(!sel) return;
+        const services=await (await fetch('/services')).json();
+        sel.innerHTML='<option value="">Все области</option>' + (services||[]).map(s=>`<option value="${s}">${s}</option>`).join('');
+        const cur=await (await fetch('/current_project_area')).json();
+        const val=(cur&&cur.project_area)||''; sel.value=val||'';
+        sel.addEventListener('change', async()=>{ try{ await fetch('/project_area', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ service: sel.value })}); location.reload(); }catch(e){} });
+      }catch(e){}
+    }
+    async function engineerLoad(){
+      try{
+        const run=getRunFromPath(); if(!run) return;
+        const r=await fetch('/engineer_summary?run_name='+encodeURIComponent(run));
+        if(!r.ok) return;
+        const j=await r.json();
+        const ed=document.getElementById('engineerEditor');
+        const updated=document.getElementById('engineerUpdated');
+        let html=String(j.content_html||'');
+        try{ if(window.DOMPurify) html = DOMPurify.sanitize(html); }catch(e){}
+        ed.innerHTML = html || '<p style="color:#888">Добавьте итоговый комментарий…</p>';
+        updated.textContent = j.created_at ? ('Обновлено: '+j.created_at.replace('T',' ').slice(0,16)) : '';
+      }catch(e){}
+    }
+    function editorExec(cmd, val){
+      try{
+        if(cmd==='h3' || cmd==='h4'){
+          document.execCommand('formatBlock', false, cmd.toUpperCase()); return;
+        }
+        document.execCommand(cmd, false, val||null);
+      }catch(e){}
+    }
+    (function(){
+      const tb=document.getElementById('engineerToolbar');
+      if(tb){
+        tb.addEventListener('click', (e)=>{
+          const btn=e.target.closest('button'); if(!btn) return;
+          const cmd=btn.getAttribute('data-cmd'); if(cmd) editorExec(cmd);
+        });
+      }
+      const linkBtn=document.getElementById('cmdLink');
+      if(linkBtn){ linkBtn.addEventListener('click', ()=>{ const url=prompt('URL ссылки:','https://'); if(url){ editorExec('createLink', url); } }); }
+      const saveBtn=document.getElementById('saveEngineer');
+      const editBtn=document.getElementById('editEngineer');
+      const editor=document.getElementById('engineerEditor');
+      function setEngineerEditing(on){
+        try{
+          if(editor) editor.setAttribute('contenteditable', on ? 'true' : 'false');
+          if(tb) tb.style.display = on ? '' : 'none';
+          if(saveBtn) saveBtn.style.display = on ? '' : 'none';
+          if(editBtn) editBtn.textContent = on ? 'Завершить' : 'Редактировать';
+        }catch(e){}
+      }
+      if(editBtn){ editBtn.addEventListener('click', ()=>{
+        const isOn = editor && editor.getAttribute('contenteditable') === 'true';
+        setEngineerEditing(!isOn);
+      }); }
+      // По умолчанию режим просмотра
+      setEngineerEditing(false);
+      if(saveBtn){ saveBtn.addEventListener('click', async()=>{
+        const run=getRunFromPath(); if(!run) return;
+        const html=document.getElementById('engineerEditor').innerHTML;
+        const st=document.getElementById('engineerStatus');
+        st.textContent='Сохранение…';
+        try{
+          const resp=await fetch('/engineer_summary', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ run_name: run, content_html: html }) });
+          const j=await resp.json();
+          if(resp.ok){ st.textContent='Сохранено'; setEngineerEditing(false); await engineerLoad(); setTimeout(()=>{ st.textContent=''; }, 1500); }
+          else { st.textContent=j.error||'Ошибка сохранения'; }
+        }catch(e){ st.textContent='Ошибка сохранения'; }
+      }); }
+    })();
+    (async function(){ await initProjectArea(); await reportsInit(); await engineerLoad(); })();
   </script>
 </body>
 </html>

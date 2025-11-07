@@ -24,7 +24,7 @@
     .app-header { position: sticky; top: 0; display: flex; align-items: center; justify-content: flex-start; gap: 12px; z-index: 2000; width: 100%; max-width: 1400px; margin: 0 auto; padding: 8px 12px; --brandSize: 40px; background: #121212; border-bottom: 1px solid #2a2a2a; }
     .app-header .logo { width: var(--brandSize); height: var(--brandSize); object-fit: contain; }
     .app-header .brand { font-size: var(--brandSize); line-height: var(--brandSize); font-weight: 600; font-style: italic; letter-spacing: 0.2px; color: #eaeaea; }
-    .app-nav { display: flex; gap: 16px; margin-left: auto; flex-wrap: nowrap; white-space: nowrap; }
+    .app-nav { display: flex; gap: 16px; margin-left: auto; flex-wrap: nowrap; white-space: nowrap; align-items: center; }
     .app-nav .nav-btn { height: 36px; padding: 8px 4px; background: transparent; border: none; color: #eaeaea; border-bottom: 2px solid transparent; border-radius: 0; cursor: pointer; font-family: 'Montserrat', Arial, sans-serif; font-weight: 600; font-style: italic; }
     .app-nav a.nav-btn { display: inline-flex; align-items: center; text-decoration: none; }
     .app-nav .nav-btn:hover { color: #ffffff; border-bottom-color: #3700b3; }
@@ -156,6 +156,8 @@
     }
     .reportLink { display: none; width: 100%; margin-top: 20px; text-decoration: none; background-color: #6200ee; color: #ffffff; padding: 8px; border-radius: 4px; border: none; cursor: pointer; text-align: center; font-size: 1rem; box-sizing: border-box; }
     .reportLink:hover { background-color: #3700b3; }
+    /* Project Area selector */
+    .pa-select { height: 36px; padding: 0 10px; background: #2b2b2b; border: 1px solid #444; border-radius: 6px; color: #eaeaea; font-family: 'Montserrat', Arial, sans-serif; font-weight: 600; font-style: italic; font-size: 14px; }
 
     /* ---------- Тумблер (toggle) для LLM ---------- */
     .toggle-row {
@@ -299,10 +301,14 @@
     <img class="logo" src="/assets/logo.png" alt="LoadLens" />
     <span class="brand">LoadLens</span>
     <div class="app-nav">
+      <select id="projectAreaSelect" class="pa-select">
+        <option value="">Все области</option>
+      </select>
       <a id="navDashboard" class="nav-btn" href="/">Дэшборд</a>
       <a id="navReport" class="nav-btn active" href="/new">Новый отчёт</a>
       <a id="navReports" class="nav-btn" href="/reports">Архив</a>
       <a id="navCompare" class="nav-btn" href="/compare">Сравнение тестов</a>
+      <a id="navSettings" class="nav-btn" href="/settings">Настройки</a>
     </div>
   </div>
   <div id="form-container">
@@ -343,6 +349,17 @@
         </div>
       </div>
 
+      <div id="stepTestType" class="toggle-row" style="display:none">
+        <label>Тип теста</label>
+        <div class="seg-group" id="testTypeGroup">
+          <button type="button" class="seg-btn" data-value="step" id="tt_step">Ступенчатый (max perf)</button>
+          <button type="button" class="seg-btn" data-value="soak" id="tt_soak">Долговременный (soak)</button>
+          <button type="button" class="seg-btn" data-value="spike" id="tt_spike">Всплески (spike)</button>
+          <button type="button" class="seg-btn" data-value="stress" id="tt_stress">Стресс</button>
+        </div>
+        <input type="hidden" id="test_type" value="" />
+      </div>
+
       <div id="stepLLM" class="toggle-row" style="display:none">
         <label>Включить анализ результатов ИИ?</label>
         <div class="seg-group" id="llmGroup">
@@ -379,6 +396,19 @@
   <script>
     // При загрузке страницы получаем сервисы
     document.addEventListener('DOMContentLoaded', loadServices);
+    document.addEventListener('DOMContentLoaded', initProjectArea);
+    async function initProjectArea(){
+      try{
+        const sel=document.getElementById('projectAreaSelect'); if(!sel) return;
+        const services=await (await fetch('/services')).json();
+        sel.innerHTML='<option value="">Все области</option>' + (services||[]).map(s=>`<option value="${s}">${s}</option>`).join('');
+        const cur=await (await fetch('/current_project_area')).json();
+        const val=(cur&&cur.project_area)||''; sel.value=val||'';
+        sel.addEventListener('change', async()=>{
+          try{ await fetch('/project_area', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ service: sel.value })}); location.reload(); }catch(e){}
+        });
+      }catch(e){}
+    }
     // ===== Compare logic (встроенная страница) =====
     let cmpChart;
     let cmpLegendSortBy = 'avg';
@@ -801,6 +831,7 @@
           const stepEnd = document.getElementById('stepEnd');
           const stepService = document.getElementById('stepService');
           const stepLLM = document.getElementById('stepLLM');
+          const stepTestType = document.getElementById('stepTestType');
           const runNameBlock = document.getElementById('runNameContainer');
           const createBtn = document.getElementById('createBtn');
           const runNameInput = document.getElementById('run_name');
@@ -811,7 +842,9 @@
           const hasEnd = !!(endEl && endEl.value);
           if (stepService) stepService.style.display = (anyTarget && hasStart && hasEnd) ? 'block' : 'none';
           const serviceChosen = !!(serviceLabel && (serviceLabel.textContent||'').trim() !== 'Выберите сервис');
-          const tail = (anyTarget && hasStart && hasEnd && serviceChosen);
+          if (stepTestType) stepTestType.style.display = (anyTarget && hasStart && hasEnd && serviceChosen) ? 'flex' : 'none';
+          const testTypeVal = (document.getElementById('test_type')?.value||'').trim();
+          const tail = (anyTarget && hasStart && hasEnd && serviceChosen && !!testTypeVal);
           if (stepLLM) stepLLM.style.display = tail ? 'flex' : 'none';
           if (runNameBlock) runNameBlock.style.display = tail ? 'block' : 'none';
           const hasName = !!(runNameInput && (runNameInput.value||'').trim());
@@ -838,6 +871,16 @@
         if(n) n.classList.toggle('active', val==='no');
       }
 
+      function selectTestType(val){
+        const inp=document.getElementById('test_type');
+        if(inp) inp.value = (val||'');
+        ['tt_step','tt_soak','tt_spike','tt_stress'].forEach(id=>{
+          const btn=document.getElementById(id);
+          if(btn){ btn.classList.toggle('active', btn.getAttribute('data-value')===val); }
+        });
+        try{ syncSteps(); }catch(e){}
+      }
+
       document.addEventListener('DOMContentLoaded', function(){
         const b1=document.getElementById('target_btn_conf');
         const b2=document.getElementById('target_btn_web');
@@ -849,6 +892,10 @@
         const ln=document.getElementById('use_llm_btn_no');
         if(ly) ly.addEventListener('click', ()=>selectLlm('yes'));
         if(ln) ln.addEventListener('click', ()=>selectLlm('no'));
+        const tStep=document.getElementById('tt_step'); if(tStep) tStep.addEventListener('click', ()=>selectTestType('step'));
+        const tSoak=document.getElementById('tt_soak'); if(tSoak) tSoak.addEventListener('click', ()=>selectTestType('soak'));
+        const tSpike=document.getElementById('tt_spike'); if(tSpike) tSpike.addEventListener('click', ()=>selectTestType('spike'));
+        const tStress=document.getElementById('tt_stress'); if(tStress) tStress.addEventListener('click', ()=>selectTestType('stress'));
         syncSteps();
       });
   
@@ -879,6 +926,7 @@
           start: start,
           end: end,
           service: selectedText,
+          test_type: (document.getElementById('test_type')?.value||'').trim(),
           use_llm: ((document.getElementById('use_llm_mode')?.value || 'yes') === 'yes'),
           run_name: (document.getElementById('run_name').value || '').trim()
         };

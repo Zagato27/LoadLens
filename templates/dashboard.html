@@ -13,7 +13,7 @@
     .app-header { position:sticky; top:0; display:flex; align-items:center; gap:12px; z-index:2000; width:100%; max-width:1400px; margin:0 auto; padding:8px 12px; --brandSize:40px; background:#121212; border-bottom:1px solid #2a2a2a; }
     .app-header .logo { width:var(--brandSize); height:var(--brandSize); object-fit:contain; }
     .app-header .brand { font-size:var(--brandSize); line-height:var(--brandSize); font-weight:600; font-style:italic; letter-spacing:.2px; color:#eaeaea; }
-    .app-nav { display:flex; gap:16px; margin-left:auto; white-space:nowrap; }
+    .app-nav { display:flex; gap:16px; margin-left:auto; white-space:nowrap; align-items:center; }
     .app-nav .nav-btn { height:36px; padding:8px 4px; background:transparent; border:none; color:#eaeaea; border-bottom:2px solid transparent; cursor:pointer; font-weight:600; font-style:italic; text-decoration:none; display:inline-flex; align-items:center; }
     .app-nav .nav-btn:hover { color:#fff; border-bottom-color:#3700b3; }
     .app-nav .nav-btn.active { color:#fff; border-bottom-color:#6200ee; }
@@ -45,10 +45,14 @@
     <img class="logo" src="/assets/logo.png" alt="LoadLens" />
     <span class="brand">LoadLens</span>
     <div class="app-nav">
+      <select id="projectAreaSelect" class="pa-select" style="height:36px; background:#2b2b2b; color:#eaeaea; border:1px solid #444; border-radius:6px;">
+        <option value="">Все области</option>
+      </select>
       <a class="nav-btn active" href="/">Дэшборд</a>
       <a class="nav-btn" href="/new">Новый отчёт</a>
       <a class="nav-btn" href="/reports">Архив</a>
       <a class="nav-btn" href="/compare">Сравнение тестов</a>
+      <a class="nav-btn" href="/settings">Настройки</a>
     </div>
   </div>
 
@@ -98,6 +102,17 @@
   </div>
 
   <script>
+    async function initProjectArea(){
+      try{
+        const sel=document.getElementById('projectAreaSelect'); if(!sel) return;
+        const services=await (await fetch('/services')).json();
+        sel.innerHTML='<option value="">Все области</option>' + (services||[]).map(s=>`<option value="${s}">${s}</option>`).join('');
+        const cur=await (await fetch('/current_project_area')).json();
+        const val=(cur&&cur.project_area)||''; sel.value=val||'';
+        sel.addEventListener('change', async()=>{ try{ await fetch('/project_area', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ service: sel.value })}); location.reload(); }catch(e){} });
+      }catch(e){}
+    }
+    document.addEventListener('DOMContentLoaded', initProjectArea);
     function fmtPeriod(startMs, endMs){
       try{
         if(!startMs && !endMs) return '—';

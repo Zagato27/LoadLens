@@ -35,6 +35,8 @@
     .app-header { position: sticky; top: 0; display: flex; align-items: center; justify-content: flex-start; gap: 12px; z-index: 2000; width: 100%; max-width: 1400px; margin: 0 auto; padding: 8px 12px; --brandSize: 40px; background: #121212; border-bottom: 1px solid #2a2a2a; }
     .app-nav { display: flex; gap: 16px; margin-left: auto; flex-wrap: nowrap; white-space: nowrap; }
     .app-nav a.nav-btn { height: 36px; padding: 8px 4px; background: transparent; border: none; color: #eaeaea; border-bottom: 2px solid transparent; border-radius: 0; cursor: pointer; font-family: 'Montserrat', Arial, sans-serif; font-weight: 600; font-style: italic; text-decoration: none; display: inline-flex; align-items: center; }
+    .app-nav { align-items: center; }
+    .pa-select { height: 36px; padding: 0 10px; background: #2b2b2b; border: 1px solid #444; border-radius: 6px; color: #eaeaea; font-family: 'Montserrat', Arial, sans-serif; font-weight: 600; font-style: italic; font-size: 14px; }
     .app-nav a.nav-btn:hover { color: #ffffff; border-bottom-color: #3700b3; }
     .app-nav a.nav-btn.active { color: #ffffff; border-bottom-color: #6200ee; }
     .app-header .logo { width: var(--brandSize); height: var(--brandSize); object-fit: contain; }
@@ -66,12 +68,21 @@
     /* Таблица p95 сравнения */
     .cmp-summary { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
     .cmp-summary th, .cmp-summary td { border-bottom: 1px solid #2a2a2a; padding: 6px 8px; text-align: left; }
+    .cmp-summary th[data-sort], .metric-table th[data-sort] { cursor: pointer; }
     .trend { font-weight: 700; }
     .trend.up { color: #e57373; } /* красный */
     .trend.down { color: #6be66b; } /* зелёный */
     .cmp-summary-wrap { margin-bottom: 12px; }
     .charts-header { margin: 8px 0 6px; font-weight: 600; color: #ddd; }
     .charts-pills { display: flex; flex-wrap: wrap; gap: 6px; }
+    /* Внутренние аккордеоны по метрикам */
+    .metric-item { background: #181818; border: 1px solid #2a2a2a; border-radius: 6px; margin: 6px 0; }
+    .metric-header { padding: 8px 10px; display:flex; justify-content:space-between; align-items:center; cursor: pointer; }
+    .metric-content { display: none; padding: 8px 10px; border-top: 1px solid #2a2a2a; }
+    .metric-table { width:100%; border-collapse: collapse; margin-top: 6px; font-size: 13px; }
+    .metric-table th, .metric-table td { border-bottom: 1px solid #2a2a2a; padding: 6px 8px; text-align: left; }
+    .metric-trend.up { color:#e57373; font-weight:700; }
+    .metric-trend.down { color:#6be66b; font-weight:700; }
   </style>
   </head>
 <body>
@@ -79,10 +90,14 @@
     <img class="logo" src="/assets/logo.png" alt="LoadLens" />
     <span class="brand">LoadLens</span>
     <div class="app-nav">
+      <select id="projectAreaSelect" class="pa-select">
+        <option value="">Все области</option>
+      </select>
       <a class="nav-btn" href="/">Дэшборд</a>
       <a class="nav-btn" href="/new">Новый отчёт</a>
       <a class="nav-btn" href="/reports">Архив</a>
       <a class="nav-btn active" href="/compare">Сравнение тестов</a>
+      <a class="nav-btn" href="/settings">Настройки</a>
     </div>
   </div>
   <div class="container">
@@ -128,6 +143,17 @@
   </div>
 
   <script>
+    async function initProjectArea(){
+      try{
+        const sel=document.getElementById('projectAreaSelect'); if(!sel) return;
+        const services=await (await fetch('/services')).json();
+        sel.innerHTML='<option value="">Все области</option>' + (services||[]).map(s=>`<option value="${s}">${s}</option>`).join('');
+        const cur=await (await fetch('/current_project_area')).json();
+        const val=(cur&&cur.project_area)||''; sel.value=val||'';
+        sel.addEventListener('change', async()=>{ try{ await fetch('/project_area', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ service: sel.value })}); location.reload(); }catch(e){} });
+      }catch(e){}
+    }
+    document.addEventListener('DOMContentLoaded', initProjectArea);
     let chart;
     let legendSortBy = 'avg';  // 'name' | 'avg'
     let legendSortDir = 'desc'; // 'asc' | 'desc'
@@ -183,14 +209,29 @@
         const summaryHeader = document.createElement('div'); summaryHeader.className = 'charts-header'; summaryHeader.textContent = 'Сводная таблица'; content.appendChild(summaryHeader);
         // Контейнер для таблицы p95 сравнения
         const tableWrap = document.createElement('div'); tableWrap.className = 'cmp-summary-wrap'; content.appendChild(tableWrap);
+        // Заголовок для сводных таблиц по метрикам
+        const metricsHeader = document.createElement('div'); metricsHeader.className = 'charts-header'; metricsHeader.textContent = 'Сводные таблицы по метрикам'; content.appendChild(metricsHeader);
+        // Контейнер внутренних карточек метрик
+        const metricsWrap = document.createElement('div'); metricsWrap.className = 'metrics-wrap'; content.appendChild(metricsWrap);
         // Заголовок для блока графиков
         const chartsHeader = document.createElement('div'); chartsHeader.className = 'charts-header'; chartsHeader.textContent = 'Графики'; content.appendChild(chartsHeader);
         // Контейнер для кнопок-графиков
         const pillsWrap = document.createElement('div'); pillsWrap.className = 'charts-pills'; content.appendChild(pillsWrap);
         schema[domain].forEach(ql => {
+          // Кнопка-график
           const pill = document.createElement('span'); pill.className = 'pill'; pill.textContent = ql.query_label;
           pill.addEventListener('click', () => renderOverlay(domain, ql.query_label));
           pillsWrap.appendChild(pill);
+          // Внутренняя карточка-метрика с таблицей по сериям
+          const mItem = document.createElement('div'); mItem.className = 'metric-item';
+          const mHeader = document.createElement('div'); mHeader.className = 'metric-header'; mHeader.innerHTML = `<div>${ql.query_label}</div><div>▼</div>`;
+          const mContent = document.createElement('div'); mContent.className = 'metric-content'; mContent.textContent = '—';
+          mHeader.addEventListener('click', async ()=>{
+            const opening = mContent.style.display !== 'block';
+            mContent.style.display = opening ? 'block' : 'none';
+            if (opening) await loadMetricSeriesSummary(domain, ql.query_label, mContent);
+          });
+          mItem.appendChild(mHeader); mItem.appendChild(mContent); metricsWrap.appendChild(mItem);
         });
         header.addEventListener('click', async ()=>{
           const opening = content.style.display !== 'block';
@@ -202,6 +243,92 @@
         item.appendChild(header); item.appendChild(content); root.appendChild(item);
       });
       if (!Object.keys(schema||{}).length){ root.textContent = 'Нет данных'; }
+    }
+
+    async function loadMetricSeriesSummary(domain, queryLabel, container){
+      try{
+        container.textContent = 'Загрузка…';
+        const runA = document.getElementById('runASelect').textContent;
+        const runB = document.getElementById('runBSelect').textContent;
+        // series_key подберётся на бэке автоматически
+        const u = new URL('/compare_metric_summary', location.origin);
+        u.searchParams.set('run_a', runA);
+        u.searchParams.set('run_b', runB);
+        u.searchParams.set('domain', domain);
+        u.searchParams.set('query_label', queryLabel);
+        const resp = await fetch(u);
+        const json = await resp.json();
+        if (!json || !Array.isArray(json.rows) || !json.rows.length){
+          container.textContent = 'Нет данных';
+          return;
+        }
+        const rows = json.rows;
+        const tbl = document.createElement('table'); tbl.className = 'metric-table';
+        tbl.innerHTML = '<thead><tr><th data-sort="series">Серия</th><th data-sort="a">Тест A (P95)</th><th data-sort="b">Тест B (P95)</th><th data-sort="trend">Тенденция</th></tr></thead>';
+        const tb = document.createElement('tbody');
+        const fmt = (v)=> (typeof v==='number' && isFinite(v)) ? v.toFixed(2) : '—';
+        rows.forEach(r=>{
+          const tr = document.createElement('tr');
+          let trendStr='—'; let cls='';
+          if (typeof r.trend_pct === 'number' && isFinite(r.trend_pct)){
+            const sign = r.trend_pct >= 0 ? 1 : -1;
+            const abs = Math.abs(r.trend_pct).toFixed(1);
+            const arrow = (sign>0) ? '↑' : '↓';
+            cls = (sign>0) ? 'up' : 'down';
+            trendStr = `${arrow} ${abs}%`;
+          }
+          tr.innerHTML = `<td>${r.series}</td><td>${fmt(r.p95_a)}</td><td>${fmt(r.p95_b)}</td><td class="metric-trend ${cls}">${trendStr}</td>`;
+          // значения для сортировки
+          tr.dataset.series = r.series || '';
+          tr.dataset.a = (typeof r.p95_a === 'number' && isFinite(r.p95_a)) ? String(r.p95_a) : '';
+          tr.dataset.b = (typeof r.p95_b === 'number' && isFinite(r.p95_b)) ? String(r.p95_b) : '';
+          tr.dataset.trend = (typeof r.trend_pct === 'number' && isFinite(r.trend_pct)) ? String(r.trend_pct) : '';
+          tb.appendChild(tr);
+        });
+        tbl.appendChild(tb);
+        container.innerHTML = '';
+        container.appendChild(tbl);
+        // сортировка по заголовкам
+        const theadEl = tbl.querySelector('thead');
+        tbl.dataset.sortBy = tbl.dataset.sortBy || 'series';
+        tbl.dataset.sortDir = tbl.dataset.sortDir || 'asc';
+        function sortRows(by, dir){
+          const rowsArr = Array.from(tb.querySelectorAll('tr'));
+          function val(tr){
+            if (by === 'series') return (tr.dataset.series || '').toLowerCase();
+            const num = parseFloat(tr.dataset[by] || '');
+            return Number.isFinite(num) ? num : null;
+          }
+          rowsArr.sort((r1, r2)=>{
+            const v1 = val(r1); const v2 = val(r2);
+            if (by === 'series'){
+              const cmp = v1.localeCompare(v2);
+              return dir === 'asc' ? cmp : -cmp;
+            } else {
+              if (v1==null && v2==null) return 0;
+              if (v1==null) return 1;
+              if (v2==null) return -1;
+              return dir === 'asc' ? (v1 - v2) : (v2 - v1);
+            }
+          });
+          tb.innerHTML = '';
+          rowsArr.forEach(tr=> tb.appendChild(tr));
+        }
+        theadEl.addEventListener('click', (e)=>{
+          const th = e.target.closest('[data-sort]');
+          if (!th) return;
+          const by = th.getAttribute('data-sort');
+          let dir = 'asc';
+          if (tbl.dataset.sortBy === by){
+            dir = (tbl.dataset.sortDir === 'asc') ? 'desc' : 'asc';
+          }
+          tbl.dataset.sortBy = by;
+          tbl.dataset.sortDir = dir;
+          sortRows(by, dir);
+        });
+      }catch(e){
+        container.textContent = 'Ошибка загрузки';
+      }
     }
 
     async function renderOverlay(domain, queryLabel){
@@ -310,7 +437,7 @@
         const arr = await resp.json();
         const rows = Array.isArray(arr) ? arr : [];
         const tbl = document.createElement('table'); tbl.className = 'cmp-summary';
-        tbl.innerHTML = '<thead><tr><th>Метрика</th><th>Тест A (P95)</th><th>Тест B (P95)</th><th>Тенденция</th></tr></thead>';
+        tbl.innerHTML = '<thead><tr><th data-sort="ql">Метрика</th><th data-sort="a">Тест A (P95)</th><th data-sort="b">Тест B (P95)</th><th data-sort="trend">Тенденция</th></tr></thead>';
         const tb = document.createElement('tbody');
         rows.forEach(r=>{
           const tr = document.createElement('tr');
@@ -326,11 +453,54 @@
             trendStr = `${arrow} ${abs}%`;
           }
           tr.innerHTML = `<td>${r.query_label}</td><td>${fmt(a)}</td><td>${fmt(b)}</td><td class="trend ${cls}">${trendStr}</td>`;
+          // значения для сортировки
+          tr.dataset.ql = r.query_label || '';
+          tr.dataset.a = (a!=null && isFinite(a)) ? String(a) : '';
+          tr.dataset.b = (b!=null && isFinite(b)) ? String(b) : '';
+          tr.dataset.trend = (typeof r.trend_pct === 'number' && isFinite(r.trend_pct)) ? String(r.trend_pct) : '';
           tb.appendChild(tr);
         });
         tbl.appendChild(tb);
         container.innerHTML = '';
         container.appendChild(tbl);
+        // сортировка по заголовкам
+        const theadEl = tbl.querySelector('thead');
+        tbl.dataset.sortBy = tbl.dataset.sortBy || 'ql';
+        tbl.dataset.sortDir = tbl.dataset.sortDir || 'asc';
+        function sortRows(by, dir){
+          const rowsArr = Array.from(tb.querySelectorAll('tr'));
+          function val(tr){
+            if (by === 'ql') return (tr.dataset.ql || '').toLowerCase();
+            const num = parseFloat(tr.dataset[by] || '');
+            return Number.isFinite(num) ? num : null;
+          }
+          rowsArr.sort((r1, r2)=>{
+            const v1 = val(r1); const v2 = val(r2);
+            if (by === 'ql'){
+              const cmp = v1.localeCompare(v2);
+              return dir === 'asc' ? cmp : -cmp;
+            } else {
+              if (v1==null && v2==null) return 0;
+              if (v1==null) return 1;
+              if (v2==null) return -1;
+              return dir === 'asc' ? (v1 - v2) : (v2 - v1);
+            }
+          });
+          tb.innerHTML = '';
+          rowsArr.forEach(tr=> tb.appendChild(tr));
+        }
+        theadEl.addEventListener('click', (e)=>{
+          const th = e.target.closest('[data-sort]');
+          if (!th) return;
+          const by = th.getAttribute('data-sort');
+          let dir = 'asc';
+          if (tbl.dataset.sortBy === by){
+            dir = (tbl.dataset.sortDir === 'asc') ? 'desc' : 'asc';
+          }
+          tbl.dataset.sortBy = by;
+          tbl.dataset.sortDir = dir;
+          sortRows(by, dir);
+        });
       }catch(e){ container.innerHTML = 'Не удалось загрузить сводку'; }
     }
 
@@ -507,6 +677,17 @@
             const domain = content.dataset ? content.dataset.domain : null;
             const wrap = content.querySelector('.cmp-summary-wrap');
             if (domain && wrap){ await loadDomainSummary(domain, wrap); }
+            // Обновляем открытые сводные таблицы по метрикам
+            try{
+              content.querySelectorAll('.metric-item').forEach(async m=>{
+                const body = m.querySelector('.metric-content');
+                const title = m.querySelector('.metric-header');
+                if (body && body.style.display === 'block' && title){
+                  const ql = title.firstChild ? title.firstChild.textContent : '';
+                  if (ql){ await loadMetricSeriesSummary(domain, ql, body); }
+                }
+              });
+            }catch(e){}
           }
         });
       }catch(e){}
