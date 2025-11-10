@@ -20,7 +20,7 @@ CONFIG = {
     'loki_url': 'http://loki:3100/loki/api/v1/query_range',
 
     "llm": {
-        # Включать ли markdown‑таблицы в контекст для LLM (увеличивает объём prompt)
+        # Включать ли markdown‑таблицы в отчет (для отладки)
         "include_markdown_tables_in_context": False,
         # Провайдер LLM: perplexity | openai | anthropic
         "provider": "openai",
