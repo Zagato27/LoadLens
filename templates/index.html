@@ -4,9 +4,6 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Создание отчета</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,400;0,500;0,600;0,700;1,600&display=swap" rel="stylesheet">
@@ -374,7 +371,7 @@
         <input type="text" id="run_name" name="run_name" placeholder="Напр.: Nightly-2025-10-30" />
       </div>
 
-      <button id="createBtn" type="button" style="display:none" onclick="createReport()">Создать отчет</button>
+      <button id="createBtn" type="button" style="display:none">Создать отчет</button>
     </form>
     <div id="progressContainer">
       <div id="progressBranchConfluence" style="display:none; margin-top:8px; text-align:left;">
@@ -394,6 +391,8 @@
   </div>
 
   <script>
+/* INLINE JS DISABLED (moved to static) */
+/*
     // При загрузке страницы получаем сервисы
     document.addEventListener('DOMContentLoaded', loadServices);
     document.addEventListener('DOMContentLoaded', initProjectArea);
@@ -1011,7 +1010,10 @@
           }
         }, 1000);
       }
-    </script>
+*/
+  </script>
+  <script defer src="/static/js/common.js"></script>
+  <script defer src="/static/js/new.js"></script>
   </body>
   </html>
   

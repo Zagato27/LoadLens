@@ -102,74 +102,10 @@
   </div>
 
   <script>
-    async function initProjectArea(){
-      try{
-        const sel=document.getElementById('projectAreaSelect'); if(!sel) return;
-        const services=await (await fetch('/services')).json();
-        sel.innerHTML='<option value="">Все области</option>' + (services||[]).map(s=>`<option value="${s}">${s}</option>`).join('');
-        const cur=await (await fetch('/current_project_area')).json();
-        const val=(cur&&cur.project_area)||''; sel.value=val||'';
-        sel.addEventListener('change', async()=>{ try{ await fetch('/project_area', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ service: sel.value })}); location.reload(); }catch(e){} });
-      }catch(e){}
-    }
-    document.addEventListener('DOMContentLoaded', initProjectArea);
-    function fmtPeriod(startMs, endMs){
-      try{
-        if(!startMs && !endMs) return '—';
-        const s = startMs ? new Date(parseInt(startMs,10)) : null;
-        const e = endMs ? new Date(parseInt(endMs,10)) : null;
-        const pad = (n)=> String(n).padStart(2,'0');
-        const fmt = (d)=> `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-        if(s && e) return `${fmt(s)} — ${fmt(e)}`;
-        if(s) return fmt(s);
-        if(e) return fmt(e);
-        return '—';
-      }catch(e){ return '—'; }
-    }
-    function verdictClass(v){
-      const t = (v||'').toLowerCase();
-      if(t.includes('усп')) return 'ok';
-      if(t.includes('риск')) return 'warn';
-      if(t.includes('провал')) return 'fail';
-      return 'na';
-    }
-    function verdictLabel(v){ return v || 'Недостаточно данных'; }
-
-    async function loadDashboard(){
-      try{
-        const resp = await fetch('/dashboard_data');
-        const data = await resp.json();
-        const last = data.last_run || null;
-        if(last){
-          document.getElementById('sumRun').textContent = last.run_name || '—';
-          document.getElementById('sumService').textContent = last.service || '—';
-          document.getElementById('sumPeriod').textContent = fmtPeriod(last.start_ms, last.end_ms);
-          const vbox = document.getElementById('sumVerdict');
-          const v = verdictLabel(last.verdict);
-          const cls = verdictClass(v);
-          vbox.innerHTML = `<span class="pill ${cls}">${v}</span>`;
-          try{
-            const link=document.getElementById('lastReportLink');
-            if(link && last.run_name){ link.href = '/reports/'+encodeURIComponent(last.run_name); link.style.display='block'; }
-          }catch(e){}
-        }
-
-        const vc = data.verdict_counts || {};
-        const labels = ['Успешно', 'Есть риски', 'Провал', 'Недостаточно данных'];
-        const values = labels.map(k=> Number(vc[k]||0));
-        const colors = ['#2ecc71','#f1c40f','#e74c3c','#7f8c8d'];
-        const ctx = document.getElementById('statusChart').getContext('2d');
-        new Chart(ctx, {
-          type: 'doughnut',
-          data: { labels, datasets: [{ data: values, backgroundColor: colors, borderColor: '#222', borderWidth: 1 }] },
-          options: { responsive:true, plugins:{ legend:{ position:'bottom', labels:{ color:'#ddd' } } } }
-        });
-      }catch(e){
-        // noop
-      }
-    }
-    document.addEventListener('DOMContentLoaded', loadDashboard);
-  </script>
+/* INLINE JS DISABLED (moved to static) */
+/*</script>
+  <script defer src="/static/js/common.js"></script>
+  <script defer src="/static/js/dashboard.js"></script>
 </body>
 </html>
 

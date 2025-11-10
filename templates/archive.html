@@ -88,29 +88,10 @@
   </div>
 
   <script>
-    let currentPage=1, pageSize=20, currentSort='end_time', currentDir='desc', currentQ='';
-    function fmtDate(iso){ try{ const d=new Date(iso); const yyyy=d.getFullYear(); const MM=String(d.getMonth()+1).padStart(2,'0'); const dd=String(d.getDate()).padStart(2,'0'); const hh=String(d.getHours()).padStart(2,'0'); const mm=String(d.getMinutes()).padStart(2,'0'); return `${yyyy}-${MM}-${dd} ${hh}:${mm}`; }catch(e){ return iso||''; } }
-    function fmtDuration(startIso, endIso){ try{ const s=new Date(startIso).getTime(); const e=new Date(endIso).getTime(); const ms=Math.max(0,e-s); const m=Math.floor(ms/60000); const h=Math.floor(m/60); const mm=String(m%60).padStart(2,'0'); return h? `${h}ч ${mm}м` : `${m}м`; }catch(e){ return '—'; } }
-    function verdictClass(v){ try{ const t=String(v||'').toLowerCase(); if(!t) return 'na'; if(t.includes('усп')) return 'ok'; if(t.includes('риск')) return 'warn'; if(t.includes('провал')) return 'fail'; if(t.includes('недостат')) return 'na'; return 'na'; }catch(e){ return 'na'; } }
-    async function loadPage(){ const offset=(currentPage-1)*pageSize; const u=new URL('/runs', location.origin); if(currentQ) u.searchParams.set('q', currentQ); u.searchParams.set('offset', String(offset)); u.searchParams.set('limit', String(pageSize)); u.searchParams.set('sort', currentSort); u.searchParams.set('dir', currentDir); const resp=await fetch(u); const rows=await resp.json(); const tbody=document.getElementById('tbody'); tbody.innerHTML=''; (rows||[]).forEach(r=>{ const tr=document.createElement('tr'); tr.className='data-row'; const dt=fmtDate(r.end_time||r.start_time); const created=fmtDate(r.report_created_at||''); const dur=fmtDuration(r.start_time, r.end_time); const v=(r.verdict||'Недостаточно данных'); const vc=verdictClass(v); const verdictHtml = `<span class="pill ${vc}">${v}</span>`; const repUrl = '/reports/'+encodeURIComponent(r.service||'')+'/'+encodeURIComponent(r.run_name); const testType = (r.test_type||''); tr.innerHTML=`<td>${r.run_name}</td><td>${r.service||''}</td><td>${testType}</td><td>${dt}</td><td>${created}</td><td>${verdictHtml}</td><td>${dur}</td><td class="actions"><button class="btn act-view">Открыть</button><button class="btn act-compare">Сравнить</button><button class="btn act-copy">Скопировать ссылку</button><button class="btn act-delete" style="border-color:#6b2e2e;">Удалить</button></td>`; tr.addEventListener('click', (e)=>{ if(!(e.target && (e.target.classList.contains('btn')))){ location.href=repUrl; } }); tr.querySelector('.act-view').addEventListener('click', (e)=>{ e.stopPropagation(); location.href=repUrl; }); tr.querySelector('.act-compare').addEventListener('click', (e)=>{ e.stopPropagation(); location.href='/compare?run_a='+encodeURIComponent(r.run_name); }); tr.querySelector('.act-copy').addEventListener('click', async (e)=>{ e.stopPropagation(); try{ await navigator.clipboard.writeText(location.origin+repUrl); }catch(err){} }); const delBtn=tr.querySelector('.act-delete'); if(delBtn){ delBtn.addEventListener('click', async (e)=>{ e.stopPropagation(); const ok=confirm(`Удалить отчёт '${r.run_name}'? Это действие необратимо.`); if(!ok) return; try{ const resp=await fetch('/runs/'+encodeURIComponent(r.run_name), { method:'DELETE' }); const j=await resp.json(); if(resp.ok){ await loadPage(); } else { alert(j.error||'Ошибка удаления'); } }catch(err){ alert('Ошибка удаления'); } }); } tbody.appendChild(tr); }); document.getElementById('pageInfo').textContent = `Стр. ${currentPage}`; document.getElementById('prevBtn').disabled = currentPage<=1; document.getElementById('nextBtn').disabled = (rows||[]).length < pageSize; }
-    document.getElementById('searchBtn').addEventListener('click', ()=>{ currentQ=String(document.getElementById('searchInput').value||'').trim(); currentPage=1; loadPage(); });
-    document.getElementById('clearBtn').addEventListener('click', ()=>{ document.getElementById('searchInput').value=''; currentQ=''; currentPage=1; loadPage(); });
-    document.getElementById('searchInput').addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ currentQ=String(e.target.value||'').trim(); currentPage=1; loadPage(); }});
-    document.getElementById('prevBtn').addEventListener('click', ()=>{ if(currentPage>1){ currentPage--; loadPage(); }});
-    document.getElementById('nextBtn').addEventListener('click', ()=>{ currentPage++; loadPage(); });
-    document.querySelectorAll('th[data-sort]').forEach(th=>{ th.addEventListener('click', ()=>{ const by=th.getAttribute('data-sort'); if(by==='duration'){ by='end_time'; } if(currentSort===by){ currentDir = (currentDir==='asc') ? 'desc' : 'asc'; } else { currentSort=by; currentDir = by==='end_time'? 'desc':'asc'; } loadPage(); }); });
-    async function initProjectArea(){
-      try{
-        const sel=document.getElementById('projectAreaSelect'); if(!sel) return;
-        const services=await (await fetch('/services')).json();
-        sel.innerHTML='<option value="">Все области</option>' + (services||[]).map(s=>`<option value="${s}">${s}</option>`).join('');
-        const cur=await (await fetch('/current_project_area')).json();
-        const val=(cur&&cur.project_area)||''; sel.value=val||'';
-        sel.addEventListener('change', async()=>{ try{ await fetch('/project_area', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ service: sel.value })}); location.reload(); }catch(e){} });
-      }catch(e){}
-    }
-    (async function(){ await initProjectArea(); await loadPage(); })();
-  </script>
+/* INLINE JS DISABLED (moved to static) */
+/*</script>
+  <script defer src="/static/js/common.js"></script>
+  <script defer src="/static/js/archive.js"></script>
 </body>
 </html>
 
