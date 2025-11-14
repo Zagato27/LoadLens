@@ -38,6 +38,8 @@
     .btn-tile:hover { background:#3700b3; }
 
     .chart-wrap { position:relative; height:260px; }
+    /* Унификация селектора проектной области */
+    .pa-select { height: 36px; padding: 0 10px; background: #2b2b2b; border: 1px solid #444; border-radius: 6px; color: #eaeaea; font-family: 'Montserrat', Arial, sans-serif; font-weight: 600; font-style: italic; font-size: 14px; }
   </style>
 </head>
 <body>
@@ -45,7 +47,7 @@
     <img class="logo" src="/assets/logo.png" alt="LoadLens" />
     <span class="brand">LoadLens</span>
     <div class="app-nav">
-      <select id="projectAreaSelect" class="pa-select" style="height:36px; background:#2b2b2b; color:#eaeaea; border:1px solid #444; border-radius:6px;">
+      <select id="projectAreaSelect" class="pa-select">
         <option value="">Все области</option>
       </select>
       <a class="nav-btn active" href="/">Дэшборд</a>
