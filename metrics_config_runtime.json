@@ -1,14 +1,14 @@
 {
   "ИНП": {
-    "page_sample_id": "",
-    "page_parent_id": "",
-    "metrics": [],
-    "logs": []
+    "services": {}
   },
   "ПАИП": {
-    "page_sample_id": "",
-    "page_parent_id": "",
-    "metrics": [],
-    "logs": []
+    "services": {}
+  },
+  "НСИ": {
+    "services": {}
+  },
+  "НСИ_тест": {
+    "services": {}
   }
 }

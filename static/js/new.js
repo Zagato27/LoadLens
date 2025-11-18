@@ -2,25 +2,78 @@
 (function () {
   // Independent timers for progress branches
   const progressTimers = { confluence: null, web: null };
+  let activeAreaCache = '';
+
+  function resetServiceSelection() {
+    const serviceSelect = document.getElementById('serviceSelect');
+    if (serviceSelect) {
+      serviceSelect.textContent = 'Выберите сервис';
+      delete serviceSelect.dataset.serviceId;
+      delete serviceSelect.dataset.serviceTitle;
+    }
+  }
+
+  function renderServicePlaceholder(message) {
+    const serviceOptions = document.getElementById('serviceOptions');
+    if (!serviceOptions) return;
+    serviceOptions.innerHTML = '';
+    const optionDiv = document.createElement('div');
+    optionDiv.classList.add('custom-option');
+    optionDiv.classList.add('disabled');
+    optionDiv.textContent = message;
+    serviceOptions.appendChild(optionDiv);
+  }
 
   // Load available services into custom select options
-  async function loadServices() {
+  async function loadServices(areaOverride) {
     try {
-      const response = await fetch('/services');
-      const services = await response.json();
       const serviceOptions = document.getElementById('serviceOptions');
       if (!serviceOptions) return;
+      let effectiveArea = typeof areaOverride === 'string' ? areaOverride : '';
+      if (!effectiveArea) {
+        effectiveArea = (window.LoadLens && window.LoadLens.activeProjectArea) || '';
+      }
+      if (!effectiveArea) {
+        try {
+          const curResp = await fetch('/current_project_area');
+          const cur = await curResp.json();
+          effectiveArea = (cur && cur.project_area) || '';
+          if (window.LoadLens) {
+            window.LoadLens.activeProjectArea = effectiveArea;
+          }
+        } catch (err) {
+          effectiveArea = '';
+        }
+      }
+      activeAreaCache = effectiveArea;
+      resetServiceSelection();
+      if (!effectiveArea) {
+        renderServicePlaceholder('Выберите область в шапке страницы');
+        return;
+      }
+      const response = await fetch(`/services?area=${encodeURIComponent(effectiveArea)}`);
+      const payload = await response.json();
+      const services = Array.isArray(payload?.services) ? payload.services : (Array.isArray(payload) ? payload : []);
+      if (!services.length) {
+        renderServicePlaceholder('Нет сервисов для выбранной области');
+        return;
+      }
       serviceOptions.innerHTML = '';
-      (services || []).forEach(svc => {
+      services.forEach((svc) => {
+        const id = typeof svc === 'string' ? svc : (svc.id || '');
+        if (!id) return;
+        const title = typeof svc === 'string' ? svc : ((svc && svc.title) || id);
         const optionDiv = document.createElement('div');
         optionDiv.classList.add('custom-option');
-        optionDiv.textContent = svc;
-        optionDiv.dataset.value = svc;
+        optionDiv.textContent = title;
+        optionDiv.dataset.value = id;
+        optionDiv.dataset.title = title;
         serviceOptions.appendChild(optionDiv);
       });
     } catch (error) {
       // eslint-disable-next-line no-console
       console.error('Ошибка загрузки сервисов:', error);
+      renderServicePlaceholder('Не удалось загрузить сервисы');
     }
   }
 
@@ -47,7 +100,7 @@
       if (stepEnd) stepEnd.style.display = anyTarget && hasStart ? 'block' : 'none';
       const hasEnd = !!(endEl && endEl.value);
       if (stepService) stepService.style.display = anyTarget && hasStart && hasEnd ? 'block' : 'none';
-      const serviceChosen = !!(serviceLabel && (serviceLabel.textContent || '').trim() !== 'Выберите сервис');
+      const serviceChosen = !!(serviceLabel && serviceLabel.dataset && serviceLabel.dataset.serviceId);
       if (stepTestType) stepTestType.style.display = anyTarget && hasStart && hasEnd && serviceChosen ? 'flex' : 'none';
       const testTypeVal = (document.getElementById('test_type')?.value || '').trim();
       const tail = anyTarget && hasStart && hasEnd && serviceChosen && !!testTypeVal;
@@ -139,11 +192,18 @@
     if (responseMessage) responseMessage.innerText = '';
     const start = document.getElementById('start')?.value;
     const end = document.getElementById('end')?.value;
-    const selectedText = document.getElementById('serviceSelect')?.textContent || '';
-    if (selectedText === 'Выберите сервис') {
+    const areaValue = activeAreaCache || (window.LoadLens && window.LoadLens.activeProjectArea) || '';
+    if (!areaValue) {
+      if (responseMessage) responseMessage.innerText = 'Пожалуйста, выберите проектную область в шапке страницы.';
+      return;
+    }
+    const serviceSelectEl = document.getElementById('serviceSelect');
+    const selectedService = serviceSelectEl?.dataset?.serviceId || '';
+    if (!selectedService) {
       if (responseMessage) responseMessage.innerText = 'Пожалуйста, выберите сервис.';
       return;
     }
+    const serviceTitle = serviceSelectEl?.dataset?.serviceTitle || serviceSelectEl?.textContent || selectedService;
 
     const target = (document.getElementById('target_mode')?.value || '').trim();
     const toConfluence = target === 'confluence';
@@ -156,7 +216,10 @@
     const common = {
       start,
       end,
-      service: selectedText,
+      service: selectedService,
+      service_title: serviceTitle,
+      project_area: areaValue,
+      area: areaValue,
       test_type: (document.getElementById('test_type')?.value || '').trim(),
       use_llm: ((document.getElementById('use_llm_mode')?.value || 'yes') === 'yes'),
       run_name: (document.getElementById('run_name')?.value || '').trim()
@@ -235,8 +298,13 @@
         if (!opt) return;
         const selectedService = opt.dataset.value || opt.textContent || '';
         if (!selectedService) return;
+        const selectedTitle = opt.dataset.title || opt.textContent || selectedService;
         const sel = document.getElementById('serviceSelect');
-        if (sel) sel.textContent = selectedService;
+        if (sel) {
+          sel.textContent = selectedTitle;
+          sel.dataset.serviceId = selectedService;
+          sel.dataset.serviceTitle = selectedTitle;
+        }
         if (serviceWrapper) serviceWrapper.classList.remove('open');
         try { syncSteps(); } catch (err) {}
       });

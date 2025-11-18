@@ -32,6 +32,9 @@
     .btn:hover { background:#3700b3; border-color:#3700b3; }
     .row { display:flex; gap:8px; align-items:center; }
     .status { color:#bbb; font-size:13px; margin-left:8px; }
+    .domain-toggle-list { display:flex; flex-wrap:wrap; gap:8px; margin:8px 0 12px 0; }
+    .domain-toggle-list label { display:inline-flex; align-items:center; gap:6px; background:#1e1e1e; border:1px solid #333; border-radius:20px; padding:6px 12px; font-size:13px; color:#ddd; cursor:pointer; }
+    .domain-toggle-list input { width:auto; height:auto; }
   </style>
 </head>
 <body>
@@ -129,6 +132,13 @@
                 <li>Рекомендуется использовать тег <code>scenario</code> как основной ключ серии.</li>
               </ul>
             </div>
+            <div class="row" style="gap:12px; align-items:center; margin:8px 0;">
+              <label for="queriesServiceSelect" style="min-width:180px; color:#ccc;">Сервис:</label>
+              <select id="queriesServiceSelect" style="height:36px; background:#1e1e1e; color:#eaeaea; border:1px solid #333; border-radius:6px; padding:6px 10px; min-width:240px;">
+                <option value="">Настройки области (по умолчанию)</option>
+              </select>
+              <button class="btn btn-secondary" id="addServiceBtnQueries" type="button">Добавить сервис</button>
+            </div>
             <div class="editor-wrap">
               <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_queries"></span></div>
               <div id="ed_queries" class="editor"></div>
@@ -140,6 +150,26 @@
           <summary>Промпты для LLM отчёта</summary>
           <div class="panel">
             <div class="help">Редактируйте тексты подсказок (prompts) для разных доменов анализа. Эти значения могут отличаться по проектным областям.</div>
+            <div class="row" style="gap:12px; align-items:center; margin:8px 0;">
+              <label for="promptServiceSelect" style="min-width:180px; color:#ccc;">Сервис:</label>
+              <select id="promptServiceSelect" style="height:36px; background:#1e1e1e; color:#eaeaea; border:1px solid #333; border-radius:6px; padding:6px 10px; min-width:240px;">
+                <option value="">Промпты области (по умолчанию)</option>
+              </select>
+              <button class="btn btn-secondary" id="addServiceBtn" type="button">Добавить сервис</button>
+              <span id="serviceManageStatus" class="status"></span>
+            </div>
+            <div id="serviceMetaPanel" style="display:none; border:1px solid #333; border-radius:8px; padding:10px; margin-bottom:16px;">
+              <div class="row" style="gap:12px; align-items:center; margin-bottom:8px;">
+                <label for="serviceTitleInput" style="min-width:180px; color:#ccc;">Отображаемое имя:</label>
+                <input type="text" id="serviceTitleInput" style="flex:1; height:36px; background:#1e1e1e; color:#eaeaea; border:1px solid #333; border-radius:6px; padding:6px 10px;" placeholder="Например: Core API" />
+              </div>
+              <div class="help">Домены, отмеченные галочкой, будут собираться и анализироваться для выбранного сервиса.</div>
+              <div id="domainToggleList" class="domain-toggle-list"></div>
+              <div class="row" style="gap:12px;">
+                <button class="btn btn-secondary" id="saveServiceMetaBtn" type="button">Сохранить сервис</button>
+                <span id="serviceMetaStatus" class="status"></span>
+              </div>
+            </div>
             <details>
               <summary>overall</summary>
               <div class="panel">
@@ -148,26 +178,6 @@
                   <div id="ed_prompt_overall" class="editor"></div>
                 </div>
                 <div class="row"><button class="btn btn-secondary" data-prompt-edit="overall">Редактировать</button><button class="btn" data-prompt-save="overall" style="display:none;">Сохранить</button></div>
-              </div>
-            </details>
-            <details>
-              <summary>judge</summary>
-              <div class="panel">
-                <div class="editor-wrap">
-                  <div class="editor-header"><div class="editor-title">Prompt: judge</div><span class="editor-status status" id="st_prompt_judge"></span></div>
-                  <div id="ed_prompt_judge" class="editor"></div>
-                </div>
-                <div class="row"><button class="btn btn-secondary" data-prompt-edit="judge">Редактировать</button><button class="btn" data-prompt-save="judge" style="display:none;">Сохранить</button></div>
-              </div>
-            </details>
-            <details>
-              <summary>critic</summary>
-              <div class="panel">
-                <div class="editor-wrap">
-                  <div class="editor-header"><div class="editor-title">Prompt: critic</div><span class="editor-status status" id="st_prompt_critic"></span></div>
-                  <div id="ed_prompt_critic" class="editor"></div>
-                </div>
-                <div class="row"><button class="btn btn-secondary" data-prompt-edit="critic">Редактировать</button><button class="btn" data-prompt-save="critic" style="display:none;">Сохранить</button></div>
               </div>
             </details>
             <details>
@@ -243,6 +253,13 @@
           <summary>Ссылки на графики для отчётов</summary>
           <div class="panel">
             <div class="help">Перечень сервисов для публикации: ID шаблонной и родительской страницы Confluence, список метрик (панелей Grafana) и логов (Loki), используемых при сборке отчёта. Изменение структуры требует внимательности.</div>
+            <div class="row" style="gap:12px; align-items:center; margin:8px 0;">
+              <label for="metricsServiceSelect" style="min-width:180px; color:#ccc;">Сервис:</label>
+              <select id="metricsServiceSelect" style="height:36px; background:#1e1e1e; color:#eaeaea; border:1px solid #333; border-radius:6px; padding:6px 10px; min-width:240px;">
+                <option value="">Настройки области (по умолчанию)</option>
+              </select>
+              <button class="btn btn-secondary" id="addServiceBtnMetrics" type="button">Добавить сервис</button>
+            </div>
             <div class="editor-wrap">
               <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_metrics_config"></span></div>
               <div id="ed_metrics_config" class="editor"></div>

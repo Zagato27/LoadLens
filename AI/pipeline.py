@@ -570,7 +570,7 @@ def build_context_pack(labeled_dfs: List[Dict[str, object]], top_n: int = 10) ->
     return {"sections": sections}
 
 
-def uploadFromLLM(start_ts: float, end_ts: float, save_to_db: bool = False, run_meta: dict | None = None, only_collect: bool = False, ef_config: dict | None = None, prompts_override: dict | None = None) -> Dict[str, object]:
+def uploadFromLLM(start_ts: float, end_ts: float, save_to_db: bool = False, run_meta: dict | None = None, only_collect: bool = False, ef_config: dict | None = None, prompts_override: dict | None = None, active_domains: List[str] | None = None) -> Dict[str, object]:
     _configure_logging()
     cfg = ef_config or CONFIG
     src_type = (cfg.get("metrics_source", {}) or {}).get("type", "prometheus").lower()
@@ -584,9 +584,18 @@ def uploadFromLLM(start_ts: float, end_ts: float, save_to_db: bool = False, run_
     domain_keys = ["jvm", "database", "kafka", "microservices", "hard_resources"]
     if isinstance(queries.get("lt_framework"), dict):
         domain_keys.append("lt_framework")
+    enabled_domain_set = set(domain_keys if active_domains is None else [d for d in active_domains if d in domain_keys])
+
+    def _is_enabled(key: str) -> bool:
+        return active_domains is None or key in enabled_domain_set
     domain_data = {}
+    def _empty_domain_payload(key: str) -> Dict[str, object]:
+        return {"labeled": [], "markdown": "", "pack": {"sections": []}, "ctx": json.dumps({"domain": key, "sections": []}, ensure_ascii=False)}
     for key in domain_keys:
         try:
+            if not _is_enabled(key):
+                domain_data[key] = _empty_domain_payload(key)
+                continue
             if key == "lt_framework":
                 qcfg = queries.get("lt_framework") or {}
                 # выбор источника lt: отдельный lt_metrics_source или общий
@@ -752,14 +761,18 @@ def uploadFromLLM(start_ts: float, end_ts: float, save_to_db: bool = False, run_
     ms_ctx = json.dumps(ms_ctx_obj, ensure_ascii=False)
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    domains_jobs = [
-        ("jvm", prompt_jvm, jvm_ctx),
-        ("database", prompt_database, database_ctx),
-        ("kafka", prompt_kafka, kafka_ctx),
-        ("microservices", prompt_microservices, ms_ctx),
-        ("hard_resources", prompt_hard_resources, hr_ctx),
-    ]
-    if "lt_framework" in domain_keys:
+    domains_jobs = []
+    if "jvm" in domain_keys and _is_enabled("jvm"):
+        domains_jobs.append(("jvm", prompt_jvm, jvm_ctx))
+    if "database" in domain_keys and _is_enabled("database"):
+        domains_jobs.append(("database", prompt_database, database_ctx))
+    if "kafka" in domain_keys and _is_enabled("kafka"):
+        domains_jobs.append(("kafka", prompt_kafka, kafka_ctx))
+    if "microservices" in domain_keys and _is_enabled("microservices"):
+        domains_jobs.append(("microservices", prompt_microservices, ms_ctx))
+    if "hard_resources" in domain_keys and _is_enabled("hard_resources"):
+        domains_jobs.append(("hard_resources", prompt_hard_resources, hr_ctx))
+    if "lt_framework" in domain_keys and _is_enabled("lt_framework"):
         lt_ctx = domain_data.get("lt_framework", {}).get("ctx", json.dumps({"domain":"lt_framework","sections":[]}, ensure_ascii=False))
         domains_jobs.append(("lt_framework", prompt_lt_framework, lt_ctx))
     results_map: dict[str, tuple[str, object, dict]] = {}
@@ -774,12 +787,20 @@ def uploadFromLLM(start_ts: float, end_ts: float, save_to_db: bool = False, run_
                 logger.error(f"LLM {key} analysis failed: {e}")
                 results_map[key] = ("{}", None, {})
 
-    answer_jvm, jvm_parsed, jvm_score = results_map.get("jvm", ("{}", None, {}))
-    answer_database, database_parsed, database_score = results_map.get("database", ("{}", None, {}))
-    answer_kafka, kafka_parsed, kafka_score = results_map.get("kafka", ("{}", None, {}))
-    answer_ms, ms_parsed, ms_score = results_map.get("microservices", ("{}", None, {}))
-    answer_hr, hr_parsed, hr_score = results_map.get("hard_resources", ("{}", None, {}))
-    answer_lt, lt_parsed, lt_score = results_map.get("lt_framework", ("{}", None, {})) if "lt_framework" in domain_keys else ("{}", None, {})
+    def _result_or_blank(key: str):
+        if _is_enabled(key):
+            return results_map.get(key, ("{}", None, {}))
+        return ("", None, {})
+
+    answer_jvm, jvm_parsed, jvm_score = _result_or_blank("jvm")
+    answer_database, database_parsed, database_score = _result_or_blank("database")
+    answer_kafka, kafka_parsed, kafka_score = _result_or_blank("kafka")
+    answer_ms, ms_parsed, ms_score = _result_or_blank("microservices")
+    answer_hr, hr_parsed, hr_score = _result_or_blank("hard_resources")
+    if "lt_framework" in domain_keys:
+        answer_lt, lt_parsed, lt_score = _result_or_blank("lt_framework")
+    else:
+        answer_lt, lt_parsed, lt_score = ("", None, {})
 
     merged_prompt_overall = (
         prompt_overall
