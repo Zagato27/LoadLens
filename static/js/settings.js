@@ -175,6 +175,43 @@
     currentPromptService = sel.value || '';
   }
 
+  async function deleteServiceConfirm(serviceId) {
+    if (!currentArea || !serviceId) return;
+    const ok = window.confirm(`Удалить сервис "${serviceId}" и все его данные?`);
+    if (!ok) return;
+    try {
+      await fetch('/service', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ area: currentArea, service: serviceId })
+      });
+      currentPromptService = '';
+      currentQueriesService = '';
+      currentMetricsService = '';
+      await loadConfig();
+      await loadPrompts();
+    } catch (e) {
+      // noop
+    }
+  }
+
+  async function deleteAreaConfirm() {
+    if (!currentArea) return;
+    const ok = window.confirm(`Удалить область "${currentArea}" со всеми сервісами и данными?`);
+    if (!ok) return;
+    try {
+      await fetch(`/areas/${encodeURIComponent(currentArea)}`, { method: 'DELETE' });
+      currentArea = '';
+      currentPromptService = '';
+      currentQueriesService = '';
+      currentMetricsService = '';
+      await loadConfig();
+      await loadPrompts();
+    } catch (e) {
+      // noop
+    }
+  }
+
   function populateServiceSelect(selectId, currentValue, placeholderText) {
     const sel = document.getElementById(selectId);
     if (!sel) return;
@@ -413,6 +450,8 @@
         await loadPrompts();
       });
     }
+    const deleteAreaBtn = document.getElementById('deleteAreaBtn');
+    if (deleteAreaBtn) deleteAreaBtn.addEventListener('click', deleteAreaConfirm);
     const queriesServiceSelect = document.getElementById('queriesServiceSelect');
     if (queriesServiceSelect) {
       queriesServiceSelect.addEventListener('change', () => {
@@ -428,11 +467,29 @@
       });
     }
     const addServiceBtn = document.getElementById('addServiceBtn');
-    if (addServiceBtn) addServiceBtn.addEventListener('click', handleAddService);
+    if (addServiceBtn) addServiceBtn.addEventListener('click', async () => {
+      await handleAddService();
+      await loadConfig();
+      await loadPrompts();
+    });
     const addServiceBtnQueries = document.getElementById('addServiceBtnQueries');
-    if (addServiceBtnQueries) addServiceBtnQueries.addEventListener('click', handleAddService);
+    if (addServiceBtnQueries) addServiceBtnQueries.addEventListener('click', async () => {
+      await handleAddService();
+      await loadConfig();
+    });
     const addServiceBtnMetrics = document.getElementById('addServiceBtnMetrics');
-    if (addServiceBtnMetrics) addServiceBtnMetrics.addEventListener('click', handleAddService);
+    if (addServiceBtnMetrics) addServiceBtnMetrics.addEventListener('click', async () => {
+      await handleAddService();
+      await loadConfig();
+    });
+    document.querySelectorAll('[data-delete-service]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const target = btn.getAttribute('data-delete-service');
+        if (target === 'prompts') deleteServiceConfirm(currentPromptService || '');
+        if (target === 'queries') deleteServiceConfirm(currentQueriesService || '');
+        if (target === 'metrics') deleteServiceConfirm(currentMetricsService || '');
+      });
+    });
     const saveServiceMetaBtn = document.getElementById('saveServiceMetaBtn');
     if (saveServiceMetaBtn) saveServiceMetaBtn.addEventListener('click', saveServiceMeta);
     }

@@ -8,6 +8,7 @@ import uuid
 import psycopg2
 import os
 import json
+import copy
 from AI.db_store import _ensure_llm_reports_table, _ensure_engineer_reports_table  # для гарантий наличия таблиц
 
 
@@ -235,6 +236,99 @@ def _service_disabled_domains(area_name: str | None, service_id: str | None) -> 
     meta = _service_meta(area_name, service_id)
     disabled = meta.get('disabled_domains') if isinstance(meta, dict) else []
     return [d for d in disabled if isinstance(d, str)]
+
+
+BOOTSTRAP_SECTIONS = ("llm", "metrics_source", "lt_metrics_source", "default_params", "queries", "prompts")
+
+
+def _default_section_template(section: str) -> dict:
+    if section == "prompts":
+        return copy.deepcopy(_load_base_prompts())
+    return copy.deepcopy(CONFIG.get(section, {}) or {})
+
+
+def _ensure_area_runtime(area_name: str):
+    runtime = _load_settings_runtime_data()
+    if 'per_area' not in runtime or not isinstance(runtime.get('per_area'), dict):
+        runtime['per_area'] = {}
+    if area_name not in runtime['per_area'] or not isinstance(runtime['per_area'].get(area_name), dict):
+        runtime['per_area'][area_name] = {}
+    return runtime, runtime['per_area'][area_name]
+
+
+def _bootstrap_area_defaults(area_name: str | None) -> None:
+    if not area_name:
+        return
+    runtime, area_entry = _ensure_area_runtime(area_name)
+    changed = False
+    for section in BOOTSTRAP_SECTIONS:
+        if section in area_entry and isinstance(area_entry[section], dict) and area_entry[section]:
+            continue
+        template = _default_section_template(section)
+        area_entry[section] = template
+        changed = True
+    if changed:
+        _save_settings_runtime_data(runtime)
+
+
+def _bootstrap_service_configs(area_name: str | None, service_id: str | None) -> None:
+    if not area_name or not service_id:
+        return
+    _bootstrap_area_defaults(area_name)
+    runtime, area_entry = _ensure_area_runtime(area_name)
+    if 'services' not in area_entry or not isinstance(area_entry.get('services'), dict):
+        area_entry['services'] = {}
+    if service_id not in area_entry['services'] or not isinstance(area_entry['services'].get(service_id), dict):
+        area_entry['services'][service_id] = {}
+    service_entry = area_entry['services'][service_id]
+    changed = False
+    for section in BOOTSTRAP_SECTIONS:
+        section_value = service_entry.get(section)
+        if isinstance(section_value, dict) and section_value:
+            continue
+        inherit = area_entry.get(section)
+        if not isinstance(inherit, dict) or not inherit:
+            inherit = _default_section_template(section)
+        service_entry[section] = copy.deepcopy(inherit)
+        changed = True
+    if changed:
+        _save_settings_runtime_data(runtime)
+    _bootstrap_metrics_service_config(area_name, service_id)
+
+
+def _default_metrics_service_template() -> dict:
+    for cfg in METRICS_CONFIG.values():
+        if isinstance(cfg, dict):
+            return copy.deepcopy(cfg)
+    return {
+        "page_sample_id": "",
+        "page_parent_id": "",
+        "metrics": [],
+        "logs": []
+    }
+
+
+def _bootstrap_metrics_service_config(area_name: str | None, service_id: str | None) -> None:
+    if not area_name or not service_id:
+        return
+    base_metrics = _default_metrics_service_template()
+    current = {}
+    try:
+        if os.path.exists(METRICS_RUNTIME_PATH):
+            with open(METRICS_RUNTIME_PATH, 'r', encoding='utf-8') as f:
+                current = json.load(f)
+    except Exception:
+        current = {}
+    if not isinstance(current, dict):
+        current = {}
+    if area_name not in current or not isinstance(current.get(area_name), dict):
+        current[area_name] = {"services": {}}
+    if 'services' not in current[area_name] or not isinstance(current[area_name].get('services'), dict):
+        current[area_name]['services'] = {}
+    if service_id not in current[area_name]['services']:
+        current[area_name]['services'][service_id] = copy.deepcopy(base_metrics)
+        with open(METRICS_RUNTIME_PATH, 'w', encoding='utf-8') as f:
+            json.dump(current, f, ensure_ascii=False, indent=2)
 
 
 def _list_project_areas() -> list[dict]:
@@ -780,6 +874,7 @@ def list_runs():
         schema = cfg.get("schema", "public")
         llm_table = cfg.get("llm_table", "llm_reports")
         pa = _active_project_area()
+        services_filter = _resolve_services_filter(pa)
         q = request.args.get('q', '').strip()
         offset = int(request.args.get('offset', '0') or 0)
         limit = int(request.args.get('limit', '20') or 20)
@@ -1223,6 +1318,9 @@ def create_report():
     except ValueError:
         return jsonify({"status": "error", "message": "Некорректный формат времени. Используйте формат YYYY-MM-DDTHH:MM"}), 400
 
+    preferred_area = project_area or _find_area_for_service(service) or service
+    _bootstrap_service_configs(preferred_area, service)
+
     # Проверка наличия конфигурации для выбранного сервиса (по активному metrics_config)
     metrics_area, service_metrics_cfg = _metrics_service_entry(service)
     if not service_metrics_cfg:
@@ -1238,7 +1336,6 @@ def create_report():
             return jsonify({"status": "error", "message": f"Сервис '{service}' принадлежит другой области"}), 400
     else:
         project_area = service_area or ''
-
     # Проверка уникальности имени запуска (в пределах выбранной области/сервиса)
     run_name = (run_name or '').strip() if isinstance(run_name, str) else ''
     if run_name:
@@ -1354,6 +1451,89 @@ def delete_run(run_name: str):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+def _delete_service_data(area_name: str, service_name: str) -> None:
+    runtime = _load_settings_runtime_data()
+    changed = False
+    if isinstance(runtime.get('per_area'), dict):
+        area_entry = runtime['per_area'].get(area_name)
+        if isinstance(area_entry, dict) and isinstance(area_entry.get('services'), dict):
+            if service_name in area_entry['services']:
+                del area_entry['services'][service_name]
+                changed = True
+    if changed:
+        _save_settings_runtime_data(runtime)
+
+    metrics_rt = {}
+    try:
+        if os.path.exists(METRICS_RUNTIME_PATH):
+            with open(METRICS_RUNTIME_PATH, 'r', encoding='utf-8') as f:
+                metrics_rt = json.load(f)
+    except Exception:
+        metrics_rt = {}
+    if isinstance(metrics_rt.get(area_name), dict):
+        services_entry = metrics_rt[area_name].get('services')
+        if isinstance(services_entry, dict) and service_name in services_entry:
+            del services_entry[service_name]
+            with open(METRICS_RUNTIME_PATH, 'w', encoding='utf-8') as f:
+                json.dump(metrics_rt, f, ensure_ascii=False, indent=2)
+
+    cfg = (CONFIG.get("storage", {}) or {}).get("timescale", {})
+    schema = cfg.get("schema", "public")
+    metrics_table = cfg.get("table", "metrics")
+    llm_table = cfg.get("llm_table", "llm_reports")
+    engineer_table = cfg.get("engineer_table", "engineer_reports")
+    conn = _ts_conn()
+    with conn, conn.cursor() as cur:
+        for table in (metrics_table,):
+            try:
+                cur.execute(f"DELETE FROM {schema}.{table} WHERE service = %s", (service_name,))
+            except Exception:
+                pass
+        for table in (llm_table, engineer_table):
+            try:
+                cur.execute(f"DELETE FROM {schema}.{table} WHERE service = %s", (service_name,))
+            except Exception:
+                pass
+    conn.close()
+
+
+@app.route('/service', methods=['DELETE'])
+def delete_service():
+    data = request.get_json(silent=True) or {}
+    area = (data.get('area') or '').strip()
+    service = (data.get('service') or '').strip()
+    if not area or not service:
+        return jsonify({"error": "area и service обязательны"}), 400
+    _delete_service_data(area, service)
+    return jsonify({"status": "ok"})
+
+
+@app.route('/areas/<area_name>', methods=['DELETE'])
+def delete_area(area_name: str):
+    area_name = (area_name or '').strip()
+    if not area_name:
+        return jsonify({"error": "area_name обязателен"}), 400
+    services = list(_resolve_services_for_area(area_name))
+    for service in services:
+        _delete_service_data(area_name, service)
+    runtime = _load_settings_runtime_data()
+    if isinstance(runtime.get('per_area'), dict) and area_name in runtime['per_area']:
+        del runtime['per_area'][area_name]
+        _save_settings_runtime_data(runtime)
+    metrics_rt = {}
+    try:
+        if os.path.exists(METRICS_RUNTIME_PATH):
+            with open(METRICS_RUNTIME_PATH, 'r', encoding='utf-8') as f:
+                metrics_rt = json.load(f)
+    except Exception:
+        metrics_rt = {}
+    if isinstance(metrics_rt, dict) and area_name in metrics_rt:
+        del metrics_rt[area_name]
+        with open(METRICS_RUNTIME_PATH, 'w', encoding='utf-8') as f:
+            json.dump(metrics_rt, f, ensure_ascii=False, indent=2)
+    return jsonify({"status": "ok"})
+
 # -------------------- Project areas API --------------------
 @app.route('/project_areas', methods=['GET'])
 def project_areas():
@@ -1462,24 +1642,30 @@ def get_config():
             "metrics_config": area_metrics_cfg,
         }
         services_meta = {}
-        services_map = _services_map_for_area(active_area) if active_area else {}
-        if active_area:
-            for sid, meta in services_map.items():
-                if not isinstance(meta, dict):
-                    meta = {}
-                services_meta[sid] = {
-                    "title": (meta.get('title') if isinstance(meta.get('title'), str) else '') or sid,
-                    "disabled_domains": [d for d in (meta.get('disabled_domains') or []) if isinstance(d, str)],
-                }
         area_metrics_services = area_metrics_cfg.get('services', {}) if isinstance(area_metrics_cfg, dict) else {}
-        for sid in area_metrics_services.keys():
+        service_ids: set[str] = set()
+        services_map_initial = _services_map_for_area(active_area) if active_area else {}
+        service_ids.update(services_map_initial.keys())
+        service_ids.update(area_metrics_services.keys())
+        if active_area:
+            for sid in service_ids:
+                _bootstrap_service_configs(active_area, sid)
+        services_map = _services_map_for_area(active_area) if active_area else {}
+        for sid, meta in services_map.items():
+            if not isinstance(meta, dict):
+                meta = {}
+            services_meta[sid] = {
+                "title": (meta.get('title') if isinstance(meta.get('title'), str) else '') or sid,
+                "disabled_domains": [d for d in (meta.get('disabled_domains') or []) if isinstance(d, str)],
+            }
+        for sid in service_ids:
             services_meta.setdefault(sid, {
                 "title": sid,
                 "disabled_domains": [],
             })
         queries_map = {"": merge_area_section("queries")}
         for sid in services_meta.keys():
-            meta = services_map.get(sid) or {}
+            meta = services_map.get(sid) or _service_meta(active_area, sid)
             svc_queries = meta.get('queries') if isinstance(meta, dict) else {}
             queries_map[sid] = svc_queries if isinstance(svc_queries, dict) else {}
         metrics_config_map = {"": area_metrics_cfg}
@@ -1744,6 +1930,7 @@ def update_service_meta():
             allowed = set(_available_domain_keys())
             svc_entry['disabled_domains'] = [d for d in meta.get('disabled_domains') if isinstance(d, str) and d in allowed]
         _save_settings_runtime_data(runtime)
+        _bootstrap_service_queries(area, service)
         return jsonify({"status": "ok", "service": service, "meta": svc_entry})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
