@@ -55,6 +55,7 @@
       <label for="areaSelect" style="min-width:160px; color:#ccc;">Проектная область:</label>
       <select id="areaSelect" style="height:36px; background:#1e1e1e; color:#eaeaea; border:1px solid #333; border-radius:6px; padding:6px 10px; min-width:200px;"></select>
       <button class="btn btn-secondary" id="addAreaBtn" type="button">Добавить область</button>
+        <button class="btn btn-secondary" id="deleteAreaBtn" type="button" style="background:#b00020; border-color:#b00020;">Удалить область</button>
       <span id="areaStatus" class="status"></span>
     </div>
 
@@ -138,6 +139,7 @@
                 <option value="">Настройки области (по умолчанию)</option>
               </select>
               <button class="btn btn-secondary" id="addServiceBtnQueries" type="button">Добавить сервис</button>
+              <button class="btn btn-secondary" data-delete-service="queries" type="button" style="background:#b00020; border-color:#b00020;">Удалить сервис</button>
             </div>
             <div class="editor-wrap">
               <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_queries"></span></div>
@@ -156,6 +158,7 @@
                 <option value="">Промпты области (по умолчанию)</option>
               </select>
               <button class="btn btn-secondary" id="addServiceBtn" type="button">Добавить сервис</button>
+              <button class="btn btn-secondary" data-delete-service="prompts" type="button" style="background:#b00020; border-color:#b00020;">Удалить сервис</button>
               <span id="serviceManageStatus" class="status"></span>
             </div>
             <div id="serviceMetaPanel" style="display:none; border:1px solid #333; border-radius:8px; padding:10px; margin-bottom:16px;">
@@ -259,6 +262,7 @@
                 <option value="">Настройки области (по умолчанию)</option>
               </select>
               <button class="btn btn-secondary" id="addServiceBtnMetrics" type="button">Добавить сервис</button>
+              <button class="btn btn-secondary" data-delete-service="metrics" type="button" style="background:#b00020; border-color:#b00020;">Удалить сервис</button>
             </div>
             <div class="editor-wrap">
               <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_metrics_config"></span></div>
