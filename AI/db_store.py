@@ -178,6 +178,21 @@ def save_domain_labeled(
     run_meta: Optional[Dict[str, object]],
     storage_cfg: Dict[str, object]
 ) -> None:
+    """Сохраняет временные ряды домена в таблицу `metrics`.
+
+    Параметры:
+        domain_key (str): Имя домена (`jvm`, `kafka`, ...).
+        domain_conf (dict): Конфигурация домена (`labels`, `promql_queries`).
+        labeled_dfs (list[dict]): Список DataFrame c их подписями.
+        run_meta (dict | None): Метаданные запуска (run_id, service и т.д.).
+        storage_cfg (dict): Настройки TimescaleDB (`host`, `schema`, `table`...).
+
+    Побочные эффекты:
+        Выполняет INSERT в PostgreSQL/TimescaleDB.
+
+    Исключения:
+        Пробрасывает ошибки psycopg2 при недоступности БД.
+    """
     if not storage_cfg:
         logger.warning("TimescaleDB конфигурация не задана, пропускаем сохранение домена %s", domain_key)
         return
@@ -393,7 +408,16 @@ def save_llm_results(
     run_meta: Dict[str, object],
     storage_cfg: Dict[str, object]
 ) -> None:
-    """Сохраняет текст/parsed/scores по доменам и финалу в обычную таблицу llm_reports."""
+    """Сохраняет текст/parsed/scores по доменам и финалу в таблицу `llm_reports`.
+
+    Параметры:
+        results (dict): Объединённый ответ `uploadFromLLM`.
+        run_meta (dict): Метаданные запуска.
+        storage_cfg (dict): Параметры TimescaleDB.
+
+    Побочные эффекты:
+        Пишет в таблицу `llm_reports` (создаёт её при необходимости).
+    """
     if not storage_cfg:
         logger.warning("TimescaleDB конфигурация не задана, пропускаю сохранение LLM результатов")
         return

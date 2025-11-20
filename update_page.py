@@ -1,24 +1,34 @@
-from confluence_manager.update_confluence_template import copy_confluence_page, update_confluence_page, update_confluence_page_multi, render_llm_report_placeholders, render_llm_markdown
-from AI.main import uploadFromLLM
-
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from data_collectors.grafana_collector import downloadImagesLogin, send_file_to_attachment
-from data_collectors.loki_collector import fetch_loki_logs, send_loki_file_to_attachment
-from settings import CONFIG  # Импорт базовой конфигурации
-from metrics_config import METRICS_CONFIG  # Базовая конфигурация метрик
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import ast
+import json
+import json as _json
+import logging
+import os
 import time
-from datetime import datetime  # если ещё не импортирован
 import traceback  # для детального вывода ошибок (опционально)
 import uuid
-import os
+from datetime import datetime  # если ещё не импортирован
+
 from requests.auth import HTTPBasicAuth
-import json
-import ast
-import json as _json
+
+from AI.main import uploadFromLLM
+from confluence_manager.update_confluence_template import (
+    copy_confluence_page,
+    render_llm_markdown,
+    render_llm_report_placeholders,
+    update_confluence_page,
+    update_confluence_page_multi,
+)
+from data_collectors.grafana_collector import downloadImagesLogin, send_file_to_attachment
+from data_collectors.loki_collector import fetch_loki_logs, send_loki_file_to_attachment
+from loadlens_app.celery_app import celery_app
+from metrics_config import METRICS_CONFIG  # Базовая конфигурация метрик
+from settings import CONFIG  # Импорт базовой конфигурации
 
 # Поддержка runtime-оверрайда metrics_config
 _METRICS_RUNTIME_PATH = os.path.join(os.path.dirname(__file__), 'metrics_config_runtime.json')
+
+logger = logging.getLogger(__name__)
+_TASK_TIMEOUT = int(os.getenv("CELERY_TASK_TIMEOUT", "600"))
 
 def _deep_merge_dicts(_a: dict, _b: dict) -> dict:
     out = dict(_a or {})
@@ -268,6 +278,115 @@ def _test_type_overlays(tt: str) -> dict:
         'lt_framework': dom_overlay,
     }
 
+
+def _await_task(async_result):
+    """Возвращает результат Celery-задачи с таймаутом."""
+    return async_result.get(timeout=_TASK_TIMEOUT)
+
+
+def _download_img_with_retry(image_url: str, file_basename: str, username: str, password: str, max_attempts: int = 3) -> bool:
+    for attempt in range(max_attempts):
+        try:
+            downloadImagesLogin(image_url, file_basename, username, password)
+            path = f"data_collectors/temporary_files/{file_basename}.jpg"
+            if os.path.exists(path) and os.path.getsize(path) > 0:
+                return True
+            logger.warning("Файл не создан или пуст: %s", path)
+        except Exception as exc:
+            logger.warning(
+                "Попытка загрузки изображения не удалась (%s/%s): %s",
+                attempt + 1,
+                max_attempts,
+                exc,
+            )
+        time.sleep(1 * (attempt + 1))
+    return False
+
+
+def _download_log_with_retry(loki_url: str, start_ts: int, end_ts: int, filter_query: str, file_basename: str, max_attempts: int = 3) -> bool:
+    for attempt in range(max_attempts):
+        try:
+            path = fetch_loki_logs(loki_url, start_ts, end_ts, filter_query, file_basename)
+            if isinstance(path, str) and os.path.exists(path) and os.path.getsize(path) > 0:
+                return True
+            logger.warning("Лог-файл не создан или пуст: %s.log", file_basename)
+        except Exception as exc:
+            logger.warning(
+                "Попытка получения логов не удалась (%s/%s): %s",
+                attempt + 1,
+                max_attempts,
+                exc,
+            )
+        time.sleep(1 * (attempt + 1))
+    return False
+
+
+def _attach_with_retry(func, *args, max_attempts: int = 3, **kwargs) -> bool:
+    for attempt in range(max_attempts):
+        try:
+            resp = func(*args, **kwargs)
+            code = getattr(resp, "status_code", None) if resp is not None else None
+            if code in (200, 201):
+                return True
+            if code == 409:
+                logger.info("Вложение уже существует, считаю успехом.")
+                return True
+            logger.warning("Ошибка загрузки вложения (attempt %s): status=%s", attempt + 1, code)
+        except Exception as exc:
+            logger.warning("Попытка загрузки вложения не удалась (%s): %s", attempt + 1, exc)
+        time.sleep(1 * (attempt + 1))
+    return False
+
+
+@celery_app.task(bind=True, autoretry_for=(Exception,), retry_kwargs={"max_retries": 3, "countdown": 2})
+def download_grafana_image_task(self, image_url: str, file_basename: str, username: str, password: str) -> bool:  # pragma: no cover - celery worker
+    if _download_img_with_retry(image_url, file_basename, username, password):
+        return True
+    raise RuntimeError(f"Не удалось загрузить изображение {file_basename}")
+
+
+@celery_app.task(bind=True, autoretry_for=(Exception,), retry_kwargs={"max_retries": 3, "countdown": 2})
+def download_loki_logs_task(self, loki_url: str, start_ts: int, end_ts: int, filter_query: str, file_basename: str) -> bool:  # pragma: no cover - celery worker
+    if _download_log_with_retry(loki_url, start_ts, end_ts, filter_query, file_basename):
+        return True
+    raise RuntimeError(f"Не удалось получить логи {file_basename}")
+
+
+@celery_app.task(bind=True, autoretry_for=(Exception,), retry_kwargs={"max_retries": 3, "countdown": 2})
+def upload_attachment_task(self, kind: str, url_basic: str, username: str, password: str, page_id: str, file_path: str) -> bool:  # pragma: no cover - celery worker
+    auth = HTTPBasicAuth(username, password)
+    if kind == "grafana":
+        ok = _attach_with_retry(send_file_to_attachment, url_basic, auth, page_id, file_path)
+    else:
+        ok = _attach_with_retry(send_loki_file_to_attachment, url_basic, auth, page_id, file_path)
+    if ok:
+        return True
+    raise RuntimeError(f"Не удалось загрузить вложение {file_path}")
+
+
+@celery_app.task(bind=True, autoretry_for=(Exception,), retry_kwargs={"max_retries": 3, "countdown": 2})
+def generate_llm_results_task(
+    self,
+    start_ts: float,
+    end_ts: float,
+    save_to_db: bool,
+    run_meta: dict | None,
+    only_collect: bool,
+    ef_config: dict | None,
+    prompts_override: dict | None,
+    active_domains: list[str] | None,
+):  # pragma: no cover - celery worker
+    return uploadFromLLM(
+        start_ts,
+        end_ts,
+        save_to_db=save_to_db,
+        run_meta=run_meta,
+        only_collect=only_collect,
+        ef_config=ef_config,
+        prompts_override=prompts_override,
+        active_domains=active_domains,
+    )
+
 def _load_area_overrides(area_name: str) -> dict:
     try:
         if not area_name:
@@ -316,6 +435,30 @@ def _prompts_override_for_area(area_name: str | None) -> dict:
 
 
 def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = False, web_only: bool = False, run_name: str | None = None, test_type: str | None = None, progress_callback=None):
+    """Формирует отчёт по нагрузочному тесту (Confluence и/или веб-интерфейс).
+
+    Параметры:
+        start (int): Начало интервала в миллисекундах UNIX.
+        end (int): Конец интервала в миллисекундах UNIX.
+        service (str): Идентификатор сервиса из конфигурации.
+        use_llm (bool): Включать ли аналитический блок LLM.
+        save_to_db (bool): Сохранять ли промежуточные данные в TimescaleDB.
+        web_only (bool): При True генерирует только веб-отчёт (без Confluence).
+        run_name (str | None): Пользовательское имя запуска.
+        test_type (str | None): Профиль теста (step/soak/...).
+        progress_callback (callable | None): Колбэк прогресса (msg, percent).
+
+    Возвращает:
+        dict: Информация о созданной странице (`page_id`, `page_url`, `run_name`).
+
+    Побочные эффекты:
+        - Сетевые запросы к Grafana, Loki, Confluence, LLM-провайдеру.
+        - Создание/обновление страниц Confluence, загрузка вложений.
+        - Опциональная запись в TimescaleDB.
+
+    Исключения:
+        Пробрасывает ошибки работы с Confluence/Grafana/LLM при критических сбоях.
+    """
     # Получение параметров из `config.py`
     user = CONFIG['user']
     password = CONFIG['password']
@@ -343,18 +486,15 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
     # Режим «только веб»: не создаём страницу Confluence, не скачиваем изображения из Grafana
     if web_only:
         def _progress(msg: str, pct: int | None = None):
-            try:
-                if pct is not None:
-                    print(f"[progress] {msg} {pct}%")
-                else:
-                    print(f"[progress] {msg}")
-            except Exception:
-                pass
+            if pct is not None:
+                logger.info("[progress] %s %s%%", msg, pct)
+            else:
+                logger.info("[progress] %s", msg)
             try:
                 if callable(progress_callback):
                     progress_callback(msg, pct)
             except Exception:
-                pass
+                logger.exception("Ошибка колбэка прогресса")
 
         _progress("Создание веб-отчёта (без Confluence) начато…", 5)
 
@@ -409,18 +549,15 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
 
     # Прогресс
     def _progress(msg: str, pct: int | None = None):
-        try:
-            if pct is not None:
-                print(f"[progress] {msg} {pct}%")
-            else:
-                print(f"[progress] {msg}")
-        except Exception:
-            pass
+        if pct is not None:
+            logger.info("[progress] %s %s%%", msg, pct)
+        else:
+            logger.info("[progress] %s", msg)
         try:
             if callable(progress_callback):
                 progress_callback(msg, pct)
         except Exception:
-            pass
+            logger.exception("Ошибка колбэка прогресса")
 
     _progress("Создание отчёта начато…", 5)
    
@@ -440,10 +577,10 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
                 return res
             except Exception as e:
                 if ("Attempted to update stale data" in str(e) or "conflict" in str(e).lower()) and attempt < max_attempts-1:
-                    print(f"Попытка {attempt+1} не удалась, повторяем через 1 секунду...")
+                    logger.warning("Попытка %s не удалась, повторяем через 1 секунду...", attempt + 1)
                     time.sleep(1)
                 elif attempt < max_attempts-1:
-                    print(f"Попытка {attempt+1} не удалась: {e}. Повтор через 1 секунду...")
+                    logger.warning("Попытка %s не удалась: %s. Повтор через 1 секунду...", attempt + 1, e)
                     time.sleep(1)
                 else:
                     raise e
@@ -479,115 +616,69 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
             "file_path": file_path,
         })
 
-    # Вспомогательные обёртки с ретраями
-    def _download_img_with_retry(image_url: str, file_basename: str, username: str, password: str, max_attempts: int = 3) -> bool:
-        for attempt in range(max_attempts):
-            try:
-                downloadImagesLogin(image_url, file_basename, username, password)
-                path = f"data_collectors/temporary_files/{file_basename}.jpg"
-                if os.path.exists(path) and os.path.getsize(path) > 0:
-                    return True
-                else:
-                    print(f"[warn] Файл не создан или пуст: {path}")
-            except Exception as e:
-                print(f"[warn] Попытка загрузки изображения не удалась ({attempt+1}/{max_attempts}): {e}")
-            time.sleep(1 * (attempt + 1))
-        return False
-
-    def _download_log_with_retry(loki_url: str, start_ts: int, end_ts: int, filter_query: str, file_basename: str, max_attempts: int = 3) -> bool:
-        for attempt in range(max_attempts):
-            try:
-                path = fetch_loki_logs(loki_url, start_ts, end_ts, filter_query, file_basename)
-                if isinstance(path, str) and os.path.exists(path) and os.path.getsize(path) > 0:
-                    return True
-                else:
-                    print(f"[warn] Лог-файл не создан или пуст: {file_basename}.log")
-            except Exception as e:
-                print(f"[warn] Попытка получения логов не удалась ({attempt+1}/{max_attempts}): {e}")
-            time.sleep(1 * (attempt + 1))
-        return False
-
-    # Параллельно скачиваем все графики и получаем логи (ограниченный пул)
-    with ThreadPoolExecutor(max_workers=min(6, max(1, len(metric_items) + len(log_items)))) as executor:
-        download_futures = []
-        for m in metric_items:
-            download_futures.append(executor.submit(
-                _download_img_with_retry, m["grafana_url"], m["file_basename"], grafana_login, grafana_pass
-            ))
-        log_futures = []
-        for l in log_items:
-            log_futures.append(executor.submit(
-                _download_log_with_retry, loki_url, start, end, l["filter_query"], l["file_basename"]
-            ))
-
-        # Дождёмся завершения загрузок
-        for f in as_completed(download_futures + log_futures):
-            try:
-                _ = f.result()
-            except Exception as e:
-                print(f"Ошибка при скачивании/получении: {e}")
+    download_jobs: list[tuple[str, dict, object]] = []
+    for m in metric_items:
+        download_jobs.append(
+            ("metric", m, download_grafana_image_task.delay(m["grafana_url"], m["file_basename"], grafana_login, grafana_pass))
+        )
+    for l in log_items:
+        download_jobs.append(
+            ("log", l, download_loki_logs_task.delay(loki_url, start, end, l["filter_query"], l["file_basename"]))
+        )
+    for kind, item, job in download_jobs:
+        identifier = item.get("name") if kind == "metric" else item.get("placeholder")
+        try:
+            _await_task(job)
+        except Exception as exc:
+            logger.error("Ошибка при скачивании %s '%s': %s", kind, identifier, exc)
 
     _progress("Загрузка вложений и обновление страницы…", 50)
 
-    # Одним проходом: прикрепляем все файлы и копим замены (ограниченный пул + ретраи)
-    def _attach_with_retry(func, *args, max_attempts: int = 3, **kwargs) -> bool:
-        for attempt in range(max_attempts):
-            try:
-                resp = func(*args, **kwargs)
-                code = getattr(resp, "status_code", None) if resp is not None else None
-                if code in (200, 201):
-                    return True
-                # 409 трактуем как успех (вложение с таким именем уже есть)
-                if code == 409:
-                    print("[info] Вложение уже существует, считаю успехом.")
-                    return True
-                print(f"[warn] Ошибка загрузки вложения (attempt {attempt+1}): status={code}")
-            except Exception as e:
-                print(f"[warn] Попытка загрузки вложения не удалась ({attempt+1}): {e}")
-            time.sleep(1 * (attempt + 1))
-        return False
-
     replacements_pending = {}
-    attach_future_to_ph = {}
+    attachment_jobs: list[tuple[tuple[str, str], object]] = []
+
+    for m in metric_items:
+        if os.path.exists(m["file_path"]) and os.path.getsize(m["file_path"]) > 0:
+            attachment_jobs.append(
+                (
+                    (m["placeholder"], f'<ac:image><ri:attachment ri:filename="{m["file_basename"]}.jpg" /></ac:image>'),
+                    upload_attachment_task.delay("grafana", url_basic, user, password, copy_page_id, m["file_path"]),
+                )
+            )
+        else:
+            logger.warning("Не найден файл графика: %s", m["file_path"])
+
+    for l in log_items:
+        if os.path.exists(l["file_path"]) and os.path.getsize(l["file_path"]) > 0:
+            attachment_jobs.append(
+                (
+                    (
+                        l["placeholder"],
+                        (
+                            f'<ac:structured-macro ac:name="view-file" ac:schema-version="1">'
+                            f'<ac:parameter ac:name="name">'
+                            f'<ri:attachment ri:filename="{l["file_basename"]}.log" />'
+                            f'</ac:parameter>'
+                            f'<ac:parameter ac:name="height">250</ac:parameter>'
+                            f'</ac:structured-macro>'
+                        ),
+                    ),
+                    upload_attachment_task.delay("logs", url_basic, user, password, copy_page_id, l["file_path"]),
+                )
+            )
+        else:
+            logger.warning("Не найден файл логов: %s", l["file_path"])
+
     success_placeholders: set[str] = set()
-
-    auth = HTTPBasicAuth(user, password)
-    with ThreadPoolExecutor(max_workers=min(4, max(1, len(metric_items) + len(log_items)))) as executor:
-        # Графики
-        for m in metric_items:
-            if os.path.exists(m["file_path"]) and os.path.getsize(m["file_path"]) > 0:
-                fut = executor.submit(_attach_with_retry, send_file_to_attachment, url_basic, auth, copy_page_id, m["file_path"])
-                attach_future_to_ph[fut] = (m["placeholder"], f'<ac:image><ri:attachment ri:filename="{m["file_basename"]}.jpg" /></ac:image>')
-            else:
-                print(f"[warn] Не найден файл графика: {m['file_path']}")
-
-        # Логи
-        for l in log_items:
-            if os.path.exists(l["file_path"]) and os.path.getsize(l["file_path"]) > 0:
-                fut = executor.submit(_attach_with_retry, send_loki_file_to_attachment, url_basic, auth, copy_page_id, l["file_path"]) 
-                attach_future_to_ph[fut] = (l["placeholder"], (
-                    f'<ac:structured-macro ac:name="view-file" ac:schema-version="1">'
-                    f'<ac:parameter ac:name="name">'
-                    f'<ri:attachment ri:filename="{l["file_basename"]}.log" />'
-                    f'</ac:parameter>'
-                    f'<ac:parameter ac:name="height">250</ac:parameter>'
-                    f'</ac:structured-macro>'
-                ))
-            else:
-                print(f"[warn] Не найден файл логов: {l['file_path']}")
-
-        # Дождёмся загрузки всех вложений и соберём успешные плейсхолдеры
-        for f in as_completed(list(attach_future_to_ph.keys())):
-            ph, html = attach_future_to_ph[f]
-            ok = False
-            try:
-                ok = bool(f.result())
-            except Exception as e:
-                print(f"Ошибка при загрузке вложения: {e}")
-                ok = False
-            if ok:
-                success_placeholders.add(ph)
-                replacements_pending[ph] = html
+    for (placeholder, html), job in attachment_jobs:
+        ok = False
+        try:
+            ok = bool(_await_task(job))
+        except Exception as exc:
+            logger.error("Ошибка при загрузке вложения: %s", exc)
+        if ok:
+            success_placeholders.add(placeholder)
+            replacements_pending[placeholder] = html
 
     # Убираем временные файлы
     for m in metric_items:
@@ -608,9 +699,9 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
         if replacements_pending:
             update_confluence_page_multi(url_basic, user, password, copy_page_id, replacements_pending)
         else:
-            print("[warn] Нет успешных вложений для подстановки плейсхолдеров")
+            logger.warning("Нет успешных вложений для подстановки плейсхолдеров")
     except Exception as e:
-        print(f"Ошибка при мульти-обновлении плейсхолдеров (графики/логи): {e}")
+        logger.error("Ошибка при мульти-обновлении плейсхолдеров (графики/логи): %s", e)
 
     _progress("Графики и логи добавлены и обновлены. Запуск анализа ИИ…", 70)
 
@@ -636,15 +727,17 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
                 final_prompts[k] = (ov + ("\n\n" if ov and base else '') + (base or '')).strip()
             else:
                 final_prompts[k] = ((base or '') + ov).strip()
-        results = uploadFromLLM(
-            start/1000,
-            end/1000,
-            save_to_db=save_to_db,
-            run_meta={"run_id": (run_meta or {}).get("run_id"), "run_name": (run_meta or {}).get("run_name"), "service": service, "test_type": (test_type or '').strip(), "start_ms": start, "end_ms": end},
-            only_collect=not use_llm,
-            ef_config=ef_cfg,
-            prompts_override=final_prompts,
-            active_domains=active_domains
+        results = _await_task(
+            generate_llm_results_task.delay(
+                start / 1000,
+                end / 1000,
+                save_to_db,
+                {"run_id": (run_meta or {}).get("run_id"), "run_name": (run_meta or {}).get("run_name"), "service": service, "test_type": (test_type or "").strip(), "start_ms": start, "end_ms": end},
+                not use_llm,
+                ef_cfg,
+                final_prompts,
+                active_domains,
+            )
         )
     else:
         _progress("Пропускаем LLM-анализ и сбор доменных данных по запросу пользователя")
@@ -810,14 +903,14 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
             _append_judge("$$answer_lt_framework$$", "lt_framework")
             _append_judge("$$final_answer$$", "final")
         except Exception as e:
-            print(f"[warn] Не удалось добавить оценки судьи: {e}")
+            logger.warning("Не удалось добавить оценки судьи: %s", e)
 
         if llm_replacements:
             update_confluence_page_multi(url_basic, user, password, copy_page_id, llm_replacements)
         _progress("ИИ-анализ завершён. Финализация отчёта…", 95)
-        print("✓ Плейсхолдеры LLM обновлены за один проход")
+        logger.info("✓ Плейсхолдеры LLM обновлены за один проход")
     except Exception as e:
-        print(f"Ошибка при мульти-обновлении данных LLM: {e}")
+        logger.error("Ошибка при мульти-обновлении данных LLM: %s", e)
 
     _progress("Отчёт готов ✅", 100)
     return {"page_id": copy_page_id, "page_url": page_url}

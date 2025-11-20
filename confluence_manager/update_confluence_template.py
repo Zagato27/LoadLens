@@ -13,6 +13,14 @@ import re
 
 
 def copy_confluence_page(url, username, password ,page_id, page_parent_id):
+    """Копирует страницу Confluence и возвращает идентификатор новой копии.
+
+    Параметры:
+        url (str): Базовый URL Confluence.
+        username/password (str): Учётные данные.
+        page_id (str): Идентификатор шаблонной страницы.
+        page_parent_id (str): Родитель для новой страницы.
+    """
     confluence = Confluence(
         url=url,
         username=username,
@@ -63,6 +71,7 @@ def copy_confluence_page(url, username, password ,page_id, page_parent_id):
 
 
 def update_confluence_page_old(url, username, password, page_id, data_to_find, replace_text):
+    """Историческая версия обновления страницы (для обратной совместимости)."""
     confluence = Confluence(
         url=url,
         username=username,
@@ -100,6 +109,12 @@ def update_confluence_page_old(url, username, password, page_id, data_to_find, r
     print("Страница успешно обновлена.")
   
 def update_confluence_page(url, username, password, page_id, data_to_find, replace_text):
+    """Заменяет одиночный плейсхолдер на странице Confluence.
+
+    Параметры аналогичны `copy_confluence_page`, плюс:
+        data_to_find (str): Плейсхолдер.
+        replace_text (str): HTML/Storage, который нужно подставить.
+    """
     confluence = Confluence(
         url=url,
         username=username,
@@ -367,7 +382,15 @@ def render_llm_html(report: dict) -> str:
 
 
 def update_confluence_page_multi(url, username, password, page_id, replacements: dict) -> str:
-    """Один проход по странице: заменить несколько плейсхолдеров. Отсутствующие не считаем ошибкой."""
+    """Один проход по странице: заменить несколько плейсхолдеров.
+
+    Параметры:
+        url/username/password/page_id: доступ к Confluence.
+        replacements (dict): Карта `{placeholder: html}`.
+
+    Возвращает:
+        str: Текст статуса.
+    """
     confluence = Confluence(
         url=url,
         username=username,
