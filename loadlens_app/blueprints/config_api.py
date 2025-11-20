@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import copy
+
 from flask import Blueprint, jsonify, request
 
 from settings import CONFIG
@@ -40,16 +42,41 @@ def get_config():
 
         def merge_area_section(section_name: str) -> dict:
             base = CONFIG.get(section_name, {}) or {}
-            per_area = ((CONFIG.get("per_area", {}) or {}).get(area, {}) or {}).get(section_name, {}) if area else {}
-            return _deep_merge_dicts(base, per_area)
+            per_area_entry = (
+                ((CONFIG.get("per_area", {}) or {}).get(area, {}) or {}).get(section_name)
+                if area else None
+            )
+            if isinstance(per_area_entry, dict):
+                return copy.deepcopy(per_area_entry)
+            return copy.deepcopy(base)
 
         active_area = area if area in areas else ""
         active_metrics = _active_metrics_config() or {}
-        area_metrics_cfg = active_metrics.get(area, {}) if area else {}
+        runtime_metrics = {}
+        try:
+            if METRICS_RUNTIME_PATH.exists():
+                with METRICS_RUNTIME_PATH.open("r", encoding="utf-8") as f:
+                    runtime_metrics = json.load(f)
+        except Exception:
+            runtime_metrics = {}
+
+        area_runtime_entry = {}
+        if area and isinstance(runtime_metrics.get(area), dict):
+            area_runtime_entry = copy.deepcopy(runtime_metrics.get(area) or {})
+            area_runtime_entry.pop("__replace__", None)
+
+        area_metrics_cfg = (
+            area_runtime_entry
+            if area_runtime_entry
+            else (active_metrics.get(area, {}) if area else {})
+        )
         if not isinstance(area_metrics_cfg, dict):
             area_metrics_cfg = {}
-        if "services" not in area_metrics_cfg:
+        if "services" not in area_metrics_cfg or not isinstance(area_metrics_cfg.get("services"), dict):
             area_metrics_cfg["services"] = {}
+        runtime_services_cfg = (
+            area_runtime_entry.get("services", {}) if isinstance(area_runtime_entry, dict) else {}
+        )
         out = {
             "areas": areas,
             "active_area": active_area,
@@ -103,7 +130,12 @@ def get_config():
             queries_map[sid] = svc_queries if isinstance(svc_queries, dict) else {}
         metrics_config_map = {"": area_metrics_cfg}
         for sid, cfg in area_metrics_services.items():
-            metrics_config_map[sid] = cfg if isinstance(cfg, dict) else {}
+            svc_runtime = {}
+            if isinstance(runtime_services_cfg, dict) and isinstance(runtime_services_cfg.get(sid), dict):
+                svc_runtime = copy.deepcopy(runtime_services_cfg.get(sid))
+            metrics_config_map[sid] = (
+                svc_runtime if svc_runtime else (cfg if isinstance(cfg, dict) else {})
+            )
         out["services_meta"] = services_meta
         out["domain_list"] = _available_domain_keys()
         out["queries_map"] = queries_map
@@ -148,6 +180,7 @@ def update_config():
                 return jsonify({"error": "area обязательна для metrics_config"}), 400
             if not isinstance(payload, dict):
                 return jsonify({"error": "metrics_config должен быть объектом"}), 400
+            payload_copy = copy.deepcopy(payload)
             current = {}
             try:
                 if METRICS_RUNTIME_PATH.exists():
@@ -162,11 +195,12 @@ def update_config():
                     current[area] = {"services": {}}
                 if "services" not in current[area] or not isinstance(current[area].get("services"), dict):
                     current[area]["services"] = {}
-                current[area]["services"][service] = payload
+                current[area]["services"][service] = payload_copy
             else:
                 if not isinstance(payload.get("services"), dict):
                     return jsonify({"error": "metrics_config должен содержать ключ 'services' с объектом сервисов"}), 400
-                current[area] = payload
+                current[area] = payload_copy
+                current[area]["__replace__"] = True
             with METRICS_RUNTIME_PATH.open("w", encoding="utf-8") as f:
                 json.dump(current, f, ensure_ascii=False, indent=2)
             return jsonify({"status": "ok"})
@@ -192,8 +226,7 @@ def update_config():
                 CONFIG["per_area"] = {}
             if area not in CONFIG["per_area"] or not isinstance(CONFIG["per_area"].get(area), dict):
                 CONFIG["per_area"][area] = {}
-            base = CONFIG["per_area"][area].get(section, {}) if isinstance(CONFIG["per_area"][area].get(section), dict) else {}
-            CONFIG["per_area"][area][section] = _deep_merge_dicts(base, payload)
+            CONFIG["per_area"][area][section] = payload
 
             existing = {}
             try:
@@ -206,8 +239,7 @@ def update_config():
                 existing["per_area"] = {}
             if area not in existing["per_area"] or not isinstance(existing["per_area"].get(area), dict):
                 existing["per_area"][area] = {}
-            base2 = existing["per_area"][area].get(section, {}) if isinstance(existing["per_area"][area].get(section), dict) else {}
-            existing["per_area"][area][section] = _deep_merge_dicts(base2, payload)
+            existing["per_area"][area][section] = payload
             with CONFIG_RUNTIME_PATH.open("w", encoding="utf-8") as f:
                 json.dump(existing, f, ensure_ascii=False, indent=2)
             return jsonify({"status": "ok"})
@@ -216,8 +248,7 @@ def update_config():
         parts = section.split(".")
         for i, p in enumerate(parts):
             if i == len(parts) - 1:
-                base = target.get(p, {}) if isinstance(target.get(p), dict) else {}
-                target[p] = _deep_merge_dicts(base, payload)
+                target[p] = payload
             else:
                 if p not in target or not isinstance(target[p], dict):
                     target[p] = {}
@@ -232,8 +263,7 @@ def update_config():
         tgt = existing
         for i, p in enumerate(parts):
             if i == len(parts) - 1:
-                base = tgt.get(p, {}) if isinstance(tgt.get(p), dict) else {}
-                tgt[p] = _deep_merge_dicts(base, payload)
+                tgt[p] = payload
             else:
                 if p not in tgt or not isinstance(tgt[p], dict):
                     tgt[p] = {}

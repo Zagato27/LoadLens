@@ -137,15 +137,23 @@ def _deep_copy_prompts(section: str) -> dict:
 
 
 def _active_metrics_config() -> dict:
-    raw: dict = {}
     base = METRICS_CONFIG if isinstance(METRICS_CONFIG, dict) else {}
-    raw = base
+    raw = copy.deepcopy(base)
     try:
         if METRICS_RUNTIME_PATH.exists():
             with METRICS_RUNTIME_PATH.open("r", encoding="utf-8") as f:
                 override = json.load(f)
             if isinstance(override, dict):
-                raw = _deep_merge_dicts(base, override)
+                for key, value in override.items():
+                    if not isinstance(value, dict):
+                        continue
+                    value_copy = copy.deepcopy(value)
+                    replace = bool(value_copy.pop("__replace__", False))
+                    if replace:
+                        raw[key] = value_copy
+                    else:
+                        base_entry = raw.get(key, {})
+                        raw[key] = _deep_merge_dicts(base_entry if isinstance(base_entry, dict) else {}, value_copy)
     except Exception:
         pass
     return _normalize_metrics_config(raw)

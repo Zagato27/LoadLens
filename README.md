@@ -14,19 +14,24 @@
 
 ## Быстрый старт
 ### Вариант A: Docker Compose
-1) Подготовьте `.env` с параметрами TimescaleDB:
+1) Скопируйте `docker/env.example` в `docker/.env` и заполните параметры TimescaleDB/Redis, например:
    ```
    POSTGRES_USER=ltar
    POSTGRES_PASSWORD=ltar
    POSTGRES_DB=loadtesting
    TSDB_PORT=5432
    APP_PORT=5000
+   CELERY_BROKER_URL=redis://redis:6379/0
+   CELERY_RESULT_BACKEND=redis://redis:6379/0
+   CELERY_TASK_ALWAYS_EAGER=0
    ```
-2) Запустите:
+2) Запустите (из директории `docker/`):
    ```
+   cd docker
    docker compose up -d --build
    ```
 3) Откройте http://localhost:5000 и создайте первый отчёт на странице «Новый отчёт».
+   Компоуз поднимет веб-приложение, TimescaleDB, Redis и отдельный Celery worker для фоновых задач (скачивание графиков, загрузка вложений, LLM).
 
 ### Вариант B: Локально (без контейнеров)
 1) Python 3.12+.  
