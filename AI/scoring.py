@@ -12,6 +12,14 @@ _PROMPT_CACHE: Dict[str, str] = {}
 
 
 def read_prompt_from_file(filename: str) -> str:
+    """Читает промпт из файла в UTF-8.
+
+    Параметры:
+        filename (str): Путь к файлу.
+
+    Возвращает:
+        str: Текст промпта.
+    """
     with open(filename, 'r', encoding='utf-8') as f:
         return f.read()
 
@@ -123,6 +131,17 @@ class LLMAnalysis(BaseModel):
 
 
 def parse_llm_analysis_strict(raw_text: str) -> Optional[LLMAnalysis]:
+    """Парсит ответ LLM в строгий объект `LLMAnalysis`.
+
+    Параметры:
+        raw_text (str): Текст модели (может содержать пояснения/кодовые блоки).
+
+    Возвращает:
+        LLMAnalysis | None: Структурированный объект или None при ошибке.
+
+    Исключения:
+        Не выбрасывает; ошибки валидации подавляются.
+    """
     if not raw_text:
         return None
     try:
@@ -211,6 +230,15 @@ def _choose_best_candidate(candidates: list) -> tuple[str, Optional[LLMAnalysis]
 
 
 def judge_candidates_with_llm(candidates_texts: List[str], data_context: str) -> Dict[int, Dict[str, float]]:
+    """Запрашивает у LLM-судьи оценки нескольких кандидатских ответов.
+
+    Параметры:
+        candidates_texts (list[str]): JSON-тексты кандидатов.
+        data_context (str): Контекст метрик в JSON.
+
+    Возвращает:
+        dict: Карта `{index: {"factual": float, ...}}`.
+    """
     if not candidates_texts:
         return {}
     template = _get_prompt_template("judge_prompt.txt", JUDGE_PROMPT_FALLBACK)
@@ -326,6 +354,15 @@ def _finding_matches_labels(finding: Any, labels: set[str]) -> bool:
 
 
 def score_candidate_by_data(parsed: Optional[LLMAnalysis], context_obj: Dict[str, Any]) -> float:
+    """Вычисляет эвристический балл кандидата на основе данных и peak_performance.
+
+    Параметры:
+        parsed (LLMAnalysis | None): Структурированный ответ.
+        context_obj (dict): Контекст с секциями метрик.
+
+    Возвращает:
+        float: Балл в диапазоне [0, 1].
+    """
     if not isinstance(parsed, LLMAnalysis):
         return 0.0
     sections = _extract_sections_from_context(context_obj)
@@ -411,6 +448,17 @@ def _select_best_candidate(
 
 
 def llm_two_pass_self_consistency(user_prompt: str, data_context: str, k: int = 3, return_scores: bool = False) -> tuple:
+    """Двухпроходный алгоритм self-consistency: генерация k кандидатов + критик.
+
+    Параметры:
+        user_prompt (str): Текстовая инструкция.
+        data_context (str): JSON с данными.
+        k (int): Количество кандидатов.
+        return_scores (bool): Возвращать ли метрики выбора.
+
+    Возвращает:
+        tuple: `(best_text, best_parsed)` или `(best_text, best_parsed, scores)`.
+    """
     candidates: list[tuple[str, Optional[LLMAnalysis]]] = []
     gen_count = max(1, int(k))
     from concurrent.futures import ThreadPoolExecutor

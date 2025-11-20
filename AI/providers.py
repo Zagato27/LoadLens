@@ -213,7 +213,26 @@ def ask_llm_with_text_data(
     base_url: str = None,
     system_prompt: Optional[str] = None
 ) -> str:
-    """Единая точка вызова LLM по текстовому интерфейсу."""
+    """Единая точка вызова LLM (Perplexity/OpenAI/Anthropic) с текстовым контекстом.
+
+    Параметры:
+        user_prompt (str): Инструкция пользователю.
+        data_context (str): Дополнительные данные (обычно JSON).
+        llm_config (dict | None): Переопределения (`provider`, `force_json` и др.).
+        api_key (str | None): Персональный API-ключ (переопределяет конфиг).
+        model (str | None): Имя модели.
+        base_url (str | None): Альтернативный эндпойнт.
+        system_prompt (str | None): Кастомный системный промпт.
+
+    Возвращает:
+        str: Сырой ответ модели.
+
+    Побочные эффекты:
+        Выполняет HTTPS-запросы к соответствующему LLM-провайдеру.
+
+    Исключения:
+        Пробрасывает ошибки HTTP и таймауты после трёх попыток.
+    """
     llm_root = CONFIG.get("llm", {}) or {}
     provider = (llm_config or {}).get("provider") if isinstance(llm_config, dict) else None
     provider = (provider or llm_root.get("provider") or "perplexity").lower()

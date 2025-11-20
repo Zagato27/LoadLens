@@ -25,11 +25,33 @@ def _configure_logging():
 
 
 def read_prompt_from_file(filename: str) -> str:
+    """Читает текст промпта из файла в кодировке UTF-8.
+
+    Параметры:
+        filename (str): Абсолютный или относительный путь к шаблону.
+
+    Возвращает:
+        str: Содержимое файла.
+
+    Побочные эффекты:
+        Выполняет чтение с файловой системы.
+
+    Исключения:
+        OSError: если файл не найден или недоступен.
+    """
     with open(filename, 'r', encoding='utf-8') as f:
         return f.read()
 
 
 def parse_step_to_seconds(step: str) -> int:
+    """Преобразует строковое значение шага агрегации PromQL в секунды.
+
+    Параметры:
+        step (str): Значение вида `30s`, `5m` или число секунд.
+
+    Возвращает:
+        int: Эквивалент в секундах.
+    """
     if step.endswith('m'):
         return int(step[:-1]) * 60
     elif step.endswith('s'):
@@ -39,6 +61,24 @@ def parse_step_to_seconds(step: str) -> int:
 
 
 def fetch_prometheus_data(prometheus_url: str, start_ts: float, end_ts: float, promql_query: str, step: str) -> dict:
+    """Выполняет PromQL-запрос напрямую к API Prometheus.
+
+    Параметры:
+        prometheus_url (str): Базовый URL сервера Prometheus.
+        start_ts (float): Время начала окна (Unix, секунды).
+        end_ts (float): Время окончания окна.
+        promql_query (str): Запрос PromQL.
+        step (str): Шаг агрегации (`30s`, `5m`, ...).
+
+    Возвращает:
+        dict: Сырые данные Prometheus (`status`, `data` и т.д.).
+
+    Побочные эффекты:
+        Сетевой HTTP-запрос к Prometheus.
+
+    Исключения:
+        requests.HTTPError: Если Prometheus вернул код ошибки.
+    """
     step_in_seconds = parse_step_to_seconds(step)
     params = {
         'query': promql_query,
@@ -124,6 +164,21 @@ def _resolve_grafana_influx_ds_id(g_cfg: dict) -> int:
 
 
 def fetch_influx_data_via_grafana(g_cfg: dict, flux_query: str) -> str:
+    """Выполняет Flux-запрос к InfluxDB через Grafana proxy.
+
+    Параметры:
+        g_cfg (dict): Конфигурация Grafana (base_url, auth, datasource).
+        flux_query (str): Полный Flux-запрос с подстановками.
+
+    Возвращает:
+        str: CSV-ответ, возвращённый Grafana.
+
+    Побочные эффекты:
+        HTTP-запрос к Grafana с авторизацией.
+
+    Исключения:
+        requests.HTTPError: При ошибке ответа Grafana.
+    """
     base_url = g_cfg["base_url"].rstrip("/")
     ds_id = _resolve_grafana_influx_ds_id(g_cfg)
     auth_cfg = g_cfg.get("auth", {})
@@ -150,6 +205,27 @@ def fetch_influx_and_aggregate_via_grafana(
     labels: List[str],
     resample_interval: str
 ) -> List[pd.DataFrame]:
+    """Получает Flux-метрики через Grafana proxy и формирует pivot-таблицы.
+
+    Параметры:
+        grafana_cfg (dict): Подключение к Grafana (URL, auth, datasource).
+        influx_aux_cfg (dict): Параметры Influx (`bucket`, org и т.д.).
+        start_ts (float): Начало интервала (Unix, секунды).
+        end_ts (float): Конец интервала.
+        flux_queries (list[str]): Список Flux-запросов с плейсхолдерами `{bucket}`, `{start}`, `{end}`.
+        label_tag_keys_list (list[list[str]]): Теги, которые попадут в подпись серии.
+        labels (list[str]): Человеко-читаемые подписи секций для Markdown.
+        resample_interval (str): Период ресемплинга pandas (`5T`, `1H`, ...).
+
+    Возвращает:
+        list[pd.DataFrame]: Набор pivot-таблиц (по одному на запрос).
+
+    Побочные эффекты:
+        Делает HTTP-запросы к Grafana и хранит CSV в памяти.
+
+    Исключения:
+        Подавляет ошибки отдельных запросов, возвращая пустые DataFrame.
+    """
     bucket = (influx_aux_cfg or {}).get("bucket", "")
     t_start = _iso8601_utc(start_ts)
     t_end = _iso8601_utc(end_ts)
@@ -208,6 +284,16 @@ def _convert_pd_offset_to_influx_interval(s: str) -> str:
 
 
 def fetch_influxql_via_grafana(g_cfg: dict, q: str, database: str | None) -> dict:
+    """Выполняет InfluxQL-запрос через Grafana proxy и возвращает JSON.
+
+    Параметры:
+        g_cfg (dict): Конфигурация Grafana.
+        q (str): InfluxQL-запрос.
+        database (str | None): Имя базы для параметра `db`.
+
+    Возвращает:
+        dict: JSON-ответ Grafana (совместим с API InfluxDB v1).
+    """
     base_url = g_cfg["base_url"].rstrip("/")
     ds_id = _resolve_grafana_influx_ds_id(g_cfg)
     auth_cfg = g_cfg.get("auth", {})
@@ -237,6 +323,24 @@ def fetch_influxql_and_aggregate_via_grafana(
     labels: List[str],
     resample_interval: str
 ) -> List[pd.DataFrame]:
+    """Получает InfluxQL-серии через Grafana proxy и строит DataFrame.
+
+    Параметры:
+        grafana_cfg (dict): Конфигурация Grafana/datasource.
+        influx_aux_cfg (dict): Доп. параметры (`database`).
+        start_ts (float): Начало интервала (Unix, секунды).
+        end_ts (float): Конец интервала.
+        influxql_queries (list[str]): Список InfluxQL-запросов с макросами (`$timeFilter`, `$__interval` и т.п.).
+        label_tag_keys_list (list[list[str]]): Теги для подписи серий.
+        labels (list[str]): Человеко-читаемые подписи (используются при Markdown).
+        resample_interval (str): Интервал ресемплинга pandas.
+
+    Возвращает:
+        list[pd.DataFrame]: Pivot-таблицы по каждому запросу.
+
+    Побочные эффекты:
+        Выполняет HTTP-запросы к Grafana; подавляет ошибки, возвращая пустые DataFrame.
+    """
     # Подстановка макросов $timeFilter и $__interval; шаблонные переменные ($Group/$Tag/$URL/$Measurement) заменяем на .* (все)
     t_start_ns = int(start_ts * 1_000_000_000)
     t_end_ns = int(end_ts * 1_000_000_000)
@@ -313,6 +417,18 @@ def fetch_influxql_and_aggregate_via_grafana(
     return dfs
 
 def fetch_prometheus_data_via_grafana(g_cfg: dict, start_ts: float, end_ts: float, promql_query: str, step: str) -> dict:
+    """Выполняет PromQL через Grafana `/api/datasources/proxy/...`.
+
+    Параметры:
+        g_cfg (dict): Конфигурация Grafana (включая datasource Prometheus).
+        start_ts (float): Начало окна (Unix, секунды).
+        end_ts (float): Конец окна.
+        promql_query (str): Запрос PromQL.
+        step (str): Шаг агрегации.
+
+    Возвращает:
+        dict: JSON-ответ Prometheus (через прокси Grafana).
+    """
     step_in_seconds = parse_step_to_seconds(step)
     base_url = g_cfg["base_url"].rstrip("/")
     ds_id = _resolve_grafana_prom_ds_id(g_cfg)
@@ -337,6 +453,18 @@ def fetch_prometheus_data_via_grafana(g_cfg: dict, start_ts: float, end_ts: floa
 
 
 def fetch_metric_series(prometheus_url: str, start_ts: float, end_ts: float, promql_query: str, step: str, ef_config: dict | None = None) -> dict:
+    """Абстрагирует выбор источника метрик (Prometheus напрямую или через Grafана).
+
+    Параметры:
+        prometheus_url (str): URL прямого Prometheus (используется в режиме `prometheus`).
+        start_ts/end_ts (float): Интервал времени.
+        promql_query (str): Запрос PromQL.
+        step (str): Шаг агрегации.
+        ef_config (dict | None): Эффективная конфигурация, чтобы определить тип источника.
+
+    Возвращает:
+        dict: Ответ Prometheus (напрямую или через Grafana).
+    """
     cfg = ef_config or CONFIG
     src = (cfg.get("metrics_source", {}).get("type") or "prometheus").lower()
     if src == "grafana_proxy":
@@ -357,6 +485,23 @@ def fetch_and_aggregate_with_label_keys(
     resample_interval: str,
     ef_config: dict | None = None
 ) -> List[pd.DataFrame]:
+    """Выполняет набор PromQL-запросов и приводит данные к pivot-таблицам.
+
+    Параметры:
+        prometheus_url (str): URL Prometheus (используется при прямом доступе).
+        start_ts/end_ts (float): Интервал времени.
+        promql_queries (list[str]): Список PromQL-запросов.
+        label_keys_list (list[list[str]]): Ключи лейблов для подписи серий (по порядку запросов).
+        step (str): Шаг агрегации.
+        resample_interval (str): Интервал ресемплинга pandas (например, `1T`).
+        ef_config (dict | None): Конфиг для выбора источника метрик.
+
+    Возвращает:
+        list[pd.DataFrame]: Pivot-таблицы (пустые, если данных нет).
+
+    Исключения:
+        ValueError: Если длины списков запросов и лейблов не совпадают.
+    """
     if len(promql_queries) != len(label_keys_list):
         raise ValueError("Количество запросов и количество списков лейблов не совпадает!")
     dfs = []
@@ -407,6 +552,22 @@ def fetch_influx_and_aggregate(
     labels: List[str],
     resample_interval: str
 ) -> List[pd.DataFrame]:
+    """Получает данные напрямую из InfluxDB (API v2) и строит pivot-таблицы.
+
+    Параметры:
+        influx_cfg (dict): Конфигурация InfluxDB (`url`, `org`, `bucket`, `token`).
+        start_ts/end_ts (float): Интервал времени.
+        flux_queries (list[str]): Список Flux-запросов.
+        label_tag_keys_list (list[list[str]]): Теги для формирования названий серий.
+        labels (list[str]): Заголовки секций (используются при выводе).
+        resample_interval (str): Интервал ресемплинга pandas.
+
+    Возвращает:
+        list[pd.DataFrame]: Pivot-таблицы по каждому запросу.
+
+    Побочные эффекты:
+        Выполняет HTTP-запросы к InfluxDB.
+    """
     url = (influx_cfg or {}).get("url", "").rstrip("/")
     org = (influx_cfg or {}).get("org", "")
     bucket = (influx_cfg or {}).get("bucket", "")
@@ -461,6 +622,14 @@ def fetch_influx_and_aggregate(
 
 
 def dataframes_to_markdown(labeled: List[Dict[str, object]]) -> str:
+    """Генерирует Markdown-представление нескольких DataFrame для отчёта.
+
+    Параметры:
+        labeled (list[dict]): Список вида `{"label": str, "df": DataFrame}`.
+
+    Возвращает:
+        str: Markdown-текст со сводкой по каждой таблице.
+    """
     lines = []
     for item in labeled:
         label = str(item.get("label") or "?")
@@ -507,6 +676,15 @@ def _summarize_time_series_dataframe(df: pd.DataFrame, top_n: int = 10) -> List[
 
 
 def build_context_pack(labeled_dfs: List[Dict[str, object]], top_n: int = 10) -> Dict[str, object]:
+    """Формирует компактное описание топовых серий и окон аномалий по домену.
+
+    Параметры:
+        labeled_dfs (list[dict]): Список секций с DataFrame.
+        top_n (int): Сколько серий на секцию включать в отчёт.
+
+    Возвращает:
+        dict: Структура `{"sections": [...]}` с топ-сериями и аномалиями.
+    """
     def _detect_anomaly_windows(col_series: pd.Series, sigma: float = 2.0, max_windows: int = 2) -> List[Dict[str, object]]:
         windows: List[Dict[str, object]] = []
         try:
@@ -571,6 +749,26 @@ def build_context_pack(labeled_dfs: List[Dict[str, object]], top_n: int = 10) ->
 
 
 def uploadFromLLM(start_ts: float, end_ts: float, save_to_db: bool = False, run_meta: dict | None = None, only_collect: bool = False, ef_config: dict | None = None, prompts_override: dict | None = None, active_domains: List[str] | None = None) -> Dict[str, object]:
+    """Основной pipeline: сбор метрик, подготовка контекста и вызов LLM.
+
+    Параметры:
+        start_ts/end_ts (float): Границы интервала в секундах Unix.
+        save_to_db (bool): Если True — сохраняет метрики и LLM-ответы в TimescaleDB.
+        run_meta (dict | None): Служебные атрибуты запуска (`run_id`, `run_name`, `service`, `test_type`, `start_ms`, `end_ms`).
+        only_collect (bool): При True собирает метрики и сохраняет их в БД, не вызывая LLM.
+        ef_config (dict | None): Эффективная конфигурация (используется для override источников/LLM/запросов).
+        prompts_override (dict | None): Пользовательские промпты по доменам.
+        active_domains (list[str] | None): Ограничение списка доменов, которые нужно обрабатывать.
+
+    Возвращает:
+        dict: Структура с текстовыми блоками, JSON-парсами и оценками качества.
+
+    Побочные эффекты:
+        Выполняет сетевые обращения (Grafana/Prometheus/Influx/LLM), может писать в TimescaleDB.
+
+    Исключения:
+        Пробрасывает любые ошибки сбора данных или сохранения в БД.
+    """
     _configure_logging()
     cfg = ef_config or CONFIG
     src_type = (cfg.get("metrics_source", {}) or {}).get("type", "prometheus").lower()
@@ -887,6 +1085,18 @@ def uploadFromLLM(start_ts: float, end_ts: float, save_to_db: bool = False, run_
 
 
 def label_dataframes(dfs: List[pd.DataFrame], labels: List[str]) -> List[Dict[str, object]]:
+    """Присваивает человекочитаемые подписи каждому DataFrame.
+
+    Параметры:
+        dfs (list[pd.DataFrame]): Набор таблиц.
+        labels (list[str]): Подписи по порядку.
+
+    Возвращает:
+        list[dict]: Структуры вида `{"label": str, "df": DataFrame}`.
+
+    Исключения:
+        ValueError: Если количество таблиц и подписей различается.
+    """
     if len(dfs) != len(labels):
         raise ValueError("Количество DataFrame и количество меток не совпадает!")
     labeled_list = []
