@@ -12,7 +12,7 @@ services:
       - "${TSDB_PORT:-5432}:5432"
     volumes:
       - tsdb_data:/var/lib/postgresql/data
-      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+      - ./initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
@@ -20,27 +20,63 @@ services:
       retries: 10
     restart: unless-stopped
 
+  redis:
+    image: redis:7.4-alpine
+    container_name: ltar_redis
+    command: ["redis-server", "--save", "20", "1", "--loglevel", "warning"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   app:
-    build: .
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
     container_name: ltar_app
     depends_on:
       - timescaledb
+      - redis
     ports:
       - "${APP_PORT:-5000}:5000"
     environment:
-      # Если вы используете переменные окружения в своих конфигурациях — добавляйте их тут
-      # Приложение по умолчанию читает значения из settings.py
-      # TIMESCALE_HOST: timescaledb
-      # TIMESCALE_PORT: 5432
+      # Приложение по умолчанию читает настройки TimescaleDB из settings.py
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+      CELERY_TASK_ALWAYS_EAGER: ${CELERY_TASK_ALWAYS_EAGER:-0}
     volumes:
       # Хранение рендеров/картинок между рестартами
-      - ./data_collectors/temporary_files:/app/data_collectors/temporary_files
+      - ../data_collectors/temporary_files:/app/data_collectors/temporary_files
       # Для безопасного переопределения локального settings.py (опционально, раскомментируйте):
-      # - ./settings.py:/app/settings.py:ro
+      # - ../settings.py:/app/settings.py:ro
+    restart: unless-stopped
+
+  celery_worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: ltar_celery_worker
+    depends_on:
+      - timescaledb
+      - redis
+    environment:
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+      CELERY_TASK_ALWAYS_EAGER: ${CELERY_TASK_ALWAYS_EAGER:-0}
+    command: celery -A loadlens_app.celery_app worker --loglevel=info
+    volumes:
+      - ../data_collectors/temporary_files:/app/data_collectors/temporary_files
+      # - ../settings.py:/app/settings.py:ro
     restart: unless-stopped
 
 volumes:
   tsdb_data:
+    driver: local
+  redis_data:
     driver: local
 
 

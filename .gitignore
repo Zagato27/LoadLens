@@ -17,20 +17,17 @@ dist/
 *.spec
 
 # Docker/Compose локальные файлы
-.env
+**/.env
 
 # Действующие конфиги (игнорируем секреты)
 settings.py
 settings_runtime.json
-utils/config.yaml
 AI/config.py
 
 # Примеры конфигов оставляем в гите
 !settings.example.py
-!utils/config.example.yaml
-!env.example
+!docker/env.example
+!loadlens_app/blueprints/settings.py
 
-# Временные файлы приложения
-data_collectors/temporary_files/
 
 

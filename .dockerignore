@@ -23,13 +23,10 @@ build/
 dist/
 *.spec
 
-# App temp data
-data_collectors/temporary_files/
 
 # Local overrides
 *.local.*
 *.secrets.*
 
-metrics_config.py
 .git
 __pycache__/
