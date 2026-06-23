@@ -122,9 +122,10 @@ def compare_metric_summary():
         pa = _active_project_area()
         services_filter = _resolve_services_filter(pa)
         svc_clause = " AND m.service = ANY(%s)" if services_filter else ""
-        sql_common = f"""
+        # Упрощаем: используем исходную подпись серии из metrics.series без regexp_replace
+        sql_common = """
           SELECT
-            regexp_replace(m.series, '.*{series_key}=([^|]+).*', '\\\\1') AS series_name,
+            m.series AS series_name,
             m.run_name,
             m.value
           FROM public.metrics m
@@ -132,7 +133,7 @@ def compare_metric_summary():
             AND m.domain = %s
             AND m.query_label = %s
             {svc_clause}
-        """
+        """.format(svc_clause=svc_clause)
         base_params = [run_a, run_b, domain, ql]
         if services_filter:
             base_params.append(services_filter)
@@ -237,18 +238,19 @@ def compare_series():
         pa = _active_project_area()
         services_filter = _resolve_services_filter(pa)
         svc_clause = " AND m.service = ANY(%s)" if services_filter else ""
-        sql_common = f"""
+        # Убираем regexp_replace, чтобы не терять подписи серий и не получать "\1"
+        sql_common = """
           SELECT
             m."time",
             m.run_name,
-            regexp_replace(m.series, '.*{series_key}=([^|]+).*', '\\\\1') AS series_name,
+            m.series AS series_name,
             m.value
           FROM public.metrics m
           WHERE m.run_name IN (%s, %s)
             AND m.domain = %s
             AND m.query_label = %s
             {svc_clause}
-        """
+        """.format(svc_clause=svc_clause)
         base_params = [run_a, run_b, domain, ql]
         if services_filter:
             base_params.append(services_filter)
@@ -317,18 +319,19 @@ def run_series():
         pa = _active_project_area()
         services_filter = _resolve_services_filter(pa)
         svc_clause = " AND m.service = ANY(%s)" if services_filter else ""
-        sql_common = f"""
+        # Тоже используем исходное значение series без regexp_replace
+        sql_common = """
           SELECT
             m."time",
             m.run_name,
-            regexp_replace(m.series, '.*{series_key}=([^|]+).*', '\\\\1') AS series_name,
+            m.series AS series_name,
             m.value
           FROM public.metrics m
           WHERE m.run_name = %s
             AND m.domain = %s
             AND m.query_label = %s
             {svc_clause}
-        """.replace("{series_key}", series_key)
+        """.format(svc_clause=svc_clause)
         base_params = [run_name, domain, ql]
         if services_filter:
             base_params.append(services_filter)

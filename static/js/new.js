@@ -4,6 +4,29 @@
   const progressTimers = { confluence: null, web: null };
   let activeAreaCache = '';
 
+  function clearProgressTimers() {
+    Object.keys(progressTimers).forEach((key) => {
+      if (progressTimers[key]) {
+        clearInterval(progressTimers[key]);
+        progressTimers[key] = null;
+      }
+    });
+  }
+
+  async function readJsonSafe(response) {
+    try {
+      return await response.json();
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function messageFromResponse(payload, fallback) {
+    if (payload && typeof payload.message === 'string' && payload.message.trim()) return payload.message.trim();
+    if (payload && typeof payload.error === 'string' && payload.error.trim()) return payload.error.trim();
+    return fallback;
+  }
+
   function resetServiceSelection() {
     const serviceSelect = document.getElementById('serviceSelect');
     if (serviceSelect) {
@@ -52,7 +75,11 @@
         return;
       }
       const response = await fetch(`/services?area=${encodeURIComponent(effectiveArea)}`);
-      const payload = await response.json();
+      const payload = await readJsonSafe(response);
+      if (!response.ok) {
+        renderServicePlaceholder(messageFromResponse(payload, 'Не удалось загрузить сервисы'));
+        return;
+      }
       const services = Array.isArray(payload?.services) ? payload.services : (Array.isArray(payload) ? payload : []);
       if (!services.length) {
         renderServicePlaceholder('Нет сервисов для выбранной области');
@@ -161,8 +188,11 @@
     progressTimers[scope] = setInterval(async () => {
       try {
         const r = await fetch(`/job_status/${jobId}`);
-        if (!r.ok) return;
-        const j = await r.json();
+        const j = await readJsonSafe(r);
+        if (!r.ok) {
+          if (text) text.textContent = messageFromResponse(j, 'Не удалось получить статус задачи');
+          return;
+        }
         const p = Math.max(0, Math.min(100, j.progress || 0));
         if (bar) bar.style.width = `${p}%`;
         const msg = j.message ? ` — ${j.message}` : '';
@@ -237,11 +267,11 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
-        const result = await resp.json();
-        if (result.status === 'accepted' && result.job_id) {
-          if (responseMessage) responseMessage.innerText = result.message || 'Задача принята.';
+          const result = await readJsonSafe(resp);
+          if (resp.ok && result.status === 'accepted' && result.job_id) {
+            if (responseMessage) responseMessage.innerText = messageFromResponse(result, 'Задача принята.');
           await startProgressBranch(scope, result.job_id);
-        } else if (result.status === 'success') {
+          } else if (resp.ok && result.status === 'success') {
           const link = scope === 'confluence' ? document.getElementById('confluenceLink') : document.getElementById('webLink');
           if (result.report_url && link) {
             link.href = result.report_url;
@@ -249,7 +279,7 @@
           }
         } else {
           const textEl = document.getElementById(scopeText);
-          if (textEl) textEl.textContent = result.message || 'Ошибка запуска задачи';
+            if (textEl) textEl.textContent = messageFromResponse(result, 'Ошибка запуска задачи');
         }
       } catch (error) {
         const textEl = document.getElementById(scopeText);
@@ -343,6 +373,7 @@
     // Initial state
     syncSteps();
   });
+  window.addEventListener('beforeunload', clearProgressTimers);
 })();
 
 

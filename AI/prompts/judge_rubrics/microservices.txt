@@ -1,0 +1,12 @@
+Domain Focus: microservices
+
+Evaluation Criteria Addendum
+- Ищите рост latency, error rate, saturation по сервисам, degraded dependencies, uneven load distribution, cascading failures.
+- Хороший кандидат выделяет конкретные сервисы/эндпоинты и различает источник и следствие деградации.
+- Рекомендации должны быть направлены на конкретные компоненты: service, deployment, pod, instance, endpoint.
+
+Evaluation Steps
+1. Проверьте latency, error rate, throughput и устойчивость по сервисам.
+2. Проверьте, выделены ли самые деградировавшие сервисы и критичные цепочки вызовов.
+3. Проверьте наличие конкретики: endpoint, service name, pod, time window, threshold.
+4. Проверьте, помогают ли рекомендации локализовать и снять деградацию в сервисной цепочке.

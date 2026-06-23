@@ -6,6 +6,7 @@ from bs4 import BeautifulSoup
 from atlassian import Confluence
 from datetime import datetime
 from getpass import getpass
+from html import escape
 
 from requests.auth import HTTPBasicAuth
 import re
@@ -139,8 +140,7 @@ def update_confluence_page(url, username, password, page_id, data_to_find, repla
         print(f"ВНИМАНИЕ: Плейсхолдер '{data_to_find}' не найден на странице!")
         return "Плейсхолдер не найден"
     
-    # Простая замена без использования BeautifulSoup
-    modified_html = original_html.replace(str(data_to_find), replace_content)
+    modified_html, _ = _replace_placeholder_storage(original_html, str(data_to_find), replace_content)
     
     # Обновление страницы с измененным содержимым
     try:
@@ -215,170 +215,562 @@ def render_llm_report_placeholders(report: dict) -> dict:
     }
 
 
-def render_llm_markdown(report: dict) -> str:
-    """Генерирует markdown для единого плейсхолдера `$$answer_llm$$`.
-    Форматирует: вердикт/доверие, список находок с метаданными, список действий.
-    """
-    def safe(x):
-        return str(x).strip() if x is not None else ""
+def _safe_text(value: object) -> str:
+    return str(value).strip() if value is not None else ""
 
-    verdict = safe((report or {}).get("verdict") or "нет данных")
-    conf_val = (report or {}).get("confidence")
-    confidence_str = f"{int(conf_val*100)}%" if isinstance(conf_val, (int, float)) else "—"
 
-    md_lines = []
-    md_lines.append("### Итог LLM")
-    md_lines.append(f"- Вердикт: {verdict}")
-    md_lines.append(f"- Доверие: {confidence_str}")
-    md_lines.append("")
+def _html(value: object) -> str:
+    return escape(_safe_text(value), quote=True)
 
-    # Пиковая производительность (опционально)
-    peak = (report or {}).get("peak_performance") or (report or {}).get("peak_perfomance")
-    if isinstance(peak, dict):
-        max_rps = safe(peak.get("max_rps"))
-        max_time = safe(peak.get("max_time"))
-        drop_time = safe(peak.get("drop_time"))
-        method = safe(peak.get("method"))
-        if any([max_rps, max_time, drop_time, method]):
-            md_lines.append("#### Пиковая производительность")
-            if max_rps:
-                md_lines.append(f"- Максимальный RPS: {max_rps}")
-            if max_time:
-                md_lines.append(f"- Время пика: {max_time}")
-            if drop_time:
-                md_lines.append(f"- Время деградации: {drop_time}")
-            if method:
-                md_lines.append(f"- Метод оценки: {method}")
-            md_lines.append("")
 
-    findings = (report or {}).get("findings") or []
-    md_lines.append("#### Ключевые находки")
-    if not findings:
-        md_lines.append("- Нет существенных находок")
+def _md(value: object) -> str:
+    text = _safe_text(value)
+    return text.replace("\\", "\\\\").replace("|", "\\|")
+
+
+def _md_cell(value: object) -> str:
+    text = _md(value)
+    text = re.sub(r"\s*\n+\s*", " / ", text)
+    return text or "—"
+
+
+def _md_rich_text(value: object) -> str:
+    raw = _safe_text(value)
+    if not raw:
+        return ""
+    lines: list[str] = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            lines.append("")
+            continue
+        if re.match(r"^[-*]\s+", stripped) or re.match(r"^\d+[.)]\s+", stripped):
+            lines.append(_md(stripped))
+        else:
+            lines.append(_md(stripped))
+    return "\n".join(lines).strip()
+
+
+def _as_list(value: object) -> list:
+    if isinstance(value, list):
+        return value
+    if value:
+        return [value]
+    return []
+
+
+def _normalize_link_id(value: object, fallback: str = "") -> str:
+    raw = _safe_text(value).lower()
+    normalized = re.sub(r"[^a-z0-9_-]+", "_", raw)
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    return normalized or fallback
+
+
+def _normalize_link_ids(value: object) -> list[str]:
+    result: list[str] = []
+    for item in _as_list(value):
+        normalized = _normalize_link_id(item)
+        if normalized and normalized not in result:
+            result.append(normalized)
+    return result
+
+
+def _render_rich_text(text: object) -> str:
+    """Минимальный markdown-like рендер для Confluence storage."""
+    raw = _safe_text(text)
+    if not raw:
+        return ""
+    parts: list[str] = []
+    list_items: list[str] = []
+
+    def flush_list() -> None:
+        if list_items:
+            parts.append("<ul>" + "".join(list_items) + "</ul>")
+            list_items.clear()
+
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            flush_list()
+            continue
+        bullet_match = re.match(r"^[-*]\s+(.+)$", stripped)
+        numbered_match = re.match(r"^\d+[.)]\s+(.+)$", stripped)
+        if bullet_match or numbered_match:
+            item_text = (bullet_match or numbered_match).group(1)
+            list_items.append(f"<li>{_html(item_text)}</li>")
+        else:
+            flush_list()
+            parts.append(f"<p>{_html(stripped)}</p>")
+    flush_list()
+    return "".join(parts)
+
+
+def _verdict_pill(verdict: object) -> str:
+    text = _safe_text(verdict) or "Недостаточно данных"
+    lower = text.lower()
+    if "усп" in lower:
+        style = "background:#e3fcef;color:#006644;border:1px solid #57d9a3;"
+    elif "риск" in lower:
+        style = "background:#fff7d6;color:#974f0c;border:1px solid #ffab00;"
+    elif "провал" in lower or "fail" in lower:
+        style = "background:#ffebe6;color:#bf2600;border:1px solid #ff7452;"
     else:
-        for f in findings:
-            if isinstance(f, dict):
-                summary = safe(f.get("summary"))
-                sev = safe(f.get("severity"))
-                comp = safe(f.get("component"))
-                ev = safe(f.get("evidence"))
-                meta = []
-                if sev:
-                    meta.append(f"severity: {sev}")
-                if comp:
-                    meta.append(f"component: {comp}")
-                if ev:
-                    meta.append(f"evidence: {ev}")
-                meta_str = "; ".join(meta)
-                if meta_str:
-                    md_lines.append(f"- {summary} ({meta_str})")
-                else:
-                    md_lines.append(f"- {summary}")
-            else:
-                md_lines.append(f"- {safe(f)}")
+        style = "background:#f4f5f7;color:#42526e;border:1px solid #dfe1e6;"
+    return (
+        f"<span style=\"display:inline-block;padding:4px 10px;border-radius:12px;"
+        f"font-weight:600;{style}\">{_html(text)}</span>"
+    )
 
-    actions = (report or {}).get("recommended_actions") or (report or {}).get("actions") or []
-    md_lines.append("")
-    md_lines.append("#### Рекомендации")
+
+def _render_key_value_table(title: str, rows: list[tuple[str, str]]) -> str:
+    body = []
+    for label, value_html in rows:
+        value = value_html or "<span style=\"color:#6b778c;\">—</span>"
+        body.append(
+            "<tr>"
+            f"<th style=\"width:42%;text-align:left;vertical-align:middle;background:#f4f5f7;"
+            f"border:1px solid #dfe1e6;padding:8px;\">{_html(label)}</th>"
+            f"<td style=\"text-align:right;vertical-align:middle;border:1px solid #dfe1e6;"
+            f"padding:8px;\">{value}</td>"
+            "</tr>"
+        )
+    heading = f"<h4>{_html(title)}</h4>" if title else ""
+    return (
+        f"{heading}<table style=\"width:100%;border-collapse:separate;border-spacing:0;"
+        f"border:1px solid #dfe1e6;border-radius:8px;margin:8px 0 14px 0;\">"
+        f"<tbody>{''.join(body)}</tbody></table>"
+    )
+
+
+def _render_rationale_box(report: dict) -> str:
+    text = (
+        (report or {}).get("verdict_rationale")
+        or (report or {}).get("verdict_reason")
+        or (report or {}).get("rationale")
+        or "Нет пояснения."
+    )
+    return (
+        "<div style=\"border:1px solid #b3d4ff;border-left:4px solid #2684ff;"
+        "background:#f4f9ff;border-radius:8px;padding:10px 12px;margin:8px 0 14px 0;\">"
+        "<p style=\"margin:0 0 6px 0;\"><strong>Обоснование вердикта</strong></p>"
+        f"{_render_rich_text(text)}"
+        "</div>"
+    )
+
+
+def _normalize_finding_entry(item: object, idx: int) -> dict:
+    raw = item if isinstance(item, dict) else {"summary": _safe_text(item)}
+    summary = _safe_text(raw.get("summary") or raw.get("title") or raw.get("text"))
+    components: list[str] = []
+    component = _safe_text(raw.get("component")).lower()
+    if component:
+        components.append(component)
+    for comp in _as_list(raw.get("affected_components")):
+        normalized = _safe_text(comp).lower()
+        if normalized and normalized not in components:
+            components.append(normalized)
+    fallback = f"finding_{idx + 1}"
+    return {
+        "idx": idx,
+        "id": _normalize_link_id(raw.get("id") or raw.get("finding_id") or raw.get("key"), fallback),
+        "summary": summary,
+        "components": components,
+        "item": raw,
+    }
+
+
+def _normalize_action_entry(item: object, idx: int) -> dict:
+    raw = item if isinstance(item, dict) else {"summary": _safe_text(item)}
+    summary = _safe_text(raw.get("summary") or raw.get("action") or raw.get("text"))
+    components: list[str] = []
+    component = _safe_text(raw.get("component")).lower()
+    if component:
+        components.append(component)
+    for comp in _as_list(raw.get("affected_components")):
+        normalized = _safe_text(comp).lower()
+        if normalized and normalized not in components:
+            components.append(normalized)
+    link_ids = _normalize_link_ids(
+        raw.get("for_finding_ids")
+        or raw.get("for_findings")
+        or raw.get("finding_ids")
+        or raw.get("related_findings")
+        or raw.get("for_finding_id")
+        or raw.get("finding_id")
+    )
+    return {
+        "idx": idx,
+        "summary": summary,
+        "components": components,
+        "for_finding_ids": link_ids,
+        "item": raw,
+    }
+
+
+def _match_legacy_action(finding: dict, actions: list[dict], unused_ids: set[int]) -> dict | None:
+    legacy = [a for a in actions if not a["for_finding_ids"] and a["idx"] in unused_ids]
+    matched = None
+    if finding["components"]:
+        matched = next(
+            (a for a in legacy if any(c in finding["components"] for c in a["components"])),
+            None,
+        )
+    if not matched and finding["idx"] in unused_ids:
+        matched = next((a for a in legacy if a["idx"] == finding["idx"]), None)
+    if not matched:
+        matched = legacy[0] if legacy else None
+    if matched:
+        unused_ids.discard(matched["idx"])
+    return matched
+
+
+def _pair_findings_with_actions(findings: object, actions: object) -> list[dict]:
+    finding_entries = [
+        item for item in (
+            _normalize_finding_entry(f, idx) for idx, f in enumerate(_as_list(findings))
+        )
+        if item["summary"]
+    ]
+    action_entries = [
+        item for item in (
+            _normalize_action_entry(a, idx) for idx, a in enumerate(_as_list(actions))
+        )
+        if item["summary"]
+    ]
+    linked_ids = {item["id"] for item in finding_entries}
+    unused_legacy = {item["idx"] for item in action_entries if not item["for_finding_ids"]}
+    rows: list[dict] = []
+    for finding in finding_entries:
+        explicit = [
+            action["item"]
+            for action in action_entries
+            if finding["id"] in action["for_finding_ids"]
+        ]
+        legacy = None if explicit else _match_legacy_action(finding, action_entries, unused_legacy)
+        rows.append({
+            "problem": finding["item"],
+            "actions": explicit or ([legacy["item"]] if legacy else []),
+        })
+    for action in action_entries:
+        is_unmatched_legacy = not action["for_finding_ids"] and action["idx"] in unused_legacy
+        is_unmatched_explicit = action["for_finding_ids"] and not any(
+            finding_id in linked_ids for finding_id in action["for_finding_ids"]
+        )
+        if is_unmatched_legacy or is_unmatched_explicit:
+            rows.append({"problem": None, "actions": [action["item"]]})
+    if not rows:
+        rows.append({"problem": None, "actions": [a["item"] for a in action_entries]})
+    return rows
+
+
+def _render_evidence(item: dict) -> str:
+    evidence_summary = _safe_text(item.get("evidence_summary") or item.get("evidence"))
+    evidence_items = _as_list(item.get("evidence_items") or item.get("evidence_list") or item.get("evidence_rows"))
+    parts: list[str] = []
+    if evidence_summary:
+        parts.append(f"<p style=\"margin:6px 0;color:#42526e;\">{_html(evidence_summary)}</p>")
+    bullets: list[str] = []
+    for evidence in evidence_items:
+        if isinstance(evidence, dict):
+            bits = [
+                _safe_text(evidence.get("metric") or evidence.get("name") or evidence.get("label")),
+                f"значение: {_safe_text(evidence.get('observed_value') or evidence.get('value') or evidence.get('actual'))}"
+                if _safe_text(evidence.get("observed_value") or evidence.get("value") or evidence.get("actual")) else "",
+                f"порог: {_safe_text(evidence.get('threshold') or evidence.get('limit') or evidence.get('baseline'))}"
+                if _safe_text(evidence.get("threshold") or evidence.get("limit") or evidence.get("baseline")) else "",
+                _safe_text(evidence.get("note") or evidence.get("details") or evidence.get("evidence")),
+            ]
+            text = " | ".join([b for b in bits if b])
+        else:
+            text = _safe_text(evidence)
+        if text:
+            bullets.append(f"<li>{_html(text)}</li>")
+    if bullets:
+        parts.append("<ul style=\"margin-top:4px;\">" + "".join(bullets) + "</ul>")
+    return "".join(parts)
+
+
+def _render_problem(problem: object) -> str:
+    if not isinstance(problem, dict):
+        text = _safe_text(problem) or "Нет существенных проблем."
+        return f"<div><strong>{_html(text)}</strong></div>"
+    summary = _safe_text(problem.get("summary") or problem.get("title") or problem.get("text")) or "—"
+    meta = []
+    severity = _safe_text(problem.get("severity"))
+    component = _safe_text(problem.get("component"))
+    if severity:
+        meta.append(("Критичность", severity))
+    if component:
+        meta.append(("Компонент", component))
+    meta_html = ""
+    if meta:
+        chips = "".join(
+            f"<span style=\"display:inline-block;background:#f4f5f7;border:1px solid #dfe1e6;"
+            f"border-radius:10px;padding:2px 8px;margin:4px 4px 0 0;font-size:12px;\">"
+            f"<strong>{_html(label)}:</strong> {_html(value)}</span>"
+            for label, value in meta
+        )
+        meta_html = f"<div style=\"margin-top:6px;\">{chips}</div>"
+    return (
+        "<div>"
+        f"<p style=\"margin:0;\"><strong>{_html(summary)}</strong></p>"
+        f"{_render_evidence(problem)}"
+        f"{meta_html}"
+        "</div>"
+    )
+
+
+def _render_action(action: object) -> str:
+    if not isinstance(action, dict):
+        text = _safe_text(action)
+        return f"<div>{_html(text) if text else '<em>Нет рекомендации.</em>'}</div>"
+    summary = _safe_text(action.get("summary") or action.get("action") or action.get("text")) or "—"
+    details = _render_rich_text(
+        action.get("details") or action.get("description") or action.get("implementation_details")
+    )
+    return (
+        "<div>"
+        f"<p style=\"margin:0;\"><strong>{_html(summary)}</strong></p>"
+        f"{details}"
+        "</div>"
+    )
+
+
+def _render_actions(actions: list) -> str:
     if not actions:
-        md_lines.append("- Нет рекомендаций")
+        return "<em>Нет рекомендации.</em>"
+    return "".join(
+        f"<div style=\"margin-bottom:10px;\">{_render_action(action)}</div>"
+        for action in actions
+    )
+
+
+def _is_stability_report(report: dict, peak: dict, test_profile: dict) -> bool:
+    test_type = _safe_text(test_profile.get("test_type")).lower()
+    return bool(
+        peak.get("not_applicable")
+        or peak.get("notApplicable")
+        or _safe_text(test_profile.get("mode")).lower() == "stability"
+        or test_type in {"soak", "stability", "endurance"}
+    )
+
+
+def _render_problem_recommendation_table(report: dict) -> str:
+    rows = _pair_findings_with_actions(
+        (report or {}).get("findings") or [],
+        (report or {}).get("recommended_actions") or (report or {}).get("actions") or [],
+    )
+    body = []
+    for row in rows:
+        problem_html = _render_problem(row.get("problem")) if row.get("problem") else "<em>Нет существенных проблем.</em>"
+        action_html = _render_actions(row.get("actions") or [])
+        body.append(
+            "<tr>"
+            f"<td style=\"width:50%;vertical-align:top;border:1px solid #dfe1e6;padding:10px;\">{problem_html}</td>"
+            f"<td style=\"width:50%;vertical-align:top;border:1px solid #dfe1e6;padding:10px;\">{action_html}</td>"
+            "</tr>"
+        )
+    return (
+        "<h4>Проблемы и рекомендации</h4>"
+        "<table style=\"width:100%;border-collapse:separate;border-spacing:0;"
+        "border:1px solid #dfe1e6;border-radius:8px;margin:8px 0 14px 0;\">"
+        "<thead><tr>"
+        "<th style=\"text-align:left;background:#f4f5f7;border:1px solid #dfe1e6;padding:8px;\">Проблемы</th>"
+        "<th style=\"text-align:left;background:#f4f5f7;border:1px solid #dfe1e6;padding:8px;\">Рекомендации по устранению</th>"
+        "</tr></thead>"
+        f"<tbody>{''.join(body)}</tbody></table>"
+    )
+
+
+def render_llm_markdown(report: dict) -> str:
+    """Возвращает Markdown для Confluence Markdown macro."""
+    report = report if isinstance(report, dict) else {}
+    peak = report.get("peak_performance") or report.get("peak_perfomance") or {}
+    peak = peak if isinstance(peak, dict) else {}
+    test_profile = report.get("test_profile") or {}
+    test_profile = test_profile if isinstance(test_profile, dict) else {}
+    stability = report.get("stability_under_load") or {}
+    stability = stability if isinstance(stability, dict) else {}
+
+    lines: list[str] = [
+        "| Параметр | Значение |",
+        "|---|---:|",
+        f"| Вердикт по тесту | **{_md_cell(report.get('verdict') or 'Недостаточно данных')}** |",
+        "",
+        "#### Обоснование вердикта",
+        _md_rich_text(
+            report.get("verdict_rationale")
+            or report.get("verdict_reason")
+            or report.get("rationale")
+            or "Нет пояснения."
+        ),
+        "",
+    ]
+
+    if _is_stability_report(report, peak, test_profile):
+        lines.extend([
+            "#### Стабильность под нагрузкой",
+            "| Параметр | Значение |",
+            "|---|---:|",
+            f"| Тип теста | {_md_cell(test_profile.get('test_type') or 'stability/soak')} |",
+            f"| Фокус оценки | {_md_cell(stability.get('focus') or test_profile.get('focus') or 'Удержание нагрузки без накопления деградации')} |",
+            f"| Целевой RPS | {_md_cell(stability.get('target_rps') or '—')} |",
+            f"| Фактический RPS | {_md_cell(stability.get('actual_rps') or '—')} |",
+            f"| Итог SLA | {_md_cell(stability.get('sla_summary') or '—')} |",
+            "",
+        ])
     else:
-        for a in actions:
-            s = safe(a)
-            if s:
-                md_lines.append(f"- {s}")
+        lines.extend([
+            "#### Пиковая производительность",
+            "| Параметр | Значение |",
+            "|---|---:|",
+            f"| Максимальный RPS | {_md_cell(peak.get('max_rps') or '—')} |",
+            f"| Время пиковой производительности | {_md_cell(peak.get('max_time') or '—')} |",
+            f"| Время деградации | {_md_cell(peak.get('drop_time') or '—')} |",
+            "",
+        ])
 
-    affected = (report or {}).get("affected_components") or []
-    if affected:
-        md_lines.append("")
-        md_lines.append("#### Затронутые компоненты")
-        md_lines.append(", ".join([f"`{safe(x)}`" for x in affected]))
+    lines.append("#### Проблемы и рекомендации")
+    rows = _pair_findings_with_actions(
+        report.get("findings") or [],
+        report.get("recommended_actions") or report.get("actions") or [],
+    )
+    if not rows:
+        lines.append("Существенных проблем и рекомендаций нет.")
+    for idx, row in enumerate(rows, start=1):
+        problem = row.get("problem")
+        actions = row.get("actions") or []
+        if isinstance(problem, dict):
+            summary = _safe_text(problem.get("summary") or problem.get("title") or problem.get("text")) or "Нет существенных проблем."
+            lines.extend(["", f"##### {idx}. {_md(summary)}"])
+            evidence_summary = _md_rich_text(problem.get("evidence_summary") or problem.get("evidence"))
+            if evidence_summary:
+                lines.extend(["", evidence_summary])
+            evidence_items = _as_list(problem.get("evidence_items") or problem.get("evidence_list") or problem.get("evidence_rows"))
+            for evidence in evidence_items:
+                if isinstance(evidence, dict):
+                    bits = [
+                        _safe_text(evidence.get("metric") or evidence.get("name") or evidence.get("label")),
+                        f"значение: {_safe_text(evidence.get('observed_value') or evidence.get('value') or evidence.get('actual'))}"
+                        if _safe_text(evidence.get("observed_value") or evidence.get("value") or evidence.get("actual")) else "",
+                        f"порог: {_safe_text(evidence.get('threshold') or evidence.get('limit') or evidence.get('baseline'))}"
+                        if _safe_text(evidence.get("threshold") or evidence.get("limit") or evidence.get("baseline")) else "",
+                        _safe_text(evidence.get("note") or evidence.get("details") or evidence.get("evidence")),
+                    ]
+                    evidence_text = " | ".join([bit for bit in bits if bit])
+                else:
+                    evidence_text = _safe_text(evidence)
+                if evidence_text:
+                    lines.append(f"- {_md(evidence_text)}")
+            meta = []
+            if _safe_text(problem.get("severity")):
+                meta.append(f"**Критичность:** `{_md(problem.get('severity'))}`")
+            if _safe_text(problem.get("component")):
+                meta.append(f"**Компонент:** `{_md(problem.get('component'))}`")
+            if meta:
+                lines.extend(["", "  ".join(meta)])
+        else:
+            lines.extend(["", f"##### {idx}. Нет существенных проблем."])
 
-    return "\n".join(md_lines)
+        lines.extend(["", "**Рекомендации по устранению:**"])
+        if not actions:
+            lines.append("- Нет рекомендации.")
+        for action in actions:
+            if isinstance(action, dict):
+                summary = _safe_text(action.get("summary") or action.get("action") or action.get("text")) or "Рекомендация"
+                lines.append(f"- **{_md(summary)}**")
+                details = _md_rich_text(action.get("details") or action.get("description") or action.get("implementation_details"))
+                if details:
+                    for detail_line in details.splitlines():
+                        lines.append(f"  {detail_line}" if detail_line else "")
+            else:
+                action_text = _safe_text(action)
+                lines.append(f"- {_md(action_text)}" if action_text else "- Нет рекомендации.")
+
+    return "\n".join(lines).strip()
 
 
 def render_llm_html(report: dict) -> str:
-    """HTML-версия рендера LLM-ответа для вставки в Confluence (storage)."""
-    def safe(x: object) -> str:
-        return str(x).strip() if x is not None else ""
+    """HTML-версия рендера LLM-ответа для вставки в Confluence storage."""
+    report = report if isinstance(report, dict) else {}
+    peak = report.get("peak_performance") or report.get("peak_perfomance") or {}
+    peak = peak if isinstance(peak, dict) else {}
+    test_profile = report.get("test_profile") or {}
+    test_profile = test_profile if isinstance(test_profile, dict) else {}
+    stability = report.get("stability_under_load") or {}
+    stability = stability if isinstance(stability, dict) else {}
 
-    verdict = safe((report or {}).get("verdict") or "нет данных")
-    conf_val = (report or {}).get("confidence")
-    confidence_str = f"{int(conf_val*100)}%" if isinstance(conf_val, (int, float)) else "—"
+    parts: list[str] = [
+        _render_key_value_table(
+            "",
+            [("Вердикт по тесту", _verdict_pill(report.get("verdict")))],
+        ),
+        _render_rationale_box(report),
+    ]
 
-    parts: list[str] = []
-    parts.append("<h3>Итог LLM</h3>")
-    parts.append("<ul>")
-    parts.append(f"<li><strong>Вердикт:</strong> {verdict}</li>")
-    parts.append(f"<li><strong>Доверие:</strong> {confidence_str}</li>")
-    parts.append("</ul>")
-
-    peak = (report or {}).get("peak_performance") or (report or {}).get("peak_perfomance")
-    if isinstance(peak, dict):
-        max_rps = safe(peak.get("max_rps"))
-        max_time = safe(peak.get("max_time"))
-        drop_time = safe(peak.get("drop_time"))
-        method = safe(peak.get("method"))
-        if any([max_rps, max_time, drop_time, method]):
-            parts.append("<h4>Пиковая производительность</h4>")
-            parts.append("<ul>")
-            if max_rps:
-                parts.append(f"<li>Максимальный RPS: {max_rps}</li>")
-            if max_time:
-                parts.append(f"<li>Время пика: {max_time}</li>")
-            if drop_time:
-                parts.append(f"<li>Время деградации: {drop_time}</li>")
-            if method:
-                parts.append(f"<li>Метод оценки: {method}</li>")
-            parts.append("</ul>")
-
-    findings = (report or {}).get("findings") or []
-    parts.append("<h4>Ключевые находки</h4>")
-    if not findings:
-        parts.append("<p><em>Нет существенных находок</em></p>")
+    if _is_stability_report(report, peak, test_profile):
+        parts.append(_render_key_value_table(
+            "Стабильность под нагрузкой",
+            [
+                ("Тип теста", _html(test_profile.get("test_type") or "stability/soak")),
+                ("Фокус оценки", _html(stability.get("focus") or test_profile.get("focus") or "Удержание нагрузки без накопления деградации")),
+                ("Целевой RPS", _html(stability.get("target_rps") or "—")),
+                ("Фактический RPS", _html(stability.get("actual_rps") or "—")),
+                ("Итог SLA", _html(stability.get("sla_summary") or "—")),
+            ],
+        ))
     else:
-        parts.append("<ul>")
-        for f in findings:
-            if isinstance(f, dict):
-                summary = safe(f.get("summary"))
-                sev = safe(f.get("severity"))
-                comp = safe(f.get("component"))
-                ev = safe(f.get("evidence"))
-                meta = []
-                if sev:
-                    meta.append(f"severity: {sev}")
-                if comp:
-                    meta.append(f"component: {comp}")
-                if ev:
-                    meta.append(f"evidence: {ev}")
-                meta_str = "; ".join(meta)
-                text = f"{summary} ({meta_str})" if meta_str else summary
-                parts.append(f"<li>{text}</li>")
-            else:
-                s = safe(f)
-                if s:
-                    parts.append(f"<li>{s}</li>")
-        parts.append("</ul>")
+        parts.append(_render_key_value_table(
+            "Пиковая производительность",
+            [
+                ("Максимальный RPS", _html(peak.get("max_rps") or "—")),
+                ("Время пиковой производительности", _html(peak.get("max_time") or "—")),
+                ("Время деградации", _html(peak.get("drop_time") or "—")),
+            ],
+        ))
 
-    actions = (report or {}).get("recommended_actions") or (report or {}).get("actions") or []
-    parts.append("<h4>Рекомендации</h4>")
-    if not actions:
-        parts.append("<p><em>Нет рекомендаций</em></p>")
-    else:
-        parts.append("<ul>")
-        for a in actions:
-            s = safe(a)
-            if s:
-                parts.append(f"<li>{s}</li>")
-        parts.append("</ul>")
-
-    affected = (report or {}).get("affected_components") or []
-    if affected:
-        parts.append("<h4>Затронутые компоненты</h4>")
-        codes = ", ".join([f"<code>{safe(x)}</code>" for x in affected])
-        parts.append(f"<p>{codes}</p>")
-
+    parts.append(_render_problem_recommendation_table(report))
     return "\n".join(parts)
+
+
+def _replace_placeholder_storage(storage_html: str, placeholder: str, value: str) -> tuple[str, bool]:
+    """Заменяет плейсхолдер в Confluence storage без вложения block HTML внутрь <p>.
+
+    Если плейсхолдер стоит отдельным абзацем (`<p>$$...$$</p>`), заменяем весь
+    абзац. Иначе блочная таблица может оказаться внутри `<p>`, и Confluence
+    покажет HTML как обычный текст.
+    """
+    html = storage_html or ""
+    ph = str(placeholder)
+    replacement = str(value)
+    patterns: list[str] = []
+    if ph.startswith("$$") and ph.endswith("$$"):
+        inner = ph[2:-2].strip()
+        token = r"\$\$\s*" + re.escape(inner) + r"\s*\$\$"
+        inline_wrappers = (
+            r"(?:<span\b[^>]*>\s*)*"
+            r"(?:<(?:strong|b|em|i)\b[^>]*>\s*)*"
+            + token +
+            r"(?:\s*</(?:strong|b|em|i)>)*"
+            r"(?:\s*</span>)*"
+        )
+        patterns.extend([
+            r"(?is)<p\b[^>]*>\s*" + inline_wrappers + r"\s*</p>",
+            r"(?is)<div\b[^>]*>\s*" + inline_wrappers + r"\s*</div>",
+            r"(?is)" + token,
+        ])
+    else:
+        patterns.extend([
+            r"(?is)<p\b[^>]*>\s*" + re.escape(ph) + r"\s*</p>",
+            r"(?is)" + re.escape(ph),
+        ])
+    for pattern in patterns:
+        new_html, count = re.subn(pattern, replacement, html, count=1)
+        if count:
+            return new_html, True
+    if ph in html:
+        return html.replace(ph, replacement, 1), True
+    return html, False
 
 
 def update_confluence_page_multi(url, username, password, page_id, replacements: dict) -> str:
@@ -410,8 +802,9 @@ def update_confluence_page_multi(url, username, password, page_id, replacements:
         if not isinstance(value, str) or not value.strip():
             print(f"[warn] Пропускаю пустую замену для: {placeholder}")
             continue
-        if placeholder in html:
-            html = html.replace(str(placeholder), str(value))
+        new_html, did_replace = _replace_placeholder_storage(html, str(placeholder), str(value))
+        if did_replace:
+            html = new_html
             replaced_any = True
         else:
             # Попробуем более гибкую замену с допуском пробелов внутри $$...$$

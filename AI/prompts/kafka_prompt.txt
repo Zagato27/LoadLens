@@ -74,23 +74,29 @@
 
 
 ФОРМАТ ОТВЕТА (ВСЕ ТЕКСТОВЫЕ ПОЛЯ — НА РУССКОМ):
-- Отвечайте строго в JSON со схемой: {verdict, confidence, findings[], recommended_actions[]}.
+- Отвечайте строго в JSON со схемой: {verdict, verdict_rationale, confidence, findings[], recommended_actions[]}.
 - Поле verdict ДОЛЖНО принимать только одно из: "Успешно" | "Есть риски" | "Провал" | "Недостаточно данных".
+- Поле verdict_rationale ДОЛЖНО кратко объяснять вердикт: сначала 1-2 предложения с итогом, затем 2-4 ключевых фактора списком.
 - Если данных недостаточно, верните verdict: "Недостаточно данных" и укажите причину в findings.
-- Для каждого findings в evidence указывайте интервал отклонения start–end и peak_time (время максимума), а также имя метрики/объекта (topic/group/client).
+- Каждый элемент findings ДОЛЖЕН быть объектом {id, summary, severity, component, evidence}; id должен быть коротким ASCII-идентификатором вроде f1, f2.
+- Каждый элемент recommended_actions ДОЛЖЕН быть объектом {summary, details, priority, affected_components[], for_finding_ids[]}, где for_finding_ids ссылается на один или несколько id из findings.
+- Поле details обязательно: опишите действие, ожидаемый эффект и критерий успешной проверки после изменения.
+- Для каждого findings используйте фиксированные поля start_time, end_time, peak_time, evidence_summary и evidence_items[].
+- Каждый элемент evidence_items должен быть объектом {metric, observed_value, threshold, note}.
 
 ПРИМЕР ОТВЕТА (JSON):
 ```json
 {
   "verdict": "Есть риски",
+  "verdict_rationale": "Kafka не показала полного отказа, но накопление lag и просадки fetch_rate указывают на риск деградации под дальнейшим ростом нагрузки.\n- Lag превысил безопасный уровень.\n- У отдельных клиентов снизился fetch_rate.\n- Проблемы проявились именно в пиковое окно.",
   "confidence": 0.8,
   "findings": [
-    {"summary": "Lag > 12000 сообщений на group=orders-consumers 12:35–12:45"},
-    "Снижение fetch_rate у client_id=payments в окне пика"
+    {"id": "f1", "summary": "Lag > 12000 сообщений на group=orders-consumers", "severity": "high", "component": "orders-consumers", "evidence": "group=orders-consumers, 12:35–12:45, peak_time=12:41"},
+    {"id": "f2", "summary": "Снижение fetch_rate у client_id=payments в окне пика", "severity": "medium", "component": "payments", "evidence": "client_id=payments, 12:36–12:44, peak_time=12:40"}
   ],
   "recommended_actions": [
-    "Увеличить параллелизм consumers для group=orders-consumers",
-    "Проверить конфигурацию acks и ретраи продюсеров"
+    {"summary": "Увеличить параллелизм consumers для group=orders-consumers", "details": "Поднимите количество consumer instances или partitions так, чтобы lag не накапливался на пиковом окне и обработка успевала за входящим потоком. После изменений перепроверьте lag, consumer utilization и задержку end-to-end на той же нагрузке.", "priority": "high", "affected_components": ["orders-consumers"], "for_finding_ids": ["f1"]},
+    {"summary": "Проверить конфигурацию acks и ретраи продюсеров", "details": "Сопоставьте настройки acks, retries и таймаутов продюсеров с текущим профилем нагрузки, чтобы исключить избыточные повторы и рост latency на записи. После корректировки повторите тест и убедитесь, что время отправки сообщений стабилизировалось без роста ошибок.", "priority": "medium", "affected_components": ["payments"], "for_finding_ids": ["f2"]}
   ]
 }
 ```

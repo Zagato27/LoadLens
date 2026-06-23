@@ -142,11 +142,17 @@ def post_prompts():
             svc_entry = target["services"][service]
             if "prompts" not in svc_entry or not isinstance(svc_entry.get("prompts"), dict):
                 svc_entry["prompts"] = {}
-            svc_entry["prompts"][domain] = text
+            if text.strip():
+                svc_entry["prompts"][domain] = text
+            else:
+                svc_entry["prompts"].pop(domain, None)
         else:
             if "prompts" not in target or not isinstance(target.get("prompts"), dict):
                 target["prompts"] = {}
-            target["prompts"][domain] = text
+            if text.strip():
+                target["prompts"][domain] = text
+            else:
+                target["prompts"].pop(domain, None)
         _save_settings_runtime_data(existing)
         return jsonify({"status": "ok"})
     except Exception as e:  # pragma: no cover
@@ -184,6 +190,48 @@ def update_service_meta():
             svc_entry["disabled_domains"] = [d for d in meta.get("disabled_domains") if isinstance(d, str) and d in allowed]
         _save_settings_runtime_data(runtime)
         return jsonify({"status": "ok", "service": service, "meta": svc_entry})
+    except Exception as e:  # pragma: no cover
+        return jsonify({"error": str(e)}), 500
+
+
+@settings_bp.route("/service_meta", methods=["DELETE"])
+def delete_service_meta():
+    """Удаляет runtime-метаданные и пользовательские оверрайды сервиса без очистки БД."""
+    try:
+        data = request.get_json(silent=True) or {}
+        area = (data.get("area") or "").strip()
+        service = (data.get("service") or "").strip()
+        if service and not area:
+            area = _find_area_for_service(service) or ""
+        if not area or not service:
+            return jsonify({"error": "area и service обязательны"}), 400
+
+        runtime = _load_settings_runtime_data()
+        changed = False
+        if isinstance(runtime.get("per_area"), dict):
+            area_entry = runtime["per_area"].get(area)
+            if isinstance(area_entry, dict) and isinstance(area_entry.get("services"), dict):
+                if service in area_entry["services"]:
+                    del area_entry["services"][service]
+                    changed = True
+        if changed:
+            _save_settings_runtime_data(runtime)
+
+        metrics_rt = {}
+        try:
+            if METRICS_RUNTIME_PATH.exists():
+                with METRICS_RUNTIME_PATH.open("r", encoding="utf-8") as f:
+                    metrics_rt = json.load(f)
+        except Exception:
+            metrics_rt = {}
+        if isinstance(metrics_rt.get(area), dict):
+            services_entry = metrics_rt[area].get("services")
+            if isinstance(services_entry, dict) and service in services_entry:
+                del services_entry[service]
+                with METRICS_RUNTIME_PATH.open("w", encoding="utf-8") as f:
+                    json.dump(metrics_rt, f, ensure_ascii=False, indent=2)
+
+        return jsonify({"status": "ok", "service": service, "area": area})
     except Exception as e:  # pragma: no cover
         return jsonify({"error": str(e)}), 500
 

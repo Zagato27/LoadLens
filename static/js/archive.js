@@ -48,6 +48,15 @@
     }
   }
 
+  function escapeHtml(value) {
+    return String(value === undefined || value === null ? '' : value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
   async function loadPage() {
     const offset = (currentPage - 1) * pageSize;
     const u = new URL('/runs', location.origin);
@@ -69,10 +78,10 @@
       const dur = fmtDuration(r.start_time, r.end_time);
       const v = (r.verdict || 'Недостаточно данных');
       const vc = verdictClass(v);
-      const verdictHtml = `<span class=\"pill ${vc}\">${v}</span>`;
+      const verdictHtml = `<span class=\"pill ${vc}\">${escapeHtml(v)}</span>`;
       const repUrl = '/reports/' + encodeURIComponent(r.service || '') + '/' + encodeURIComponent(r.run_name);
       const testType = (r.test_type || '');
-      tr.innerHTML = `<td>${r.run_name}</td><td>${r.service || ''}</td><td>${testType}</td><td>${dt}</td><td>${created}</td><td>${verdictHtml}</td><td>${dur}</td><td class=\"actions\"><button class=\"btn act-view\">Открыть</button><button class=\"btn act-compare\">Сравнить</button><button class=\"btn act-copy\">Скопировать ссылку</button><button class=\"btn act-delete\" style=\"border-color:#6b2e2e;\">Удалить</button></td>`;
+      tr.innerHTML = `<td>${escapeHtml(r.run_name)}</td><td>${escapeHtml(r.service || '')}</td><td>${escapeHtml(testType)}</td><td>${escapeHtml(dt)}</td><td>${escapeHtml(created)}</td><td>${verdictHtml}</td><td>${escapeHtml(dur)}</td><td class=\"actions\"><button class=\"btn act-view\">Открыть</button><button class=\"btn act-compare\">Сравнить</button><button class=\"btn act-copy\">Скопировать ссылку</button><button class=\"btn act-rename\">Переименовать</button><button class=\"btn act-delete\" style=\"border-color:#6b2e2e;\">Удалить</button></td>`;
       tr.addEventListener('click', (e) => {
         if (!(e.target && (e.target.classList.contains('btn')))) {
           location.href = repUrl;
@@ -84,6 +93,31 @@
         e.stopPropagation();
         try { await navigator.clipboard.writeText(location.origin + repUrl); } catch (err) {}
       });
+      const renameBtn = tr.querySelector('.act-rename');
+      if (renameBtn) {
+        renameBtn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const nextName = prompt('Новое название отчёта:', r.run_name || '');
+          if (nextName === null) return;
+          const trimmed = String(nextName || '').trim();
+          if (!trimmed || trimmed === r.run_name) return;
+          try {
+            const resp = await fetch('/runs/' + encodeURIComponent(r.run_name), {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ new_run_name: trimmed })
+            });
+            const j = await resp.json();
+            if (resp.ok) {
+              await loadPage();
+            } else {
+              alert(j.error || 'Ошибка переименования');
+            }
+          } catch (err) {
+            alert('Ошибка переименования');
+          }
+        });
+      }
       const delBtn = tr.querySelector('.act-delete');
       if (delBtn) {
         delBtn.addEventListener('click', async (e) => {

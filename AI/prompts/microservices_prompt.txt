@@ -8,7 +8,7 @@
 
 
 РЕКОМЕНДУЕМЫЕ ОРИЕНТИРЫ:
-- Время отклика (latency P95): норма < 200 мс; предупреждение 200–500 мс; критично > 500 мс
+- Время отклика (latency P95): норма < 2000 мс; предупреждение 2000–5000 мс; критично > 5000 мс
 - Суммарный RPS для выявления максимальной производительности : норма > 1000 RPS; предупреждение > 750 RPS; критично > 500 RPS
 
 ТРЕБОВАНИЯ К АНАЛИЗУ:
@@ -60,24 +60,31 @@
 
 
 ФОРМАТ ОТВЕТА (ВСЕ ТЕКСТОВЫЕ ПОЛЯ — НА РУССКОМ):
-- Отвечайте строго в JSON со схемой: {verdict, confidence, findings[], recommended_actions[]}.
+- Отвечайте строго в JSON со схемой: {verdict, verdict_rationale, confidence, findings[], recommended_actions[]}.
 - Поле verdict ДОЛЖНО принимать только одно из: "Успешно" | "Есть риски" | "Провал" | "Недостаточно данных".
+- Поле verdict_rationale ДОЛЖНО кратко объяснять вердикт: сначала 1-2 предложения с итогом, затем 2-4 ключевых фактора списком.
 - Если данных недостаточно, верните verdict: "Недостаточно данных" и укажите причину в findings.
-- Для каждого findings в evidence укажите: microservice, метрику, интервал отклонения start–end, peak_time и RPS в момент превышения.
-- Если возможно по данным агрегировать суммарный RPS (по всем сервисам), добавьте поле peak_performance: {max_rps, max_time, drop_time, method="max_step_before_drop"}.
+- Каждый элемент findings ДОЛЖЕН быть объектом {id, summary, severity, component, evidence}; id должен быть коротким ASCII-идентификатором вроде f1, f2.
+- Каждый элемент recommended_actions ДОЛЖЕН быть объектом {summary, details, priority, affected_components[], for_finding_ids[]}, где for_finding_ids ссылается на один или несколько id из findings.
+- Поле details обязательно: 2-4 предложения о конкретных изменениях, ожидаемом эффекте и проверке результата.
+- Для каждого findings используйте фиксированные поля start_time, end_time, peak_time, evidence_summary и evidence_items[].
+- Каждый элемент evidence_items должен быть объектом {metric, observed_value, threshold, note}.
+- Если test_profile.mode="stability", не добавляйте peak_performance: оценивайте удержание нагрузки, рост latency/errors и ресурсные тренды на интервале.
+- Если это capacity/step тест и возможно по данным агрегировать суммарный RPS (по всем сервисам), добавьте поле peak_performance: {max_rps, max_time, drop_time, method="max_step_before_drop"}.
 
 ПРИМЕР ОТВЕТА (JSON):
 ```json
 {
   "verdict": "Успешно",
+  "verdict_rationale": "Микросервисный слой в целом выдержал профиль нагрузки без выраженной деградации пользовательских метрик.\n- P95 оставался в допустимых границах.\n- Рост RPS не сопровождался системным ростом ошибок.\n- Проблемы носили локальный, а не системный характер.",
   "confidence": 0.74,
   "findings": [
-    "Среднее время ответа стабильно, P95 < 250мс на всех сервисах",
-    {"summary": "RPS вырос на 30% без деградации latency на micro-registry-nsi"}
+    {"id": "f1", "summary": "Среднее время ответа стабильно, P95 < 250мс на всех сервисах", "severity": "low", "component": "microservices", "evidence": "aggregated, 12:00–13:00, peak_time=12:42, RPS stable"},
+    {"id": "f2", "summary": "RPS вырос на 30% без деградации latency на micro-registry-nsi", "severity": "low", "component": "micro-registry-nsi", "evidence": "microservice=micro-registry-nsi, 12:20–12:50, peak_time=12:42, RPS +30%"}
   ],
   "recommended_actions": [
-    "Добавить алерт P95>300мс для всех сервисов",
-    "Проверить лимиты CPU для micro-address-search-node"
+    {"summary": "Добавить алерт P95>300мс для всех сервисов", "details": "Заведите единый алерт по p95 latency с разрезом по сервису и эндпоинту, чтобы деградация была видна до роста пользовательских ошибок. После настройки проверьте, что алерт срабатывает на тестовом превышении и в событии есть ссылка на проблемный сервис.", "priority": "medium", "affected_components": ["microservices"], "for_finding_ids": ["f1"]},
+    {"summary": "Проверить лимиты CPU для micro-address-search-node", "details": "Сверьте текущие requests/limits с фактическим потреблением CPU на пике и исключите throttling как причину роста latency. После корректировки повторите тот же профиль нагрузки и убедитесь, что сервис держит нагрузку без повторной просадки.", "priority": "low", "affected_components": ["micro-address-search-node"], "for_finding_ids": ["f2"]}
   ]
 }
 ```

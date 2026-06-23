@@ -1,5 +1,7 @@
 # ОС/IDE
 .DS_Store
+Thumbs.db
+Desktop.ini
 .idea/
 .vscode/
 __pycache__/
@@ -18,16 +20,29 @@ dist/
 
 # Docker/Compose локальные файлы
 **/.env
+.env
+.env.*
+*.log
 
 # Действующие конфиги (игнорируем секреты)
 settings.py
 settings_runtime.json
+metrics_config.py
+metrics_config_runtime.json
 AI/config.py
 
 # Примеры конфигов оставляем в гите
 !settings.example.py
+!metrics_config.example.py
 !docker/env.example
 !loadlens_app/blueprints/settings.py
+
+# Локальные/сгенерированные артефакты отчётов и сборщиков метрик
+data_collectors/temporary_files/
+k6-load-testing-results*.json
+
+# Локальные копии/форки проекта
+loadlens_sber/
 
 
 

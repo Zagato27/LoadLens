@@ -81,26 +81,32 @@
 
 
 ФОРМАТ ОТВЕТА (ВСЕ ТЕКСТОВЫЕ ПОЛЯ — НА РУССКОМ):
-- Отвечайте строго в JSON со схемой: {verdict, confidence, findings[], recommended_actions[]}.
+- Отвечайте строго в JSON со схемой: {verdict, verdict_rationale, confidence, findings[], recommended_actions[]}.
 - Поле verdict ДОЛЖНО принимать только одно из: "Успешно" | "Есть риски" | "Провал" | "Недостаточно данных".
-- Каждый элемент findings ДОЛЖЕН содержать: summary, severity (critical/high/medium/low), component (имя сервиса/процесса/инстанса), evidence.
+- Поле verdict_rationale ДОЛЖНО кратко объяснять вердикт: сначала 1-2 предложения с итогом, затем 2-4 ключевых фактора списком.
+- Каждый элемент findings ДОЛЖЕН содержать: id, summary, severity (critical/high/medium/low), component (имя сервиса/процесса/инстанса), evidence.
+- id у findings должен быть коротким ASCII-идентификатором вроде f1, f2.
+- Каждый элемент recommended_actions ДОЛЖЕН быть объектом {summary, details, priority, affected_components[], for_finding_ids[]}, где for_finding_ids ссылается на один или несколько id из findings.
+- Поле details обязательно: 2-4 предложения с конкретными изменениями, ожидаемым эффектом и способом проверки.
 - Если component не указан явно — извлеките его из evidence по лейблам application|service|job|pod|instance; если это невозможно, используйте "unknown".
 - Если severity не указана или вне списка — используйте "low".
 - Если данных недостаточно, верните verdict: "Недостаточно данных" и укажите причину в findings.
-- Для каждого findings в evidence указывайте интервал отклонения start–end и peak_time (время максимума), а также имя метрики/экземпляра.
+- Для каждого findings используйте фиксированные поля start_time, end_time, peak_time, evidence_summary и evidence_items[].
+- Каждый элемент evidence_items должен быть объектом {metric, observed_value, threshold, note}.
 
 ПРИМЕР ОТВЕТА (JSON):
 ```json
 {
   "verdict": "Есть риски",
+  "verdict_rationale": "JVM в целом работала стабильно, но в пиковом окне появились признаки давления по памяти и GC.\n- P99 GC pause заметно вырос.\n- Heap usage держался выше безопасного уровня.\n- Риски локализованы на нескольких инстансах billing.",
   "confidence": 0.86,
   "findings": [
-    {"summary": "P99 GC pause вырос до 620мс", "evidence": "application=billing, instance=10.0.1.15, 12:40–12:50, peak_time=12:47"},
-    "Heap usage стабильно >85% на нескольких инстансах в окне пиков"
+    {"id": "f1", "summary": "P99 GC pause вырос до 620мс", "severity": "high", "component": "billing", "evidence": "application=billing, instance=10.0.1.15, 12:40–12:50, peak_time=12:47"},
+    {"id": "f2", "summary": "Heap usage стабильно >85% на нескольких инстансах в окне пиков", "severity": "medium", "component": "billing", "evidence": "application=billing, 12:40–12:50, peak_time=12:46"}
   ],
   "recommended_actions": [
-    "Увеличить -Xmx/-Xms на billing до 4ГБ и пересобрать",
-    "Понизить RPS на /pay до 200 до фикса GC настроек"
+    {"summary": "Увеличить -Xmx/-Xms на billing до 4ГБ и пересобрать", "details": "Поднимите heap для сервиса billing симметрично по Xms/Xmx, чтобы сократить частоту GC и убрать давление на память в пиковое окно. После деплоя повторите тест и сравните паузы GC, p95 latency и частоту ошибок с исходным прогоном.", "priority": "high", "affected_components": ["billing"], "for_finding_ids": ["f1", "f2"]},
+    {"summary": "Понизить RPS на /pay до 200 до фикса GC настроек", "details": "Если быстрый тюнинг JVM невозможен, временно ограничьте нагрузку на проблемный endpoint `/pay`, чтобы не доводить сервис до нестабильной зоны. Зафиксируйте безопасный уровень нагрузки и убедитесь, что на нем latency и error rate возвращаются в приемлемый диапазон.", "priority": "medium", "affected_components": ["billing"], "for_finding_ids": ["f1"]}
   ]
 }
 ```

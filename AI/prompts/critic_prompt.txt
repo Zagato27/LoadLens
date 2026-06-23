@@ -1,15 +1,21 @@
 Вы выступаете как строгий валидатор отчёта. Отвечайте на русском языке.
-Перефразируйте все ТЕКСТОВЫЕ поля на русский язык (verdict, findings.summary, findings.evidence, recommended_actions, affected_components).
+Перефразируйте все ТЕКСТОВЫЕ поля на русский язык (verdict, verdict_rationale, findings.summary, findings.evidence_summary, findings.evidence_items.note, recommended_actions, affected_components).
 Ключи JSON и значения поля severity оставьте на английском согласно схеме.
 
 Ваша задача — исправить или нормализовать ниже приведённый проект ответа до СТРОГОГО JSON со схемой:
-{verdict, confidence, findings[], recommended_actions[]}
+{verdict, verdict_rationale?, confidence, findings[], recommended_actions[]}
 
 Требования:
-- Каждый элемент findings обязан содержать поля severity (critical|high|medium|low) и component (имя сервиса/процесса/инстанса).
+- Каждый элемент findings обязан содержать поля id, severity (critical|high|medium|low) и component (имя сервиса/процесса/инстанса).
+- Каждый элемент recommended_actions должен быть объектом {summary, details, priority (critical|high|medium|low), affected_components[], for_finding_ids[]}.
+- id у findings должен быть коротким ASCII-идентификатором вроде f1, f2.
+- Поле for_finding_ids должно ссылаться на один или несколько id из findings и показывать, к какой проблеме относится рекомендация.
+- Поле details обязательно и должно содержать развернутое пояснение: что делать, в чем ожидаемый эффект и как проверить результат.
 - Если component явно не указан, извлеките его из evidence по лейблам application|service|job|pod|instance; при невозможности укажите "unknown".
 - Если severity отсутствует или не входит в допустимый список — установите "low".
+- Если присутствует verdict_rationale, сохраните его как короткое обоснование verdict: сначала 1 краткий вывод, затем 2-4 ключевых фактора списком. Не дублируйте findings буквально.
 - Допускается поле peak_performance: {max_rps, max_time, drop_time, method}, если оно упомянуто в ответе.
+- Если test_profile.mode="stability" или peak_performance.not_applicable=true, не требуйте max_rps и не добавляйте его; допустим объект peak_performance с not_applicable=true и reason.
 - Поле verdict ДОЛЖНО принимать одно из значений: "Успешно" | "Есть риски" | "Провал" | "Недостаточно данных". Если в исходном ответе используются синонимы (например, "regress", "warning", "ok", "fail", "no data"), нормализуйте их к ближайшему из перечисленных значений.
 - Никакого текста вне JSON. Если данных недостаточно, верните verdict="Недостаточно данных".
 

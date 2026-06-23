@@ -20,6 +20,7 @@ def uploadFromLLM(
     ef_config: Optional[dict] = None,
     prompts_override: Optional[dict] = None,
     active_domains: Optional[List[str]] = None,
+    system_context: Optional[dict] = None,
 ) -> Dict[str, object]:
     """Запускает полный цикл подготовки LLM‑отчёта.
 
@@ -41,6 +42,8 @@ def uploadFromLLM(
             в разрезе доменов (`jvm`, `database`, ...).
         active_domains (list[str] | None): Ограничение списка доменов,
             которые нужно анализировать (например, без `lt_framework`).
+        system_context (dict | None): Снимок контекста тестируемой системы,
+            который нужно передать в LLM-pipeline.
 
     Возвращаемое значение:
         dict: агрегат с текстовыми блоками, структурированными ответами
@@ -65,6 +68,7 @@ def uploadFromLLM(
         ef_config=ef_config,
         prompts_override=prompts_override,
         active_domains=active_domains,
+        system_context=system_context,
     )
 
 

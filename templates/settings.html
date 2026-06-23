@@ -118,6 +118,45 @@
           </div>
         </details>
         <details>
+          <summary>Контекст тестируемой системы</summary>
+          <div class="panel">
+            <div class="help">
+              Структурированный глобальный контекст о системе: что это за продукт, какие компоненты и зависимости в нем есть, какие пользовательские потоки критичны и на чем нужно делать акцент в анализе. Этот JSON используется как справочный источник для AI-анализа и сохраняется вместе с отчетом как снапшот. Формат задается самим содержимым этого блока. Если контекст не нужен, установите <code>"enabled": false</code> и остальные поля можно не заполнять.
+            </div>
+            <div class="editor-wrap">
+              <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_system_context"></span></div>
+              <div id="ed_system_context" class="editor"></div>
+            </div>
+            <div class="row"><button class="btn btn-secondary" data-edit="system_context">Редактировать</button><button class="btn" data-save="system_context" style="display:none;">Сохранить</button></div>
+          </div>
+        </details>
+        <details>
+          <summary>SLA-критерии</summary>
+          <div class="panel">
+            <div class="help">
+              <p>Пороговые значения SLA для автоматической оценки результата теста.</p>
+              <ul>
+                <li><code>target_rps</code> — целевой RPS. Если достигнут устойчивый <code>stable_max</code>, тест считается успешным даже при последующей деградации.</li>
+                <li><code>max_error_rate_pct</code> — максимальный допустимый процент ошибок.</li>
+                <li><code>max_p95_ms</code> / <code>max_p99_ms</code> — пороги по p95 / p99 задержке в миллисекундах.</li>
+                <li><code>max_cpu_pct</code> / <code>max_memory_pct</code> — пороги CPU / Memory в процентах.</li>
+              </ul>
+              <p>Значение <code>null</code> означает «не проверять». SLA можно задавать как для всей области, так и отдельно для конкретного сервиса.</p>
+            </div>
+            <div class="row" style="gap:12px; align-items:center; margin:8px 0;">
+              <label for="slaServiceSelect" style="min-width:180px; color:#ccc;">Сервис:</label>
+              <select id="slaServiceSelect" style="height:36px; background:#1e1e1e; color:#eaeaea; border:1px solid #333; border-radius:6px; padding:6px 10px; min-width:240px;">
+                <option value="">SLA области (по умолчанию)</option>
+              </select>
+            </div>
+            <div class="editor-wrap">
+              <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_sla"></span></div>
+              <div id="ed_sla" class="editor"></div>
+            </div>
+            <div class="row"><button class="btn btn-secondary" data-edit="sla">Редактировать</button><button class="btn" data-save="sla" style="display:none;">Сохранить</button></div>
+          </div>
+        </details>
+        <details>
           <summary>Запросы</summary>
           <div class="panel">
             <div class="help">
@@ -275,9 +314,7 @@
     </details>
   </div>
 
-  <script>
-/* INLINE JS DISABLED (moved to static) */
-/*</script>
+  <!-- Inline JS intentionally removed -->
   <!-- Ace Editor for JSON/prompt editors -->
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.23.4/ace.js"></script>
   <script defer src="/static/js/common.js"></script>

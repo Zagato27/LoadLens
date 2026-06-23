@@ -1,0 +1,12 @@
+Domain Focus: kafka
+
+Evaluation Criteria Addendum
+- Ищите consumer lag, broker saturation, ISR/replication issues, produce/fetch latency, throttling, rebalance, errors.
+- Хороший кандидат различает проблему продюсера, брокера и консюмера.
+- Рекомендации должны быть конкретны: partitions, batch size, linger, fetch, consumer concurrency, broker tuning.
+
+Evaluation Steps
+1. Проверьте lag, throughput, latency и ошибки продюсеров/консьюмеров/брокеров.
+2. Проверьте, отражены ли проблемы устойчивости кластера: ISR, rebalance, replication, throttling.
+3. Проверьте, указаны ли конкретные topics, consumer groups, brokers или сервисы.
+4. Проверьте, приводят ли рекомендации к уменьшению lag и стабилизации доставки сообщений.

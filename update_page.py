@@ -21,6 +21,7 @@ from confluence_manager.update_confluence_template import (
 from data_collectors.grafana_collector import downloadImagesLogin, send_file_to_attachment
 from data_collectors.loki_collector import fetch_loki_logs, send_loki_file_to_attachment
 from loadlens_app.celery_app import celery_app
+from loadlens_app.core import _active_system_context as _core_active_system_context, _normalize_system_context
 from metrics_config import METRICS_CONFIG  # Базовая конфигурация метрик
 from settings import CONFIG  # Импорт базовой конфигурации
 
@@ -99,16 +100,33 @@ def _normalize_metrics_config(raw: dict | None) -> dict:
     return normalized
 
 
-def _metrics_service_entry(metrics_cfg: dict, service_name: str | None) -> dict:
+def _metrics_service_entry(metrics_cfg: dict, service_name: str | None, area_name: str | None = None) -> dict:
+    """Возвращает конфигурацию метрик/графиков для конкретного сервиса.
+
+    Приоритет:
+    1) Явно указанная область (project_area), если там есть service.
+    2) Любая другая область, где встречается этот service (для обратной совместимости).
+    """
     if not service_name:
         return {}
-    for area_cfg in (metrics_cfg or {}).values():
-        services = (area_cfg or {}).get('services')
+
+    # 1) Сначала пробуем явную область
+    if area_name and isinstance(metrics_cfg.get(area_name), dict):
+        area_cfg = metrics_cfg.get(area_name) or {}
+        services = area_cfg.get("services")
         if isinstance(services, dict) and service_name in services:
             return services.get(service_name) or {}
+
+    # 2) Фолбэк: поиск по всем областям (старое поведение)
+    for area_cfg in (metrics_cfg or {}).values():
+        services = (area_cfg or {}).get("services")
+        if isinstance(services, dict) and service_name in services:
+            return services.get(service_name) or {}
+
+    # 3) Наследие: конфиги верхнего уровня
     legacy = (metrics_cfg or {}).get(service_name)
     if isinstance(legacy, dict):
-        services = legacy.get('services')
+        services = legacy.get("services")
         if isinstance(services, dict) and service_name in services:
             return services.get(service_name) or {}
     return {}
@@ -227,14 +245,70 @@ def _domain_keys_from_config(cfg: dict) -> list[str]:
     return keys
 
 
+def _sla_prompt_block(sla_cfg: dict) -> str:
+    """Формирует текстовый блок SLA-критериев для вставки в промпт."""
+    if not isinstance(sla_cfg, dict):
+        return ""
+    lines = []
+    mapping = {
+        "target_rps": ("Целевой RPS (target_rps)", ""),
+        "max_error_rate_pct": ("Макс. % ошибок", "%"),
+        "max_p95_ms": ("Макс. p95 latency", " ms"),
+        "max_p99_ms": ("Макс. p99 latency", " ms"),
+        "max_cpu_pct": ("Макс. CPU usage", "%"),
+        "max_memory_pct": ("Макс. Memory usage", "%"),
+    }
+    for key, (label, unit) in mapping.items():
+        val = sla_cfg.get(key)
+        if val is not None:
+            try:
+                lines.append(f"  - {label}: {float(val)}{unit}")
+            except (TypeError, ValueError):
+                pass
+    if not lines:
+        return ""
+    perf_query = str(sla_cfg.get("max_performance_query") or "").strip()
+    try:
+        stable_min = float(sla_cfg.get("min_stable_minutes", 5.0))
+    except (TypeError, ValueError):
+        stable_min = 5.0
+    raw_peak_fallback = sla_cfg.get("target_rps_allow_peak_fallback", True)
+    if isinstance(raw_peak_fallback, bool):
+        allow_peak_fallback = raw_peak_fallback
+    else:
+        allow_peak_fallback = str(raw_peak_fallback).strip().lower() in {"1", "true", "yes", "y", "on"}
+    source_note = ""
+    if perf_query:
+        source_note += f"  - Метрика макс. производительности: «{perf_query}» (stable_max)\n"
+    source_note += f"  - Мин. длительность стабильной ступени: {stable_min} мин\n"
+    source_note += (
+        "  - Fallback для target_rps при отсутствии stable_max: "
+        + ("РАЗРЕШЕН (использовать peak max)" if allow_peak_fallback else "ЗАПРЕЩЕН (только stable_max)")
+        + "\n"
+    )
+    return (
+        "\n[SLA-критерии заказчика]\n"
+        + "\n".join(lines)
+        + "\n" + source_note
+        + "- ВАЖНО: если target_rps достигнут (stable_max >= target_rps), "
+        "тест считается успешным, даже если потом была деградация.\n"
+        + "- Учитывай эти пороги при формировании verdict и рекомендаций.\n"
+    )
+
+
 def _test_type_overlays(tt: str) -> dict:
     t = (tt or '').strip().lower()
     step = (
         "[Профиль теста: Ступенчатый поиск максимальной производительности]\n"
-        "- Цели: найти точку насыщения/предел (max_rps), момент деградации.\n"
-        "- KPI: max_rps, время пика, момент падения, доля ошибок у порога.\n"
+        "- Цели: найти последнюю стабильную ступень — максимальный уровень нагрузки,\n"
+        "  который система выдержала стабильно (без деградации) не менее 5-10 минут.\n"
+        "- ВАЖНО: max_rps — это НЕ кратковременный пик, а стабильная устойчивая нагрузка.\n"
+        "  Используй поле stable_max из домена lt_framework (если есть) вместо max.\n"
+        "- KPI: stable_max (устойчивый RPS), время последней стабильной ступени, момент деградации,\n"
+        "  доля ошибок у порога.\n"
         "- Проверки: SLA p95/p99, рост ошибок/таймаутов у порога, узкие места ресурсов.\n"
-        "- Вывод: peak_performance {max_rps, max_time, drop_time, method='max_step_before_drop'}.\n"
+        "- Вывод: peak_performance {max_rps=значение_stable_max, max_time=время_ступени,\n"
+        "  drop_time=момент_деградации, method='last_stable_step'}.\n"
     )
     soak = (
         "[Профиль теста: Долговременная стабильность (soak)]\n"
@@ -246,7 +320,7 @@ def _test_type_overlays(tt: str) -> dict:
     spike = (
         "[Профиль теста: Всплески (spike)]\n"
         "- Цели: реакция на резкий рост/падение нагрузки и восстановление.\n"
-        "- KPI: overshoot латентности, время восстановления t_recovery, ошибки в окне спайка, реакция авто-масштабирования.\n"
+        "- KPI: overshoot латентности, время восстановления t_recovery, ошибки в окне спайка.\n"
         "- Проверки: просадки RPS, рост очередей, время стабилизации.\n"
         "- Вывод: recovery_time_s, autoscaling_reaction_s, overshoot_pct, уязвимые компоненты.\n"
     )
@@ -286,6 +360,7 @@ def _await_task(async_result):
 
 def _download_img_with_retry(image_url: str, file_basename: str, username: str, password: str, max_attempts: int = 3) -> bool:
     for attempt in range(max_attempts):
+        delay_sec = min(5 * (attempt + 1), 20) if "/render/" in image_url else (attempt + 1)
         try:
             downloadImagesLogin(image_url, file_basename, username, password)
             path = f"data_collectors/temporary_files/{file_basename}.jpg"
@@ -293,13 +368,25 @@ def _download_img_with_retry(image_url: str, file_basename: str, username: str, 
                 return True
             logger.warning("Файл не создан или пуст: %s", path)
         except Exception as exc:
+            if attempt >= max_attempts - 1:
+                logger.warning(
+                    "Попытка загрузки изображения не удалась (%s/%s): %s. Повторы исчерпаны.",
+                    attempt + 1,
+                    max_attempts,
+                    exc,
+                )
+                continue
             logger.warning(
-                "Попытка загрузки изображения не удалась (%s/%s): %s",
+                "Попытка загрузки изображения не удалась (%s/%s): %s. Повтор через %s сек.",
                 attempt + 1,
                 max_attempts,
                 exc,
+                delay_sec,
             )
-        time.sleep(1 * (attempt + 1))
+            time.sleep(delay_sec)
+            continue
+        if attempt < max_attempts - 1:
+            time.sleep(delay_sec)
     return False
 
 
@@ -375,6 +462,7 @@ def generate_llm_results_task(
     ef_config: dict | None,
     prompts_override: dict | None,
     active_domains: list[str] | None,
+    system_context: dict | None,
 ):  # pragma: no cover - celery worker
     return uploadFromLLM(
         start_ts,
@@ -385,6 +473,7 @@ def generate_llm_results_task(
         ef_config=ef_config,
         prompts_override=prompts_override,
         active_domains=active_domains,
+        system_context=system_context,
     )
 
 def _load_area_overrides(area_name: str) -> dict:
@@ -419,7 +508,7 @@ def _effective_config_for_scope(area_name: str, service_name: str | None = None)
     area = _load_area_overrides(area_name)
     service_entry = _service_entry(area_name, service_name) if service_name else {}
     eff = dict(CONFIG)
-    for key in ("llm", "metrics_source", "lt_metrics_source", "default_params", "queries"):
+    for key in ("llm", "metrics_source", "lt_metrics_source", "default_params", "queries", "sla", "system_context"):
         base = (CONFIG.get(key) or {}) if isinstance(CONFIG.get(key), dict) else (CONFIG.get(key) if key == 'queries' else {})
         over_area = (area.get(key) or {}) if isinstance(area.get(key), dict) else {}
         over_service = (service_entry.get(key) or {}) if isinstance(service_entry.get(key), dict) else {}
@@ -434,7 +523,7 @@ def _prompts_override_for_area(area_name: str | None) -> dict:
     return prompts if isinstance(prompts, dict) else {}
 
 
-def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = False, web_only: bool = False, run_name: str | None = None, test_type: str | None = None, progress_callback=None):
+def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = False, web_only: bool = False, run_name: str | None = None, test_type: str | None = None, project_area: str | None = None, progress_callback=None):
     """Формирует отчёт по нагрузочному тесту (Confluence и/или веб-интерфейс).
 
     Параметры:
@@ -470,18 +559,26 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
     loki_url = CONFIG['loki_url']
 
     
+    # Определяем область проекта (area) для сервиса
+    # В приоритете явно переданный project_area из UI, затем маппинг service->area, затем сам service.
+    area_name = (project_area or "").strip() or _find_area_for_service(service) or service
+
     # Получаем конфигурацию сервиса и проверяем наличие метрик (горячее чтение runtime)
     _mc = _active_metrics_config_now()
-    service_config = _metrics_service_entry(_mc, service)
+    service_config = _metrics_service_entry(_mc, service, area_name)
     if not service_config:
-        raise ValueError(f"Конфигурация для сервиса '{service}' не найдена.")
-
-    area_name = _find_area_for_service(service) or service
+        raise ValueError(f"Конфигурация для сервиса '{service}' в области '{area_name}' не найдена.")
     ef_cfg = _effective_config_for_scope(area_name, service)
     base_prompt_templates = _prompt_templates_for_scope(area_name, service)
     domain_keys = _domain_keys_from_config(ef_cfg)
     disabled_domains = _service_disabled_domains(area_name, service)
     active_domains = [d for d in domain_keys if d not in disabled_domains]
+    scoped_system_context = ef_cfg.get("system_context") if isinstance(ef_cfg.get("system_context"), dict) else None
+    system_context_snapshot = (
+        _normalize_system_context(scoped_system_context)
+        if scoped_system_context is not None
+        else _core_active_system_context()
+    )
 
     # Режим «только веб»: не создаём страницу Confluence, не скачиваем изображения из Grafana
     if web_only:
@@ -514,14 +611,15 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
         results = None
         if use_llm or save_to_db_effective:
             overlays = _test_type_overlays(test_type)
+            sla_block = _sla_prompt_block(ef_cfg.get("sla") or {})
             final_prompts = {}
-            for k in ('overall', 'jvm', 'database', 'kafka', 'microservices', 'hard_resources'):
+            for k in ('overall', 'jvm', 'database', 'kafka', 'microservices', 'hard_resources', 'lt_framework'):
                 base_text = base_prompt_templates.get(k, '')
                 ov = overlays.get(k, '') or ''
                 if k == 'overall':
-                    final_prompts[k] = (ov + ("\n\n" if ov and base_text else '') + (base_text or '')).strip()
+                    final_prompts[k] = (ov + sla_block + ("\n\n" if (ov or sla_block) and base_text else '') + (base_text or '')).strip()
                 else:
-                    final_prompts[k] = ((base_text or '') + ov).strip()
+                    final_prompts[k] = ((base_text or '') + ov + sla_block).strip()
 
             results = uploadFromLLM(
                 start/1000,
@@ -531,7 +629,8 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
                 only_collect=not use_llm,
                 ef_config=ef_cfg,
                 prompts_override=final_prompts,
-                active_domains=active_domains
+                active_domains=active_domains,
+                system_context=system_context_snapshot,
             )
         else:
             _progress("Пропускаем LLM-анализ и сбор доменных данных по запросу пользователя")
@@ -714,19 +813,21 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
             "run_id": uuid.uuid4().hex,
             "run_name": (run_name or "").strip() or datetime.now().strftime("run-%Y%m%d-%H%M%S"),
             "service": service,
+            "test_type": (test_type or "").strip(),
             "start_ms": start,
             "end_ms": end,
         }
     if use_llm or save_to_db:
         overlays = _test_type_overlays(test_type)
+        sla_block = _sla_prompt_block(ef_cfg.get("sla") or {})
         final_prompts = {}
-        for k in ('overall','jvm','database','kafka','microservices','hard_resources'):
+        for k in ('overall', 'jvm', 'database', 'kafka', 'microservices', 'hard_resources', 'lt_framework'):
             base = base_prompt_templates.get(k, '')
             ov = overlays.get(k, '') or ''
             if k == 'overall':
-                final_prompts[k] = (ov + ("\n\n" if ov and base else '') + (base or '')).strip()
+                final_prompts[k] = (ov + sla_block + ("\n\n" if (ov or sla_block) and base else '') + (base or '')).strip()
             else:
-                final_prompts[k] = ((base or '') + ov).strip()
+                final_prompts[k] = ((base or '') + ov + sla_block).strip()
         results = _await_task(
             generate_llm_results_task.delay(
                 start / 1000,
@@ -737,6 +838,7 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
                 ef_cfg,
                 final_prompts,
                 active_domains,
+                system_context_snapshot,
             )
         )
     else:
@@ -876,24 +978,53 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
                 completeness = judge.get("completeness")
                 specificity = judge.get("specificity")
                 data_score = (s or {}).get("data_score")
+                data_score_details = (s or {}).get("data_score_details") or {}
                 final_score = (s or {}).get("final_score")
                 conf = (s or {}).get("confidence")
-                lines = [
-                    "\n\n#### Доверие (судья)",
-                    f"- Итог: {_pct(overall)}",
-                    f"- Согласованность (factual): {_pct(factual)}",
-                    f"- Полнота (completeness): {_pct(completeness)}",
-                    f"- Конкретика (specificity): {_pct(specificity)}",
-                    f"- По данным: {_pct(data_score)}",
-                    f"- Агрегат: {_pct(final_score)}",
+                rows = [
+                    ("Оценка текста судьей", _pct(overall)),
+                    ("Эвристическая проверка по данным", _pct(data_score)),
+                    ("Итог для выбора кандидата", _pct(final_score)),
+                    ("Точность относительно данных", _pct(factual)),
+                    ("Полнота покрытия важных наблюдений", _pct(completeness)),
+                    ("Конкретика по метрикам и компонентам", _pct(specificity)),
                 ]
                 if isinstance(conf, (int, float)):
-                    lines.append(f"- Доверие модели: {_pct(float(conf))}")
-                lines.extend([
+                    rows.insert(3, ("Уверенность модели", _pct(float(conf))))
+                if isinstance(data_score_details, dict) and data_score_details:
+                    rows.append(("Привязка выводов к метрикам и сериям", _pct(data_score_details.get("label_grounding"))))
+                    claims_total = int(data_score_details.get("numeric_claims_total") or 0)
+                    claims_supported = int(data_score_details.get("numeric_claims_supported") or 0)
+                    if claims_total > 0:
+                        rows.append(
+                            (
+                                "Совпадение чисел из текста",
+                                f"{_pct(data_score_details.get('numeric_grounding'))} "
+                                f"(подтверждено {claims_supported} из {claims_total})",
+                            )
+                        )
+                    else:
+                        rows.append(("Совпадение чисел из текста", "не проверялось, в findings не найдено явных числовых утверждений"))
+                    if bool(data_score_details.get("peak_checked")):
+                        rows.append(("Совпадение peak_performance", _pct(data_score_details.get("peak_consistency"))))
+                    else:
+                        rows.append(("Совпадение peak_performance", "не проверялось"))
+                def _md_cell(x: object) -> str:
+                    return str(x).replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ").strip() or "—"
+
+                judge_lines = [
                     "",
-                    "_Пояснения: итог = 0.6·factual + 0.3·completeness + 0.2·specificity._",
+                    "#### Оценка ответа",
+                    "| Параметр | Значение |",
+                    "|---|---:|",
+                ]
+                judge_lines.extend(f"| {_md_cell(label)} | {_md_cell(value)} |" for label, value in rows)
+                judge_lines.extend([
+                    "",
+                    "_Проверка по данным остаётся эвристической: она оценивает привязку текста к метрикам, "
+                    "совпадение чисел и согласованность peak_performance._",
                 ])
-                llm_replacements[ph] = val + "\n".join(lines)
+                llm_replacements[ph] = val.rstrip() + "\n\n" + "\n".join(judge_lines)
 
             _append_judge("$$answer_jvm$$", "jvm")
             _append_judge("$$answer_database$$", "database")

@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import numpy as np
 from requests.auth import HTTPBasicAuth
@@ -12,6 +13,32 @@ import shutil
 # # with open('config.yaml', 'r') as file:
 
 #     config = yaml.safe_load(file)
+
+_GRAFANA_RENDER_QUERY_TIMEOUT_SEC = int(os.getenv("GRAFANA_RENDER_QUERY_TIMEOUT_SEC", "180"))
+_GRAFANA_RENDER_CONNECT_TIMEOUT_SEC = int(os.getenv("GRAFANA_RENDER_CONNECT_TIMEOUT_SEC", "10"))
+_GRAFANA_RENDER_READ_TIMEOUT_SEC = int(os.getenv("GRAFANA_RENDER_READ_TIMEOUT_SEC", "240"))
+
+
+def _prepare_render_url(image_url: str) -> str:
+    if not isinstance(image_url, str) or "/render/" not in image_url:
+        return image_url
+    parts = urlsplit(image_url)
+    query_items = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query_items.setdefault("timeout", str(_GRAFANA_RENDER_QUERY_TIMEOUT_SEC))
+    new_query = urlencode(query_items, doseq=True)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
+
+
+def _safe_response_excerpt(response: requests.Response, limit: int = 600) -> str:
+    try:
+        raw = response.text[:limit]
+    except Exception:
+        try:
+            raw = response.content[:limit].decode("utf-8", errors="replace")
+        except Exception:
+            raw = ""
+    raw = raw.replace("\r", " ").replace("\n", " ").strip()
+    return raw.encode("ascii", "backslashreplace").decode("ascii", "ignore")
 
 def send_file_to_attachment(url_basic, auth_header, page_id, filename):
     """
@@ -69,27 +96,47 @@ def downloadImagesLogin(image_url, filename, username, password):
     """
 
     try:
+        prepared_url = _prepare_render_url(image_url)
+        target_path = f'data_collectors/temporary_files/{filename}.jpg'
+
         # Отправка GET запроса для получения изображения с базовой аутентификацией
-        r = requests.get(image_url, stream=True, auth=(username, password), verify=False)
-        print(image_url)
-        print(r.status_code)
+        with requests.get(
+            prepared_url,
+            stream=True,
+            auth=(username, password),
+            verify=False,
+            timeout=(_GRAFANA_RENDER_CONNECT_TIMEOUT_SEC, _GRAFANA_RENDER_READ_TIMEOUT_SEC),
+        ) as r:
+            print(prepared_url)
+            print(r.status_code)
 
-        # Проверка статуса ответа
-        if r.status_code == 200:
-            r.raw.decode_content = True
+            content_type = (r.headers.get("content-type") or "").lower()
 
-            # Сохранение изображения в локальном каталоге
-            with open(f'data_collectors/temporary_files/{filename}.jpg', 'wb') as f:
-                shutil.copyfileobj(r.raw, f)
+            # Проверка статуса ответа
+            if r.status_code == 200 and content_type.startswith("image/"):
+                r.raw.decode_content = True
 
-            print('Image sucessfully Downloaded: ', filename)
-        else:
-            print('Image Couldn\'t be retreived')
+                # Сохранение изображения в локальном каталоге
+                with open(target_path, 'wb') as f:
+                    shutil.copyfileobj(r.raw, f)
+
+                if not os.path.exists(target_path) or os.path.getsize(target_path) == 0:
+                    raise RuntimeError(f"Grafana render returned empty image: {prepared_url}")
+
+                print('Image successfully downloaded:', filename)
+            else:
+                excerpt = _safe_response_excerpt(r)
+                raise RuntimeError(
+                    "Grafana render failed: "
+                    f"status={r.status_code}, content_type={content_type or 'unknown'}, body={excerpt or '<empty>'}"
+                )
 
     except requests.exceptions.RequestException as e:
         print(f"Произошла ошибка при отправке запроса: {str(e)}")
+        raise
     except Exception as e:
         print(f"Произошла ошибка: {str(e)}")
+        raise
 
     return filename
 

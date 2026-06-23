@@ -5,7 +5,9 @@ from typing import Dict, Iterable, List, Optional
 import pandas as pd
 import psycopg2
 from psycopg2 import sql
-from psycopg2.extras import execute_batch
+from psycopg2.extras import Json, execute_batch
+
+from AI.scoring import parse_llm_analysis_strict
 
 
 logger = logging.getLogger(__name__)
@@ -291,7 +293,8 @@ def _ensure_llm_reports_table(conn, storage_cfg: Dict[str, object]) -> None:
                             domain      TEXT NOT NULL,
                             text        TEXT,
                             parsed      JSONB,
-                            scores      JSONB
+                            scores      JSONB,
+                            system_context JSONB
                         );
                         """
                     ).format(sql.Identifier(schema), sql.Identifier(table))
@@ -319,6 +322,30 @@ def _ensure_llm_reports_table(conn, storage_cfg: Dict[str, object]) -> None:
             try:
                 cur.execute(
                     sql.SQL("ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS test_type TEXT;").format(
+                        sql.Identifier(schema), sql.Identifier(table)
+                    )
+                )
+            except Exception:
+                pass
+            try:
+                cur.execute(
+                    sql.SQL("ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS sla_verdict TEXT;").format(
+                        sql.Identifier(schema), sql.Identifier(table)
+                    )
+                )
+            except Exception:
+                pass
+            try:
+                cur.execute(
+                    sql.SQL("ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS sla_details JSONB;").format(
+                        sql.Identifier(schema), sql.Identifier(table)
+                    )
+                )
+            except Exception:
+                pass
+            try:
+                cur.execute(
+                    sql.SQL("ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS system_context JSONB;").format(
                         sql.Identifier(schema), sql.Identifier(table)
                     )
                 )
@@ -429,8 +456,9 @@ def save_llm_results(
         insert_sql = sql.SQL(
             """
             INSERT INTO {}.{} (
-                run_id, run_name, service, test_type, start_ms, end_ms, domain, text, parsed, scores, verdict
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);
+                run_id, run_name, service, test_type, start_ms, end_ms, domain,
+                text, parsed, scores, system_context, verdict, sla_verdict, sla_details
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);
             """
         ).format(sql.Identifier(schema), sql.Identifier(table))
 
@@ -442,41 +470,59 @@ def save_llm_results(
         end_ms = int((run_meta or {}).get("end_ms") or 0)
 
         rows = []
+        scores_all = (results.get("scores", {}) or {})
+        system_context_snapshot = results.get("system_context") if isinstance(results.get("system_context"), dict) else None
+        run_sla_verdict = results.get("sla_verdict") if results.get("sla_checks") else None
+        run_sla_details = {
+            "checks": results.get("sla_checks", []),
+            "summary": results.get("sla_summary", ""),
+        } if results.get("sla_checks") else None
         domains = [
-            ("jvm", results.get("jvm"), results.get("jvm_parsed"), (results.get("scores", {}) or {}).get("jvm")),
-            ("database", results.get("database"), results.get("database_parsed"), (results.get("scores", {}) or {}).get("database")),
-            ("kafka", results.get("kafka"), results.get("kafka_parsed"), (results.get("scores", {}) or {}).get("kafka")),
-            ("microservices", results.get("ms"), results.get("ms_parsed"), (results.get("scores", {}) or {}).get("microservices")),
-            ("hard_resources", results.get("hard_resources"), results.get("hard_resources_parsed"), (results.get("scores", {}) or {}).get("hard_resources")),
-            ("final", results.get("final"), results.get("final_parsed"), (results.get("scores", {}) or {}).get("final")),
+            ("jvm", results.get("jvm"), results.get("jvm_parsed"), scores_all.get("jvm")),
+            ("database", results.get("database"), results.get("database_parsed"), scores_all.get("database")),
+            ("kafka", results.get("kafka"), results.get("kafka_parsed"), scores_all.get("kafka")),
+            ("microservices", results.get("ms"), results.get("ms_parsed"), scores_all.get("microservices")),
+            ("hard_resources", results.get("hard_resources"), results.get("hard_resources_parsed"), scores_all.get("hard_resources")),
+            ("final", results.get("final"), results.get("final_parsed"), scores_all.get("final")),
         ]
-        # Дополнительно сохраняем lt_framework, если присутствует
-        try:
-            if "lt_framework" in results:
-                domains.insert(-1, ("lt_framework", results.get("lt_framework"), results.get("lt_framework_parsed"), (results.get("scores", {}) or {}).get("lt_framework")))
-        except Exception:
-            pass
-
-        # Стандартизированный вердикт рассчитываем один раз для финального домена
-        final_parsed = results.get("final_parsed") if isinstance(results, dict) else None
-        final_verdict_std = None
-        try:
-            if isinstance(final_parsed, dict):
-                final_verdict_std = _standardize_verdict(final_parsed.get("verdict"))
-            else:
-                final_verdict_std = _standardize_verdict(None)
-        except Exception:
-            final_verdict_std = "Недостаточно данных"
+        if "lt_framework" in results:
+            domains.insert(-1, ("lt_framework", results.get("lt_framework"), results.get("lt_framework_parsed"), scores_all.get("lt_framework")))
 
         for domain, text_val, parsed_val, scores_val in domains:
-            # сохраняем даже пустые тексты, чтобы фиксировать сам факт попытки
+            raw_text = str(text_val) if text_val is not None else None
+            if parsed_val is None and text_val:
+                try:
+                    coerced = parse_llm_analysis_strict(raw_text or "")
+                    if coerced is not None:
+                        parsed_val = coerced.dict()
+                except Exception:
+                    pass
+
+            verdict_std = None
+            try:
+                if isinstance(parsed_val, dict):
+                    verdict_std = _standardize_verdict(parsed_val.get("verdict"))
+            except Exception:
+                pass
+
+            text_str = raw_text
+            raw_json_like = bool((raw_text or "").strip().startswith("{") or (raw_text or "").strip().startswith("```json"))
+            if parsed_val is not None and raw_json_like:
+                try:
+                    text_str = json.dumps(parsed_val, ensure_ascii=False, indent=2)
+                except Exception:
+                    text_str = raw_text
+            parsed_json = Json(parsed_val) if parsed_val is not None else None
+            scores_json = Json(scores_val) if scores_val is not None else None
+            system_context_json = Json(system_context_snapshot) if system_context_snapshot is not None else None
+            is_final = (domain == "final")
+            sla_v = run_sla_verdict if is_final else None
+            sla_d = Json(run_sla_details) if (is_final and run_sla_details) else None
+
             rows.append(
                 (
                     run_id, run_name, service, test_type, start_ms, end_ms, domain,
-                    str(text_val) if text_val is not None else None,
-                    json.dumps(parsed_val) if parsed_val is not None else None,
-                    json.dumps(scores_val) if scores_val is not None else None,
-                    (final_verdict_std if domain == "final" else None),
+                    text_str, parsed_json, scores_json, system_context_json, verdict_std, sla_v, sla_d,
                 )
             )
 

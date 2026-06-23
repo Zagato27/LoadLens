@@ -16,7 +16,8 @@ from flask import (
     send_file,
 )
 
-from AI.db_store import _ensure_engineer_reports_table
+from AI.db_store import _ensure_engineer_reports_table, _ensure_llm_reports_table
+from AI.scoring import parse_llm_analysis_strict
 from settings import CONFIG
 from update_page import update_report
 
@@ -28,10 +29,12 @@ from loadlens_app.core import (
     _active_project_area,
     _available_domain_keys,
     _bootstrap_service_configs,
+    _delete_run_data,
     _find_area_for_service,
     _list_project_areas,
     _metrics_service_entry,
     _metrics_services_for_area,
+    _rename_run_data,
     _resolve_services_filter,
     _services_map_for_area,
     _ts_conn,
@@ -119,7 +122,7 @@ def get_services():
                     "disabled_domains": [],
                 }
             )
-    else:
+    elif not area:
         for area_name, cfg in metrics.items():
             services = cfg.get("services")
             if isinstance(services, dict):
@@ -142,6 +145,10 @@ def dashboard_data():
         schema = cfg.get("schema", "public")
         table = cfg.get("llm_table", "llm_reports")
         conn = _ts_conn()
+        try:
+            _ensure_llm_reports_table(conn, cfg)
+        except Exception:
+            pass
         pa = _active_project_area()
         services_filter = _resolve_services_filter(pa)
         last_run = None
@@ -150,7 +157,15 @@ def dashboard_data():
             if services_filter:
                 cur.execute(
                     f"""
-                    SELECT run_name, service, start_ms, end_ms, verdict, created_at
+                    SELECT
+                        run_name,
+                        service,
+                        start_ms,
+                        end_ms,
+                        COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS effective_verdict,
+                        verdict AS llm_verdict,
+                        sla_verdict,
+                        created_at
                     FROM {schema}.{table}
                     WHERE domain = 'final' AND service = ANY(%s)
                     ORDER BY created_at DESC
@@ -161,7 +176,15 @@ def dashboard_data():
             else:
                 cur.execute(
                     f"""
-                    SELECT run_name, service, start_ms, end_ms, verdict, created_at
+                    SELECT
+                        run_name,
+                        service,
+                        start_ms,
+                        end_ms,
+                        COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS effective_verdict,
+                        verdict AS llm_verdict,
+                        sla_verdict,
+                        created_at
                     FROM {schema}.{table}
                     WHERE domain = 'final'
                     ORDER BY created_at DESC
@@ -176,19 +199,24 @@ def dashboard_data():
                     "start_ms": int(r[2]) if r[2] is not None else None,
                     "end_ms": int(r[3]) if r[3] is not None else None,
                     "verdict": r[4],
-                    "created_at": r[5].isoformat() if r[5] else None,
+                    "llm_verdict": r[5],
+                    "sla_verdict": r[6],
+                    "created_at": r[7].isoformat() if r[7] else None,
                 }
 
             if services_filter:
                 cur.execute(
                     f"""
                     WITH ranked AS (
-                      SELECT run_name, verdict, created_at,
+                      SELECT
+                             run_name,
+                             COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS effective_verdict,
+                             created_at,
                              ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC) AS rn
                       FROM {schema}.{table}
                       WHERE domain = 'final' AND service = ANY(%s)
                     )
-                    SELECT COALESCE(verdict, 'Недостаточно данных') AS v, COUNT(*) AS cnt
+                    SELECT effective_verdict AS v, COUNT(*) AS cnt
                     FROM ranked
                     WHERE rn = 1
                     GROUP BY v
@@ -199,12 +227,15 @@ def dashboard_data():
                 cur.execute(
                     f"""
                     WITH ranked AS (
-                      SELECT run_name, verdict, created_at,
+                      SELECT
+                             run_name,
+                             COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS effective_verdict,
+                             created_at,
                              ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC) AS rn
                       FROM {schema}.{table}
                       WHERE domain = 'final'
                     )
-                    SELECT COALESCE(verdict, 'Недостаточно данных') AS v, COUNT(*) AS cnt
+                    SELECT effective_verdict AS v, COUNT(*) AS cnt
                     FROM ranked
                     WHERE rn = 1
                     GROUP BY v
@@ -233,33 +264,99 @@ def llm_reports():
         schema = cfg.get("schema", "public")
         table = cfg.get("llm_table", "llm_reports")
         conn = _ts_conn()
+        try:
+            _ensure_llm_reports_table(conn, cfg)
+        except Exception:
+            pass
         pa = _active_project_area()
         services_filter = _resolve_services_filter(pa)
+        rows = []
         with conn, conn.cursor() as cur:
+            # 1) Пытаемся отфильтровать по сервисам области
             if services_filter:
                 cur.execute(
                     f"""
-                    SELECT run_name, service, start_ms, end_ms, domain, verdict, text, parsed, scores, created_at
+                    SELECT
+                        run_name,
+                        service,
+                        start_ms,
+                        end_ms,
+                        domain,
+                        verdict,
+                        text,
+                        parsed,
+                        scores,
+                        sla_verdict,
+                        sla_details,
+                        system_context,
+                        created_at
                     FROM {schema}.{table}
                     WHERE run_name = %s AND domain <> 'engineer' AND service = ANY(%s)
                     ORDER BY created_at DESC, domain
                     """,
                     (run_name, services_filter),
                 )
+                rows = cur.fetchall()
+                # 2) Фолбэк: если ничего не нашли (например, сервисы запускались под другой областью), берём все домены по run_name
+                if not rows:
+                    cur.execute(
+                        f"""
+                        SELECT
+                            run_name,
+                            service,
+                            start_ms,
+                            end_ms,
+                            domain,
+                            verdict,
+                            text,
+                            parsed,
+                            scores,
+                            sla_verdict,
+                            sla_details,
+                            system_context,
+                            created_at
+                        FROM {schema}.{table}
+                        WHERE run_name = %s AND domain <> 'engineer'
+                        ORDER BY created_at DESC, domain
+                        """,
+                        (run_name,),
+                    )
+                    rows = cur.fetchall()
             else:
                 cur.execute(
                     f"""
-                    SELECT run_name, service, start_ms, end_ms, domain, verdict, text, parsed, scores, created_at
+                    SELECT
+                        run_name,
+                        service,
+                        start_ms,
+                        end_ms,
+                        domain,
+                        verdict,
+                        text,
+                        parsed,
+                        scores,
+                        sla_verdict,
+                        sla_details,
+                        system_context,
+                        created_at
                     FROM {schema}.{table}
                     WHERE run_name = %s AND domain <> 'engineer'
                     ORDER BY created_at DESC, domain
                     """,
                     (run_name,),
                 )
-            rows = cur.fetchall()
+                rows = cur.fetchall()
         conn.close()
         data = []
         for r in rows:
+            parsed_value = r[7]
+            if parsed_value is None and isinstance(r[6], str) and r[6].strip():
+                try:
+                    recovered = parse_llm_analysis_strict(r[6])
+                    if recovered is not None:
+                        parsed_value = recovered.dict()
+                except Exception:
+                    parsed_value = None
             data.append(
                 {
                     "run_name": r[0],
@@ -267,11 +364,15 @@ def llm_reports():
                     "start_ms": int(r[2]) if r[2] is not None else None,
                     "end_ms": int(r[3]) if r[3] is not None else None,
                     "domain": r[4],
-                    "verdict": r[5],
+                    "verdict": r[9] or r[5],
+                    "llm_verdict": r[5],
+                    "sla_verdict": r[9],
                     "text": r[6],
-                    "parsed": r[7],
+                    "parsed": parsed_value,
                     "scores": r[8],
-                    "created_at": r[9].isoformat() if r[9] else None,
+                    "sla_details": r[10],
+                    "system_context": r[11],
+                    "created_at": r[12].isoformat() if r[12] else None,
                 }
             )
         return jsonify(data)
@@ -310,125 +411,78 @@ def list_runs():
             params.extend([like, like])
 
         conn = _ts_conn()
-        test_type_supported = True
+        try:
+            _ensure_llm_reports_table(conn, cfg)
+        except Exception:
+            pass
         with conn, conn.cursor() as cur:
-            try:
-                if services_filter:
-                    cur.execute(
-                        f"""
-                        WITH base AS (
-                          SELECT run_name,
-                                 MIN("time") AS start_time,
-                                 MAX("time") AS end_time,
-                                 COALESCE(MAX(service), '') AS service
-                          FROM public.metrics
-                          WHERE run_name IS NOT NULL AND run_name <> '' AND service = ANY(%s)
-                          {where_q}
-                          GROUP BY run_name
-                        ), final AS (
-                          SELECT run_name, verdict, created_at, test_type,
-                                 ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC) AS rn
-                          FROM {schema}.{llm_table}
-                          WHERE domain = 'final' AND service = ANY(%s)
-                        )
-                        SELECT b.run_name, b.start_time, b.end_time, b.service,
-                               f.verdict, f.created_at AS report_created_at, f.test_type
-                        FROM base b
-                        LEFT JOIN final f ON f.run_name = b.run_name AND f.rn = 1
-                        ORDER BY {sort_sql} {dir_sql}
-                        OFFSET %s LIMIT %s
-                        """,
-                        (services_filter, *params, services_filter, offset, limit),
+            if services_filter:
+                cur.execute(
+                    f"""
+                    WITH base AS (
+                      SELECT run_name,
+                             MIN("time") AS start_time,
+                             MAX("time") AS end_time,
+                             COALESCE(MAX(service), '') AS service
+                      FROM public.metrics
+                      WHERE run_name IS NOT NULL AND run_name <> '' AND service = ANY(%s)
+                      {where_q}
+                      GROUP BY run_name
+                    ), final AS (
+                      SELECT
+                             run_name,
+                             COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS verdict,
+                             verdict AS llm_verdict,
+                             sla_verdict,
+                             created_at,
+                             test_type,
+                             ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC) AS rn
+                      FROM {schema}.{llm_table}
+                      WHERE domain = 'final' AND service = ANY(%s)
                     )
-                else:
-                    cur.execute(
-                        f"""
-                        WITH base AS (
-                          SELECT run_name,
-                                 MIN("time") AS start_time,
-                                 MAX("time") AS end_time,
-                                 COALESCE(MAX(service), '') AS service
-                          FROM public.metrics
-                          WHERE run_name IS NOT NULL AND run_name <> ''
-                          {where_q}
-                          GROUP BY run_name
-                        ), final AS (
-                          SELECT run_name, verdict, created_at, test_type,
-                                 ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC) AS rn
-                          FROM {schema}.{llm_table}
-                          WHERE domain = 'final'
-                        )
-                        SELECT b.run_name, b.start_time, b.end_time, b.service,
-                               f.verdict, f.created_at AS report_created_at, f.test_type
-                        FROM base b
-                        LEFT JOIN final f ON f.run_name = b.run_name AND f.rn = 1
-                        ORDER BY {sort_sql} {dir_sql}
-                        OFFSET %s LIMIT %s
-                        """,
-                        (*params, offset, limit),
+                    SELECT b.run_name, b.start_time, b.end_time, b.service,
+                           f.verdict, f.llm_verdict, f.sla_verdict, f.created_at AS report_created_at, f.test_type
+                    FROM base b
+                    LEFT JOIN final f ON f.run_name = b.run_name AND f.rn = 1
+                    ORDER BY {sort_sql} {dir_sql}
+                    OFFSET %s LIMIT %s
+                    """,
+                    (services_filter, *params, services_filter, offset, limit),
+                )
+            else:
+                cur.execute(
+                    f"""
+                    WITH base AS (
+                      SELECT run_name,
+                             MIN("time") AS start_time,
+                             MAX("time") AS end_time,
+                             COALESCE(MAX(service), '') AS service
+                      FROM public.metrics
+                      WHERE run_name IS NOT NULL AND run_name <> ''
+                      {where_q}
+                      GROUP BY run_name
+                    ), final AS (
+                      SELECT
+                             run_name,
+                             COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS verdict,
+                             verdict AS llm_verdict,
+                             sla_verdict,
+                             created_at,
+                             test_type,
+                             ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC) AS rn
+                      FROM {schema}.{llm_table}
+                      WHERE domain = 'final'
                     )
-                rows = cur.fetchall()
-            except Exception:
-                test_type_supported = False
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                if services_filter:
-                    cur.execute(
-                        f"""
-                        WITH base AS (
-                          SELECT run_name,
-                                 MIN("time") AS start_time,
-                                 MAX("time") AS end_time,
-                                 COALESCE(MAX(service), '') AS service
-                          FROM public.metrics
-                          WHERE run_name IS NOT NULL AND run_name <> '' AND service = ANY(%s)
-                          {where_q}
-                          GROUP BY run_name
-                        ), final AS (
-                          SELECT run_name, verdict, created_at,
-                                 ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC) AS rn
-                          FROM {schema}.{llm_table}
-                          WHERE domain = 'final' AND service = ANY(%s)
-                        )
-                        SELECT b.run_name, b.start_time, b.end_time, b.service,
-                               f.verdict, f.created_at AS report_created_at
-                        FROM base b
-                        LEFT JOIN final f ON f.run_name = b.run_name AND f.rn = 1
-                        ORDER BY {sort_sql} {dir_sql}
-                        OFFSET %s LIMIT %s
-                        """,
-                        (services_filter, *params, services_filter, offset, limit),
-                    )
-                else:
-                    cur.execute(
-                        f"""
-                        WITH base AS (
-                          SELECT run_name,
-                                 MIN("time") AS start_time,
-                                 MAX("time") AS end_time,
-                                 COALESCE(MAX(service), '') AS service
-                          FROM public.metrics
-                          WHERE run_name IS NOT NULL AND run_name <> ''
-                          {where_q}
-                          GROUP BY run_name
-                        ), final AS (
-                          SELECT run_name, verdict, created_at,
-                                 ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC) AS rn
-                          FROM {schema}.{llm_table}
-                          WHERE domain = 'final'
-                        )
-                        SELECT b.run_name, b.start_time, b.end_time, b.service,
-                               f.verdict, f.created_at AS report_created_at
-                        FROM base b
-                        LEFT JOIN final f ON f.run_name = b.run_name AND f.rn = 1
-                        ORDER BY {sort_sql} {dir_sql}
-                        OFFSET %s LIMIT %s
-                        """,
-                        (*params, offset, limit),
-                    )
-                rows = cur.fetchall()
+                    SELECT b.run_name, b.start_time, b.end_time, b.service,
+                           f.verdict, f.llm_verdict, f.sla_verdict, f.created_at AS report_created_at, f.test_type
+                    FROM base b
+                    LEFT JOIN final f ON f.run_name = b.run_name AND f.rn = 1
+                    ORDER BY {sort_sql} {dir_sql}
+                    OFFSET %s LIMIT %s
+                    """,
+                    (*params, offset, limit),
+                )
+            rows = cur.fetchall()
         conn.close()
         out = []
         for r in rows:
@@ -438,9 +492,11 @@ def list_runs():
                 "end_time": r[2].isoformat() if r[2] else None,
                 "service": r[3],
                 "verdict": r[4],
-                "report_created_at": (r[5].isoformat() if r[5] else None),
+                "llm_verdict": r[5],
+                "sla_verdict": r[6],
+                "report_created_at": (r[7].isoformat() if r[7] else None),
             }
-            item["test_type"] = r[6] or "" if test_type_supported else ""
+            item["test_type"] = r[8] or ""
             out.append(item)
         return jsonify(out)
     except Exception as e:  # pragma: no cover
@@ -548,6 +604,7 @@ def create_report():
                 web_only=web_only,
                 run_name=run_name,
                 test_type=test_type,
+                project_area=project_area,
                 progress_callback=_progress_cb,
             )
             with JOBS_LOCK:
@@ -585,27 +642,30 @@ def delete_run(run_name: str):
     if not run_name:
         return jsonify({"error": "run_name обязателен"}), 400
     try:
-        cfg = (CONFIG.get("storage", {}) or {}).get("timescale", {})
-        schema = cfg.get("schema", "public")
-        metrics_table = cfg.get("table", "metrics")
-        llm_table = cfg.get("llm_table", "llm_reports")
-        engineer_table = cfg.get("engineer_table", "engineer_reports")
-        conn = _ts_conn()
-        with conn, conn.cursor() as cur:
-            try:
-                cur.execute(f"DELETE FROM {schema}.{llm_table} WHERE run_name = %s", (run_name,))
-            except Exception:
-                pass
-            try:
-                cur.execute(f"DELETE FROM {schema}.{engineer_table} WHERE run_name = %s", (run_name,))
-            except Exception:
-                pass
-            try:
-                cur.execute(f"DELETE FROM {schema}.{metrics_table} WHERE run_name = %s", (run_name,))
-            except Exception:
-                pass
-        conn.close()
+        _delete_run_data(run_name)
         return jsonify({"status": "ok", "message": "Отчёт удалён"})
+    except Exception as e:  # pragma: no cover
+        return jsonify({"error": str(e)}), 500
+
+
+@dashboard_bp.route("/runs/<run_name>", methods=["PATCH"])
+def rename_run(run_name: str):
+    """Переименовывает готовый отчёт во всех таблицах хранения."""
+    data = request.get_json(silent=True) or {}
+    new_name = (data.get("new_run_name") or data.get("run_name") or data.get("name") or "").strip()
+    if not run_name:
+        return jsonify({"error": "run_name обязателен"}), 400
+    if not new_name:
+        return jsonify({"error": "Новое имя отчёта обязательно"}), 400
+    try:
+        result = _rename_run_data(run_name, new_name)
+        return jsonify(result), 200
+    except LookupError as e:
+        return jsonify({"error": str(e)}), 404
+    except FileExistsError as e:
+        return jsonify({"error": str(e)}), 409
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:  # pragma: no cover
         return jsonify({"error": str(e)}), 500
 

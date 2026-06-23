@@ -15,30 +15,36 @@
 
 ТРЕБОВАНИЯ К НАСЫЩЕННОСТИ И ФОРМАТУ (ВСЕ ТЕКСТОВЫЕ ПОЛЯ — НА РУССКОМ):
 - Минимум 5 пунктов в findings и 5 в recommended_actions (если данных достаточно).
-- Для каждого findings укажите: severity (critical/high/medium/low), component, evidence (факт: метрика/окно времени/значение) с интервалом отклонения start–end и peak_time.
-- Отвечайте СТРОГО в JSON: {verdict, confidence, findings[], recommended_actions[], affected_components[]}.
+- Для каждого findings укажите фиксированные поля: id, summary, severity (critical/high/medium/low), component, start_time, end_time, peak_time, evidence_summary, evidence_items[].
+- Каждый элемент evidence_items должен быть объектом {metric, observed_value, threshold, note}.
+- id у findings должен быть коротким ASCII-идентификатором вроде f1, f2.
+- Каждый элемент recommended_actions должен быть объектом {summary, details, priority, affected_components[], for_finding_ids[]}, где for_finding_ids ссылается на один или несколько id из findings.
+- Поле details обязательно: опишите конкретные изменения, ожидаемый эффект и способ проверки после внедрения.
+- Отвечайте СТРОГО в JSON: {verdict, verdict_rationale, confidence, findings[], recommended_actions[], affected_components[]}.
 - Поле verdict ДОЛЖНО принимать только одно из: "Успешно" | "Есть риски" | "Провал" | "Недостаточно данных".
+- Поле verdict_rationale ДОЛЖНО кратко объяснять вердикт: сначала 1-2 предложения с итогом, затем 2-4 ключевых фактора списком.
 - Если данных недостаточно — верните verdict="Недостаточно данных" и объясните причину в findings.
 
 ПРИМЕР ОТВЕТА (JSON):
 ```json
 {
   "verdict": "Есть риски",
+  "verdict_rationale": "База в целом выдержала нагрузку, но итоговый verdict снижен до \"Есть риски\" из-за выраженной деградации в пиковом окне.\n- P95 latency превысил рекомендуемый порог.\n- Пул соединений был близок к насыщению.\n- Replica lag и ошибки выросли одновременно с пиком нагрузки.",
   "confidence": 0.84,
   "findings": [
-    {"summary": "P95 latency вырос до 230мс", "severity": "high", "component": "db-primary", "evidence": "12:40–12:55, P95=230мс при QPS +25%"},
-    {"summary": "Connection pool utilization 92%", "severity": "high", "component": "app→db pool", "evidence": "12:45–12:55, active≈max"},
-    {"summary": "Cache hit ratio просел до 78%", "severity": "medium", "component": "buffer cache", "evidence": "12:35–12:50"},
-    {"summary": "Replica lag до 6с", "severity": "medium", "component": "replica-2", "evidence": "12:48–12:55"},
-    {"summary": "Рост 5xx тайм-аутов", "severity": "medium", "component": "db-api", "evidence": "после 12:45, error rate≈0.7%"}
+    {"id": "f1", "summary": "P95 latency вырос до 230мс", "severity": "high", "component": "db-primary", "evidence": "12:40–12:55, P95=230мс при QPS +25%"},
+    {"id": "f2", "summary": "Connection pool utilization 92%", "severity": "high", "component": "app→db pool", "evidence": "12:45–12:55, active≈max"},
+    {"id": "f3", "summary": "Cache hit ratio просел до 78%", "severity": "medium", "component": "buffer cache", "evidence": "12:35–12:50"},
+    {"id": "f4", "summary": "Replica lag до 6с", "severity": "medium", "component": "replica-2", "evidence": "12:48–12:55"},
+    {"id": "f5", "summary": "Рост 5xx тайм-аутов", "severity": "medium", "component": "db-api", "evidence": "после 12:45, error rate≈0.7%"}
   ],
   "affected_components": ["db-primary", "replica-2", "app→db pool", "db-api"],
   "recommended_actions": [
-    "Увеличить размер пула соединений и добавить backoff на клиенте",
-    "Пересмотреть индексы для горячих запросов (top-3 slow patterns)",
-    "Теплый кэш перед пиковыми окнами; проверить настройки shared buffers",
-    "Проверить диск/IO (iowait) и лимиты; рассмотреть provisioned IOPS",
-    "Настроить алерт на Replica lag > 3с и деградацию Cache hit < 85%"
+    {"summary": "Увеличить размер пула соединений и добавить backoff на клиенте", "details": "Поднимите лимит активных соединений для app→db pool и синхронно ограничьте burst-нагрузку на стороне клиента. После изменения проверьте, что время ожидания соединения и доля timeout ошибок в пиковом окне снижаются.", "priority": "high", "affected_components": ["app→db pool"], "for_finding_ids": ["f2"]},
+    {"summary": "Пересмотреть индексы для горячих запросов (top-3 slow patterns)", "details": "Снимите top-3 самых медленных SQL-паттерна из окна деградации и перепроверьте план выполнения для каждого из них. После добавления или корректировки индексов убедитесь, что p95/p99 по этим запросам и общая latency на db-primary заметно уменьшаются.", "priority": "high", "affected_components": ["db-primary"], "for_finding_ids": ["f1"]},
+    {"summary": "Теплый кэш перед пиковыми окнами; проверить настройки shared buffers", "details": "Если просадка совпадает с холодным стартом кэша, прогрейте часто используемые запросы перед основным тестом и проверьте достаточность shared buffers. Подтвердите эффект по росту cache hit ratio и уменьшению времени ответа на старте пика.", "priority": "medium", "affected_components": ["buffer cache"], "for_finding_ids": ["f3"]},
+    {"summary": "Проверить диск/IO (iowait) и лимиты; рассмотреть provisioned IOPS", "details": "Сопоставьте рост latency с iowait, очередями на диск и фактическими лимитами хранилища в момент деградации. Если упираетесь в IOPS, увеличьте профиль диска и повторно сравните latency/throughput на той же ступени нагрузки.", "priority": "medium", "affected_components": ["db-primary", "replica-2"], "for_finding_ids": ["f1", "f4"]},
+    {"summary": "Настроить алерт на Replica lag > 3с и деградацию Cache hit < 85%", "details": "Добавьте отдельные алерты на lag реплики и просадку cache hit ratio, чтобы проблема фиксировалась до заметной деградации пользовательских операций. После настройки убедитесь, что алерты срабатывают на тестовом сценарии и содержат привязку к нужным компонентам.", "priority": "medium", "affected_components": ["replica-2", "buffer cache", "db-api"], "for_finding_ids": ["f3", "f4", "f5"]}
   ]
 }
 ```

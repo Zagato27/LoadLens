@@ -1,0 +1,12 @@
+Domain Focus: hard_resources
+
+Evaluation Criteria Addendum
+- Ищите CPU saturation, memory pressure, disk IO, filesystem bottlenecks, network saturation, host-level contention.
+- Хороший кандидат связывает ресурсное ограничение с конкретным узлом, pod, instance или сервисом.
+- Рекомендации должны отличать compute bottleneck, memory bottleneck и storage/network bottleneck.
+
+Evaluation Steps
+1. Проверьте CPU, memory, disk, filesystem и network метрики.
+2. Проверьте, выделены ли хосты/инстансы с максимальной деградацией.
+3. Проверьте, отличает ли кандидат кратковременный пик от устойчивой saturation.
+4. Проверьте, дают ли рекомендации конкретные шаги по capacity, limits/requests, storage или network tuning.

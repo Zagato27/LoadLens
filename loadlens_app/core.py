@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 from datetime import datetime
 from pathlib import Path
 from typing import Dict
 
 import psycopg2
+from psycopg2 import sql
 from flask import request
 
+from AI.db_store import _ensure_engineer_reports_table, _ensure_llm_reports_table, _ensure_schema_and_table
 from metrics_config import METRICS_CONFIG
 from settings import CONFIG
 
@@ -19,6 +22,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 CONFIG_RUNTIME_PATH = ROOT_DIR / "settings_runtime.json"
 METRICS_RUNTIME_PATH = ROOT_DIR / "metrics_config_runtime.json"
 PROMPTS_DIR = ROOT_DIR / "AI" / "prompts"
+logger = logging.getLogger(__name__)
 
 PROMPT_DOMAIN_FILES = {
     "overall": "overall_prompt.txt",
@@ -32,7 +36,7 @@ PROMPT_DOMAIN_FILES = {
     "critic": "critic_prompt.txt",
 }
 LOCKED_PROMPT_DOMAINS = {"judge", "critic"}
-BOOTSTRAP_SECTIONS = ("llm", "metrics_source", "lt_metrics_source", "default_params", "queries", "prompts")
+BOOTSTRAP_SECTIONS = ("llm", "metrics_source", "lt_metrics_source", "default_params", "queries", "prompts", "sla")
 
 
 def _deep_merge_dicts(base: dict, override: dict) -> dict:
@@ -43,6 +47,137 @@ def _deep_merge_dicts(base: dict, override: dict) -> dict:
         else:
             out[k] = v
     return out
+
+
+def _clean_text(value) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _clean_string_list(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            text = item.strip()
+        elif isinstance(item, (int, float)):
+            text = str(item).strip()
+        else:
+            continue
+        if text:
+            out.append(text)
+    return out
+
+
+def _coerce_bool(value, default: bool = True) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = _clean_text(value).lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _normalize_object_list(
+    value,
+    *,
+    string_fields: tuple[str, ...] = (),
+    list_fields: tuple[str, ...] = (),
+) -> list[dict]:
+    items = value if isinstance(value, list) else []
+    normalized: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        row = copy.deepcopy(item)
+        for key in string_fields:
+            row[key] = _clean_text(item.get(key))
+        for key in list_fields:
+            row[key] = _clean_string_list(item.get(key))
+        normalized.append(row)
+    return normalized
+
+
+def _normalize_system_context(payload: dict | None) -> dict:
+    raw = payload if isinstance(payload, dict) else {}
+    base_context = CONFIG.get("system_context")
+    if not isinstance(base_context, dict):
+        base_context = {}
+    merged = _deep_merge_dicts(copy.deepcopy(base_context), raw)
+
+    try:
+        merged["schema_version"] = int(merged.get("schema_version") or 1)
+    except (TypeError, ValueError):
+        merged["schema_version"] = 1
+    merged["enabled"] = _coerce_bool(merged.get("enabled"), default=True)
+
+    system = merged.get("system") if isinstance(merged.get("system"), dict) else {}
+    merged["system"] = {
+        **copy.deepcopy(system),
+        "name": _clean_text(system.get("name")),
+        "domain": _clean_text(system.get("domain")),
+        "description": _clean_text(system.get("description")),
+        "test_goal": _clean_text(system.get("test_goal")),
+    }
+
+    architecture = merged.get("architecture") if isinstance(merged.get("architecture"), dict) else {}
+    merged["architecture"] = {
+        **copy.deepcopy(architecture),
+        "style": _clean_text(architecture.get("style")),
+        "components": _normalize_object_list(
+            architecture.get("components"),
+            string_fields=("id", "name", "role", "criticality"),
+            list_fields=("technologies",),
+        ),
+        "dependencies": _normalize_object_list(
+            architecture.get("dependencies"),
+            string_fields=("from", "to", "kind", "purpose"),
+        ),
+        "data_stores": _normalize_object_list(
+            architecture.get("data_stores"),
+            string_fields=("id", "type", "purpose"),
+            list_fields=("used_by",),
+        ),
+    }
+
+    load_model = merged.get("load_model") if isinstance(merged.get("load_model"), dict) else {}
+    merged["load_model"] = {
+        **copy.deepcopy(load_model),
+        "entrypoints": _normalize_object_list(
+            load_model.get("entrypoints"),
+            string_fields=("id", "name", "kind", "business_priority"),
+        ),
+        "critical_user_flows": _normalize_object_list(
+            load_model.get("critical_user_flows"),
+            string_fields=("id", "name"),
+            list_fields=("steps", "success_signals"),
+        ),
+        "expected_hotspots": _clean_string_list(load_model.get("expected_hotspots")),
+    }
+
+    operational_context = (
+        merged.get("operational_context")
+        if isinstance(merged.get("operational_context"), dict)
+        else {}
+    )
+    merged["operational_context"] = {
+        **copy.deepcopy(operational_context),
+        "known_constraints": _clean_string_list(operational_context.get("known_constraints")),
+        "known_risks": _clean_string_list(operational_context.get("known_risks")),
+        "normal_degradation_rules": _clean_string_list(operational_context.get("normal_degradation_rules")),
+        "analysis_focus": _clean_string_list(operational_context.get("analysis_focus")),
+    }
+    return merged
+
+
+def _active_system_context() -> dict:
+    return _normalize_system_context(CONFIG.get("system_context"))
 
 
 try:
@@ -79,7 +214,7 @@ def _save_settings_runtime_data(payload: dict) -> None:
         with CONFIG_RUNTIME_PATH.open("w", encoding="utf-8") as f:
             json.dump(payload or {}, f, ensure_ascii=False, indent=2)
     except Exception:
-        pass
+        logger.exception("Не удалось сохранить runtime-конфигурацию в %s", CONFIG_RUNTIME_PATH)
 
 
 def _per_area_config() -> dict:
@@ -443,6 +578,86 @@ def convert_to_timestamp(date_str: str) -> int:
     return int(dt.timestamp() * 1000)
 
 
+def _delete_run_data(run_name: str) -> None:
+    cfg = (CONFIG.get("storage", {}) or {}).get("timescale", {})
+    schema = cfg.get("schema", "public")
+    metrics_table = cfg.get("table", "metrics")
+    llm_table = cfg.get("llm_table", "llm_reports")
+    engineer_table = cfg.get("engineer_table", "engineer_reports")
+    conn = _ts_conn()
+    with conn, conn.cursor() as cur:
+        for table in (llm_table, engineer_table, metrics_table):
+            try:
+                cur.execute(f"DELETE FROM {schema}.{table} WHERE run_name = %s", (run_name,))
+            except Exception:
+                logger.exception("Не удалось удалить данные запуска '%s' из %s.%s", run_name, schema, table)
+    conn.close()
+
+
+def _rename_run_data(old_run_name: str, new_run_name: str) -> dict:
+    old_name = str(old_run_name or "").strip()
+    new_name = str(new_run_name or "").strip()
+    if not old_name:
+        raise ValueError("Текущее имя отчёта не задано")
+    if not new_name:
+        raise ValueError("Новое имя отчёта не задано")
+    if len(new_name) > 180:
+        raise ValueError("Новое имя отчёта слишком длинное")
+    if any(ch in new_name for ch in ("/", "\\", "<", ">", "\x00")):
+        raise ValueError("Новое имя отчёта содержит недопустимые символы: / \\ < >")
+    if old_name == new_name:
+        return {"status": "ok", "renamed": 0, "run_name": new_name}
+
+    cfg = (CONFIG.get("storage", {}) or {}).get("timescale", {})
+    schema = cfg.get("schema", "public")
+    metrics_table = cfg.get("table", "metrics")
+    llm_table = cfg.get("llm_table", "llm_reports")
+    engineer_table = cfg.get("engineer_table", "engineer_reports")
+    tables = (metrics_table, llm_table, engineer_table)
+    conn = _ts_conn()
+    renamed = 0
+    try:
+        try:
+            _ensure_schema_and_table(conn, cfg, schema, metrics_table)
+            _ensure_llm_reports_table(conn, cfg)
+            _ensure_engineer_reports_table(conn, cfg)
+        except Exception:
+            logger.exception("Не удалось подготовить таблицы для переименования отчёта")
+        with conn, conn.cursor() as cur:
+            old_exists = False
+            new_exists = False
+            for table in tables:
+                cur.execute(
+                    sql.SQL("SELECT 1 FROM {}.{} WHERE run_name = %s LIMIT 1").format(
+                        sql.Identifier(schema), sql.Identifier(table)
+                    ),
+                    (old_name,),
+                )
+                old_exists = bool(cur.fetchone()) or old_exists
+                cur.execute(
+                    sql.SQL("SELECT 1 FROM {}.{} WHERE run_name = %s LIMIT 1").format(
+                        sql.Identifier(schema), sql.Identifier(table)
+                    ),
+                    (new_name,),
+                )
+                new_exists = bool(cur.fetchone()) or new_exists
+            if not old_exists:
+                raise LookupError(f"Отчёт '{old_name}' не найден")
+            if new_exists:
+                raise FileExistsError(f"Отчёт '{new_name}' уже существует")
+            for table in tables:
+                cur.execute(
+                    sql.SQL("UPDATE {}.{} SET run_name = %s WHERE run_name = %s").format(
+                        sql.Identifier(schema), sql.Identifier(table)
+                    ),
+                    (new_name, old_name),
+                )
+                renamed += int(cur.rowcount or 0)
+        return {"status": "ok", "renamed": renamed, "run_name": new_name, "old_run_name": old_name}
+    finally:
+        conn.close()
+
+
 def _delete_service_data(area_name: str, service_name: str) -> None:
     runtime = _load_settings_runtime_data()
     changed = False
@@ -503,11 +718,13 @@ __all__ = [
     "_active_project_area",
     "_active_metrics_config",
     "_active_area_prompts",
+    "_active_system_context",
     "_available_domain_keys",
     "_bootstrap_area_defaults",
     "_bootstrap_metrics_service_config",
     "_bootstrap_service_configs",
     "_bootstrap_service_queries",
+    "_delete_run_data",
     "_delete_service_data",
     "_disabled_domains_payload",
     "_find_area_for_service",
@@ -519,6 +736,7 @@ __all__ = [
     "_normalize_metrics_config",
     "_per_area_config",
     "_prompt_templates_for_scope",
+    "_rename_run_data",
     "_resolve_services_filter",
     "_resolve_services_for_area",
     "_save_settings_runtime_data",
@@ -529,6 +747,7 @@ __all__ = [
     "_ts_conn",
     "convert_to_timestamp",
     "_deep_merge_dicts",
+    "_normalize_system_context",
 ]
 
 

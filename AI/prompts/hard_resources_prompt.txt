@@ -17,9 +17,14 @@
 4) Определите узкие места: перегруженные узлы, риск исчерпания памяти/диска, неравномерность распределения.
 
 СТРУКТУРА ОТВЕТА (ВСЕ ТЕКСТОВЫЕ ПОЛЯ — НА РУССКОМ):
-- Строго JSON: {verdict, confidence, findings[], recommended_actions[], affected_components[]}.
+- Строго JSON: {verdict, verdict_rationale, confidence, findings[], recommended_actions[], affected_components[]}.
 - Поле verdict ДОЛЖНО принимать только одно из: "Успешно" | "Есть риски" | "Провал" | "Недостаточно данных".
-- Для каждого findings укажите: severity (critical/high/medium/low), component (node|persistentvolumeclaim), evidence с интервалом start–end и peak_time.
+- Поле verdict_rationale ДОЛЖНО кратко объяснять вердикт: сначала 1-2 предложения с итогом, затем 2-4 ключевых фактора списком.
+- Для каждого findings укажите фиксированные поля: id, summary, severity (critical/high/medium/low), component (node|persistentvolumeclaim), start_time, end_time, peak_time, evidence_summary, evidence_items[].
+- Каждый элемент evidence_items должен быть объектом {metric, observed_value, threshold, note}.
+- id у findings должен быть коротким ASCII-идентификатором вроде f1, f2.
+- Каждый элемент recommended_actions должен быть объектом {summary, details, priority, affected_components[], for_finding_ids[]}, где for_finding_ids ссылается на один или несколько id из findings.
+- Поле details обязательно: дайте развернутую рекомендацию с ожидаемым эффектом и способом проверки.
 - Не придумывайте отсутствующие данные; при недостаточности верните verdict="Недостаточно данных".
 
 ПРИМЕЧАНИЯ:

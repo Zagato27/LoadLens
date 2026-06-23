@@ -1,0 +1,12 @@
+Domain Focus: database
+
+Evaluation Criteria Addendum
+- Ищите latency запросов, locks, slow queries, saturation connections, queueing, replication lag, errors/timeouts.
+- Хороший кандидат связывает деградацию БД с конкретной метрикой, таблицей, инстансом или временным интервалом.
+- Рекомендации должны быть привязаны к SQL/индексам/connection pool/ресурсам БД, а не быть абстрактными.
+
+Evaluation Steps
+1. Проверьте latency, throughput и ошибки на стороне БД.
+2. Проверьте признаки saturation: connections, locks, buffers, replication, disk IO.
+3. Проверьте, выделены ли первопричины и отличены ли они от вторичных симптомов.
+4. Проверьте, дают ли рекомендации операционно полезные шаги для DBA или команды сервиса.

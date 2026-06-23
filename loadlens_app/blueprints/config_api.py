@@ -21,6 +21,7 @@ from loadlens_app.core import (
     _list_project_areas,
     _load_settings_runtime_data,
     _metrics_service_entry,
+    _normalize_system_context,
     _save_settings_runtime_data,
     _services_map_for_area,
 )
@@ -35,6 +36,10 @@ def get_config():
         area = (request.args.get("area") or "")
         areas_meta = _list_project_areas()
         areas = [a["id"] for a in areas_meta]
+        runtime_settings = _load_settings_runtime_data()
+        runtime_per_area = runtime_settings.get("per_area") if isinstance(runtime_settings, dict) else {}
+        if not isinstance(runtime_per_area, dict):
+            runtime_per_area = {}
         if not area:
             cookie_area = _active_project_area() or ""
             if cookie_area in areas:
@@ -42,10 +47,12 @@ def get_config():
 
         def merge_area_section(section_name: str) -> dict:
             base = CONFIG.get(section_name, {}) or {}
-            per_area_entry = (
-                ((CONFIG.get("per_area", {}) or {}).get(area, {}) or {}).get(section_name)
-                if area else None
-            )
+            per_area_entry = ((runtime_per_area.get(area, {}) or {}).get(section_name) if area else None)
+            if not isinstance(per_area_entry, dict):
+                per_area_entry = (
+                    ((CONFIG.get("per_area", {}) or {}).get(area, {}) or {}).get(section_name)
+                    if area else None
+                )
             if isinstance(per_area_entry, dict):
                 return copy.deepcopy(per_area_entry)
             return copy.deepcopy(base)
@@ -84,6 +91,8 @@ def get_config():
             "metrics_source": merge_area_section("metrics_source"),
             "lt_metrics_source": merge_area_section("lt_metrics_source"),
             "default_params": merge_area_section("default_params"),
+            "sla": merge_area_section("sla"),
+            "system_context": _normalize_system_context(merge_area_section("system_context")),
             "storage": {"timescale": (CONFIG.get("storage", {}) or {}).get("timescale", {})},
             "queries": merge_area_section("queries"),
             "confluence": {
@@ -124,10 +133,13 @@ def get_config():
                 },
             )
         queries_map = {"": merge_area_section("queries")}
+        service_sla = {}
         for sid in services_meta.keys():
             meta = services_map.get(sid) or {}
             svc_queries = meta.get("queries") if isinstance(meta, dict) else {}
             queries_map[sid] = svc_queries if isinstance(svc_queries, dict) else {}
+            svc_sla = meta.get("sla") if isinstance(meta, dict) else {}
+            service_sla[sid] = svc_sla if isinstance(svc_sla, dict) else {}
         metrics_config_map = {"": area_metrics_cfg}
         for sid, cfg in area_metrics_services.items():
             svc_runtime = {}
@@ -139,6 +151,7 @@ def get_config():
         out["services_meta"] = services_meta
         out["domain_list"] = _available_domain_keys()
         out["queries_map"] = queries_map
+        out["service_sla"] = service_sla
         out["metrics_config_map"] = metrics_config_map
         return jsonify(out)
     except Exception as e:  # pragma: no cover
@@ -205,6 +218,27 @@ def update_config():
                 json.dump(current, f, ensure_ascii=False, indent=2)
             return jsonify({"status": "ok"})
 
+        if section == "system_context":
+            normalized = _normalize_system_context(payload)
+            existing = _load_settings_runtime_data()
+            if area:
+                if "per_area" not in CONFIG or not isinstance(CONFIG.get("per_area"), dict):
+                    CONFIG["per_area"] = {}
+                if area not in CONFIG["per_area"] or not isinstance(CONFIG["per_area"].get(area), dict):
+                    CONFIG["per_area"][area] = {}
+                CONFIG["per_area"][area]["system_context"] = normalized
+
+                if "per_area" not in existing or not isinstance(existing.get("per_area"), dict):
+                    existing["per_area"] = {}
+                if area not in existing["per_area"] or not isinstance(existing["per_area"].get(area), dict):
+                    existing["per_area"][area] = {}
+                existing["per_area"][area]["system_context"] = normalized
+            else:
+                CONFIG["system_context"] = normalized
+                existing["system_context"] = normalized
+            _save_settings_runtime_data(existing)
+            return jsonify({"status": "ok"})
+
         if section == "queries" and area and service:
             runtime = _load_settings_runtime_data()
             if "per_area" not in runtime or not isinstance(runtime.get("per_area"), dict):
@@ -220,7 +254,22 @@ def update_config():
             _save_settings_runtime_data(runtime)
             return jsonify({"status": "ok"})
 
-        area_overridable = {"llm", "metrics_source", "lt_metrics_source", "default_params", "queries"}
+        if section == "sla" and area and service:
+            runtime = _load_settings_runtime_data()
+            if "per_area" not in runtime or not isinstance(runtime.get("per_area"), dict):
+                runtime["per_area"] = {}
+            if area not in runtime["per_area"] or not isinstance(runtime["per_area"].get(area), dict):
+                runtime["per_area"][area] = {}
+            area_entry = runtime["per_area"][area]
+            if "services" not in area_entry or not isinstance(area_entry.get("services"), dict):
+                area_entry["services"] = {}
+            if service not in area_entry["services"] or not isinstance(area_entry["services"].get(service), dict):
+                area_entry["services"][service] = {}
+            area_entry["services"][service]["sla"] = payload
+            _save_settings_runtime_data(runtime)
+            return jsonify({"status": "ok"})
+
+        area_overridable = {"llm", "metrics_source", "lt_metrics_source", "default_params", "queries", "sla"}
         if section in area_overridable and area:
             if "per_area" not in CONFIG or not isinstance(CONFIG.get("per_area"), dict):
                 CONFIG["per_area"] = {}

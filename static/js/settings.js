@@ -6,12 +6,17 @@
   let servicesMeta = {};
   let domainList = [];
   let currentPromptService = '';
+  let slaData = {};
+  let serviceSlaMap = {};
   let queriesMap = {};
   let metricsConfigMap = {};
   let currentQueriesService = '';
   let currentMetricsService = '';
+  let currentSlaService = '';
 
   function makeEditor(id) {
+    const host = document.getElementById(id);
+    if (!host || typeof ace === 'undefined') return null;
     // eslint-disable-next-line no-undef
     const ed = ace.edit(id);
     ed.setTheme('ace/theme/twilight');
@@ -44,6 +49,8 @@
       'metrics_config': 'ed_metrics_config',
       'storage.timescale': 'ed_storage_timescale',
       'default_params': 'ed_default_params',
+      'system_context': 'ed_system_context',
+      'sla': 'ed_sla',
       'queries': 'ed_queries'
     }[section];
   }
@@ -81,6 +88,7 @@
       if (currentPromptService) params.append('service', currentPromptService);
       const r = await fetch(`/prompts${params.toString() ? `?${params.toString()}` : ''}`);
       const j = await r.json();
+      if (!r.ok) return;
       if (typeof j.active_service === 'string') {
         currentPromptService = j.active_service;
       }
@@ -130,6 +138,7 @@
       setEditorJson('ed_confluence', j.confluence);
       setEditorJson('ed_storage_timescale', (j.storage || {}).timescale || {});
       setEditorJson('ed_default_params', j.default_params);
+      setEditorJson('ed_system_context', j.system_context);
       servicesMeta = j.services_meta || {};
       domainList = Array.isArray(j.domain_list) ? j.domain_list : [];
       queriesMap = j.queries_map || {};
@@ -140,6 +149,8 @@
       if (!Object.prototype.hasOwnProperty.call(metricsConfigMap, '')) {
         metricsConfigMap[''] = j.metrics_config || {};
       }
+      slaData = (j.sla && typeof j.sla === 'object' && !Array.isArray(j.sla)) ? j.sla : {};
+      serviceSlaMap = (j.service_sla && typeof j.service_sla === 'object' && !Array.isArray(j.service_sla)) ? j.service_sla : {};
       if (currentPromptService && !servicesMeta[currentPromptService]) {
         currentPromptService = '';
       }
@@ -149,12 +160,17 @@
       if (currentMetricsService && !servicesMeta[currentMetricsService]) {
         currentMetricsService = '';
       }
+      if (currentSlaService && !servicesMeta[currentSlaService]) {
+        currentSlaService = '';
+      }
       populatePromptServiceSelect();
       populateServiceSelect('queriesServiceSelect', currentQueriesService, 'Настройки области (по умолчанию)');
       populateServiceSelect('metricsServiceSelect', currentMetricsService, 'Настройки области (по умолчанию)');
+      populateServiceSelect('slaServiceSelect', currentSlaService, 'SLA области (по умолчанию)');
       renderServiceMetaPanel(currentPromptService);
       refreshQueriesEditor();
       refreshMetricsConfigEditor();
+      refreshSlaEditor();
     } catch (e) {}
   }
 
@@ -228,6 +244,8 @@
       currentQueriesService = hasCurrent ? currentValue : '';
     } else if (selectId === 'metricsServiceSelect') {
       currentMetricsService = hasCurrent ? currentValue : '';
+    } else if (selectId === 'slaServiceSelect') {
+      currentSlaService = hasCurrent ? currentValue : '';
     }
   }
 
@@ -289,6 +307,9 @@
       }
       servicesMeta[payload.service] = j.meta || {};
       populatePromptServiceSelect();
+      populateServiceSelect('queriesServiceSelect', currentQueriesService, 'Настройки области (по умолчанию)');
+      populateServiceSelect('metricsServiceSelect', currentMetricsService, 'Настройки области (по умолчанию)');
+      populateServiceSelect('slaServiceSelect', currentSlaService, 'SLA области (по умолчанию)');
       if (statusEl) {
         statusEl.textContent = 'Сохранено';
         setTimeout(() => { statusEl.textContent = ''; }, 1500);
@@ -308,7 +329,10 @@
     const status = document.getElementById('serviceManageStatus');
     await persistServiceMeta({ service: svcId, data: { title } }, status);
     currentPromptService = svcId;
-    renderServiceMetaPanel(currentPromptService);
+    currentQueriesService = svcId;
+    currentMetricsService = svcId;
+    currentSlaService = svcId;
+    await loadConfig();
     await loadPrompts();
   }
 
@@ -340,6 +364,13 @@
     setEditorJson('ed_metrics_config', payload);
   }
 
+  function refreshSlaEditor() {
+    const payload = currentSlaService
+      ? (serviceSlaMap[currentSlaService] || slaData || {})
+      : (slaData || {});
+    setEditorJson('ed_sla', payload);
+  }
+
   async function saveSection(section) {
     try {
       const edId = sectionIdToEditorId(section);
@@ -349,7 +380,7 @@
       let data = {};
       try { data = JSON.parse(ed.getValue() || '{}'); }
       catch (e) { if (st) st.textContent = 'Ошибка: некорректный JSON'; return; }
-      const areaSections = new Set(['llm', 'metrics_source', 'default_params', 'queries', 'metrics_config']);
+      const areaSections = new Set(['llm', 'metrics_source', 'default_params', 'queries', 'metrics_config', 'sla']);
       areaSections.add('lt_metrics_source');
       const body = { section, data };
       if (areaSections.has(section) && currentArea) { body.area = currentArea; }
@@ -358,6 +389,9 @@
       }
       if (section === 'metrics_config' && currentMetricsService) {
         body.service = currentMetricsService;
+      }
+      if (section === 'sla' && currentSlaService) {
+        body.service = currentSlaService;
       }
       const resp = await fetch('/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       const j = await resp.json();
@@ -368,6 +402,13 @@
         } else if (section === 'metrics_config') {
           metricsConfigMap[currentMetricsService || ''] = data;
           refreshMetricsConfigEditor();
+        } else if (section === 'sla') {
+          if (currentSlaService) {
+            serviceSlaMap[currentSlaService] = data;
+          } else {
+            slaData = data;
+          }
+          refreshSlaEditor();
         }
         if (st) st.textContent = 'Сохранено';
         setEditing(section, false);
@@ -378,7 +419,7 @@
   }
 
   function wireUI() {
-    ['ed_llm', 'ed_confluence', 'ed_metrics_source', 'ed_lt_metrics_source', 'ed_metrics_config', 'ed_default_params', 'ed_queries', 'ed_storage_timescale',
+    ['ed_llm', 'ed_confluence', 'ed_metrics_source', 'ed_lt_metrics_source', 'ed_metrics_config', 'ed_default_params', 'ed_system_context', 'ed_sla', 'ed_queries', 'ed_storage_timescale',
       'ed_prompt_overall', 'ed_prompt_database', 'ed_prompt_kafka', 'ed_prompt_microservices', 'ed_prompt_jvm', 'ed_prompt_hard_resources'
     ].forEach(makeEditor);
     document.querySelectorAll('button[data-save]').forEach((b) => { b.addEventListener('click', () => saveSection(b.getAttribute('data-save'))); });
@@ -423,6 +464,7 @@
         currentPromptService = '';
         currentQueriesService = '';
         currentMetricsService = '';
+        currentSlaService = '';
         await loadConfig();
         await loadPrompts();
       });
@@ -442,6 +484,7 @@
           await loadConfig(); await loadPrompts();
         } catch (e) { areaStatus.textContent = 'Ошибка'; setTimeout(() => areaStatus.textContent = '', 1200); }
       });
+    }
     const promptServiceSelect = document.getElementById('promptServiceSelect');
     if (promptServiceSelect) {
       promptServiceSelect.addEventListener('change', async () => {
@@ -464,6 +507,13 @@
       metricsServiceSelect.addEventListener('change', () => {
         currentMetricsService = metricsServiceSelect.value || '';
         refreshMetricsConfigEditor();
+      });
+    }
+    const slaServiceSelect = document.getElementById('slaServiceSelect');
+    if (slaServiceSelect) {
+      slaServiceSelect.addEventListener('change', () => {
+        currentSlaService = slaServiceSelect.value || '';
+        refreshSlaEditor();
       });
     }
     const addServiceBtn = document.getElementById('addServiceBtn');
@@ -492,7 +542,6 @@
     });
     const saveServiceMetaBtn = document.getElementById('saveServiceMetaBtn');
     if (saveServiceMetaBtn) saveServiceMetaBtn.addEventListener('click', saveServiceMeta);
-    }
   }
 
   document.addEventListener('DOMContentLoaded', async () => {

@@ -29,6 +29,8 @@
     select, button { padding: 8px; background: #2b2b2b; color: #fff; border: 1px solid #444; border-radius: 6px; font-family: 'Montserrat', Arial, sans-serif; font-size: 14px; }
     select, button { height: 40px; }
     h1, h2, h3, h4 { font-weight: 600; font-style: italic; }
+    .report-title-row { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+    .report-title-row h1 { margin:8px 0 4px; }
     #repRunInfo { font-size: 18px; font-weight: 600; }
 
     .app-nav-inner { display:flex; gap: 16px; margin: 8px 0; }
@@ -41,7 +43,7 @@
     .cmp-chart-canvas { flex: 1; min-width: 0; }
     .cmp-legend-panel { width: 480px; max-width: 55%; background: #1b1b1b; border-left: 1px solid #333; border-radius: 6px; padding: 10px; overflow-y: auto; overflow-x: hidden; white-space: normal; min-height: 160px; }
     .cmp-legend-panel h4 { margin: 0 0 8px; font-weight: normal; color: #ddd; }
-    .cmp-legend-table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; display: table; }
+    .cmp-legend-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; table-layout: fixed; display: table; border:1px solid #333; border-radius:12px; overflow:hidden; background:#151515; }
     .cmp-legend-table thead { display: table-header-group; }
     .cmp-legend-table tbody { display: table-row-group; }
     .cmp-legend-table tr { display: table-row; }
@@ -72,11 +74,66 @@
     .editor-actions { display:flex; gap:8px; margin-top:10px; }
     .btn-primary { background:#6200ee; border:1px solid #6200ee; }
     .btn-primary:hover { background:#3700b3; border-color:#3700b3; }
+    .report-analysis-card { background:#1e1e1e; border:1px solid #333; border-radius:12px; padding:16px; }
+    .report-stack { display:flex; flex-direction:column; gap:16px; }
+    .report-block-title { font-size:15px; font-weight:600; color:#f1f1f1; margin-bottom:8px; }
+    .report-table-shell { border:1px solid #333; border-radius:12px; overflow:hidden; background:#151515; }
+    .report-table { width:100%; border-collapse:separate; border-spacing:0; table-layout:fixed; }
+    .report-table th, .report-table td { padding:12px 14px; vertical-align:top; border-bottom:1px solid #2a2a2a; }
+    .report-table tbody tr:last-child th, .report-table tbody tr:last-child td { border-bottom:none; }
+    .report-table th { width:38%; background:#191919; color:#d8d8d8; text-align:left; font-weight:600; }
+    .report-table td { background:#131313; color:#f5f5f5; }
+    .report-aligned-value-table th, .report-aligned-value-table td { vertical-align:middle; }
+    .report-aligned-value-table td { text-align:right; }
+    .report-aligned-value-table .report-verdict-pill { margin-left:auto; }
+    .report-two-col-table thead th { width:50%; background:#191919; color:#f5f5f5; text-align:left; font-weight:600; }
+    .report-two-col-table tbody td { width:50%; }
+    .report-list { margin:0; padding-left:18px; }
+    .report-list li + li { margin-top:8px; }
+    .report-empty { color:#bdbdbd; }
+    .report-cell-stack { display:flex; flex-direction:column; gap:12px; }
+    .report-item-card { display:flex; flex-direction:column; gap:10px; }
+    .report-item-summary { color:#f5f5f5; line-height:1.5; font-weight:600; }
+    .report-item-details { color:#dbdbdb; line-height:1.55; }
+    .report-item-details p:first-child { margin-top:0; }
+    .report-item-details p:last-child { margin-bottom:0; }
+    .report-item-details ul { margin:0; padding-left:18px; }
+    .report-item-meta-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); gap:8px; }
+    .report-item-meta-entry { background:#1a1a1a; border:1px solid #2d2d2d; border-radius:10px; padding:8px 10px; }
+    .report-item-meta-label { display:block; margin-bottom:4px; color:#aab1bb; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.04em; }
+    .report-item-meta-value { color:#f0f0f0; word-break:break-word; line-height:1.4; }
+    .report-item-evidence-inline { display:flex; flex-direction:column; gap:6px; color:#d8d8d8; line-height:1.55; }
+    .report-item-evidence-text { color:#dcdcdc; }
+    .report-item-evidence-list { margin:0; padding-left:18px; }
+    .report-item-evidence-list li + li { margin-top:6px; }
+    .report-note { border:1px solid #2f6feb; border-radius:12px; background:rgba(47, 111, 235, 0.12); padding:14px 16px; }
+    .report-note-title { font-weight:600; color:#d8e7ff; margin-bottom:10px; }
+    .report-note-body p:first-child { margin-top:0; }
+    .report-note-body p:last-child { margin-bottom:0; }
+    .report-note-body ul { margin:0; padding-left:18px; }
+    .report-verdict-pill { display:inline-flex; align-items:center; justify-content:center; padding:6px 12px; border-radius:999px; border:1px solid; font-weight:700; white-space:nowrap; }
+    .report-verdict-success { color:#c9f7d0; background:rgba(33, 160, 56, 0.14); border-color:#21A038; }
+    .report-verdict-risk { color:#ffe7ad; background:rgba(196, 137, 20, 0.18); border-color:#d39b22; }
+    .report-verdict-fail { color:#ffc9c9; background:rgba(176, 0, 32, 0.18); border-color:#d85b75; }
+    .report-verdict-na { color:#d5def5; background:rgba(98, 0, 238, 0.16); border-color:#7d4dff; }
+    .report-markdown-block h4 { margin:0 0 10px; }
+    .report-markdown-block p:first-child { margin-top:0; }
+    .report-markdown-block p:last-child { margin-bottom:0; }
+    .report-markdown-block ul { margin:0; padding-left:18px; }
+    .report-collapsible { border:1px solid #333; border-radius:12px; background:#181818; overflow:hidden; }
+    .report-collapsible summary { display:flex; align-items:center; gap:12px; cursor:pointer; list-style:none; padding:12px 14px; font-weight:600; }
+    .report-collapsible summary::-webkit-details-marker { display:none; }
+    .report-collapsible summary::marker { content:''; }
+    .report-collapsible summary::after { content:'▾'; margin-left:auto; color:#aaa; transition:transform 0.2s ease; }
+    .report-collapsible:not([open]) summary::after { transform:rotate(-90deg); }
+    .report-collapsible-body { padding:12px 14px 14px; border-top:1px solid #2a2a2a; }
+    .report-collapsible-subtitle { color:#aaa; font-size:12px; font-weight:400; }
     /* Ширины колонок легенды: больше места под 'Серия' */
     .cmp-legend-table th:nth-child(1), .cmp-legend-table td:nth-child(1) { width: 66%; }
     .cmp-legend-table th:nth-child(2), .cmp-legend-table td:nth-child(2) { width: 56px; }
     .cmp-legend-table th:nth-child(3), .cmp-legend-table td:nth-child(3) { width: 24%; }
     .cmp-legend-table th:nth-child(4), .cmp-legend-table td:nth-child(4) { width: 40px; }
+    .cmp-legend-row.hidden, .cmp-off { opacity: 0.45; }
   </style>
 </head>
 <body>
@@ -95,7 +152,10 @@
     </div>
   </div>
   <div class="container">
-    <h1 id="pageTitle">Отчет по тесту</h1>
+    <div class="report-title-row">
+      <h1 id="pageTitle">Отчет по тесту</h1>
+      <button type="button" id="renameRunBtn">Переименовать отчёт</button>
+    </div>
     <div id="pageTimeRange" style="margin:6px 0 12px 0; font-size:14px; color:#bbb;">Время теста: —</div>
     <div id="engineerBox" class="editor-card">
       <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px;">
@@ -121,6 +181,7 @@
         <span id="engineerStatus" style="color:#bbb; font-size:13px;"></span>
       </div>
     </div>
+    <div id="systemContextBox" class="editor-card" style="display:none;"></div>
     <div id="rep-llm-tabs" style="margin:12px 0;"></div>
     <div id="rep-domain-tabs"></div>
   </div>
@@ -186,7 +247,7 @@
       return lines.join('\n');
     }
     function pct(x){ try{ if(x===undefined||x===null) return '—'; const v=Number(x); if(!isFinite(v)) return '—'; return `${Math.round(v*100)}%`; }catch(e){ return '—'; } }
-    function judgeMarkdown(scores){ try{ const s=scores||{}; const j=(s.judge)||{}; const overall=j.overall,factual=j.factual,completeness=j.completeness,specificity=j.specificity; const dataScore=s.data_score,finalScore=s.final_score,conf=s.confidence; const lines=['','#### Доверие (судья)']; lines.push(`- Итог: ${pct(overall)}`); lines.push(`- Согласованность (factual): ${pct(factual)}`); lines.push(`- Полнота (completeness): ${pct(completeness)}`); lines.push(`- Конкретика (specificity): ${pct(specificity)}`); lines.push(`- По данным: ${pct(dataScore)}`); lines.push(`- Агрегат: ${pct(finalScore)}`); if(typeof conf==='number') lines.push(`- Доверие модели: ${pct(conf)}`); lines.push(''); lines.push('_Пояснения: итог = 0.6·factual + 0.3·completeness + 0.2·specificity._'); return '\n'+lines.join('\n'); }catch(e){ return ''; } }
+    function judgeMarkdown(scores){ try{ const s=scores||{}; const j=(s.judge)||{}; const rubric=(j&&typeof j.rubric==='object'&&j.rubric)?j.rubric:{}; const meta=(s.judge_meta&&typeof s.judge_meta==='object')?s.judge_meta:{}; const overall=j.overall,factual=j.factual,completeness=j.completeness,specificity=j.specificity; const dataScore=s.data_score,finalScore=s.final_score,conf=s.confidence; const lines=['','#### Доверие (судья)']; lines.push(`- Итог: ${pct(overall)}`); lines.push(`- Согласованность (factual): ${pct(factual)}`); lines.push(`- Полнота (completeness): ${pct(completeness)}`); lines.push(`- Конкретика (specificity): ${pct(specificity)}`); lines.push(`- По данным: ${pct(dataScore)}`); lines.push(`- Агрегат: ${pct(finalScore)}`); if(typeof conf==='number') lines.push(`- Доверие модели: ${pct(conf)}`); if(Object.keys(rubric).length){ lines.push(''); lines.push('#### Rubric'); lines.push(`- Основанность на данных: ${pct(rubric.evidence_grounding)}`); lines.push(`- Покрытие проблем: ${pct(rubric.issue_coverage)}`); lines.push(`- Конкретика rubric: ${pct(rubric.specificity)}`); lines.push(`- SLA-alignment: ${pct(rubric.sla_alignment)}`); lines.push(`- Практичность рекомендаций: ${pct(rubric.actionability)}`); } if(meta.used_safe_path||meta.context_truncated||Number(meta.truncated_candidates||0)>0){ lines.push(''); lines.push('#### Judge Guardrails'); if(meta.used_safe_path) lines.push('- Включён safe-path без доменной rubric.'); if(meta.context_truncated) lines.push('- Judge context был укорочен для ограничения latency.'); if(Number(meta.truncated_candidates||0)>0) lines.push(`- Усечено кандидатов: ${Number(meta.truncated_candidates||0)}.`); } lines.push(''); lines.push('_Judge overall = 0.5·factual + 0.3·completeness + 0.2·specificity; итоговый выбор = 0.6·judge + 0.35·data + 0.05·confidence._'); return '\n'+lines.join('\n'); }catch(e){ return ''; } }
 
     function getRunFromPath(){
       try{
