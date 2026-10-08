@@ -1,4 +1,5 @@
 import ast
+import copy
 import json
 import json as _json
 import logging
@@ -21,7 +22,11 @@ from confluence_manager.update_confluence_template import (
 from data_collectors.grafana_collector import downloadImagesLogin, send_file_to_attachment
 from data_collectors.loki_collector import fetch_loki_logs, send_loki_file_to_attachment
 from loadlens_app.celery_app import celery_app
-from loadlens_app.core import _active_system_context as _core_active_system_context, _normalize_system_context
+from loadlens_app.core import (
+    _active_system_context as _core_active_system_context,
+    _normalize_system_context,
+    _resolve_services_for_area,
+)
 from metrics_config import METRICS_CONFIG  # Базовая конфигурация метрик
 from settings import CONFIG  # Импорт базовой конфигурации
 
@@ -142,7 +147,14 @@ _PROMPT_DOMAIN_FILES = {
     'microservices': 'microservices_prompt.txt',
     'hard_resources': 'hard_resources_prompt.txt',
     'lt_framework': 'lt_framework_prompt.txt',
+    'application_logs': 'application_logs_prompt.txt',
 }
+_LLM_PROMPT_DOMAINS = ('overall', 'jvm', 'database', 'kafka', 'microservices', 'hard_resources', 'lt_framework', 'application_logs')
+
+
+def default_run_name(now: datetime | None = None) -> str:
+    """Run name used when the user leaves the name empty."""
+    return (now or datetime.now()).strftime("run-%Y%m%d-%H%M%S")
 
 
 def _load_default_prompts() -> dict:
@@ -239,6 +251,9 @@ def _domain_keys_from_config(cfg: dict) -> list[str]:
     queries = (cfg.get('queries') or {})
     preferred_order = ['jvm', 'database', 'kafka', 'microservices', 'hard_resources', 'lt_framework']
     keys = [k for k in preferred_order if k in queries]
+    logs_cfg = cfg.get('logs_source') if isinstance(cfg.get('logs_source'), dict) else {}
+    if logs_cfg.get('enabled'):
+        keys.append('application_logs')
     for key in queries.keys():
         if key not in keys:
             keys.append(key)
@@ -350,12 +365,44 @@ def _test_type_overlays(tt: str) -> dict:
         'microservices': dom_overlay,
         'hard_resources': dom_overlay,
         'lt_framework': dom_overlay,
+        'application_logs': dom_overlay,
     }
+
+
+def _build_final_prompts(base_prompt_templates: dict, test_type: str | None, sla_cfg: dict) -> dict:
+    """Combines base prompt texts with the test-type overlay and the SLA block for every LLM domain."""
+    overlays = _test_type_overlays(test_type)
+    sla_block = _sla_prompt_block(sla_cfg or {})
+    final_prompts: dict[str, str] = {}
+    for key in _LLM_PROMPT_DOMAINS:
+        base_text = base_prompt_templates.get(key, '') or ''
+        overlay = overlays.get(key, '') or ''
+        if key == 'overall':
+            final_prompts[key] = (overlay + sla_block + ("\n\n" if (overlay or sla_block) and base_text else '') + base_text).strip()
+        else:
+            final_prompts[key] = (base_text + overlay + sla_block).strip()
+    return final_prompts
 
 
 def _await_task(async_result):
     """Возвращает результат Celery-задачи с таймаутом."""
     return async_result.get(timeout=_TASK_TIMEOUT)
+
+
+def _span_percent(start: int, end: int, done: int, total: int) -> int:
+    """Position ``done`` of ``total`` inside the percent range ``start``..``end``."""
+    if total <= 0:
+        return start
+    ratio = max(0, min(int(done), int(total))) / int(total)
+    return start + int(round((end - start) * ratio))
+
+
+def _scale_pipeline_percent(percent: int | None) -> int | None:
+    """Maps the pipeline's 0..100 into 40..94, after charts and attachments."""
+    if percent is None:
+        return None
+    scaled = 40 + int(round(max(0, min(100, int(percent))) * 0.54))
+    return min(scaled, 94)
 
 
 def _download_img_with_retry(image_url: str, file_basename: str, username: str, password: str, max_attempts: int = 3) -> bool:
@@ -504,15 +551,28 @@ def _service_entry(area_name: str | None, service_name: str | None) -> dict:
     return svc_entry if isinstance(svc_entry, dict) else {}
 
 
+# Only these sections are edited per service in the settings UI. Bootstrap copies
+# the rest onto each service once; merging them would freeze the first snapshot
+# and ignore later area changes (notably default_params.resample_interval).
+_SERVICE_CONFIG_OVERRIDES = frozenset({"queries", "sla"})
+
+
 def _effective_config_for_scope(area_name: str, service_name: str | None = None) -> dict:
     area = _load_area_overrides(area_name)
     service_entry = _service_entry(area_name, service_name) if service_name else {}
     eff = dict(CONFIG)
-    for key in ("llm", "metrics_source", "lt_metrics_source", "default_params", "queries", "sla", "system_context"):
+    for key in ("llm", "logs_source", "default_params", "queries", "sla", "system_context"):
         base = (CONFIG.get(key) or {}) if isinstance(CONFIG.get(key), dict) else (CONFIG.get(key) if key == 'queries' else {})
         over_area = (area.get(key) or {}) if isinstance(area.get(key), dict) else {}
-        over_service = (service_entry.get(key) or {}) if isinstance(service_entry.get(key), dict) else {}
+        over_service = (service_entry.get(key) or {}) if key in _SERVICE_CONFIG_OVERRIDES and isinstance(service_entry.get(key), dict) else {}
         eff[key] = _deep_merge_dicts(_deep_merge_dicts(base, over_area), over_service)
+    # The catalog is global. An area that sets domain_sources replaces the global bindings entirely.
+    eff["data_sources"] = copy.deepcopy(CONFIG.get("data_sources") or {})
+    area_bindings = area.get("domain_sources")
+    if isinstance(area_bindings, dict):
+        eff["domain_sources"] = copy.deepcopy(area_bindings)
+    else:
+        eff["domain_sources"] = copy.deepcopy(CONFIG.get("domain_sources") or {})
     return eff
 
 def _prompts_override_for_area(area_name: str | None) -> dict:
@@ -600,27 +660,18 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
 
         run_meta = {
             "run_id": uuid.uuid4().hex,
-            "run_name": (run_name or "").strip() or datetime.now().strftime("run-%Y%m%d-%H%M%S"),
+            "run_name": (run_name or "").strip() or default_run_name(),
             "service": service,
             "test_type": (test_type or '').strip(),
             "start_ms": start,
             "end_ms": end,
+            "project_area": area_name,
+            "area_services": _resolve_services_for_area(area_name) or [service],
         }
 
-        _progress("Сбор метрик для веб-отчёта…", 30)
         results = None
         if use_llm or save_to_db_effective:
-            overlays = _test_type_overlays(test_type)
-            sla_block = _sla_prompt_block(ef_cfg.get("sla") or {})
-            final_prompts = {}
-            for k in ('overall', 'jvm', 'database', 'kafka', 'microservices', 'hard_resources', 'lt_framework'):
-                base_text = base_prompt_templates.get(k, '')
-                ov = overlays.get(k, '') or ''
-                if k == 'overall':
-                    final_prompts[k] = (ov + sla_block + ("\n\n" if (ov or sla_block) and base_text else '') + (base_text or '')).strip()
-                else:
-                    final_prompts[k] = ((base_text or '') + ov + sla_block).strip()
-
+            # The pipeline reports its own phases (collect 10-40 %, LLM 47-80 %, save 95 %).
             results = uploadFromLLM(
                 start/1000,
                 end/1000,
@@ -628,17 +679,18 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
                 run_meta=run_meta,
                 only_collect=not use_llm,
                 ef_config=ef_cfg,
-                prompts_override=final_prompts,
+                prompts_override=_build_final_prompts(base_prompt_templates, test_type, ef_cfg.get("sla") or {}),
                 active_domains=active_domains,
                 system_context=system_context_snapshot,
+                progress_callback=_progress,
             )
         else:
             _progress("Пропускаем LLM-анализ и сбор доменных данных по запросу пользователя")
 
-        _progress("Финализация веб-отчёта…", 95)
-        page_url = f"/reports/{service}/{run_meta['run_name']}"
+        _progress("Финализация веб-отчёта…", 98)
+        page_url = f"/reports/{run_meta['run_id']}"
         _progress("Отчёт (веб) готов ✅", 100)
-        return {"page_id": None, "page_url": page_url, "run_name": run_meta["run_name"]}
+        return {"page_id": None, "page_url": page_url, "run_name": run_meta["run_name"], "run_id": run_meta["run_id"]}
 
     # Получаем `page_sample_id` и `page_parent_id` из конфигурации сервиса
     page_parent_id = service_config["page_parent_id"]
@@ -724,14 +776,18 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
         download_jobs.append(
             ("log", l, download_loki_logs_task.delay(loki_url, start, end, l["filter_query"], l["file_basename"]))
         )
-    for kind, item, job in download_jobs:
+    download_total = len(download_jobs)
+    for index, (kind, item, job) in enumerate(download_jobs, start=1):
         identifier = item.get("name") if kind == "metric" else item.get("placeholder")
+        kind_label = "графика" if kind == "metric" else "логов"
+        _progress(
+            f"Скачивание {kind_label} «{identifier}» ({index}/{download_total})",
+            _span_percent(10, 30, index - 1, download_total),
+        )
         try:
             _await_task(job)
         except Exception as exc:
             logger.error("Ошибка при скачивании %s '%s': %s", kind, identifier, exc)
-
-    _progress("Загрузка вложений и обновление страницы…", 50)
 
     replacements_pending = {}
     attachment_jobs: list[tuple[tuple[str, str], object]] = []
@@ -769,7 +825,12 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
             logger.warning("Не найден файл логов: %s", l["file_path"])
 
     success_placeholders: set[str] = set()
-    for (placeholder, html), job in attachment_jobs:
+    attachment_total = len(attachment_jobs)
+    for index, ((placeholder, html), job) in enumerate(attachment_jobs, start=1):
+        _progress(
+            f"Загрузка вложения в Confluence ({index}/{attachment_total})",
+            _span_percent(30, 40, index - 1, attachment_total),
+        )
         ok = False
         try:
             ok = bool(_await_task(job))
@@ -802,44 +863,34 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
     except Exception as e:
         logger.error("Ошибка при мульти-обновлении плейсхолдеров (графики/логи): %s", e)
 
-    _progress("Графики и логи добавлены и обновлены. Запуск анализа ИИ…", 70)
+    def _pipeline_progress(msg: str, pct: int | None = None):
+        _progress(msg, _scale_pipeline_percent(pct))
 
-    # Получаем результаты LLM и обновляем их последовательно
+    # Same in-process pipeline as the web report, so the progress bar keeps moving.
     results = None
-    # Сбор доменных данных и/или LLM анализ
-    run_meta = None
-    if save_to_db:
-        run_meta = {
-            "run_id": uuid.uuid4().hex,
-            "run_name": (run_name or "").strip() or datetime.now().strftime("run-%Y%m%d-%H%M%S"),
-            "service": service,
-            "test_type": (test_type or "").strip(),
-            "start_ms": start,
-            "end_ms": end,
-        }
+    run_meta = {
+        "run_id": uuid.uuid4().hex,
+        "run_name": (run_name or "").strip() or default_run_name(),
+        "service": service,
+        "test_type": (test_type or "").strip(),
+        "start_ms": start,
+        "end_ms": end,
+        "project_area": area_name,
+        "area_services": _resolve_services_for_area(area_name) or [service],
+    }
     if use_llm or save_to_db:
-        overlays = _test_type_overlays(test_type)
-        sla_block = _sla_prompt_block(ef_cfg.get("sla") or {})
-        final_prompts = {}
-        for k in ('overall', 'jvm', 'database', 'kafka', 'microservices', 'hard_resources', 'lt_framework'):
-            base = base_prompt_templates.get(k, '')
-            ov = overlays.get(k, '') or ''
-            if k == 'overall':
-                final_prompts[k] = (ov + sla_block + ("\n\n" if (ov or sla_block) and base else '') + (base or '')).strip()
-            else:
-                final_prompts[k] = ((base or '') + ov + sla_block).strip()
-        results = _await_task(
-            generate_llm_results_task.delay(
-                start / 1000,
-                end / 1000,
-                save_to_db,
-                {"run_id": (run_meta or {}).get("run_id"), "run_name": (run_meta or {}).get("run_name"), "service": service, "test_type": (test_type or "").strip(), "start_ms": start, "end_ms": end},
-                not use_llm,
-                ef_cfg,
-                final_prompts,
-                active_domains,
-                system_context_snapshot,
-            )
+        final_prompts = _build_final_prompts(base_prompt_templates, test_type, ef_cfg.get("sla") or {})
+        results = uploadFromLLM(
+            start / 1000,
+            end / 1000,
+            save_to_db=bool(save_to_db),
+            run_meta=run_meta,
+            only_collect=not use_llm,
+            ef_config=ef_cfg,
+            prompts_override=final_prompts,
+            active_domains=active_domains,
+            system_context=system_context_snapshot,
+            progress_callback=_pipeline_progress,
         )
     else:
         _progress("Пропускаем LLM-анализ и сбор доменных данных по запросу пользователя")
@@ -866,7 +917,7 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
         # Добавляем финальный плейсхолдер только как $$final_answer$$
         final_struct = (results or {}).get("final_parsed")
         if isinstance(final_struct, dict) and final_struct:
-            md = render_llm_markdown(final_struct)
+            md = render_llm_markdown(final_struct, domain="final")
             if md.strip():
                 llm_replacements["$$final_answer$$"] = md
         else:
@@ -892,35 +943,35 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
 
         jvm_struct = _inject_confidence((results or {}).get("jvm_parsed"), "jvm")
         if isinstance(jvm_struct, dict) and jvm_struct:
-            md = render_llm_markdown(jvm_struct)
+            md = render_llm_markdown(jvm_struct, domain="jvm")
             if md.strip():
                 llm_replacements["$$answer_jvm$$"] = md
 
         db_struct = _inject_confidence((results or {}).get("database_parsed"), "database")
         if isinstance(db_struct, dict) and db_struct:
-            md = render_llm_markdown(db_struct)
+            md = render_llm_markdown(db_struct, domain="database")
             if md.strip():
                 llm_replacements["$$answer_database$$"] = md
 
         kafka_struct = _inject_confidence((results or {}).get("kafka_parsed"), "kafka")
         if isinstance(kafka_struct, dict) and kafka_struct:
-            md = render_llm_markdown(kafka_struct)
+            md = render_llm_markdown(kafka_struct, domain="kafka")
             if md.strip():
                 llm_replacements["$$answer_kafka$$"] = md
 
         ms_struct = _inject_confidence((results or {}).get("ms_parsed"), "microservices")
         if isinstance(ms_struct, dict) and ms_struct:
-            md = render_llm_markdown(ms_struct)
+            md = render_llm_markdown(ms_struct, domain="microservices")
             if md.strip():
                 llm_replacements["$$answer_ms$$"] = md
 
         hr_struct = _inject_confidence((results or {}).get("hard_resources_parsed"), "hard_resources")
         if isinstance(hr_struct, dict) and hr_struct:
-            md = render_llm_markdown(hr_struct)
+            md = render_llm_markdown(hr_struct, domain="hard_resources")
             if md.strip():
                 llm_replacements["$$answer_hard_resources$$"] = md
 
-        def _try_json_to_markdown(raw_text: str) -> str | None:
+        def _try_json_to_markdown(raw_text: str, domain: str | None) -> str | None:
             if not isinstance(raw_text, str) or not raw_text.strip():
                 return None
             try:
@@ -938,7 +989,7 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
                     except Exception:
                         parsed = None
                 if isinstance(parsed, dict):
-                    md = render_llm_markdown(parsed)
+                    md = render_llm_markdown(parsed, domain=domain)
                     return md.strip() or None
             except Exception:
                 return None
@@ -948,7 +999,13 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
             val = llm_replacements.get(ph)
             if not isinstance(val, str):
                 return
-            md = _try_json_to_markdown(val)
+            md = _try_json_to_markdown(val, {
+                "$$answer_jvm$$": "jvm",
+                "$$answer_database$$": "database",
+                "$$answer_kafka$$": "kafka",
+                "$$answer_ms$$": "microservices",
+                "$$answer_hard_resources$$": "hard_resources",
+            }.get(ph))
             if md:
                 llm_replacements[ph] = md
 
@@ -1044,4 +1101,9 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
         logger.error("Ошибка при мульти-обновлении данных LLM: %s", e)
 
     _progress("Отчёт готов ✅", 100)
-    return {"page_id": copy_page_id, "page_url": page_url}
+    return {
+        "page_id": copy_page_id,
+        "page_url": page_url,
+        "run_name": run_meta["run_name"],
+        "run_id": run_meta["run_id"],
+    }

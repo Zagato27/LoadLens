@@ -28,5 +28,8 @@ dist/
 *.local.*
 *.secrets.*
 
+# Session signing key (generated at runtime, never baked into an image)
+.loadlens_secret_key
+
 .git
 __pycache__/

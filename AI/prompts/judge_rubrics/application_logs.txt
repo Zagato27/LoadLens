@@ -1,0 +1,16 @@
+Domain Focus: application_logs
+
+Assess whether the answer is grounded in aggregated OpenSearch ERROR logs.
+
+High-quality answers:
+- Use interval-level error counts, hostname, and normalized error types as evidence.
+- Distinguish repeated error bursts from isolated noise.
+- Mention truncation or missing data when present in the context.
+- Avoid inventing root causes that are not supported by message samples or error types.
+- Provide actionable checks tied to affected hostnames and error types.
+
+Penalize answers that:
+- Treat raw samples as counts.
+- Ignore intervals with the highest error volume.
+- Group conclusions by unique request ids, rqUid, UUID, or other dynamic identifiers.
+- Claim cross-component impact without timing or count evidence.

@@ -31,8 +31,8 @@ COPY . .
 # Открываем порт для взаимодействия (опционально, если нужно)
 EXPOSE 5000
 
-# Healthcheck: приложение должно отвечать на /
-HEALTHCHECK --interval=30s --timeout=5s --retries=5 CMD curl -fsS http://localhost:5000/ || exit 1
+# Healthcheck: the public liveness endpoint (every other page requires a login)
+HEALTHCHECK --interval=30s --timeout=5s --retries=5 CMD curl -fsS http://localhost:5000/healthz || exit 1
 
 # Определяем команду для запуска приложения
 CMD ["python", "app.py"]

@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% set active_nav = 'forecasting' %}
+{% block title %}Прогноз мощностей{% endblock %}
+{% block head %}
+<script src="/static/vendor/chart.umd.js"></script>
+{% endblock %}
+{% block content %}
+  <nav id="forecastBreadcrumbs" class="breadcrumbs" aria-label="Навигация по разделу">
+    <a href="/forecasting">Прогнозирование</a>
+  </nav>
+  <div class="page-header">
+    <div>
+      <h1 id="forecastTitle">Прогноз мощностей</h1>
+    </div>
+    <div class="page-actions">
+      <a id="forecastReportLink" class="btn" href="#" hidden>Открыть отчёт</a>
+      <button type="button" id="forecastConfluence" class="btn" data-min-role="engineer" hidden>Добавить отчёт в Confluence</button>
+      <a id="forecastConfluenceLink" href="#" target="_blank" rel="noopener noreferrer" hidden>Открыть в Confluence</a>
+      <span id="forecastConfluenceStatus" class="dim" aria-live="polite"></span>
+    </div>
+  </div>
+  <section id="forecastPanel" class="report-forecast" aria-live="polite"></section>
+{% endblock %}
+{% block scripts %}
+<script defer src="/static/js/forecast_report.js"></script>
+{% endblock %}

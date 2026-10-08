@@ -582,7 +582,12 @@ def _render_problem_recommendation_table(report: dict) -> str:
     )
 
 
-def render_llm_markdown(report: dict) -> str:
+def _peak_section_applies(domain: str | None) -> bool:
+    """Empty peak tables are omitted outside the final report and the load tool."""
+    return domain is None or domain in {"final", "lt_framework"}
+
+
+def render_llm_markdown(report: dict, domain: str | None = None) -> str:
     """Возвращает Markdown для Confluence Markdown macro."""
     report = report if isinstance(report, dict) else {}
     peak = report.get("peak_performance") or report.get("peak_perfomance") or {}
@@ -607,7 +612,9 @@ def render_llm_markdown(report: dict) -> str:
         "",
     ]
 
-    if _is_stability_report(report, peak, test_profile):
+    if not _peak_section_applies(domain):
+        pass
+    elif _is_stability_report(report, peak, test_profile):
         lines.extend([
             "#### Стабильность под нагрузкой",
             "| Параметр | Значение |",
@@ -619,7 +626,7 @@ def render_llm_markdown(report: dict) -> str:
             f"| Итог SLA | {_md_cell(stability.get('sla_summary') or '—')} |",
             "",
         ])
-    else:
+    elif any(peak.get(key) not in (None, "") for key in ("max_rps", "max_time", "drop_time")):
         lines.extend([
             "#### Пиковая производительность",
             "| Параметр | Значение |",
@@ -690,7 +697,7 @@ def render_llm_markdown(report: dict) -> str:
     return "\n".join(lines).strip()
 
 
-def render_llm_html(report: dict) -> str:
+def render_llm_html(report: dict, domain: str | None = None) -> str:
     """HTML-версия рендера LLM-ответа для вставки в Confluence storage."""
     report = report if isinstance(report, dict) else {}
     peak = report.get("peak_performance") or report.get("peak_perfomance") or {}
@@ -708,7 +715,9 @@ def render_llm_html(report: dict) -> str:
         _render_rationale_box(report),
     ]
 
-    if _is_stability_report(report, peak, test_profile):
+    if not _peak_section_applies(domain):
+        pass
+    elif _is_stability_report(report, peak, test_profile):
         parts.append(_render_key_value_table(
             "Стабильность под нагрузкой",
             [
@@ -719,7 +728,7 @@ def render_llm_html(report: dict) -> str:
                 ("Итог SLA", _html(stability.get("sla_summary") or "—")),
             ],
         ))
-    else:
+    elif any(peak.get(key) not in (None, "") for key in ("max_rps", "max_time", "drop_time")):
         parts.append(_render_key_value_table(
             "Пиковая производительность",
             [

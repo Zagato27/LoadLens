@@ -48,6 +48,13 @@ services:
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
       CELERY_TASK_ALWAYS_EAGER: ${CELERY_TASK_ALWAYS_EAGER:-0}
+      # Authentication (see docker/env.example). Empty values fall back to settings.py.
+      LOADLENS_AUTH_ENABLED: ${LOADLENS_AUTH_ENABLED:-1}
+      LOADLENS_SECRET_KEY: ${LOADLENS_SECRET_KEY:-}
+      LOADLENS_ADMIN_USER: ${LOADLENS_ADMIN_USER:-}
+      LOADLENS_ADMIN_PASSWORD: ${LOADLENS_ADMIN_PASSWORD:-}
+      LOADLENS_COOKIE_SECURE: ${LOADLENS_COOKIE_SECURE:-}
+      LOADLENS_TRUSTED_PROXIES: ${LOADLENS_TRUSTED_PROXIES:-}
     volumes:
       # Хранение рендеров/картинок между рестартами
       - ../data_collectors/temporary_files:/app/data_collectors/temporary_files

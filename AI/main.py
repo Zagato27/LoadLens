@@ -6,7 +6,7 @@
 
 from typing import Dict, List, Optional
 
-from AI.pipeline import uploadFromLLM as _pipeline_upload
+from AI.pipeline import ProgressCallback, uploadFromLLM as _pipeline_upload
 
 __all__ = ["uploadFromLLM"]
 
@@ -21,6 +21,7 @@ def uploadFromLLM(
     prompts_override: Optional[dict] = None,
     active_domains: Optional[List[str]] = None,
     system_context: Optional[dict] = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> Dict[str, object]:
     """Запускает полный цикл подготовки LLM‑отчёта.
 
@@ -44,6 +45,8 @@ def uploadFromLLM(
             которые нужно анализировать (например, без `lt_framework`).
         system_context (dict | None): Снимок контекста тестируемой системы,
             который нужно передать в LLM-pipeline.
+        progress_callback (callable | None): Принимает `(message, percent)`
+            на каждой фазе pipeline для отображения прогресса пользователю.
 
     Возвращаемое значение:
         dict: агрегат с текстовыми блоками, структурированными ответами
@@ -69,6 +72,5 @@ def uploadFromLLM(
         prompts_override=prompts_override,
         active_domains=active_domains,
         system_context=system_context,
+        progress_callback=progress_callback,
     )
-
-

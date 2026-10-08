@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Вход — LoadLens</title>
+  <script>
+    // Apply the saved theme before first paint to avoid a flash.
+    (function () {
+      try {
+        var saved = localStorage.getItem('loadlens.theme');
+        if (saved === 'light' || saved === 'dark') document.documentElement.setAttribute('data-theme', saved);
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="icon" href="/assets/logo.png?c={{ appearance.key }}" type="image/png" />
+  <link rel="stylesheet" href="/static/css/app.css" />
+  <style id="accentVars">{{ appearance.css }}</style>
+</head>
+<body>
+  <main class="auth-page" id="main">
+    <div class="auth-card">
+      <div class="auth-brand">
+        <img class="logo" src="/assets/logo.png?c={{ appearance.key }}" alt="" />
+        <span class="brand">LoadLens</span>
+      </div>
+      {% if error %}
+      <div class="auth-alert" role="alert">{{ error }}</div>
+      {% endif %}
+      {% if no_users %}
+      <div class="auth-info">
+        <strong>Пользователей пока нет.</strong>
+        Создайте администратора на сервере командой:
+        <code>python -m loadlens_app.auth create-user admin --role admin</code>
+        Либо задайте переменные <code>LOADLENS_ADMIN_USER</code> и <code>LOADLENS_ADMIN_PASSWORD</code> и перезагрузите страницу.
+      </div>
+      {% endif %}
+      <form method="post" action="/login" autocomplete="on">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="next" value="{{ next_url }}" />
+        <div class="form-grid">
+          <div>
+            <label for="username">Логин</label>
+            <input id="username" name="username" type="text" value="{{ username }}" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus />
+          </div>
+          <div>
+            <label for="password">Пароль</label>
+            <input id="password" name="password" type="password" autocomplete="current-password" required />
+          </div>
+        </div>
+        <button type="submit" class="btn btn-primary btn-lg">Войти</button>
+      </form>
+      {% if providers %}
+      <p class="auth-note">{{ providers | join(' · ') }}</p>
+      {% endif %}
+    </div>
+  </main>
+</body>
+</html>

@@ -1,158 +1,79 @@
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Сравнение тестов</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,400;0,500;0,600;0,700;1,600&display=swap" rel="stylesheet">
-  <style>
-    body { background: #121212; color: #fff; font-family: 'Montserrat', Arial, sans-serif; margin: 0; }
-    .container { width: 90%; max-width: 1400px; margin: 0 auto; padding: 16px; }
-    h2 { margin: 8px 0 16px; }
-    .row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
-    select, button { padding: 8px; background: #2b2b2b; color: #fff; border: 1px solid #444; border-radius: 6px; font-family: 'Montserrat', Arial, sans-serif; font-size: 14px; }
-    .accordion { margin-top: 16px; }
-    .acc-item { background: #1e1e1e; border: 1px solid #333; border-radius: 6px; margin-bottom: 8px; }
-    .acc-header { padding: 10px 12px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
-    .acc-content { display: none; padding: 10px 12px; border-top: 1px solid #333; }
-    .pill { display: inline-block; padding: 4px 8px; background: #2b2b2b; border: 1px solid #444; border-radius: 14px; margin: 4px; cursor: pointer; }
-    .controls { margin-top: 8px; display: flex; gap: 12px; align-items: center; }
-    .chart-wrap { background: #0f0f0f; border: 1px solid #333; border-radius: 6px; padding: 10px; margin-top: 12px; display: flex; gap: 12px; }
-    .chart-canvas { flex: 1; min-width: 0; }
-    .legend-panel { width: 480px; max-width: 55%; background: #1b1b1b; border-left: 1px solid #333; border-radius: 6px; padding: 10px; overflow-y: auto; min-height: 160px; }
-    .legend-controls { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
-    .legend-panel h4 { margin: 0 0 8px; font-weight: normal; color: #ddd; }
-    .legend-table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
-    .legend-table th, .legend-table td { white-space: normal; word-break: break-word; }
-    .legend-table th, .legend-table td { border-bottom: 1px solid #2a2a2a; padding: 6px 8px; text-align: left; }
-    .legend-color { width: 14px; height: 14px; border-radius: 3px; display: inline-block; margin-right: 6px; vertical-align: middle; border: 1px solid #444; }
-    .legend-row { cursor: pointer; }
-    .legend-row.hidden { opacity: 0.5; }
-    a { color: #9bbcff; text-decoration: none; }
-    .app-header { position: sticky; top: 0; display: flex; align-items: center; justify-content: flex-start; gap: 12px; z-index: 2000; width: 100%; max-width: 1400px; margin: 0 auto; padding: 8px 12px; --brandSize: 40px; background: #121212; border-bottom: 1px solid #2a2a2a; }
-    .app-nav { display: flex; gap: 16px; margin-left: auto; flex-wrap: nowrap; white-space: nowrap; }
-    .app-nav a.nav-btn { height: 36px; padding: 8px 4px; background: transparent; border: none; color: #eaeaea; border-bottom: 2px solid transparent; border-radius: 0; cursor: pointer; font-family: 'Montserrat', Arial, sans-serif; font-weight: 600; font-style: italic; text-decoration: none; display: inline-flex; align-items: center; }
-    .app-nav { align-items: center; }
-    .pa-select { height: 36px; padding: 0 10px; background: #2b2b2b; border: 1px solid #444; border-radius: 6px; color: #eaeaea; font-family: 'Montserrat', Arial, sans-serif; font-weight: 600; font-style: italic; font-size: 14px; }
-    .app-nav a.nav-btn:hover { color: #ffffff; border-bottom-color: #3700b3; }
-    .app-nav a.nav-btn.active { color: #ffffff; border-bottom-color: #6200ee; }
-    .app-header .logo { width: var(--brandSize); height: var(--brandSize); object-fit: contain; }
-    .app-header .brand { font-size: var(--brandSize); line-height: var(--brandSize); font-weight: 600; font-style: italic; letter-spacing: 0.2px; color: #eaeaea; }
-    select, button { height: 40px; }
-    h1, h2, h3, h4 { font-weight: 600; font-style: italic; }
-    /* Кастомный селект как на странице создания отчёта */
-    .custom-select-wrapper { position: relative; display: block; background-color: #2b2b2b; color: #ffffff; border: 1px solid #444; border-radius: 4px; margin-top: 5px; cursor: pointer; }
-    .custom-select { padding: 8px; position: relative; }
-    .custom-select::after { content: ''; position: absolute; top: 50%; right: 10px; width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 5px solid #ffffff; transform: translateY(-50%); }
-    .custom-options { position: absolute; top: 100%; left: 0; right: 0; background-color: #2b2b2b; border: 1px solid #444; border-top: none; max-height: 200px; overflow-y: auto; z-index: 1000; display: none; }
-    .custom-option { padding: 8px; cursor: pointer; border-bottom: 1px solid #444; }
-    .custom-option:last-child { border-bottom: none; }
-    .custom-option:hover { background-color: #444; }
-    .custom-select-wrapper.open .custom-options { display: block; }
-    /* Увеличенная ширина селекторов Run A / Run B */
-    #runAWrapper, #runBWrapper { width: clamp(500px, 80vw, 500px); display: block; }
-    /* Адаптив: легенда под графиком на узких экранах */
-    @media (max-width: 900px) {
-      .chart-wrap { flex-wrap: wrap; }
-      .legend-panel { width: 100%; max-width: none; }
-    }
-    /* Hover-подсветка кнопок в легенде */
-    .legend-controls button { background: #2b2b2b; border: 1px solid #444; color: #fff; transition: background-color 0.2s ease, border-color 0.2s ease; }
-    .legend-controls button:hover { background: #3700b3; border-color: #6200ee; }
-    .btn-compare { background:#6200ee; border:1px solid #6f35e3; color:#fff; }
-    .btn-compare.active { background:#3700b3; border-color:#8a5cf2; }
-    /* Таблица p95 сравнения */
-    /* Таблица p95 сравнения */
-    .cmp-summary { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
-    .cmp-summary th, .cmp-summary td { border-bottom: 1px solid #2a2a2a; padding: 6px 8px; text-align: left; }
-    .cmp-summary th[data-sort], .metric-table th[data-sort] { cursor: pointer; }
-    .trend { font-weight: 700; }
-    .trend.up { color: #e57373; } /* красный */
-    .trend.down { color: #6be66b; } /* зелёный */
-    .cmp-summary-wrap { margin-bottom: 12px; }
-    .charts-header { margin: 8px 0 6px; font-weight: 600; color: #ddd; }
-    .charts-pills { display: flex; flex-wrap: wrap; gap: 6px; }
-    /* Внутренние аккордеоны по метрикам */
-    .metric-item { background: #181818; border: 1px solid #2a2a2a; border-radius: 6px; margin: 6px 0; }
-    .metric-header { padding: 8px 10px; display:flex; justify-content:space-between; align-items:center; cursor: pointer; }
-    .metric-content { display: none; padding: 8px 10px; border-top: 1px solid #2a2a2a; }
-    .metric-table { width:100%; border-collapse: collapse; margin-top: 6px; font-size: 13px; }
-    .metric-table th, .metric-table td { border-bottom: 1px solid #2a2a2a; padding: 6px 8px; text-align: left; }
-    .metric-trend.up { color:#e57373; font-weight:700; }
-    .metric-trend.down { color:#6be66b; font-weight:700; }
-    /* Ширины колонок легенды: больше места под 'Серия' */
-    .legend-table th:nth-child(1), .legend-table td:nth-child(1) { width: 66%; }
-    .legend-table th:nth-child(2), .legend-table td:nth-child(2) { width: 56px; }
-    .legend-table th:nth-child(3), .legend-table td:nth-child(3) { width: 24%; }
-    .legend-table th:nth-child(4), .legend-table td:nth-child(4) { width: 40px; }
-  </style>
-  </head>
-<body>
-  <div class="app-header">
-    <img class="logo" src="/assets/logo.png" alt="LoadLens" />
-    <span class="brand">LoadLens</span>
-    <div class="app-nav">
-      <select id="projectAreaSelect" class="pa-select">
-        <option value="">Все области</option>
-      </select>
-      <a class="nav-btn" href="/">Дэшборд</a>
-      <a class="nav-btn" href="/new">Новый отчёт</a>
-      <a class="nav-btn" href="/reports">Архив</a>
-      <a class="nav-btn active" href="/compare">Сравнение тестов</a>
-      <a class="nav-btn" href="/settings">Настройки</a>
+{% extends "base.html" %}
+{% set active_nav = 'compare' %}
+{% block title %}Сравнение тестов{% endblock %}
+{% block head %}
+<script src="/static/vendor/chart.umd.js"></script>
+<style>
+  .section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 20px; }
+  .section-head h3 { margin: 0; }
+  .metric-row td.metric-label { font-weight: 600; }
+  .metric-row.open td { background: var(--bg-elev2); }
+  .chart-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  .series-legend { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+  .series-legend th, .series-legend td { padding: 6px 8px; border-bottom: 1px solid var(--border-soft); text-align: left; }
+  .series-legend th { color: var(--text-muted); }
+  .series-legend tr.off { opacity: 0.45; }
+  .series-legend .swatch { display: inline-block; width: 14px; height: 4px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+  .series-legend .swatch.dashed { background: repeating-linear-gradient(90deg, currentColor 0 4px, transparent 4px 7px); }
+  .findings-list { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.5; }
+  .findings-list li + li { margin-top: 6px; }
+  .sev { font-size: 11px; font-weight: 700; text-transform: uppercase; margin-right: 6px; }
+  .sev.critical, .sev.high { color: var(--fail-fg); }
+  .sev.medium { color: var(--warn-fg); }
+  .sev.low { color: var(--text-dim); }
+</style>
+{% endblock %}
+{% block content %}
+  <h2>Сравнение тестов</h2>
+  <p class="muted" style="margin:0 0 12px">Выберите два прогона: для B можно автоматически подставить предыдущий успешный прогон того же сервиса. Сравниваются вердикты, находки итогового анализа и метрики по доменам.</p>
+
+  <div class="compare-pickers">
+    <div class="picker-card">
+      <div class="picker-title"><span>Прогон A <span class="picker-badge">A</span></span><span id="runAMeta" class="dim"></span></div>
+      <div id="runAPicker"></div>
+      <div class="field-hint">Обычно новый прогон, который нужно оценить.</div>
     </div>
-  </div>
-  <div class="container">
-    
-
-    <div class="row">
-      <div>
-        <div>Run A</div>
-        <div class="custom-select-wrapper" id="runAWrapper">
-          <div class="custom-select" id="runASelect">Выберите запуск A</div>
-          <div class="custom-options" id="runAOptions"></div>
-        </div>
-      </div>
-      <div>
-        <div>Run B</div>
-        <div class="custom-select-wrapper" id="runBWrapper">
-          <div class="custom-select" id="runBSelect">Выберите запуск B</div>
-          <div class="custom-options" id="runBOptions"></div>
-        </div>
-      </div>
-      
-      <div style="align-self: flex-end;">
-        <button id="compareBtn" class="btn-compare">Сравнить</button>
-      </div>
-    </div>
-
-    <div class="accordion" id="accRoot"></div>
-
-    <div class="chart-wrap">
-      <div class="chart-canvas">
-        <canvas id="chart" height="120"></canvas>
-      </div>
-      <div class="legend-panel">
-        <h4>Легенда</h4>
-        <div class="legend-controls">
-          <button id="legendHideAll">Выключить все</button>
-          <button id="legendShowAll">Включить все</button>
-          <button id="legendDownloadPng">Скачать PNG</button>
-        </div>
-        <div id="legend"></div>
+    <div class="picker-card">
+      <div class="picker-title"><span>Прогон B <span class="picker-badge b">B</span></span><span id="runBMeta" class="dim"></span></div>
+      <div id="runBPicker"></div>
+      <div class="picker-actions">
+        <button type="button" class="btn btn-sm" id="baselineSuccessBtn" disabled>Предыдущий успешный</button>
+        <button type="button" class="btn btn-sm" id="baselinePrevBtn" disabled>Предыдущий прогон</button>
+        <span class="dim" id="baselineNote"></span>
       </div>
     </div>
   </div>
+  <div class="form-actions" style="margin-top:12px">
+    <button type="button" class="btn btn-primary" id="compareBtn" disabled>Сравнить</button>
+    <span class="dim" id="compareHint">Выберите оба прогона.</span>
+  </div>
 
-  <script>
-/* INLINE JS DISABLED (moved to static) */
-/*</script>
-  <script defer src="/static/js/common.js"></script>
-  <script defer src="/static/js/compare.js"></script>
-  </body>
-  </html>
+  <section id="verdictCompare" class="verdict-compare" hidden>
+    <div class="section-head"><h3>Вердикты и находки</h3><span class="dim">итог и домены: A против B</span></div>
+    <div class="verdict-grid" id="verdictGrid"></div>
+    <details class="report-collapsible" style="margin-top:10px">
+      <summary><span>Находки итогового анализа</span><small class="report-collapsible-subtitle">что нашёл ИИ в каждом прогоне</small></summary>
+      <div class="report-collapsible-body"><div class="findings-compare" id="findingsCompare"></div></div>
+    </details>
+  </section>
 
-
+  <section id="metricsCompare" hidden>
+    <div class="section-head">
+      <h3>Метрики</h3>
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+        <span class="dim">Агрегат:</span>
+        <div class="seg-group" id="aggGroup" role="group" aria-label="Агрегат">
+          <button type="button" class="seg-btn active" data-agg="p95" aria-pressed="true">p95</button>
+          <button type="button" class="seg-btn" data-agg="avg" aria-pressed="false">среднее</button>
+          <button type="button" class="seg-btn" data-agg="max" aria-pressed="false">максимум</button>
+        </div>
+      </div>
+    </div>
+    <p class="agg-note" id="aggNote"></p>
+    <div id="domainTabs" class="tabs" aria-label="Домены"></div>
+    <div id="domainPanels"></div>
+  </section>
+{% endblock %}
+{% block scripts %}
+<script defer src="/static/js/compare.js"></script>
+{% endblock %}

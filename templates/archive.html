@@ -1,98 +1,60 @@
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Архив отчётов</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,400;0,500;0,600;0,700;1,600&display=swap" rel="stylesheet">
-  <style>
-    body { background: #121212; color: #fff; font-family: 'Montserrat', Arial, sans-serif; margin: 0; }
-    .container { width: 90%; max-width: 1400px; margin: 0 auto; padding: 16px; }
-    h2 { margin: 8px 0 16px; }
-    a { color: #9bbcff; text-decoration: none; }
-    .app-header { position: sticky; top: 0; display: flex; align-items: center; justify-content: flex-start; gap: 12px; z-index: 2000; width: 100%; max-width: 1400px; margin: 0 auto; padding: 8px 12px; --brandSize: 40px; background: #121212; border-bottom: 1px solid #2a2a2a; }
-    .app-header .logo { width: var(--brandSize); height: var(--brandSize); object-fit: contain; }
-    .app-header .brand { font-size: var(--brandSize); line-height: var(--brandSize); font-weight: 600; font-style: italic; letter-spacing: 0.2px; color: #eaeaea; }
-    .app-nav { display: flex; gap: 16px; margin-left: auto; flex-wrap: nowrap; white-space: nowrap; align-items: center; }
-    .pa-select { height: 36px; padding: 0 10px; background: #2b2b2b; border: 1px solid #444; border-radius: 6px; color: #eaeaea; font-family: 'Montserrat', Arial, sans-serif; font-weight: 600; font-style: italic; font-size: 14px; }
-    .app-nav a.nav-btn { height: 36px; padding: 8px 4px; background: transparent; border: none; color: #eaeaea; border-bottom: 2px solid transparent; border-radius: 0; cursor: pointer; font-family: 'Montserrat', Arial, sans-serif; font-weight: 600; font-style: italic; text-decoration: none; display: inline-flex; align-items: center; }
-    .app-nav a.nav-btn:hover { color: #ffffff; border-bottom-color: #3700b3; }
-    .app-nav a.nav-btn.active { color: #ffffff; border-bottom-color: #6200ee; }
+{% extends "base.html" %}
+{% set active_nav = 'archive' %}
+{% block title %}Архив отчётов{% endblock %}
+{% block head %}
+<style>
+  td.run-name { font-weight: 600; white-space: nowrap; max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
+  td.actions { white-space: nowrap; }
+  .actions-inner { display: flex; gap: 6px; align-items: center; justify-content: flex-end; }
+</style>
+{% endblock %}
+{% block content %}
+  <h2 id="archiveTitle">Архив отчётов</h2>
+  <div id="archiveBreadcrumbs" class="breadcrumbs" style="display:none"></div>
 
-    .toolbar { display:flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    .toolbar input[type="search"] { height: 36px; padding: 6px 10px; border-radius: 6px; border: 1px solid #444; background: #1e1e1e; color: #fff; min-width: 280px; }
-    .btn { height: 36px; padding: 6px 10px; background: #2b2b2b; border: 1px solid #444; color: #fff; border-radius: 6px; cursor: pointer; }
-    .btn:hover { background: #3700b3; border-color: #6200ee; }
+  <section id="jobsStrip" class="jobs-strip" style="display:none" aria-live="polite">
+    <div class="jobs-title"><span>Задачи в работе и с ошибками</span><small id="jobsStripNote"></small></div>
+    <div id="jobsStripList"></div>
+  </section>
 
-    /* Метки вердиктов */
-    .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; }
-    .pill.ok { background: #1f3d1f; color: #6be66b; border: 1px solid #2e6b2e; }
-    .pill.warn { background: #3d341f; color: #f4c66a; border: 1px solid #6b582e; }
-    .pill.fail { background: #3d1f1f; color: #f17878; border: 1px solid #6b2e2e; }
-    .pill.na { background: #2a2a2a; color: #cfcfcf; border: 1px solid #444; }
+  <form class="toolbar" id="filtersForm" onsubmit="return false;">
+    <input type="search" id="searchInput" placeholder="Поиск по названию запуска или сервису…" aria-label="Поиск" />
+    <label>Сервис
+      <select id="serviceFilter"><option value="">Все</option></select>
+    </label>
+    <label>Вердикт
+      <select id="verdictFilter"><option value="">Все</option></select>
+    </label>
+    <label>Тип теста
+      <select id="testTypeFilter"><option value="">Все</option></select>
+    </label>
+    <button type="button" class="btn btn-primary" id="searchBtn">Применить</button>
+    <button type="button" class="btn" id="clearBtn">Сбросить</button>
+  </form>
 
-    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
-    th, td { border-bottom: 1px solid #2a2a2a; padding: 10px; text-align: left; }
-    th { cursor: pointer; user-select:none; }
-    tr.data-row { cursor: pointer; }
-    tr.data-row:hover { background: #1a1a1a; }
-    .actions { display:flex; gap: 8px; }
-    .pager { display:flex; gap:8px; align-items:center; margin-top:12px; }
-    .pager button { height: 32px; }
-  </style>
-</head>
-<body>
-  <div class="app-header">
-    <img class="logo" src="/assets/logo.png" alt="LoadLens" />
-    <span class="brand">LoadLens</span>
-    <div class="app-nav">
-      <select id="projectAreaSelect" class="pa-select">
-        <option value="">Все области</option>
-      </select>
-      <a class="nav-btn" href="/">Дэшборд</a>
-      <a class="nav-btn" href="/new">Новый отчёт</a>
-      <a class="nav-btn active" href="/reports">Архив</a>
-      <a class="nav-btn" href="/compare">Сравнение тестов</a>
-      <a class="nav-btn" href="/settings">Настройки</a>
-    </div>
-  </div>
-  <div class="container">
-    <h2>Архив отчётов</h2>
-    <div class="toolbar">
-      <input type="search" id="searchInput" placeholder="Найдите запуск по имени или сервису…" />
-      <button class="btn" id="searchBtn">Искать</button>
-      <button class="btn" id="clearBtn">Сброс</button>
-    </div>
-    <table>
+  <div class="table-wrap">
+    <table class="data-table">
       <thead>
         <tr>
           <th data-sort="run_name">Запуск</th>
           <th data-sort="service">Сервис</th>
-          <th>Тип теста</th>
-          <th data-sort="end_time">Дата/время</th>
-          <th>Создан отчёт</th>
-          <th>Вердикт</th>
-          <th data-sort="duration">Длительность</th>
-          <th>Действия</th>
+          <th data-sort="test_type">Тип теста</th>
+          <th data-sort="end_time">Дата/время теста</th>
+          <th data-sort="report_created_at">Отчёт создан</th>
+          <th data-sort="verdict">Вердикт</th>
+          <th>Длительность</th>
+          <th><span class="visually-hidden">Действия</span></th>
         </tr>
       </thead>
       <tbody id="tbody"></tbody>
     </table>
-    <div class="pager">
-      <button class="btn" id="prevBtn">Назад</button>
-      <span id="pageInfo"></span>
-      <button class="btn" id="nextBtn">Вперед</button>
-    </div>
   </div>
-
-  <script>
-/* INLINE JS DISABLED (moved to static) */
-/*</script>
-  <script defer src="/static/js/common.js"></script>
-  <script defer src="/static/js/archive.js"></script>
-</body>
-</html>
-
-
+  <div class="pager">
+    <button class="btn" id="prevBtn">Назад</button>
+    <span class="info" id="pageInfo"></span>
+    <button class="btn" id="nextBtn">Вперёд</button>
+  </div>
+{% endblock %}
+{% block scripts %}
+<script defer src="/static/js/archive.js"></script>
+{% endblock %}

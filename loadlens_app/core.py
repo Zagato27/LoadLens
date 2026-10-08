@@ -32,11 +32,15 @@ PROMPT_DOMAIN_FILES = {
     "jvm": "jvm_prompt.txt",
     "hard_resources": "hard_resources_prompt.txt",
     "lt_framework": "lt_framework_prompt.txt",
+    "application_logs": "application_logs_prompt.txt",
     "judge": "judge_prompt.txt",
     "critic": "critic_prompt.txt",
 }
-LOCKED_PROMPT_DOMAINS = {"judge", "critic"}
-BOOTSTRAP_SECTIONS = ("llm", "metrics_source", "lt_metrics_source", "default_params", "queries", "prompts", "sla")
+LOCKED_PROMPT_DOMAINS = {"judge", "critic", "_context_guide", "_response_format", "verify"}
+# Sections the settings UI may override per project area (and per service for queries/sla).
+AREA_OVERRIDABLE_SECTIONS = frozenset({"llm", "domain_sources", "logs_source", "default_params", "queries", "sla"})
+# Flat top-level keys of the legacy template-based Confluence flow, exposed as one config section.
+CONFLUENCE_TEMPLATE_KEYS = ("url_basic", "space_conf", "user", "password", "grafana_base_url", "grafana_login", "grafana_pass", "loki_url")
 
 
 def _deep_merge_dicts(base: dict, override: dict) -> dict:
@@ -217,6 +221,25 @@ def _save_settings_runtime_data(payload: dict) -> None:
         logger.exception("Не удалось сохранить runtime-конфигурацию в %s", CONFIG_RUNTIME_PATH)
 
 
+def _load_metrics_runtime_data() -> dict:
+    """Runtime metrics_config overrides; an unreadable file is an error, not an empty config."""
+    if not METRICS_RUNTIME_PATH.exists():
+        return {}
+    try:
+        with METRICS_RUNTIME_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{METRICS_RUNTIME_PATH}: некорректный JSON ({exc})") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"{METRICS_RUNTIME_PATH}: ожидается JSON-объект")
+    return data
+
+
+def _save_metrics_runtime_data(payload: dict) -> None:
+    with METRICS_RUNTIME_PATH.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
 def _per_area_config() -> dict:
     data = _load_settings_runtime_data()
     per_area = data.get("per_area") if isinstance(data, dict) else {}
@@ -263,12 +286,6 @@ def _load_base_prompts() -> dict:
         except Exception:
             prompts[domain] = ""
     return prompts
-
-
-def _deep_copy_prompts(section: str) -> dict:
-    if section == "prompts":
-        return copy.deepcopy(_load_base_prompts())
-    return copy.deepcopy(CONFIG.get(section, {}) or {})
 
 
 def _active_metrics_config() -> dict:
@@ -364,10 +381,14 @@ def _metrics_service_entry(service_id: str | None) -> tuple[str | None, dict]:
 
 
 def _available_domain_keys(cfg: dict | None = None) -> list[str]:
+    """Domains available for analysis: query-based ones plus application_logs when OpenSearch is enabled."""
     config = cfg or CONFIG
     queries = config.get("queries") or {}
     preferred_order = ["jvm", "database", "kafka", "microservices", "hard_resources", "lt_framework"]
     result = [d for d in preferred_order if d in queries]
+    logs_cfg = config.get("logs_source") if isinstance(config.get("logs_source"), dict) else {}
+    if logs_cfg.get("enabled"):
+        result.append("application_logs")
     for key in queries.keys():
         if key not in result:
             result.append(key)
@@ -413,10 +434,6 @@ def _find_area_for_service(service_id: str | None) -> str | None:
     return None
 
 
-def _default_section_template(section: str) -> dict:
-    return _deep_copy_prompts(section)
-
-
 def _ensure_area_runtime(area_name: str):
     runtime = _load_settings_runtime_data()
     if "per_area" not in runtime or not isinstance(runtime.get("per_area"), dict):
@@ -427,18 +444,11 @@ def _ensure_area_runtime(area_name: str):
 
 
 def _bootstrap_area_defaults(area_name: str | None) -> None:
-    if not area_name:
+    """Registers the area in runtime settings; sections it does not set inherit the global values."""
+    if not area_name or isinstance(_per_area_config().get(area_name), dict):
         return
-    runtime, area_entry = _ensure_area_runtime(area_name)
-    changed = False
-    for section in BOOTSTRAP_SECTIONS:
-        if section in area_entry and isinstance(area_entry[section], dict) and area_entry[section]:
-            continue
-        template = _default_section_template(section)
-        area_entry[section] = template
-        changed = True
-    if changed:
-        _save_settings_runtime_data(runtime)
+    runtime, _area = _ensure_area_runtime(area_name)
+    _save_settings_runtime_data(runtime)
 
 
 def _bootstrap_service_configs(area_name: str | None, service_id: str | None) -> None:
@@ -448,19 +458,13 @@ def _bootstrap_service_configs(area_name: str | None, service_id: str | None) ->
     runtime, area_entry = _ensure_area_runtime(area_name)
     if "services" not in area_entry or not isinstance(area_entry.get("services"), dict):
         area_entry["services"] = {}
+    changed = False
     if service_id not in area_entry["services"] or not isinstance(area_entry["services"].get(service_id), dict):
         area_entry["services"][service_id] = {}
-    service_entry = area_entry["services"][service_id]
-    changed = False
-    for section in BOOTSTRAP_SECTIONS:
-        section_value = service_entry.get(section)
-        if isinstance(section_value, dict) and section_value:
-            continue
-        inherit = area_entry.get(section)
-        if not isinstance(inherit, dict) or not inherit:
-            inherit = _default_section_template(section)
-        service_entry[section] = copy.deepcopy(inherit)
         changed = True
+    # Area settings are not copied onto the service. A copied snapshot would hide
+    # later edits of the area. queries, sla and prompts land here only when the
+    # user saves that service in the settings UI.
     if changed:
         _save_settings_runtime_data(runtime)
     _bootstrap_metrics_service_config(area_name, service_id)
@@ -574,22 +578,49 @@ def _series_key_for(domain: str, query_label: str, default_key: str = "applicati
 
 
 def convert_to_timestamp(date_str: str) -> int:
-    dt = datetime.strptime(date_str, "%Y-%m-%dT%H:%M")
+    """Converts an ISO 8601 datetime string to unix milliseconds.
+
+    Accepts values with an explicit offset (``2025-01-15T10:00:00+03:00``,
+    ``...Z``) and the legacy offset-less form ``2025-01-15T10:00``, which is
+    interpreted in the server's local time zone.
+
+    Raises:
+        ValueError: if the string is not a valid ISO 8601 datetime.
+    """
+    raw = (date_str or "").strip()
+    if not raw:
+        raise ValueError("Пустое значение времени")
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    dt = datetime.fromisoformat(raw)
     return int(dt.timestamp() * 1000)
+
+
+def _run_tables(cfg: dict) -> tuple[str, tuple[str, ...]]:
+    """Schema and every table that stores rows keyed by run_name."""
+    schema = cfg.get("schema", "public")
+    tables = (
+        cfg.get("table", "metrics"),
+        cfg.get("llm_table", "llm_reports"),
+        cfg.get("engineer_table", "engineer_reports"),
+        cfg.get("confluence_table", "confluence_publications"),
+        cfg.get("llm_feedback_table", "llm_feedback"),
+    )
+    return schema, tables
 
 
 def _delete_run_data(run_name: str) -> None:
     cfg = (CONFIG.get("storage", {}) or {}).get("timescale", {})
-    schema = cfg.get("schema", "public")
-    metrics_table = cfg.get("table", "metrics")
-    llm_table = cfg.get("llm_table", "llm_reports")
-    engineer_table = cfg.get("engineer_table", "engineer_reports")
+    schema, tables = _run_tables(cfg)
     conn = _ts_conn()
     with conn, conn.cursor() as cur:
-        for table in (llm_table, engineer_table, metrics_table):
+        for table in tables:
             try:
+                cur.execute("SAVEPOINT run_delete")
                 cur.execute(f"DELETE FROM {schema}.{table} WHERE run_name = %s", (run_name,))
+                cur.execute("RELEASE SAVEPOINT run_delete")
             except Exception:
+                cur.execute("ROLLBACK TO SAVEPOINT run_delete")
                 logger.exception("Не удалось удалить данные запуска '%s' из %s.%s", run_name, schema, table)
     conn.close()
 
@@ -609,50 +640,53 @@ def _rename_run_data(old_run_name: str, new_run_name: str) -> dict:
         return {"status": "ok", "renamed": 0, "run_name": new_name}
 
     cfg = (CONFIG.get("storage", {}) or {}).get("timescale", {})
-    schema = cfg.get("schema", "public")
-    metrics_table = cfg.get("table", "metrics")
-    llm_table = cfg.get("llm_table", "llm_reports")
-    engineer_table = cfg.get("engineer_table", "engineer_reports")
-    tables = (metrics_table, llm_table, engineer_table)
+    schema, tables = _run_tables(cfg)
     conn = _ts_conn()
     renamed = 0
+
+    def _run_name_exists(cur, run_name: str) -> bool:
+        # Each probe is isolated in a savepoint so a missing table does not abort the transaction.
+        found = False
+        for table in tables:
+            try:
+                cur.execute("SAVEPOINT run_name_probe")
+                cur.execute(
+                    sql.SQL("SELECT 1 FROM {}.{} WHERE run_name = %s LIMIT 1").format(
+                        sql.Identifier(schema), sql.Identifier(table)
+                    ),
+                    (run_name,),
+                )
+                found = bool(cur.fetchone()) or found
+                cur.execute("RELEASE SAVEPOINT run_name_probe")
+            except Exception:
+                cur.execute("ROLLBACK TO SAVEPOINT run_name_probe")
+        return found
+
     try:
         try:
-            _ensure_schema_and_table(conn, cfg, schema, metrics_table)
+            _ensure_schema_and_table(conn, cfg, schema, cfg.get("table", "metrics"))
             _ensure_llm_reports_table(conn, cfg)
             _ensure_engineer_reports_table(conn, cfg)
         except Exception:
             logger.exception("Не удалось подготовить таблицы для переименования отчёта")
         with conn, conn.cursor() as cur:
-            old_exists = False
-            new_exists = False
-            for table in tables:
-                cur.execute(
-                    sql.SQL("SELECT 1 FROM {}.{} WHERE run_name = %s LIMIT 1").format(
-                        sql.Identifier(schema), sql.Identifier(table)
-                    ),
-                    (old_name,),
-                )
-                old_exists = bool(cur.fetchone()) or old_exists
-                cur.execute(
-                    sql.SQL("SELECT 1 FROM {}.{} WHERE run_name = %s LIMIT 1").format(
-                        sql.Identifier(schema), sql.Identifier(table)
-                    ),
-                    (new_name,),
-                )
-                new_exists = bool(cur.fetchone()) or new_exists
-            if not old_exists:
+            if not _run_name_exists(cur, old_name):
                 raise LookupError(f"Отчёт '{old_name}' не найден")
-            if new_exists:
+            if _run_name_exists(cur, new_name):
                 raise FileExistsError(f"Отчёт '{new_name}' уже существует")
             for table in tables:
-                cur.execute(
-                    sql.SQL("UPDATE {}.{} SET run_name = %s WHERE run_name = %s").format(
-                        sql.Identifier(schema), sql.Identifier(table)
-                    ),
-                    (new_name, old_name),
-                )
-                renamed += int(cur.rowcount or 0)
+                try:
+                    cur.execute("SAVEPOINT run_name_rename")
+                    cur.execute(
+                        sql.SQL("UPDATE {}.{} SET run_name = %s WHERE run_name = %s").format(
+                            sql.Identifier(schema), sql.Identifier(table)
+                        ),
+                        (new_name, old_name),
+                    )
+                    renamed += int(cur.rowcount or 0)
+                    cur.execute("RELEASE SAVEPOINT run_name_rename")
+                except Exception:
+                    cur.execute("ROLLBACK TO SAVEPOINT run_name_rename")
         return {"status": "ok", "renamed": renamed, "run_name": new_name, "old_run_name": old_name}
     finally:
         conn.close()
@@ -710,7 +744,9 @@ def _bootstrap_service_queries(area_name: str, service_name: str) -> None:
 
 
 __all__ = [
+    "AREA_OVERRIDABLE_SECTIONS",
     "CONFIG_RUNTIME_PATH",
+    "CONFLUENCE_TEMPLATE_KEYS",
     "METRICS_RUNTIME_PATH",
     "PROMPTS_DIR",
     "PROMPT_DOMAIN_FILES",
@@ -730,6 +766,7 @@ __all__ = [
     "_find_area_for_service",
     "_list_project_areas",
     "_load_base_prompts",
+    "_load_metrics_runtime_data",
     "_load_settings_runtime_data",
     "_metrics_service_entry",
     "_metrics_services_for_area",
@@ -739,6 +776,7 @@ __all__ = [
     "_rename_run_data",
     "_resolve_services_filter",
     "_resolve_services_for_area",
+    "_save_metrics_runtime_data",
     "_save_settings_runtime_data",
     "_series_key_for",
     "_service_meta",

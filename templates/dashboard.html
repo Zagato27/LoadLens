@@ -1,114 +1,91 @@
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Дэшборд</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,400;0,500;0,600;0,700;1,600&display=swap" rel="stylesheet">
-  <style>
-    body { display:block; min-height:100vh; margin:0; font-family:'Montserrat', Arial, sans-serif; background:#121212; color:#fff; }
-    .app-header { position:sticky; top:0; display:flex; align-items:center; gap:12px; z-index:2000; width:100%; max-width:1400px; margin:0 auto; padding:8px 12px; --brandSize:40px; background:#121212; border-bottom:1px solid #2a2a2a; }
-    .app-header .logo { width:var(--brandSize); height:var(--brandSize); object-fit:contain; }
-    .app-header .brand { font-size:var(--brandSize); line-height:var(--brandSize); font-weight:600; font-style:italic; letter-spacing:.2px; color:#eaeaea; }
-    .app-nav { display:flex; gap:16px; margin-left:auto; white-space:nowrap; align-items:center; }
-    .app-nav .nav-btn { height:36px; padding:8px 4px; background:transparent; border:none; color:#eaeaea; border-bottom:2px solid transparent; cursor:pointer; font-weight:600; font-style:italic; text-decoration:none; display:inline-flex; align-items:center; }
-    .app-nav .nav-btn:hover { color:#fff; border-bottom-color:#3700b3; }
-    .app-nav .nav-btn.active { color:#fff; border-bottom-color:#6200ee; }
+{% extends "base.html" %}
+{% set active_nav = 'dashboard' %}
+{% block title %}Дэшборд{% endblock %}
+{% block head %}
+<script src="/static/vendor/chart.umd.js"></script>
+<style>
+  .summary { display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
+  .kv { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .kv .k { color: var(--text-muted); width: 130px; flex: 0 0 auto; }
+  .kv .v { font-weight: 600; word-break: break-word; }
+  .card .grow { flex: 1; }
+  .card.stack { display: flex; flex-direction: column; min-height: 220px; }
+  .chart-wrap { position: relative; height: 240px; }
+  .section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 20px; }
+  .section-head h3 { margin: 0; }
+  td.run-name { font-weight: 600; white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+  .empty-state .btn { margin-top: 8px; }
+</style>
+{% endblock %}
+{% block content %}
+  <h2>Дэшборд</h2>
 
-    .container { width:90%; max-width:1400px; margin:16px auto; }
-    .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap:16px; align-items: stretch; }
-    .card { background:#1e1e1e; border:1px solid #333; border-radius:8px; padding:16px; display:flex; flex-direction:column; min-height: 200px; }
-    .card h3 { margin:0 0 10px; font-weight:600; font-style:italic; }
-    .summary { display:flex; flex-direction:column; gap:6px; font-size:14px; }
-    .kv { display:flex; gap:8px; align-items:center; }
-    .k { color:#bbb; width:140px; flex:0 0 auto; }
-    .v { color:#fff; font-weight:600; }
-    .desc { color:#bbbbbb; font-size:13px; line-height:1.5; margin: 6px 0 12px 0; }
-    .grow { flex: 1; }
-    .pill { display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:14px; font-size:13px; font-weight:600; }
-    .pill.ok { background:#1f3d1f; color:#6be66b; border:1px solid #2e6b2e; }
-    .pill.warn { background:#3d341f; color:#f4c66a; border:1px solid #6b582e; }
-    .pill.fail { background:#3d1f1f; color:#f17878; border:1px solid #6b2e2e; }
-    .pill.na { background:#2a2a2a; color:#cfcfcf; border:1px solid #444; }
+  <section id="setupBanner" class="banner" data-min-role="admin" hidden>
+    <div>
+      <div class="banner-title">Похоже, LoadLens ещё не настроен</div>
+      <div class="muted">Пройдите мастер: подключение к базе, источникам метрик и LLM-провайдеру проверяется прямо в форме. Это займёт несколько минут.</div>
+    </div>
+    <div style="margin-left:auto; display:flex; gap:8px; flex-wrap:wrap">
+      <a class="btn btn-primary" href="/settings?wizard=1">Открыть мастер</a>
+      <button type="button" class="btn" id="bannerDemoBtn">Загрузить демо-данные</button>
+    </div>
+  </section>
 
-    .btn-tile { display:block; width:90%; margin: 0 auto; text-align:center; background:#6200ee; border:1px solid #6f35e3; color:#fff; padding:14px; border-radius:8px; text-decoration:none; font-weight:700; }
-    .btn-tile:hover { background:#3700b3; }
+  <section id="emptyState" class="card empty-state" hidden>
+    <h3>Отчётов пока нет</h3>
+    <p>Три шага, чтобы увидеть первый результат:</p>
+    <div class="steps">
+      <div class="step"><span class="step-num">1</span><div class="step-title">Проверить подключения</div><div class="step-desc">База данных, Prometheus/Grafana, метрики нагрузочного инструмента и LLM-провайдер — каждое соединение можно проверить кнопкой.</div><a class="btn btn-sm" href="/settings#connections" data-min-role="admin">Открыть настройки</a></div>
+      <div class="step"><span class="step-num">2</span><div class="step-title">Посмотреть демо-отчёт</div><div class="step-desc">Синтетический прогон с метриками, SLA-чеклистом и анализом — без внешних систем.</div><button type="button" class="btn btn-sm" id="emptyDemoBtn" data-min-role="admin">Загрузить демо-данные</button></div>
+      <div class="step"><span class="step-num">3</span><div class="step-title">Создать первый отчёт</div><div class="step-desc">Укажите окно теста, сервис и тип нагрузки; прогресс виден по фазам.</div><a class="btn btn-sm btn-primary" href="/new" data-min-role="engineer">Новый отчёт</a></div>
+    </div>
+  </section>
 
-    .chart-wrap { position:relative; height:260px; }
-    /* Унификация селектора проектной области */
-    .pa-select { height: 36px; padding: 0 10px; background: #2b2b2b; border: 1px solid #444; border-radius: 6px; color: #eaeaea; font-family: 'Montserrat', Arial, sans-serif; font-weight: 600; font-style: italic; font-size: 14px; }
-  </style>
-</head>
-<body>
-  <div class="app-header">
-    <img class="logo" src="/assets/logo.png" alt="LoadLens" />
-    <span class="brand">LoadLens</span>
-    <div class="app-nav">
-      <select id="projectAreaSelect" class="pa-select">
-        <option value="">Все области</option>
-      </select>
-      <a class="nav-btn active" href="/">Дэшборд</a>
-      <a class="nav-btn" href="/new">Новый отчёт</a>
-      <a class="nav-btn" href="/reports">Архив</a>
-      <a class="nav-btn" href="/compare">Сравнение тестов</a>
-      <a class="nav-btn" href="/settings">Настройки</a>
+  <div class="grid" id="dashGrid">
+    <div class="card stack">
+      <h3>Последний запуск</h3>
+      <div class="summary" id="lastSummary">
+        <div class="kv"><div class="k">Запуск</div><div class="v" id="sumRun">—</div></div>
+        <div class="kv"><div class="k">Сервис</div><div class="v" id="sumService">—</div></div>
+        <div class="kv"><div class="k">Период теста</div><div class="v" id="sumPeriod">—</div></div>
+        <div class="kv"><div class="k">Вердикт</div><div class="v" id="sumVerdict">—</div></div>
+      </div>
+      <div class="grow"></div>
+      <a id="lastReportLink" class="btn-tile" href="#" style="display:none">Открыть отчёт</a>
+    </div>
+    <div class="card stack">
+      <h3>Вердикты по запускам</h3>
+      <div class="chart-wrap"><canvas id="statusChart" aria-label="Распределение вердиктов" role="img"></canvas></div>
+      <div class="dim" id="verdictTotals"></div>
+    </div>
+    <div class="card stack" id="jobsCard" hidden>
+      <h3>Задачи в работе</h3>
+      <div id="jobsList"></div>
+      <div class="grow"></div>
+      <a class="btn btn-sm" href="/new" data-min-role="engineer">К созданию отчёта</a>
     </div>
   </div>
 
-  <div class="container">
-    <div class="grid">
-      <div class="card">
-        <h3>Сводка: последний запуск</h3>
-        <div class="summary" id="lastSummary">
-          <div class="kv"><div class="k">Название запуска</div><div class="v" id="sumRun">—</div></div>
-          <div class="kv"><div class="k">Сервис</div><div class="v" id="sumService">—</div></div>
-          <div class="kv"><div class="k">Период теста</div><div class="v" id="sumPeriod">—</div></div>
-          <div class="kv"><div class="k">Вердикт</div><div class="v" id="sumVerdict">—</div></div>
-        </div>
-        <div class="grow"></div>
-        <a id="lastReportLink" class="btn-tile" href="#" style="display:none">Перейти к отчёту</a>
-      </div>
-
-      <div class="card">
-        <h3>Статусы запусков</h3>
-        <div class="chart-wrap"><canvas id="statusChart"></canvas></div>
-      </div>
-
-      <div class="card">
-        <h3>Новый отчёт</h3>
-        <div class="grow">
-          <div class="desc">Запустите сбор метрик и LLM-анализ для выбранного интервала и сервиса. После завершения будет доступен подробный отчёт.</div>
-        </div>
-        <a class="btn-tile" href="/new">Перейти к созданию отчёта</a>
-      </div>
-
-      <div class="card">
-        <h3>Архив</h3>
-        <div class="grow">
-          <div class="desc">Список всех запусков с поиском и сортировкой. Открывайте отчёты, копируйте ссылки и переходите к сравнению.</div>
-        </div>
-        <a class="btn-tile" href="/reports">Открыть архив запусков</a>
-      </div>
-
-      <div class="card">
-        <h3>Сравнение тестов</h3>
-        <div class="grow">
-          <div class="desc">Сравните два запуска по выбранным метрикам: отобразите графики в единой шкале и выгрузите визуализацию.</div>
-        </div>
-        <a class="btn-tile" href="/compare">Перейти к сравнению</a>
-      </div>
+  <div class="section-head"><h3>По сервисам</h3><span class="dim">последний вердикт и история последних пяти запусков</span></div>
+  <div class="card">
+    <div class="table-wrap">
+      <table class="data-table" id="servicesTable">
+        <thead><tr><th>Сервис</th><th>Последний запуск</th><th>Вердикт</th><th class="num">Max RPS</th><th>Последние запуски</th><th><span class="visually-hidden">Действия</span></th></tr></thead>
+        <tbody id="servicesBody"></tbody>
+      </table>
     </div>
   </div>
 
-  <script>
-/* INLINE JS DISABLED (moved to static) */
-/*</script>
-  <script defer src="/static/js/common.js"></script>
-  <script defer src="/static/js/dashboard.js"></script>
-</body>
-</html>
-
-
+  <div class="section-head"><h3>Недавние запуски</h3><a href="/reports">Весь архив →</a></div>
+  <div class="card">
+    <div class="table-wrap">
+      <table class="data-table" id="recentTable">
+        <thead><tr><th>Запуск</th><th>Сервис</th><th>Тип теста</th><th>Вердикт</th><th>Отчёт создан</th></tr></thead>
+        <tbody id="recentBody"></tbody>
+      </table>
+    </div>
+  </div>
+{% endblock %}
+{% block scripts %}
+<script defer src="/static/js/dashboard.js"></script>
+{% endblock %}

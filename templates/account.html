@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}Профиль — LoadLens{% endblock %}
+{% block head %}
+<style>
+  .help { color: var(--text-muted); font-size: 13px; line-height: 1.5; margin: 6px 0 12px; }
+  .card-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+  .account-facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; }
+  .account-facts dt { color: var(--text-muted); }
+  .account-facts dd { margin: 0; }
+</style>
+{% endblock %}
+{% block content %}
+  <div class="page-header">
+    <h2 style="margin:0">Профиль</h2>
+  </div>
+
+  {% if force_change %}
+  <div class="banner" role="alert">
+    <div>
+      <div class="banner-title">Нужно сменить пароль</div>
+      <div>Пароль был задан администратором. Установите свой пароль, чтобы продолжить работу.</div>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="account-grid">
+    <section class="card" aria-labelledby="h-account">
+      <h3 id="h-account">Учётная запись</h3>
+      <dl class="account-facts">
+        <dt>Логин</dt><dd>{{ current_user.username }}</dd>
+        <dt>Имя</dt><dd>{{ current_user.display_name or '—' }}</dd>
+        <dt>Email</dt><dd>{{ current_user.email or '—' }}</dd>
+        <dt>Роль</dt><dd>{{ current_user.role.label }}</dd>
+        <dt>Источник</dt><dd>{{ 'локальная' if current_user.provider == 'local' else current_user.provider }}</dd>
+      </dl>
+    </section>
+
+    <section class="card" aria-labelledby="h-password">
+      <h3 id="h-password">Смена пароля</h3>
+      {% if current_user.provider == 'local' %}
+      <form id="passwordForm" data-min-length="{{ password_min_length }}" data-forced="{{ 1 if force_change else 0 }}" autocomplete="off">
+        <div class="form-grid">
+          <div>
+            <label for="currentPassword">Текущий пароль</label>
+            <input id="currentPassword" type="password" autocomplete="current-password" required />
+          </div>
+          <div>
+            <label for="newPassword">Новый пароль</label>
+            <input id="newPassword" type="password" autocomplete="new-password" minlength="{{ password_min_length }}" required />
+            <div class="field-hint">Не короче {{ password_min_length }} символов, без логина внутри.</div>
+          </div>
+          <div>
+            <label for="confirmPassword">Повторите новый пароль</label>
+            <input id="confirmPassword" type="password" autocomplete="new-password" required />
+          </div>
+        </div>
+        <div class="form-error" id="passwordError" role="alert"></div>
+        <div class="card-actions">
+          <button type="submit" class="btn btn-primary">Сменить пароль</button>
+        </div>
+      </form>
+      {% else %}
+      <p class="help">Пароль этой учётной записи управляется внешним провайдером и здесь не меняется.</p>
+      {% endif %}
+    </section>
+
+    {% if tokens_enabled and not force_change %}
+    <section class="card wide" aria-labelledby="h-tokens">
+      <h3 id="h-tokens">API-токены</h3>
+      <p class="help">Токен нужен для автоматизации: например, чтобы запускать отчёт из CI после нагрузочного теста. Передавайте его в заголовке <code>Authorization: Bearer &lt;токен&gt;</code>. Полное значение показывается один раз при создании. Токен не может иметь роль выше вашей и перестаёт работать, если учётную запись отключить.</p>
+      <form id="tokenForm" class="inline-form" autocomplete="off">
+        <label for="tokenName">Название
+          <input id="tokenName" type="text" maxlength="80" placeholder="например, CI nightly" required />
+        </label>
+        <label for="tokenRole">Роль
+          <select id="tokenRole">
+            {% for role in roles %}
+            <option value="{{ role.key }}"{% if role.key == role_key %} selected{% endif %}>{{ role.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label for="tokenDays">Срок, дней
+          <input id="tokenDays" type="number" min="1" max="{{ token_max_days }}" value="{{ token_default_days }}" required />
+        </label>
+        <button type="submit" class="btn btn-primary">Создать токен</button>
+      </form>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead><tr><th>Название</th><th>Начало токена</th><th>Роль</th><th>Создан</th><th>Истекает</th><th>Использован</th><th>Статус</th><th><span class="visually-hidden">Действия</span></th></tr></thead>
+          <tbody id="tokensBody"><tr class="empty-row"><td colspan="8">Загрузка…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+    {% endif %}
+  </div>
+{% endblock %}
+{% block scripts %}
+<script defer src="/static/js/account.js"></script>
+{% endblock %}

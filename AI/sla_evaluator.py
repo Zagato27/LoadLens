@@ -12,10 +12,119 @@
 from __future__ import annotations
 
 import logging
-import re
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional
 
+import pandas as pd
+
 logger = logging.getLogger(__name__)
+
+PRIMARY_SPECS: tuple[tuple[str, str, str, str], ...] = (
+    ("error_rate", "max_error_rate_pct", "error_rate_query", "%"),
+    ("p95_latency", "max_p95_ms", "p95_query", "мс"),
+    ("p99_latency", "max_p99_ms", "p99_query", "мс"),
+)
+SECONDARY_SPECS: tuple[tuple[str, str, str, str], ...] = (
+    ("cpu_usage", "max_cpu_pct", "cpu_query", "%"),
+    ("memory_usage", "max_memory_pct", "memory_query", "%"),
+)
+
+
+@dataclass(frozen=True)
+class StableWindow:
+    """RPS plateau the SLA is evaluated on; ``level`` is its stable_max."""
+
+    start: str
+    end: str
+    level: float
+    series: str
+    label: str
+    degraded_level: Optional[float] = None
+    degraded_checks: tuple[str, ...] = ()
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "start": self.start,
+            "end": self.end,
+            "level": round(self.level, 2),
+            "series": self.series,
+            "label": self.label,
+            "degraded_level": round(self.degraded_level, 2) if self.degraded_level is not None else None,
+            "degraded_checks": list(self.degraded_checks),
+        }
+
+SLA_CHECK_TITLES = {
+    "target_rps": "целевой RPS",
+    "error_rate": "доля ошибок",
+    "p95_latency": "p95 latency",
+    "p99_latency": "p99 latency",
+    "cpu_usage": "CPU",
+    "memory_usage": "память",
+}
+
+
+def _check_title(name: str) -> str:
+    key = str(name or "").strip()
+    return SLA_CHECK_TITLES.get(key, key or "критерий")
+
+
+def _format_check_line(check: Dict[str, Any]) -> str:
+    title = _check_title(str(check.get("name") or ""))
+    message = str(check.get("message") or "").strip()
+    if message:
+        return f"- {title}: {message}"
+    passed = check.get("passed")
+    actual = check.get("actual")
+    threshold = check.get("threshold")
+    if passed is True:
+        return f"- {title}: порог соблюдён ({actual} при лимите {threshold})"
+    if passed is False:
+        return f"- {title}: порог нарушен ({actual} при лимите {threshold})"
+    return f"- {title}: нет данных для проверки"
+
+
+def format_sla_rationale(verdict: str, checks: List[Dict[str, Any]]) -> str:
+    """Human-readable explanation of why the SLA verdict was chosen."""
+    rps = next((item for item in checks if item.get("name") == "target_rps"), None)
+    failed = [item for item in checks if item.get("passed") is False]
+    failed_titles = ", ".join(_check_title(str(item.get("name") or "")) for item in failed)
+    if verdict == "Успешно":
+        if rps and rps.get("passed") is True and rps.get("actual") is not None:
+            head = (
+                f"Статус «Успешно»: целевой RPS достигнут "
+                f"({rps['actual']} ≥ {rps['threshold']}), вторичные пороги SLA не нарушены."
+            )
+        else:
+            head = "Статус «Успешно»: проверяемые SLA-критерии соблюдены."
+    elif verdict == "Есть риски":
+        if rps and rps.get("passed") is True and failed:
+            head = (
+                f"Статус «Есть риски»: целевой RPS достигнут, "
+                f"но нарушены вторичные пороги ({failed_titles})."
+            )
+        elif failed:
+            head = (
+                f"Статус «Есть риски»: нарушены критерии {failed_titles}, "
+                "без однозначного провала по целевому RPS."
+            )
+        else:
+            head = "Статус «Есть риски»: не все SLA-критерии удалось подтвердить числами."
+    elif verdict == "Провал":
+        if rps and rps.get("passed") is False and rps.get("actual") is not None:
+            head = (
+                f"Статус «Провал»: целевой RPS не достигнут "
+                f"({rps['actual']} < {rps['threshold']})."
+            )
+        elif failed:
+            head = f"Статус «Провал»: нарушены обязательные SLA-критерии ({failed_titles})."
+        else:
+            head = "Статус «Провал»: по SLA целевой результат теста не подтверждён."
+    else:
+        head = "Статус «Недостаточно данных»: не хватает метрик, чтобы проверить SLA."
+    lines = [_format_check_line(item) for item in checks]
+    if not lines:
+        return head
+    return head + "\n" + "\n".join(lines)
 
 
 def _safe_float(val: Any) -> Optional[float]:
@@ -25,20 +134,6 @@ def _safe_float(val: Any) -> Optional[float]:
         return float(val)
     except (TypeError, ValueError):
         return None
-
-
-def _keyword_matches(label: str, keyword: str) -> bool:
-    """Сопоставляет keyword с label как substring или regex."""
-    kw = str(keyword or "").strip().lower()
-    if not kw:
-        return False
-    has_regex_meta = any(ch in kw for ch in (".", "*", "+", "?", "[", "]", "(", ")", "|", "^", "$", "\\"))
-    if has_regex_meta:
-        try:
-            return re.search(kw, label) is not None
-        except re.error:
-            return kw in label
-    return kw in label
 
 
 def _safe_bool(val: Any, default: bool = False) -> bool:
@@ -200,22 +295,301 @@ def extract_target_rps_from_pack(
     return out
 
 
-def _extract_metric_from_pack(
-    pack: Dict[str, Any],
-    label_keywords: List[str],
-    field: str = "max",
-) -> Optional[float]:
-    """Извлекает числовое значение из top_series по ключевым словам в label."""
-    best: Optional[float] = None
-    for section in (pack.get("sections") or []):
-        label = str(section.get("label") or "").lower()
-        if not any(_keyword_matches(label, kw) for kw in label_keywords):
+def _segment_end_sort_key(value: Any) -> float:
+    try:
+        return float(pd.Timestamp(value).value)
+    except (TypeError, ValueError):
+        return float("-inf")
+
+
+def _stable_windows_from_rps(pack: Dict[str, Any], query_label: Optional[str]) -> List[StableWindow]:
+    """Stable segments of the designated RPS series, latest first.
+
+    Load steps are stretched to the next segment or the end of the test, so they
+    still contain the tail after the plateau. Detector segments stop at the drop.
+    """
+    section = _find_section_by_label(list(pack.get("sections") or []), str(query_label or ""))
+    if not isinstance(section, dict):
+        return []
+    chosen: Optional[Dict[str, Any]] = None
+    for series in section.get("top_series") or []:
+        if not isinstance(series, dict) or series.get("stable_max") is None:
             continue
-        for series in (section.get("top_series") or []):
-            val = _safe_float(series.get(field))
-            if val is not None and (best is None or val > best):
-                best = val
-    return best
+        if chosen is None or float(series.get("stable_max") or 0) > float(chosen.get("stable_max") or 0):
+            chosen = series
+    if chosen is None:
+        return []
+    label = str(section.get("label") or query_label or "")
+    name = str(chosen.get("series") or "")
+    windows = [
+        StableWindow(start=str(seg["start"]), end=str(seg["end"]), level=float(seg.get("level") or 0.0), series=name, label=label)
+        for seg in (chosen.get("step_segments") or [])
+        if isinstance(seg, dict) and seg.get("stable") is True and not seg.get("after_drop") and not seg.get("dip")
+        and seg.get("start") and seg.get("end")
+    ]
+    if not windows and chosen.get("stable_window_start") and chosen.get("stable_window_end"):
+        windows = [StableWindow(
+            start=str(chosen["stable_window_start"]), end=str(chosen["stable_window_end"]),
+            level=float(chosen["stable_max"]), series=name, label=label,
+        )]
+    return sorted(windows, key=lambda w: _segment_end_sort_key(w.end), reverse=True)
+
+
+def _checks_for_window(
+    sla_config: Dict[str, Any],
+    specs: tuple[tuple[str, str, str, str], ...],
+    labeled: Any,
+    window: Optional[StableWindow],
+    category: str,
+) -> List[Dict[str, Any]]:
+    checks: List[Dict[str, Any]] = []
+    for name, threshold_key, query_key, unit in specs:
+        check = _check_by_query_label(
+            sla_config, name=name, threshold_key=threshold_key, query_key=query_key,
+            labeled=labeled, window=window, unit=unit, category=category,
+        )
+        if check is not None:
+            checks.append(check)
+    return checks
+
+
+def _peak_column(frame: Optional[pd.DataFrame]) -> Optional[str]:
+    if frame is None or frame.empty:
+        return None
+    best_name: Optional[str] = None
+    best_max: Optional[float] = None
+    for column in frame.columns:
+        values = pd.to_numeric(frame[column], errors="coerce").dropna()
+        if values.empty:
+            continue
+        current = float(values.max())
+        if best_max is None or current > best_max:
+            best_name, best_max = str(column), current
+    return best_name
+
+
+def _mean_between(series: pd.Series, start: pd.Timestamp, end: pd.Timestamp) -> Optional[float]:
+    chunk = series[(series.index >= start) & (series.index <= end)].dropna()
+    if chunk.empty:
+        return None
+    return float(chunk.mean())
+
+
+def _windows_from_load_steps(
+    pack: Dict[str, Any],
+    query_label: Optional[str],
+    labeled: Any,
+) -> List[StableWindow]:
+    """Report steps, latest first. Their RPS is what the step table shows.
+
+    A recovered RPS dip is skipped: it is not a load level the system was tested at.
+    """
+    raw = [
+        item for item in (pack.get("load_steps") or [])
+        if isinstance(item, dict) and item.get("start_iso") and item.get("end_iso") and not item.get("dip")
+    ]
+    if not raw:
+        return []
+    label = str(query_label or "")
+    frame = _labeled_frame(labeled, label)
+    column = _peak_column(frame)
+    series = None
+    if frame is not None and column is not None:
+        values = pd.to_numeric(frame[column], errors="coerce")
+        index = pd.DatetimeIndex(frame.index)
+        values.index = index.tz_localize("UTC") if index.tz is None else index.tz_convert("UTC")
+        series = values
+    windows: List[StableWindow] = []
+    for step in raw:
+        level = _safe_float(step.get("rps_level"))
+        start = _as_utc(step.get("start_iso"))
+        end = _as_utc(step.get("end_iso"))
+        if level is None and series is not None and start is not None and end is not None:
+            level = _mean_between(series, start, end)
+        if level is None or start is None or end is None:
+            continue
+        windows.append(StableWindow(
+            start=str(step["start_iso"]),
+            end=str(step["end_iso"]),
+            level=level,
+            series=column or str(step.get("series") or ""),
+            label=label,
+        ))
+    return sorted(windows, key=lambda item: _segment_end_sort_key(item.end), reverse=True)
+
+
+def _select_sla_window(
+    sla_config: Dict[str, Any],
+    lt_pack: Dict[str, Any],
+    lt_labeled: Any,
+) -> tuple[Optional[StableWindow], List[Dict[str, Any]]]:
+    """Latest report step on which latency and error SLA still hold, with its checks.
+
+    The step table is the source of the steps. A later flat RPS stretch can
+    continue through a latency collapse, so the search walks from the last step
+    backwards and stops at the last one that still passes. Detector segments are
+    used only when the report has no load steps. When every step breaks the SLA
+    the latest one is kept and fails.
+    """
+    query = sla_config.get("max_performance_query")
+    candidates = _windows_from_load_steps(lt_pack, query, lt_labeled)
+    if not candidates:
+        candidates = _stable_windows_from_rps(lt_pack, query)
+    if not candidates:
+        return None, _checks_for_window(sla_config, PRIMARY_SPECS, lt_labeled, None, "primary")
+    latest_checks: List[Dict[str, Any]] = []
+    degraded: Optional[StableWindow] = None
+    degraded_names: tuple[str, ...] = ()
+    for window in candidates:
+        checks = _checks_for_window(sla_config, PRIMARY_SPECS, lt_labeled, window, "primary")
+        if window is candidates[0]:
+            latest_checks = checks
+        failed = tuple(str(c["name"]) for c in checks if c.get("passed") is False)
+        if not failed:
+            if degraded is None:
+                return window, checks
+            return replace(window, degraded_level=degraded.level, degraded_checks=degraded_names), checks
+        degraded, degraded_names = window, failed
+    return candidates[0], latest_checks
+
+
+def _as_utc(value: Any) -> Optional[pd.Timestamp]:
+    if value is None:
+        return None
+    try:
+        ts = pd.Timestamp(value, unit="s", tz="UTC") if isinstance(value, (int, float)) else pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        return ts.tz_localize("UTC")
+    return ts.tz_convert("UTC")
+
+
+def _bin_width(index: pd.DatetimeIndex) -> pd.Timedelta:
+    if len(index) < 2:
+        return pd.Timedelta(0)
+    deltas = pd.Series(index).diff().dropna()
+    if deltas.empty:
+        return pd.Timedelta(0)
+    width = deltas.median()
+    if pd.isna(width) or width <= pd.Timedelta(0):
+        return pd.Timedelta(0)
+    return width
+
+
+def _worst_series_p95(df: pd.DataFrame, start: Optional[pd.Timestamp] = None, end: Optional[pd.Timestamp] = None) -> tuple[Optional[float], Optional[str]]:
+    """Highest 95th percentile among series, optionally inside the stable window.
+
+    A resampled point is stamped at the start of its bucket but already averages
+    the whole bucket. Buckets that begin inside the window and end after it are
+    dropped, otherwise the spike after the plateau leaks into the percentile.
+    """
+    if df is None or df.empty or not isinstance(df.index, pd.DatetimeIndex):
+        return None, None
+    work = df.copy()
+    idx = pd.DatetimeIndex(work.index)
+    work.index = idx.tz_localize("UTC") if idx.tz is None else idx.tz_convert("UTC")
+    if start is not None and end is not None:
+        width = _bin_width(work.index)
+        bin_end = work.index + width
+        work = work[(work.index >= start) & (bin_end <= end)]
+    best: Optional[float] = None
+    best_name: Optional[str] = None
+    for col in work.columns:
+        values = pd.to_numeric(work[col], errors="coerce").dropna()
+        if values.empty:
+            continue
+        current = float(values.quantile(0.95))
+        if best is None or current > best:
+            best, best_name = current, str(col)
+    return best, best_name
+
+
+def _labeled_frame(labeled: Any, query: str) -> Optional[pd.DataFrame]:
+    if not isinstance(labeled, list):
+        return None
+    section = _find_section_by_label([item for item in labeled if isinstance(item, dict)], query)
+    df = section.get("df") if isinstance(section, dict) else None
+    return df if isinstance(df, pd.DataFrame) else None
+
+
+def _check_by_query_label(
+    sla_config: Dict[str, Any],
+    *,
+    name: str,
+    threshold_key: str,
+    query_key: str,
+    labeled: Any,
+    window: Optional[StableWindow],
+    unit: str,
+    category: str,
+) -> Optional[Dict[str, Any]]:
+    """Checks one SLA threshold against the 95th percentile of a named query.
+
+    On a step test the window is a stable RPS segment closed before the drop.
+    Soak tests and runs without such a segment use the whole test window. A
+    resampled bucket that runs past the segment end is excluded. Among several
+    series the worst percentile is compared with the threshold.
+    """
+    threshold = _safe_float(sla_config.get(threshold_key))
+    if threshold is None:
+        return None
+    query = str(sla_config.get(query_key) or "").strip()
+    if not query:
+        return _make_check(
+            name=name,
+            threshold=threshold,
+            actual=None,
+            passed=None,
+            message="Источник не задан: выберите запрос в настройках SLA",
+            category=category,
+        )
+    frame = _labeled_frame(labeled, query)
+    if frame is None:
+        return _make_check(
+            name=name,
+            threshold=threshold,
+            actual=None,
+            passed=None,
+            message=f"Нет данных по запросу «{query}»",
+            category=category,
+        )
+    start = _as_utc(window.start) if window else None
+    end = _as_utc(window.end) if window else None
+    scope = "всего окна"
+    actual, series = (None, None)
+    if window is not None and start is not None and end is not None and end > start:
+        actual, series = _worst_series_p95(frame, start, end)
+        scope = f"стабильной ступени ≈{window.level:.0f} RPS"
+    elif window is None:
+        actual, series = _worst_series_p95(frame)
+    if actual is None:
+        empty_message = (
+            f"На стабильной ступени RPS нет точек запроса «{query}»"
+            if window is not None
+            else f"В запросе «{query}» нет чисел"
+        )
+        return _make_check(
+            name=name,
+            threshold=threshold,
+            actual=None,
+            passed=None,
+            message=empty_message,
+            category=category,
+        )
+    passed = actual <= threshold
+    series_note = f", серия «{series}»" if series else ""
+    return _make_check(
+        name=name,
+        threshold=threshold,
+        actual=round(actual, 3),
+        passed=passed,
+        message=(
+            f"p95 {actual:.2f} {unit} {'≤' if passed else '>'} порог {threshold:g} {unit} "
+            f"({scope}, запрос «{query}»{series_note})"
+        ),
+        category=category,
+    )
 
 
 def _make_check(
@@ -267,13 +641,38 @@ def evaluate_sla(
         }
 
     checks: List[Dict[str, Any]] = []
-    lt_pack = (domain_data.get("lt_framework") or {}).get("pack") or {}
-    hr_pack = (domain_data.get("hard_resources") or {}).get("pack") or {}
-    ms_pack = (domain_data.get("microservices") or {}).get("pack") or {}
+    lt_payload = domain_data.get("lt_framework") or {}
+    hr_payload = domain_data.get("hard_resources") or {}
+    lt_pack = lt_payload.get("pack") or {}
+    lt_labeled = lt_payload.get("labeled")
+    perf_query = str(sla_config.get("max_performance_query") or "").strip() or None
+    if test_mode == "stability":
+        window, primary_checks = None, _checks_for_window(sla_config, PRIMARY_SPECS, lt_labeled, None, "primary")
+    else:
+        window, primary_checks = _select_sla_window(sla_config, lt_pack, lt_labeled)
 
     target_rps = _safe_float(sla_config.get("target_rps"))
-    perf_query = str(sla_config.get("max_performance_query") or "").strip() or None
-    if target_rps is not None:
+    if target_rps is not None and window is not None:
+        passed = window.level >= target_rps
+        degraded_note = ""
+        if window.degraded_level is not None:
+            degraded_note = (
+                f"; на ступени ≈{window.degraded_level:.0f} RPS нарушены: "
+                f"{', '.join(window.degraded_checks)}"
+            )
+        checks.append(_make_check(
+            name="target_rps",
+            threshold=target_rps,
+            actual=round(window.level, 2),
+            passed=passed,
+            severity="critical",
+            message=(
+                f"RPS {window.level:.1f} (stable_max (query: {window.label})) "
+                f"{'≥' if passed else '<'} целевой {target_rps:.0f}"
+                f"; label='{window.label}'; series='{window.series}'{degraded_note}"
+            ),
+        ))
+    elif target_rps is not None:
         allow_peak_fallback = _safe_bool(sla_config.get("target_rps_allow_peak_fallback"), default=True)
         debug_peak_logging = _safe_bool(sla_config.get("debug_peak_logging"), default=False)
         rps_pick = extract_target_rps_from_pack(
@@ -313,92 +712,8 @@ def evaluate_sla(
                 message=f"Нет данных RPS из lt_framework (reason={reason or method})",
             ))
 
-    max_err = _safe_float(sla_config.get("max_error_rate_pct"))
-    if max_err is not None:
-        err_pct = _extract_metric_from_pack(
-            lt_pack, ["error", "ошибк", "fail"], field="max"
-        )
-        if err_pct is not None:
-            passed = err_pct <= max_err
-            checks.append(_make_check(
-                name="error_rate",
-                threshold=max_err,
-                actual=round(err_pct, 3),
-                passed=passed,
-                severity="warning",
-                message=f"Error rate {err_pct:.2f}% {'≤' if passed else '>'} порог {max_err}%",
-                category="primary",
-            ))
-
-    max_p95 = _safe_float(sla_config.get("max_p95_ms"))
-    if max_p95 is not None:
-        p95_val = _extract_metric_from_pack(
-            lt_pack, ["p95", "percentile.*95", "duration.*p95", "95"], field="max"
-        )
-        if p95_val is None:
-            p95_val = _extract_metric_from_pack(
-                ms_pack, ["p95", "average request time"], field="max"
-            )
-            if p95_val is not None:
-                p95_val *= 1000
-        if p95_val is not None:
-            passed = p95_val <= max_p95
-            checks.append(_make_check(
-                name="p95_latency",
-                threshold=max_p95,
-                actual=round(p95_val, 2),
-                passed=passed,
-                severity="warning",
-                message=f"P95 latency {p95_val:.1f} ms {'≤' if passed else '>'} порог {max_p95} ms",
-                category="primary",
-            ))
-
-    max_p99 = _safe_float(sla_config.get("max_p99_ms"))
-    if max_p99 is not None:
-        p99_val = _extract_metric_from_pack(
-            lt_pack, ["p99", "percentile.*99", "duration.*p99", "99"], field="max"
-        )
-        if p99_val is not None:
-            passed = p99_val <= max_p99
-            checks.append(_make_check(
-                name="p99_latency",
-                threshold=max_p99,
-                actual=round(p99_val, 2),
-                passed=passed,
-                severity="warning",
-                message=f"P99 latency {p99_val:.1f} ms {'≤' if passed else '>'} порог {max_p99} ms",
-                category="primary",
-            ))
-
-    max_cpu = _safe_float(sla_config.get("max_cpu_pct"))
-    if max_cpu is not None:
-        cpu_val = _extract_metric_from_pack(hr_pack, ["cpu"], field="max")
-        if cpu_val is not None:
-            passed = cpu_val <= max_cpu
-            checks.append(_make_check(
-                name="cpu_usage",
-                threshold=max_cpu,
-                actual=round(cpu_val, 2),
-                passed=passed,
-                severity="warning",
-                message=f"CPU usage {cpu_val:.1f}% {'≤' if passed else '>'} порог {max_cpu}%",
-                category="secondary",
-            ))
-
-    max_mem = _safe_float(sla_config.get("max_memory_pct"))
-    if max_mem is not None:
-        mem_val = _extract_metric_from_pack(hr_pack, ["memory", "mem"], field="max")
-        if mem_val is not None:
-            passed = mem_val <= max_mem
-            checks.append(_make_check(
-                name="memory_usage",
-                threshold=max_mem,
-                actual=round(mem_val, 2),
-                passed=passed,
-                severity="warning",
-                message=f"Memory usage {mem_val:.1f}% {'≤' if passed else '>'} порог {max_mem}%",
-                category="secondary",
-            ))
+    checks.extend(primary_checks)
+    checks.extend(_checks_for_window(sla_config, SECONDARY_SPECS, hr_payload.get("labeled"), window, "secondary"))
 
     if not checks:
         return {
@@ -480,4 +795,5 @@ def evaluate_sla(
         "checks": checks,
         "summary": summary,
         "test_mode": test_mode,
+        "stable_window": window.to_dict() if window is not None else None,
     }

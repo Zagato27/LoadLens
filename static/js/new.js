@@ -1,379 +1,500 @@
 // New report page logic (templates/index.html)
 (function () {
-  // Independent timers for progress branches
-  const progressTimers = { confluence: null, web: null };
-  let activeAreaCache = '';
+  const LL = window.LoadLens;
+  const POLL_INTERVAL_MS = 1500;
+  const JOBS_REFRESH_MS = 5000;
+  const LONG_WINDOW_WARN_MINUTES = 24 * 60;
+  const SERVICE_HINT = 'Список сервисов задаётся в настройках (раздел «Сервисы»).';
+  const TEST_TYPE_HINT = 'Тип теста подбирает инструкции для анализа ИИ и метод расчёта максимальной производительности.';
 
-  function clearProgressTimers() {
-    Object.keys(progressTimers).forEach((key) => {
-      if (progressTimers[key]) {
-        clearInterval(progressTimers[key]);
-        progressTimers[key] = null;
-      }
-    });
+  // Phase boundaries mirror the progress budget in AI/pipeline.py and update_page.py.
+  // The Confluence template path spends 0..40 on charts and attachments, then maps the pipeline into 40..94.
+  const WEB_PHASES = [
+    { key: 'prepare', from: 0 },
+    { key: 'collect', from: 10 },
+    { key: 'sla', from: 42 },
+    { key: 'save_metrics', from: 45 },
+    { key: 'llm', from: 47 },
+    { key: 'final', from: 83 },
+    { key: 'save', from: 95 },
+    { key: 'finish', from: 98 }
+  ];
+  const CONFLUENCE_PHASES = [
+    { key: 'prepare', from: 0 },
+    { key: 'charts', from: 8 },
+    { key: 'attachments', from: 28 },
+    { key: 'collect', from: 45 },
+    { key: 'sla', from: 63 },
+    { key: 'save_metrics', from: 64 },
+    { key: 'llm', from: 65 },
+    { key: 'final', from: 85 },
+    { key: 'save', from: 91 },
+    { key: 'finish', from: 98 }
+  ];
+  let activePhases = WEB_PHASES;
+
+  let progressTimer = null;
+  let jobsTimer = null;
+  // Options of the job currently shown in the progress card (run name, service, publication target).
+  let currentJobOpts = {};
+
+  const $ = (id) => document.getElementById(id);
+
+  function setHint(id, text, tone) {
+    const el = $(id);
+    if (!el) return;
+    el.textContent = text || '';
+    el.classList.remove('error', 'warn', 'ok');
+    if (tone) el.classList.add(tone);
   }
 
-  async function readJsonSafe(response) {
+  function setInvalid(id, invalid) {
+    const el = $(id);
+    if (el) el.setAttribute('aria-invalid', invalid ? 'true' : 'false');
+  }
+
+  function toLocalInputValue(date) {
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
+
+  // ---- services ---------------------------------------------------------
+
+  async function loadServices() {
+    const select = $('service');
+    if (!select) return;
     try {
-      return await response.json();
-    } catch (e) {
-      return {};
-    }
-  }
-
-  function messageFromResponse(payload, fallback) {
-    if (payload && typeof payload.message === 'string' && payload.message.trim()) return payload.message.trim();
-    if (payload && typeof payload.error === 'string' && payload.error.trim()) return payload.error.trim();
-    return fallback;
-  }
-
-  function resetServiceSelection() {
-    const serviceSelect = document.getElementById('serviceSelect');
-    if (serviceSelect) {
-      serviceSelect.textContent = 'Выберите сервис';
-      delete serviceSelect.dataset.serviceId;
-      delete serviceSelect.dataset.serviceTitle;
-    }
-  }
-
-  function renderServicePlaceholder(message) {
-    const serviceOptions = document.getElementById('serviceOptions');
-    if (!serviceOptions) return;
-    serviceOptions.innerHTML = '';
-    const optionDiv = document.createElement('div');
-    optionDiv.classList.add('custom-option');
-    optionDiv.classList.add('disabled');
-    optionDiv.textContent = message;
-    serviceOptions.appendChild(optionDiv);
-  }
-
-  // Load available services into custom select options
-  async function loadServices(areaOverride) {
-    try {
-      const serviceOptions = document.getElementById('serviceOptions');
-      if (!serviceOptions) return;
-      let effectiveArea = typeof areaOverride === 'string' ? areaOverride : '';
-      if (!effectiveArea) {
-        effectiveArea = (window.LoadLens && window.LoadLens.activeProjectArea) || '';
-      }
-      if (!effectiveArea) {
-        try {
-          const curResp = await fetch('/current_project_area');
-          const cur = await curResp.json();
-          effectiveArea = (cur && cur.project_area) || '';
-          if (window.LoadLens) {
-            window.LoadLens.activeProjectArea = effectiveArea;
-          }
-        } catch (err) {
-          effectiveArea = '';
-        }
-      }
-      activeAreaCache = effectiveArea;
-      resetServiceSelection();
-      if (!effectiveArea) {
-        renderServicePlaceholder('Выберите область в шапке страницы');
-        return;
-      }
-      const response = await fetch(`/services?area=${encodeURIComponent(effectiveArea)}`);
-      const payload = await readJsonSafe(response);
-      if (!response.ok) {
-        renderServicePlaceholder(messageFromResponse(payload, 'Не удалось загрузить сервисы'));
-        return;
-      }
-      const services = Array.isArray(payload?.services) ? payload.services : (Array.isArray(payload) ? payload : []);
+      const response = await fetch('/services');
+      const payload = await response.json();
+      const services = Array.isArray(payload && payload.services) ? payload.services : [];
+      select.innerHTML = '';
       if (!services.length) {
-        renderServicePlaceholder('Нет сервисов для выбранной области');
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = 'Нет настроенных сервисов';
+        select.appendChild(opt);
+        select.disabled = true;
+        setHint('serviceHint', 'Добавьте сервис в настройках (раздел «Сервисы»), затем обновите страницу.', 'warn');
         return;
       }
-      serviceOptions.innerHTML = '';
+      const placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = 'Выберите сервис…';
+      select.appendChild(placeholder);
       services.forEach((svc) => {
-        const id = typeof svc === 'string' ? svc : (svc.id || '');
+        const id = typeof svc === 'string' ? svc : String((svc && svc.id) || '');
         if (!id) return;
-        const title = typeof svc === 'string' ? svc : ((svc && svc.title) || id);
-        const optionDiv = document.createElement('div');
-        optionDiv.classList.add('custom-option');
-        optionDiv.textContent = title;
-        optionDiv.dataset.value = id;
-        optionDiv.dataset.title = title;
-        serviceOptions.appendChild(optionDiv);
+        const opt = document.createElement('option');
+        opt.value = id;
+        opt.textContent = typeof svc === 'string' ? svc : ((svc && svc.title) || id);
+        select.appendChild(opt);
       });
+      if (services.length === 1) select.value = String(services[0].id || services[0]);
     } catch (error) {
-      // eslint-disable-next-line no-console
-      console.error('Ошибка загрузки сервисов:', error);
-      renderServicePlaceholder('Не удалось загрузить сервисы');
+      select.innerHTML = '<option value="">Не удалось загрузить сервисы</option>';
+      select.disabled = true;
+      setHint('serviceHint', `Ошибка загрузки списка сервисов: ${error.message}`, 'error');
     }
   }
 
-  // Step-by-step visibility sync
-  function syncSteps() {
-    try {
-      const targetVal = (document.getElementById('target_mode') && document.getElementById('target_mode').value) || '';
-      const anyTarget = !!targetVal;
-      const startEl = document.getElementById('start');
-      const endEl = document.getElementById('end');
-      const serviceLabel = document.getElementById('serviceSelect');
+  // ---- period -----------------------------------------------------------
 
-      const stepStart = document.getElementById('stepStart');
-      const stepEnd = document.getElementById('stepEnd');
-      const stepService = document.getElementById('stepService');
-      const stepLLM = document.getElementById('stepLLM');
-      const stepTestType = document.getElementById('stepTestType');
-      const runNameBlock = document.getElementById('runNameContainer');
-      const createBtn = document.getElementById('createBtn');
-      const runNameInput = document.getElementById('run_name');
+  function applyPreset(minutes) {
+    const end = new Date();
+    end.setSeconds(0, 0);
+    const start = new Date(end.getTime() - minutes * 60000);
+    $('start').value = toLocalInputValue(start);
+    $('end').value = toLocalInputValue(end);
+    validateRange();
+  }
 
-      if (stepStart) stepStart.style.display = anyTarget ? 'block' : 'none';
-      const hasStart = !!(startEl && startEl.value);
-      if (stepEnd) stepEnd.style.display = anyTarget && hasStart ? 'block' : 'none';
-      const hasEnd = !!(endEl && endEl.value);
-      if (stepService) stepService.style.display = anyTarget && hasStart && hasEnd ? 'block' : 'none';
-      const serviceChosen = !!(serviceLabel && serviceLabel.dataset && serviceLabel.dataset.serviceId);
-      if (stepTestType) stepTestType.style.display = anyTarget && hasStart && hasEnd && serviceChosen ? 'flex' : 'none';
-      const testTypeVal = (document.getElementById('test_type')?.value || '').trim();
-      const tail = anyTarget && hasStart && hasEnd && serviceChosen && !!testTypeVal;
-      if (stepLLM) stepLLM.style.display = tail ? 'flex' : 'none';
-      if (runNameBlock) runNameBlock.style.display = tail ? 'block' : 'none';
-      const hasName = !!(runNameInput && (runNameInput.value || '').trim());
-      if (createBtn) createBtn.style.display = tail && hasName ? 'inline-block' : 'none';
-    } catch (e) {
-      // noop
+  function validateRange() {
+    const startVal = $('start').value;
+    const endVal = $('end').value;
+    setInvalid('start', false);
+    setInvalid('end', false);
+    if (!startVal || !endVal) {
+      setHint('rangeHint', 'Укажите начало и окончание теста или выберите быстрый период.');
+      return false;
     }
+    const startMs = new Date(startVal).getTime();
+    const endMs = new Date(endVal).getTime();
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
+      setHint('rangeHint', 'Некорректная дата.', 'error');
+      return false;
+    }
+    if (endMs <= startMs) {
+      setInvalid('end', true);
+      setHint('rangeHint', 'Окончание должно быть позже начала.', 'error');
+      return false;
+    }
+    const minutes = Math.round((endMs - startMs) / 60000);
+    const human = minutes >= 60 ? `${Math.floor(minutes / 60)} ч ${String(minutes % 60).padStart(2, '0')} мин` : `${minutes} мин`;
+    if (minutes > LONG_WINDOW_WARN_MINUTES) {
+      setHint('rangeHint', `Окно ${human}: длинные интервалы обрабатываются дольше и агрегируются грубее.`, 'warn');
+    } else {
+      setHint('rangeHint', `Длительность окна: ${human}.`);
+    }
+    return true;
   }
 
-  function selectTarget(val) {
-    const inp = document.getElementById('target_mode');
-    if (inp) inp.value = val || '';
-    const b1 = document.getElementById('target_btn_conf');
-    const b2 = document.getElementById('target_btn_web');
-    if (b1) b1.classList.toggle('active', val === 'confluence');
-    if (b2) b2.classList.toggle('active', val === 'web');
-    syncSteps();
-  }
-
-  function selectLlm(val) {
-    const inp = document.getElementById('use_llm_mode');
-    if (inp) inp.value = val || 'no';
-    const y = document.getElementById('use_llm_btn_yes');
-    const n = document.getElementById('use_llm_btn_no');
-    if (y) y.classList.toggle('active', val === 'yes');
-    if (n) n.classList.toggle('active', val === 'no');
-  }
-
-  function selectTestType(val) {
-    const inp = document.getElementById('test_type');
-    if (inp) inp.value = val || '';
-    ['tt_step', 'tt_soak', 'tt_spike', 'tt_stress'].forEach(id => {
-      const btn = document.getElementById(id);
-      if (btn) btn.classList.toggle('active', btn.getAttribute('data-value') === val);
+  function highlightPreset() {
+    const startVal = $('start').value;
+    const endVal = $('end').value;
+    const diff = (startVal && endVal) ? Math.round((new Date(endVal) - new Date(startVal)) / 60000) : null;
+    document.querySelectorAll('#rangePresets .seg-btn').forEach((btn) => {
+      const active = diff !== null && Number(btn.dataset.minutes) === diff;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
     });
+  }
+
+  // ---- LLM toggle -------------------------------------------------------
+
+  function selectedLlm() {
+    return $('use_llm_btn_yes').classList.contains('active');
+  }
+
+  function selectLlm(enabled) {
+    const yes = $('use_llm_btn_yes');
+    const no = $('use_llm_btn_no');
+    yes.classList.toggle('active', enabled);
+    no.classList.toggle('active', !enabled);
+    yes.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+    no.setAttribute('aria-pressed', enabled ? 'false' : 'true');
+  }
+
+  // ---- publication target (web only / web + Confluence template) --------
+
+  function selectedTarget() {
+    const active = document.querySelector('#targetGroup .seg-btn.active');
+    return active ? active.dataset.target : 'web';
+  }
+
+  function selectTarget(target) {
+    document.querySelectorAll('#targetGroup .seg-btn').forEach((btn) => {
+      const on = btn.dataset.target === target;
+      btn.classList.toggle('active', on);
+      btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+  }
+
+  // ---- validation & submit ---------------------------------------------
+
+  function selectedTestType() {
+    const checked = document.querySelector('input[name="test_type"]:checked');
+    return checked ? checked.value : '';
+  }
+
+  function validateForm() {
+    let ok = validateRange();
+    const service = $('service').value;
+    setInvalid('service', !service);
+    if (!service) {
+      setHint('serviceHint', 'Выберите сервис.', 'error');
+      ok = false;
+    } else {
+      setHint('serviceHint', SERVICE_HINT);
+    }
+    if (!selectedTestType()) {
+      setHint('testTypeHint', 'Выберите тип теста: от него зависят инструкции анализа.', 'error');
+      ok = false;
+    } else {
+      setHint('testTypeHint', TEST_TYPE_HINT);
+    }
+    setHint('runNameHint', '');
+    setInvalid('run_name', false);
+    return ok;
+  }
+
+  async function createReport(event) {
+    event.preventDefault();
+    const formError = $('formError');
+    formError.textContent = '';
+    if (!validateForm()) {
+      formError.textContent = 'Заполните выделенные поля.';
+      return;
+    }
+    const toConfluence = selectedTarget() === 'confluence';
+    const payload = {
+      start: LL.localInputToIso($('start').value),
+      end: LL.localInputToIso($('end').value),
+      service: $('service').value,
+      project_area: LL.activeProjectArea || '',
+      test_type: selectedTestType(),
+      use_llm: selectedLlm(),
+      run_name: ($('run_name').value || '').trim(),
+      save_to_db: true,
+      // The template flow also stores metrics and analysis, so the web report is available too.
+      web_only: !toConfluence
+    };
+    const button = $('createBtn');
+    button.disabled = true;
     try {
-      syncSteps();
-    } catch (e) {
-      // noop
+      const resp = await fetch('/create_report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const result = await resp.json();
+      if (resp.ok && result.status === 'accepted' && result.job_id) {
+        showProgressForJob(result.job_id, {
+          runName: result.run_name || payload.run_name,
+          service: payload.service,
+          useLlm: payload.use_llm,
+          confluence: toConfluence
+        });
+        return;
+      }
+      const message = result.message || result.error || 'Не удалось запустить задачу';
+      if (/уже существует/i.test(message)) {
+        setInvalid('run_name', true);
+        setHint('runNameHint', message, 'error');
+        $('run_name').focus();
+      } else {
+        formError.textContent = message;
+      }
+    } catch (error) {
+      formError.textContent = `Ошибка создания отчёта: ${error.message}`;
+    } finally {
+      button.disabled = false;
     }
   }
 
-  async function startProgressBranch(scope, jobId) {
-    const isConf = scope === 'confluence';
-    const bar = document.getElementById(isConf ? 'progressConfluenceBarFill' : 'progressWebBarFill');
-    const text = document.getElementById(isConf ? 'progressConfluenceText' : 'progressWebText');
-    const link = document.getElementById(isConf ? 'confluenceLink' : 'webLink');
+  // ---- progress ---------------------------------------------------------
 
-    if (link) {
-      link.style.display = 'none';
-      link.removeAttribute('href');
+  function phaseIndexFor(pct) {
+    let idx = 0;
+    activePhases.forEach((phase, i) => { if (pct >= phase.from) idx = i; });
+    return idx;
+  }
+
+  function renderPhases(pct, status) {
+    const currentIdx = status === 'done' ? activePhases.length : phaseIndexFor(pct);
+    document.querySelectorAll('#phaseList li').forEach((li) => {
+      if (li.hidden) return;
+      const idx = activePhases.findIndex((p) => p.key === li.dataset.phase);
+      li.classList.remove('done', 'current', 'failed');
+      if (status === 'done' || idx < currentIdx) li.classList.add('done');
+      else if (idx === currentIdx) li.classList.add(status === 'error' ? 'failed' : 'current');
+    });
+  }
+
+  function setLlmPhasesVisible(visible) {
+    document.querySelectorAll('#phaseList li[data-llm-only]').forEach((li) => {
+      li.hidden = !visible;
+    });
+  }
+
+  function setPhaseMode(confluence) {
+    activePhases = confluence ? CONFLUENCE_PHASES : WEB_PHASES;
+    document.querySelectorAll('#phaseList li[data-confluence-only]').forEach((li) => {
+      li.hidden = !confluence;
+    });
+    const list = $('phaseList');
+    if (list) list.hidden = false;
+  }
+
+  function showProgressForJob(jobId, options) {
+    const opts = options || {};
+    currentJobOpts = opts;
+    const form = $('reportForm');
+    if (form) form.style.display = 'none';
+    $('progressContainer').style.display = '';
+    $('progressTitle').textContent = opts.runName ? `Формирование отчёта «${opts.runName}»` : 'Формирование отчёта';
+    setPhaseMode(!!opts.confluence);
+    if (typeof opts.useLlm === 'boolean') setLlmPhasesVisible(opts.useLlm);
+    const jobUrl = `/new?job=${encodeURIComponent(jobId)}`;
+    try { history.replaceState(null, '', jobUrl); } catch (e) { /* history API unavailable */ }
+    const jobLink = $('jobLink');
+    jobLink.href = jobUrl;
+    jobLink.style.display = '';
+    $('webLink').style.display = 'none';
+    $('confluenceLink').style.display = 'none';
+    $('newReportLink').style.display = 'none';
+    $('progressErrorDetails').style.display = 'none';
+    renderPhases(0, 'running');
+    startPolling(jobId);
+  }
+
+  function isConfluenceUrl(url) {
+    return /^https?:\/\//i.test(String(url || ''));
+  }
+
+  function showResultLinks(job) {
+    const webLink = $('webLink');
+    const confluenceLink = $('confluenceLink');
+    const webHref = [job.page_url, job.report_url].map((value) => String(value || '')).find((url) => url.startsWith('/reports/')) || '';
+    if (isConfluenceUrl(job.report_url)) {
+      confluenceLink.href = job.report_url;
+      confluenceLink.style.display = 'inline-block';
+      if (webHref) {
+        webLink.href = webHref;
+        webLink.style.display = 'inline-block';
+      }
+    } else if (webHref || job.report_url) {
+      webLink.href = webHref || job.report_url;
+      webLink.style.display = 'inline-block';
     }
+  }
 
-    if (progressTimers[scope]) clearInterval(progressTimers[scope]);
-    progressTimers[scope] = setInterval(async () => {
+  function applyJobState(job) {
+    const pct = Math.max(0, Math.min(100, Number(job.progress) || 0));
+    const bar = $('progressBarFill');
+    bar.style.width = `${pct}%`;
+    bar.classList.toggle('error', job.status === 'error');
+    $('progressPct').textContent = `${pct}%`;
+    $('progressMessage').textContent = job.message || '';
+    if (job.run_name) $('progressTitle').textContent = `Формирование отчёта «${job.run_name}»`;
+    renderPhases(pct, job.status);
+    if (job.status === 'done') {
+      showResultLinks(job);
+      $('progressMessage').textContent = 'Отчёт готов.';
+      $('newReportLink').style.display = '';
+      return true;
+    }
+    if (job.status === 'error') {
+      $('progressMessage').textContent = job.message || 'Ошибка выполнения задачи';
+      if (job.error) {
+        $('progressErrorText').textContent = job.error;
+        $('progressErrorDetails').style.display = '';
+      }
+      $('newReportLink').style.display = '';
+      return true;
+    }
+    return false;
+  }
+
+  function startPolling(jobId) {
+    if (progressTimer) clearInterval(progressTimer);
+    const tick = async () => {
       try {
-        const r = await fetch(`/job_status/${jobId}`);
-        const j = await readJsonSafe(r);
-        if (!r.ok) {
-          if (text) text.textContent = messageFromResponse(j, 'Не удалось получить статус задачи');
+        const r = await fetch(`/job_status/${encodeURIComponent(jobId)}`);
+        if (r.status === 404) {
+          clearInterval(progressTimer);
+          $('progressMessage').textContent = 'Задача не найдена: возможно, сервер был перезапущен до сохранения статуса. Проверьте архив.';
+          $('newReportLink').style.display = '';
           return;
         }
-        const p = Math.max(0, Math.min(100, j.progress || 0));
-        if (bar) bar.style.width = `${p}%`;
-        const msg = j.message ? ` — ${j.message}` : '';
-        if (text) text.textContent = `Прогресс${isConf ? ' (Confluence)' : ' (LoadLens)'}: ${p}%${msg}`;
-        if (j.report_url && link && (!link.href || link.href !== j.report_url)) {
-          link.href = j.report_url;
-          link.style.display = 'inline-block';
-        }
-        if (j.status === 'done') {
-          clearInterval(progressTimers[scope]);
-          if (j.report_url && link) {
-            link.href = j.report_url;
-            link.style.display = 'inline-block';
-          }
-        } else if (j.status === 'error') {
-          clearInterval(progressTimers[scope]);
-          if (text) text.textContent = `Ошибка: ${j.error || 'unknown'}`;
+        if (!r.ok) return;
+        const job = await r.json();
+        if (applyJobState(job)) {
+          clearInterval(progressTimer);
+          loadActiveJobs();
         }
       } catch (e) {
-        // ignore transient errors
+        // transient network error: keep polling
       }
-    }, 1000);
+    };
+    tick();
+    progressTimer = setInterval(tick, POLL_INTERVAL_MS);
   }
 
-  async function createReport() {
-    const responseMessage = document.getElementById('responseMessage');
-    if (responseMessage) responseMessage.innerText = '';
-    const start = document.getElementById('start')?.value;
-    const end = document.getElementById('end')?.value;
-    const areaValue = activeAreaCache || (window.LoadLens && window.LoadLens.activeProjectArea) || '';
-    if (!areaValue) {
-      if (responseMessage) responseMessage.innerText = 'Пожалуйста, выберите проектную область в шапке страницы.';
-      return;
+  // ---- active jobs panel -----------------------------------------------
+
+  function jobStatusLabel(status) {
+    if (status === 'running') return 'В работе';
+    if (status === 'error') return 'Ошибка';
+    if (status === 'done') return 'Готово';
+    return status || '';
+  }
+
+  function renderJobRow(job) {
+    const row = document.createElement('div');
+    row.className = 'job-row';
+    const pill = document.createElement('span');
+    pill.className = `pill ${job.status}`;
+    pill.textContent = jobStatusLabel(job.status);
+    const info = document.createElement('div');
+    const name = document.createElement('div');
+    name.className = 'name';
+    name.textContent = job.run_name || '(без названия)';
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const bits = [];
+    if (job.kind === 'confluence') bits.push('публикация в Confluence');
+    if (job.kind === 'forecast_confluence') bits.push('публикация прогноза в Confluence');
+    if (job.service) bits.push(job.service);
+    if (job.status === 'running') bits.push(`${Number(job.progress) || 0}% — ${job.message || ''}`);
+    else bits.push(job.message || '');
+    if (job.updated_at) bits.push(LL.formatDateTime(job.updated_at));
+    meta.textContent = bits.filter(Boolean).join(' · ');
+    info.appendChild(name);
+    info.appendChild(meta);
+    const link = document.createElement('a');
+    if (job.status === 'done' && job.report_url) {
+      link.href = job.report_url;
+      link.textContent = 'Открыть отчёт';
+    } else if (job.kind === 'report') {
+      link.href = `/new?job=${encodeURIComponent(job.job_id)}`;
+      link.textContent = job.status === 'running' ? 'Следить' : 'Подробности';
+    } else if (job.page_url) {
+      link.href = job.page_url;
+      link.textContent = 'Открыть страницу';
     }
-    const serviceSelectEl = document.getElementById('serviceSelect');
-    const selectedService = serviceSelectEl?.dataset?.serviceId || '';
-    if (!selectedService) {
-      if (responseMessage) responseMessage.innerText = 'Пожалуйста, выберите сервис.';
-      return;
-    }
-    const serviceTitle = serviceSelectEl?.dataset?.serviceTitle || serviceSelectEl?.textContent || selectedService;
+    row.appendChild(pill);
+    row.appendChild(info);
+    row.appendChild(link);
+    return row;
+  }
 
-    const target = (document.getElementById('target_mode')?.value || '').trim();
-    const toConfluence = target === 'confluence';
-    const toWeb = target === 'web' || target === 'confluence';
-    if (!toWeb && !toConfluence) {
-      if (responseMessage) responseMessage.innerText = 'Выберите хотя бы одно направление публикации.';
-      return;
-    }
-
-    const common = {
-      start,
-      end,
-      service: selectedService,
-      service_title: serviceTitle,
-      project_area: areaValue,
-      area: areaValue,
-      test_type: (document.getElementById('test_type')?.value || '').trim(),
-      use_llm: ((document.getElementById('use_llm_mode')?.value || 'yes') === 'yes'),
-      run_name: (document.getElementById('run_name')?.value || '').trim()
-    };
-
-    const progressBox = document.getElementById('progressContainer');
-    if (progressBox) progressBox.style.display = 'block';
-
-    // Helper to start job
-    const startJob = async (scope, payload) => {
-      const scopeText = scope === 'confluence' ? 'progressConfluenceText' : 'progressWebText';
-      try {
-        const resp = await fetch('/create_report', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-          const result = await readJsonSafe(resp);
-          if (resp.ok && result.status === 'accepted' && result.job_id) {
-            if (responseMessage) responseMessage.innerText = messageFromResponse(result, 'Задача принята.');
-          await startProgressBranch(scope, result.job_id);
-          } else if (resp.ok && result.status === 'success') {
-          const link = scope === 'confluence' ? document.getElementById('confluenceLink') : document.getElementById('webLink');
-          if (result.report_url && link) {
-            link.href = result.report_url;
-            link.style.display = 'inline-block';
-          }
-        } else {
-          const textEl = document.getElementById(scopeText);
-            if (textEl) textEl.textContent = messageFromResponse(result, 'Ошибка запуска задачи');
-        }
-      } catch (error) {
-        const textEl = document.getElementById(scopeText);
-        if (textEl) textEl.textContent = `Ошибка создания отчёта: ${error.message}`;
+  async function loadActiveJobs() {
+    const panel = $('activeJobs');
+    const list = $('activeJobsList');
+    if (!panel || !list) return;
+    try {
+      const resp = await fetch('/jobs?status=running,error&limit=10');
+      if (!resp.ok) return;
+      const payload = await resp.json();
+      const jobs = Array.isArray(payload && payload.jobs) ? payload.jobs : [];
+      list.innerHTML = '';
+      if (!jobs.length) {
+        panel.style.display = 'none';
+        if (jobsTimer) { clearInterval(jobsTimer); jobsTimer = null; }
+        return;
       }
-    };
-
-    if (toConfluence) {
-      const branch = document.getElementById('progressBranchConfluence');
-      if (branch) branch.style.display = 'block';
-      // Конфлюенс выполняет ИИ-анализ и сохраняет ИИ-результаты в БД
-      await startJob('confluence', { ...common, web_only: false, save_to_db: true });
-    }
-    if (toWeb) {
-      const branch = document.getElementById('progressBranchWeb');
-      if (branch) branch.style.display = 'block';
-      // Если выбрана Конфлюенс, веб-ветка пишет только метрики (без ИИ), иначе — как выбрано пользователем
-      const useLlmForWeb = toConfluence ? false : common.use_llm;
-      await startJob('web', { ...common, use_llm: useLlmForWeb, web_only: true, save_to_db: true });
+      jobs.forEach((job) => list.appendChild(renderJobRow(job)));
+      const running = jobs.filter((j) => j.status === 'running').length;
+      $('activeJobsNote').textContent = running ? `в работе: ${running}` : 'завершились с ошибкой';
+      panel.style.display = '';
+      if (running && !jobsTimer) jobsTimer = setInterval(loadActiveJobs, JOBS_REFRESH_MS);
+      if (!running && jobsTimer) { clearInterval(jobsTimer); jobsTimer = null; }
+    } catch (e) {
+      // panel is auxiliary; the form keeps working without it
     }
   }
 
-  // Wire up events on DOM ready
-  document.addEventListener('DOMContentLoaded', async function () {
-    try { await window.LoadLens.initProjectArea(); } catch (e) {}
+  // ---- wiring -----------------------------------------------------------
+
+  document.addEventListener('DOMContentLoaded', async () => {
+    $('tzLabel').textContent = LL.timeZoneLabel();
+    await LL.initProjectArea();
     await loadServices();
+    loadActiveJobs();
 
-    // Custom select open/close
-    const serviceSelect = document.getElementById('serviceSelect');
-    const serviceWrapper = document.getElementById('serviceWrapper');
-    const serviceOptions = document.getElementById('serviceOptions');
-    if (serviceSelect) {
-      serviceSelect.addEventListener('click', function (e) {
-        e.stopPropagation();
-        if (serviceWrapper) serviceWrapper.classList.toggle('open');
-      });
-    }
-    window.addEventListener('click', function (e) {
-      if (serviceWrapper && !serviceWrapper.contains(e.target)) {
-        serviceWrapper.classList.remove('open');
-      }
+    document.querySelectorAll('#rangePresets .seg-btn').forEach((btn) => {
+      btn.addEventListener('click', () => { applyPreset(Number(btn.dataset.minutes)); highlightPreset(); });
     });
-    if (serviceOptions) {
-      serviceOptions.addEventListener('click', function (e) {
-        const opt = e.target.closest('.custom-option');
-        if (!opt) return;
-        const selectedService = opt.dataset.value || opt.textContent || '';
-        if (!selectedService) return;
-        const selectedTitle = opt.dataset.title || opt.textContent || selectedService;
-        const sel = document.getElementById('serviceSelect');
-        if (sel) {
-          sel.textContent = selectedTitle;
-          sel.dataset.serviceId = selectedService;
-          sel.dataset.serviceTitle = selectedTitle;
-        }
-        if (serviceWrapper) serviceWrapper.classList.remove('open');
-        try { syncSteps(); } catch (err) {}
-      });
-    }
-
-    // Toggle targets
-    const b1 = document.getElementById('target_btn_conf');
-    const b2 = document.getElementById('target_btn_web');
-    if (b1) b1.addEventListener('click', () => selectTarget('confluence'));
-    if (b2) b2.addEventListener('click', () => selectTarget('web'));
-
-    // Inputs
-    ['start', 'end'].forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.addEventListener('change', syncSteps);
+    document.querySelectorAll('#targetGroup .seg-btn').forEach((btn) => {
+      btn.addEventListener('click', () => selectTarget(btn.dataset.target));
     });
-    const rn = document.getElementById('run_name');
-    if (rn) rn.addEventListener('input', syncSteps);
+    ['start', 'end'].forEach((id) => {
+      $(id).addEventListener('change', () => { validateRange(); highlightPreset(); });
+    });
+    $('service').addEventListener('change', () => {
+      if ($('service').value) { setInvalid('service', false); setHint('serviceHint', SERVICE_HINT); }
+    });
+    document.querySelectorAll('input[name="test_type"]').forEach((radio) => {
+      radio.addEventListener('change', () => setHint('testTypeHint', TEST_TYPE_HINT));
+    });
+    $('run_name').addEventListener('input', () => { setInvalid('run_name', false); setHint('runNameHint', ''); });
+    $('use_llm_btn_yes').addEventListener('click', () => selectLlm(true));
+    $('use_llm_btn_no').addEventListener('click', () => selectLlm(false));
+    $('reportForm').addEventListener('submit', createReport);
 
-    // LLM toggle
-    const ly = document.getElementById('use_llm_btn_yes');
-    const ln = document.getElementById('use_llm_btn_no');
-    if (ly) ly.addEventListener('click', () => selectLlm('yes'));
-    if (ln) ln.addEventListener('click', () => selectLlm('no'));
+    validateRange();
 
-    // Test type
-    const tStep = document.getElementById('tt_step'); if (tStep) tStep.addEventListener('click', () => selectTestType('step'));
-    const tSoak = document.getElementById('tt_soak'); if (tSoak) tSoak.addEventListener('click', () => selectTestType('soak'));
-    const tSpike = document.getElementById('tt_spike'); if (tSpike) tSpike.addEventListener('click', () => selectTestType('spike'));
-    const tStress = document.getElementById('tt_stress'); if (tStress) tStress.addEventListener('click', () => selectTestType('stress'));
-
-    // Create button
-    const createBtn = document.getElementById('createBtn');
-    if (createBtn) createBtn.addEventListener('click', createReport);
-
-    // Initial state
-    syncSteps();
+    const resumeJobId = new URLSearchParams(location.search).get('job');
+    if (resumeJobId) showProgressForJob(resumeJobId, {});
   });
-  window.addEventListener('beforeunload', clearProgressTimers);
 })();
-
-

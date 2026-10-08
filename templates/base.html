@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta name="csrf-token" content="{{ csrf_token }}" />
+  <meta name="loadlens-role" content="{{ role_key }}" />
+  <title>{% block title %}LoadLens{% endblock %}</title>
+  <script>
+    // Apply the saved theme before first paint to avoid a flash.
+    (function () {
+      try {
+        var saved = localStorage.getItem('loadlens.theme');
+        if (saved === 'light' || saved === 'dark') document.documentElement.setAttribute('data-theme', saved);
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="icon" id="tabIcon" href="/assets/logo.png?c={{ appearance.key }}" type="image/png" />
+  <link rel="stylesheet" href="/static/css/app.css" />
+  <style id="accentVars">{{ appearance.css }}</style>
+  {% block head %}{% endblock %}
+</head>
+<body data-role="{{ role_key }}">
+  <a class="skip-link" href="#main">К содержимому</a>
+  <header class="app-header">
+    <a class="brand-link" href="/" aria-label="LoadLens — на дэшборд">
+      <img class="logo" src="/assets/logo.png?c={{ appearance.key }}" alt="" />
+      <span class="brand">LoadLens</span>
+    </a>
+    <button type="button" class="nav-toggle" id="navToggle" aria-expanded="false" aria-controls="appNav" aria-label="Открыть меню">☰</button>
+    <nav class="app-nav" id="appNav" aria-label="Основная навигация">
+      <select id="projectAreaSelect" class="pa-select" aria-label="Проектная область">
+        <option value="">Все области</option>
+      </select>
+      {# The last item is the minimum role rank: 1 viewer, 2 engineer, 3 admin. While a password change is enforced every page but the account is refused, so no links are shown. #}
+      {% set forced_change = current_user and current_user.must_change_password %}
+      {% set nav_items = [('dashboard', '/', 'Дэшборд', 1), ('new', '/new', 'Новый отчёт', 2), ('archive', '/reports', 'Архив', 1), ('compare', '/compare', 'Сравнение тестов', 1), ('forecasting', '/forecasting', 'Прогнозирование', 1), ('settings', '/settings', 'Настройки', 3)] %}
+      {% for key, href, label, min_rank in nav_items %}
+        {% if role_rank >= min_rank and not forced_change %}
+        <a class="nav-btn{% if active_nav == key %} active{% endif %}" href="{{ href }}"{% if active_nav == key %} aria-current="page"{% endif %}>{{ label }}</a>
+        {% endif %}
+      {% endfor %}
+      <button type="button" class="theme-toggle" id="themeToggle" aria-label="Переключить тему">☀</button>
+      {% if auth_enabled and current_user %}
+      <details class="menu user-menu">
+        <summary class="user-chip" aria-label="Меню пользователя"><span class="user-name">{{ current_user.title }}</span></summary>
+        <div class="menu-items">
+          <div class="menu-note">{{ current_user.username }} · {{ current_user.role.label }}</div>
+          <a class="menu-link{% if active_nav == 'account' %} active{% endif %}" href="/account">Профиль и API-токены</a>
+          <form method="post" action="/logout"><button type="submit">Выйти</button></form>
+        </div>
+      </details>
+      {% endif %}
+    </nav>
+  </header>
+  <main id="main" class="container {% block container_class %}{% endblock %}">
+    {% block content %}{% endblock %}
+  </main>
+  <script defer src="/static/js/common.js"></script>
+  <script defer src="/static/js/ui.js"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

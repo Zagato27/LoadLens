@@ -3,10 +3,12 @@
 Модуль `AI/` собирает метрики по доменам, строит компактные “контекст‑пакеты” и выполняет многошаговый анализ LLM. Результаты возвращаются как текст (для отображения) и как строгие структуры (JSON) для программной обработки и сохранения.
 
 ## Возможности
-- Домены анализа: JVM, базы данных, Kafka, микросервисы, инфраструктурные ресурсы; опционально — `lt_framework` (метрики инструмента нагрузки).
+- Домены анализа: JVM, базы данных, Kafka, микросервисы, инфраструктурные ресурсы; опционально — `lt_framework` (метрики инструмента нагрузки) и `application_logs` (агрегированные ERROR‑логи из OpenSearch, включается `logs_source.enabled`).
 - Контекст‑пакеты: резюме по сериям (средние/минимумы/максимумы/последние значения, время пиков, окна аномалий).
 - Двухпроходный вывод: k кандидатов → приведение к строгому JSON → выбор лучшего по G-Eval-lite judge и верификации на данных.
-- Вычисление “пиковой производительности” (peak_performance) в итоговом JSON при наличии соответствующих метрик.
+- Вычисление “пиковой производительности” (peak_performance) в итоговом JSON при наличии соответствующих метрик; в остальных доменах `peak_performance` вырезается.
+- Прогресс по фазам: `uploadFromLLM(..., progress_callback=fn)` вызывает `fn(message, percent)` при сборе каждого домена, после каждого ответа LLM, при проверке SLA, итоговом анализе и сохранении (диапазон 10–95 %).
+- Домены, упавшие в параллельном прогоне, повторяются последовательно с паузой (частая причина — burst запросов к провайдеру).
 
 ## Как это работает (поток)
 1) Сбор данных за интервал (PromQL/Flux/InfluxQL; напрямую или через Grafana‑proxy).  
@@ -19,17 +21,19 @@
 
 ## Настройка
 Источник конфигурации — `settings.py`:
-- `llm` — провайдер (`perplexity|openai|anthropic`), модель, лимиты токенов и таймауты;
-- `metrics_source` — источник метрик: `type=prometheus|grafana_proxy`;
-- `lt_metrics_source` — источник метрик инструмента нагрузки: `type=prometheus|grafana_proxy|influxdb`;
+- `llm` — провайдер (`perplexity|openai|anthropic|gigachat`), модель, лимиты токенов и таймауты; `max_domain_workers` и `self_consistency_k` задают параллельность доменов и число кандидатов, `self_consistency` — троттлинг вызовов внутри домена (последовательный режим с паузой для провайдеров с rate limit), `<provider>.max_attempts` — число попыток одного вызова;
+- `data_sources` — каталог подключений (`prometheus|grafana_proxy|influxdb`);
+- `domain_sources` — привязка домена к источнику (`default` или имя домена; датасорс, database, bucket);
+- `logs_source` — OpenSearch Dashboards для домена `application_logs` (индекс, поля, фильтры уровней, лимиты агрегации);
 - `default_params` — шаг выборки и ресемплирование;
 - `queries` — список запросов/разметки серий для каждого домена (PromQL/Flux/InfluxQL).
+GigaChat подключается через `langchain_gigachat` с mTLS (`cert_file`/`key_file`) или `api_key`; отдельный CLI `opensearch_error_report.py` строит markdown‑отчёт по ERROR‑логам тем же агрегатором, что и домен `application_logs`.
 Для точечных изменений без перезапуска предназначен `settings_runtime.json` (в т.ч. по проектным областям: `per_area[<service>]`).  
 Тексты промптов лежат в `AI/prompts/*.txt`, judge-рубрики — в `AI/prompts/judge_rubrics/*.txt`; всё это также может переопределяться через рантайм‑конфиг.
 
 ## Judge Layer
 - Judge использует компактную form-filling схему: `scores[].rubric` плюс совместимые поля `factual`, `completeness`, `specificity`, `overall`.
-- Доменный `domain_key` выбирает статическую rubric file (`jvm`, `database`, `kafka`, `microservices`, `hard_resources`, `lt_framework`, `final`).
+- Доменный `domain_key` выбирает статическую rubric file (`jvm`, `database`, `kafka`, `microservices`, `hard_resources`, `lt_framework`, `application_logs`, `final`).
 - Итоговый выбор остаётся гибридным: `0.6 * judge_overall + 0.35 * score_candidate_by_data() + 0.05 * confidence`.
 - Judge не урезает `data_context`; для наблюдаемости он только логирует размер prompt и judge latency.
 

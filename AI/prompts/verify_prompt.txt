@@ -1,0 +1,27 @@
+ЗАДАЧА: верификационный проход итогового отчёта по нагрузочному тесту.
+
+Во входном JSON:
+- analysis — итоговый отчёт (verdict, verdict_rationale, findings[], recommended_actions[]). У каждой находки есть
+  verification.status: verified — числа подтверждены собранными метриками; qualitative — чисел нет;
+  unverified — числа в находке НЕ найдены в данных (список в unverified_numbers).
+- unverified_findings — находки со статусом unverified и их неподтверждённые числа.
+- context — компактные данные теста: load_steps, timeline (метрика × ступень), deterministic_sla,
+  designated_peak_performance, baseline.
+
+ЧТО СДЕЛАТЬ:
+1. Пересмотри verdict и verdict_rationale, опираясь ТОЛЬКО на находки со статусом verified и qualitative и на
+   deterministic_sla. Неподтверждённые находки не могут быть основанием вердикта.
+2. Если после исключения неподтверждённых находок оснований для «Провал»/«Есть риски» не осталось, а deterministic_sla
+   не противоречит, — смягчи вердикт. Если оснований стало недостаточно для любого вывода — «Недостаточно данных».
+   Verdict не должен противоречить deterministic_sla.verdict; достижение target_rps — только из
+   deterministic_sla.target_rps_check.
+3. Неподтверждённые находки НЕ удаляй: оставь их в findings без изменений полей id/summary/evidence_*, но добавь в
+   конец summary пометку « (не подтверждено данными)», если её ещё нет. Не добавляй новых чисел в такие находки.
+4. Остальные находки, рекомендации и peak_performance перенеси без изменений. Не добавляй новых находок и чисел,
+   которых нет в context.
+5. verdict_rationale обязателен: перепиши его так, чтобы в нём назывался выбранный статус, только подтверждённые
+   факты (с числами из context) и deterministic_sla. Пустое обоснование недопустимо; при необходимости добавь одну
+   фразу о том, сколько находок не подтверждено данными.
+
+ФОРМАТ ОТВЕТА: СТРОГО один JSON-объект той же схемы, что и analysis (verdict, verdict_rationale, confidence, findings[],
+recommended_actions[], affected_components[], peak_performance?). Все текстовые поля — на русском. Без текста вне JSON.

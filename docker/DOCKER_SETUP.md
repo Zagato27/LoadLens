@@ -4,9 +4,10 @@
 
 ### Что добавлено
 
-- `Dockerfile` — актуализирован: добавлены переменные окружения, `curl` для healthcheck и `HEALTHCHECK`.
+- `Dockerfile` — актуализирован: добавлены переменные окружения, `curl` для healthcheck и `HEALTHCHECK` (проверяет публичный `/healthz`: остальные страницы требуют входа).
 - `docker-compose.yml` — поднимает сервисы: `app` (веб), `timescaledb` (TimescaleDB/PostgreSQL), `redis` (брокер) и `celery_worker` (фоновые задачи).
 - `initdb/01_timescaledb.sql` — автоматическое включение расширения TimescaleDB в базе при первом старте.
+- `initdb/02_schema.sql` — таблицы `metrics` (гипертаблица), `llm_reports`, `engineer_reports`, `confluence_publications`, `report_jobs`, `app_users`, `api_tokens`, `audit_log` и индексы; приложение создаёт их и само, скрипт лишь готовит схему заранее.
 - Redis + Celery worker — через `docker-compose` теперь поднимаются брокер `redis` и отдельный контейнер `celery_worker` для фоновых задач.
 - `env.example` (лежит в этой же папке) — пример файла окружения для Compose. Скопируйте его в `.env` и отредактируйте.
 - `settings.example.py` — обезличенный пример `settings.py`. Скопируйте и заполните.
@@ -35,6 +36,10 @@
    - `TSDB_PORT` — порт БД на хосте (по умолчанию 5432)
    - `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` — URL брокера/хранилища результатов (по умолчанию `redis://redis:6379/0`)
    - `CELERY_TASK_ALWAYS_EAGER` — `0` для настоящих фоновых задач, `1` чтобы выполнять их синхронно (режим отладки)
+   - `LOADLENS_SECRET_KEY` — ключ подписи сессий: длинная случайная строка (`openssl rand -hex 32`), одна и та же между пересозданиями контейнера. Без неё ключ создаётся внутри контейнера и сессии сбрасываются при его пересоздании.
+   - `LOADLENS_ADMIN_USER` / `LOADLENS_ADMIN_PASSWORD` — первый администратор; создаётся при первом открытии страницы входа, пока в базе нет пользователей. После первого входа удалите пароль из `.env`.
+   - `LOADLENS_AUTH_ENABLED` — `1` (по умолчанию) вход обязателен; `0` отключает авторизацию (открытый доступ с правами администратора — только для отладки).
+   - `LOADLENS_COOKIE_SECURE=1` и `LOADLENS_TRUSTED_PROXIES=1` — за HTTPS-прокси перед приложением (см. README, «Доступ и безопасность»).
 
 3. Отредактируйте `settings.py` (используется приложением). Рекомендуется начать с `settings.example.py`:
    - Блок `storage.timescale`:
@@ -47,18 +52,11 @@
      - `table`: `metrics`
      - `llm_table`: `llm_reports`
      - `ensure_extension`: `True` (на всякий случай; расширение также создаётся скриптом инициализации)
-   - Блок `metrics_source` — источник метрик тестируемой системы (SUT):
-     - Режим `type`: `prometheus` (прямой доступ) или `grafana_proxy` (через `/api/datasources/proxy/...`).
-     - Для `prometheus`: укажите `prometheus.url`.
-     - Для `grafana_proxy`: укажите `grafana.base_url`, `auth` и `prometheus_datasource` (uid/name/id).
-   - Блок `lt_metrics_source` — источник метрик инструмента нагрузки (например, k6/JMeter):
-     - Режим `type`: `prometheus` | `grafana_proxy` | `influxdb`.
-     - `prometheus.url` — прямой PromQL.
-     - `grafana.influxdb_datasource` — использование InfluxDB через Grafana‑прокси.
-     - `influxdb.{url,org,bucket,database,token}` — прямой доступ к InfluxDB (Flux/InfluxQL).
+   - Блок `data_sources` — каталог подключений (`prometheus`, `grafana_proxy`, `influxdb`): адрес, авторизация и TLS.
+   - Блок `domain_sources` — какой источник читает домен. `default` задаёт источник доменов без своей строки. Для Grafana укажите `datasource_uid` или `datasource_name`, для InfluxQL — `database`, для Flux — `bucket`.
    - Блок `queries.lt_framework` — примеры запросов для Prometheus/InfluxDB и наборы ключей меток/тегов для подписи серий.
 
-   При необходимости обновите блоки `llm`, `metrics_source`, `grafana_base_url`, `loki_url` — используйте безопасные ключи/URL.
+   При необходимости обновите блоки `llm`, `data_sources`, `domain_sources`, `grafana_base_url`, `loki_url` — используйте безопасные ключи/URL.
 
 4. (Опционально) Если вы не хотите, чтобы секреты попадали в образ, можно смонтировать локальный `settings.py` в контейнер (см. комментарии в `docker/docker-compose.yml`).
 
@@ -86,7 +84,16 @@ docker compose ps
 docker logs ltar_app --tail=100
 ```
 
-Приложение должно быть доступно на `http://localhost:5000/` (порт регулируется `APP_PORT` в `.env`).
+Приложение должно быть доступно на `http://localhost:5000/` (порт регулируется `APP_PORT` в `.env`); откроется страница входа. Войдите под `LOADLENS_ADMIN_USER` и добавьте остальных пользователей в «Настройки → Пользователи». Если администратор не задан в `.env`, создайте его командой:
+
+```bash
+cd docker
+docker compose exec app python -m loadlens_app.auth create-user admin --role admin
+```
+
+Забытый пароль сбрасывается так же: `docker compose exec app python -m loadlens_app.auth set-password <логин>`.
+
+Базы, созданные до появления авторизации, дополнительных действий не требуют: таблицы пользователей приложение создаёт само при первом обращении (пользователю БД из `settings.py` нужно право `CREATE` в схеме).
 
 ### 3) Что делает TimescaleDB при старте
 
@@ -126,6 +133,7 @@ docker exec -it ltar_app python AI/test_timescale_write.py
 
 - В `.gitignore` уже добавлены правила для локальных конфигов: `settings.py`, `settings_runtime.json`, все `.env` (включая `docker/.env`).
 - Примеры остаются в репозитории: `settings.example.py`, `docker/env.example`.
+- Ключ сессий (`LOADLENS_SECRET_KEY` или файл `.loadlens_secret_key`) и пароль администратора — секреты: не коммитьте их; файл ключа уже в `.gitignore` и `.dockerignore`.
 
 Если `settings.py` или `docker/.env` уже были закоммичены ранее, их нужно убрать из индекса git (файлы останутся локально):
 
@@ -171,7 +179,7 @@ git commit -m "chore: stop tracking local configs; add examples"
 
 ### 9) Рантайм‑оверрайды и области (per‑area)
 
-- `settings_runtime.json` — позволяет изменить разделы `llm`, `metrics_source`, `lt_metrics_source`, `default_params`, `queries` без пересборки/перезапуска. Поддерживает блок `per_area`: можно задать отличающиеся настройки для разных проектных областей.
+- `settings_runtime.json` — позволяет изменить разделы `llm`, `data_sources`, `domain_sources`, `default_params`, `queries` без пересборки/перезапуска. Поддерживает блок `per_area`: можно задать отличающиеся настройки для разных проектных областей. Каталог `data_sources` общий, область заменяет только `domain_sources`.
 - `metrics_config_runtime.json` — аналогично для ссылок на панели/логи Confluence в разрезе областей.
 - Оба файла можно редактировать из вкладки «Настройки» в приложении. Изменения применяются динамически.
 

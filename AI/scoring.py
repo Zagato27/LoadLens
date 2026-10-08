@@ -6,7 +6,16 @@ import logging
 from typing import List, Dict, Optional, Union, Tuple, Any
 from pydantic import BaseModel, Field, ValidationError, root_validator
 
-from AI.providers import ask_llm_with_text_data
+from AI.providers import (
+    LLMBudgetError,
+    LLMEmptyAnswer,
+    LLMOutputTruncated,
+    ask_llm_structured,
+    ask_llm_with_text_data,
+    structured_output_enabled,
+    usage_domain,
+)
+from settings import CONFIG
 
 
 PROMPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
@@ -31,6 +40,7 @@ JUDGE_RUBRIC_FILES = {
     "microservices": os.path.join(JUDGE_RUBRIC_DIR, "microservices.txt"),
     "hard_resources": os.path.join(JUDGE_RUBRIC_DIR, "hard_resources.txt"),
     "lt_framework": os.path.join(JUDGE_RUBRIC_DIR, "lt_framework.txt"),
+    "application_logs": os.path.join(JUDGE_RUBRIC_DIR, "application_logs.txt"),
     "final": os.path.join(JUDGE_RUBRIC_DIR, "final.txt"),
 }
 JUDGE_COMMON_RUBRIC_FILE = os.path.join(JUDGE_RUBRIC_DIR, "common.txt")
@@ -401,6 +411,20 @@ class FindingEvidenceItem(BaseModel):
         }
 
 
+VERIFICATION_VERIFIED = "verified"
+VERIFICATION_UNVERIFIED = "unverified"
+VERIFICATION_QUALITATIVE = "qualitative"
+
+
+class FindingVerification(BaseModel):
+    """Result of checking a finding's numbers against the collected metrics."""
+
+    status: str = Field(default=VERIFICATION_QUALITATIVE)
+    claims_total: int = Field(default=0)
+    claims_matched: int = Field(default=0)
+    unmatched: List[str] = Field(default_factory=list)
+
+
 class FindingItem(BaseModel):
     id: str = Field(default="")
     summary: str = Field(default="")
@@ -412,6 +436,7 @@ class FindingItem(BaseModel):
     evidence_summary: Optional[str] = Field(default=None)
     evidence_items: List[FindingEvidenceItem] = Field(default_factory=list)
     evidence: Optional[str] = Field(default=None)
+    verification: Optional[FindingVerification] = Field(default=None)
 
     @root_validator(pre=True)
     def _normalize_finding(cls, values: Dict[str, object]) -> Dict[str, object]:
@@ -540,6 +565,9 @@ def _derive_verdict_rationale(verdict: str, findings: List[Dict[str, object]]) -
     for item in findings or []:
         if not isinstance(item, dict):
             continue
+        verification = item.get("verification") if isinstance(item.get("verification"), dict) else {}
+        if str(verification.get("status") or "").lower() == VERIFICATION_UNVERIFIED:
+            continue
         summary = _clean_text(item.get("summary") or item.get("title") or item.get("text"))
         if summary:
             summaries.append(summary)
@@ -555,9 +583,66 @@ def _derive_verdict_rationale(verdict: str, findings: List[Dict[str, object]]) -
     return f"Вердикт «{verdict_text}» сформирован по доступным метрикам и выявленным рискам."
 
 
+_VERDICT_RATIONALE_HEAD = {
+    "Успешно": "Статус «Успешно»: по подтверждённым метрикам существенных отклонений не видно.",
+    "Есть риски": "Статус «Есть риски»: есть подтверждённые отклонения, но без провала целевого результата.",
+    "Провал": "Статус «Провал»: по подтверждённым данным целевой результат теста не достигнут.",
+    "Недостаточно данных": "Статус «Недостаточно данных»: в ответе нет достаточных подтверждённых фактов.",
+}
+
+
+def rationale_from_analysis(parsed: "LLMAnalysis") -> str:
+    """Builds a short verdict rationale from confirmed findings when the model omitted one."""
+    label = _normalize_verdict(getattr(parsed, "verdict", None))
+    head = _VERDICT_RATIONALE_HEAD.get(label, _VERDICT_RATIONALE_HEAD["Недостаточно данных"])
+    bullets: List[str] = []
+    for finding in getattr(parsed, "findings", None) or []:
+        verification = getattr(finding, "verification", None)
+        status = _clean_text(getattr(verification, "status", None)).lower() if verification is not None else ""
+        if status == VERIFICATION_UNVERIFIED:
+            continue
+        summary = _clean_text(getattr(finding, "summary", None))
+        if summary:
+            bullets.append(f"- {summary}")
+        if len(bullets) >= 4:
+            break
+    if not bullets:
+        return head
+    return f"{head}\n" + "\n".join(bullets)
+
+
+def fill_missing_verdict_rationale(parsed: "LLMAnalysis") -> "LLMAnalysis":
+    """Keeps a model-written rationale; otherwise fills one so the status is never unexplained."""
+    if _clean_text(getattr(parsed, "verdict_rationale", None)):
+        return parsed
+    return parsed.copy(update={"verdict_rationale": rationale_from_analysis(parsed)})
+
+
+class VerificationSummary(BaseModel):
+    """Counts of findings per verification status for one LLM answer."""
+
+    total: int = Field(default=0)
+    verified: int = Field(default=0)
+    unverified: int = Field(default=0)
+    qualitative: int = Field(default=0)
+    revised_by_model: bool = Field(default=False)
+
+
+class LLMAnalysisError(BaseModel):
+    """Why a domain has no model analysis. Shown instead of a fake verdict."""
+
+    reason: str = Field(default="invalid_json")
+    message: str = Field(default="")
+    provider: Optional[str] = Field(default=None)
+    max_tokens: Optional[int] = Field(default=None)
+    output_tokens: Optional[int] = Field(default=None)
+    excerpt: Optional[str] = Field(default=None)
+
+
 class LLMAnalysis(BaseModel):
     verdict: str = Field(default="нет данных")
     verdict_rationale: Optional[str] = Field(default=None)
+    analysis_error: Optional[LLMAnalysisError] = Field(default=None)
     confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     findings: List[FindingItem] = Field(default_factory=list)
     recommended_actions: List[RecommendedActionItem] = Field(default_factory=list)
@@ -566,11 +651,14 @@ class LLMAnalysis(BaseModel):
     test_profile: Optional[Dict[str, Any]] = Field(default=None)
     deterministic_sla: Optional[Dict[str, Any]] = Field(default=None)
     stability_under_load: Optional[Dict[str, Any]] = Field(default=None)
+    verification_summary: Optional[VerificationSummary] = Field(default=None)
 
     @root_validator(pre=True)
     def _normalize_fields(cls, values: Dict[str, object]) -> Dict[str, object]:
         if not isinstance(values, dict):
             values = {}
+        raw_error = values.get("analysis_error")
+        values["analysis_error"] = raw_error if isinstance(raw_error, dict) else None
         values["verdict"] = _normalize_verdict(values.get("verdict"))
         verdict_rationale = _clean_text(
             values.get("verdict_rationale")
@@ -695,37 +783,51 @@ def _finding_evidence_strings(finding: Any) -> List[str]:
     return [_clean_text(part) for part in parts if _clean_text(part)]
 
 
-def make_invalid_llm_analysis(raw_text: str, reason: str = "invalid_json") -> LLMAnalysis:
+def _failure_payload(error: Any, raw_text: str) -> Dict[str, Any]:
+    excerpt = _safe_excerpt(raw_text) or None
+    if isinstance(error, LLMOutputTruncated):
+        reason = "output_truncated"
+    elif isinstance(error, LLMEmptyAnswer):
+        reason = "empty_answer"
+    elif isinstance(error, LLMBudgetError):
+        reason = "budget"
+    elif isinstance(error, BaseException):
+        reason = "provider_error"
+    elif isinstance(error, dict):
+        return {
+            "reason": str(error.get("reason") or "invalid_json"),
+            "message": str(error.get("message") or "Ответ модели не удалось разобрать как JSON."),
+            "provider": error.get("provider"),
+            "max_tokens": error.get("max_tokens"),
+            "output_tokens": error.get("output_tokens"),
+            "excerpt": error.get("excerpt") or excerpt,
+        }
+    else:
+        reason = "invalid_json"
+    message = str(error).strip() if error is not None else ""
+    if not message:
+        message = "Ответ модели не удалось разобрать как JSON."
+    return {
+        "reason": reason,
+        "message": message,
+        "provider": getattr(error, "provider", None),
+        "max_tokens": getattr(error, "max_tokens", None) or None,
+        "output_tokens": getattr(error, "output_tokens", None),
+        "excerpt": excerpt,
+    }
+
+
+def make_failed_llm_analysis(error: Any, raw_text: str = "") -> LLMAnalysis:
+    """Analysis placeholder that reports the failure instead of inventing findings."""
+    payload = _failure_payload(error, raw_text)
     return LLMAnalysis.parse_obj(
         {
             "verdict": "Недостаточно данных",
-            "verdict_rationale": (
-                "Вердикт вынесен как \"Недостаточно данных\", потому что ответ LLM не прошёл "
-                "строгую JSON-валидацию.\n"
-                "- Структура ответа не соответствовала ожидаемой схеме.\n"
-                "- Без корректного JSON нельзя безопасно извлечь факты и рекомендации."
-            ),
+            "verdict_rationale": payload["message"],
             "confidence": 0.0,
-            "findings": [
-                {
-                    "id": "finding_1",
-                    "summary": "Ответ LLM не прошёл проверку структуры JSON и был заменён безопасным сообщением.",
-                    "severity": "medium",
-                    "component": "llm_output",
-                    "evidence_summary": f"reason={reason}; excerpt={_safe_excerpt(raw_text)}",
-                    "evidence": f"reason={reason}; excerpt={_safe_excerpt(raw_text)}",
-                }
-            ],
-            "recommended_actions": [
-                {
-                    "summary": "Проверьте prompt, лимит токенов и повторите генерацию отчёта.",
-                    "details": "Убедитесь, что prompt требует строгий JSON и что лимит токенов достаточен для полного ответа. После корректировки повторите генерацию и проверьте, что ответ проходит JSON-валидацию.",
-                    "priority": "medium",
-                    "affected_components": ["llm_output"],
-                    "for_finding_ids": ["finding_1"],
-                }
-            ],
-            "affected_components": ["llm_output"],
+            "findings": [],
+            "recommended_actions": [],
+            "analysis_error": payload,
         }
     )
 
@@ -1311,6 +1413,117 @@ def _build_numeric_reference_catalog(sections: List[Dict[str, Any]]) -> List[Dic
     return refs
 
 
+def _context_packs(ctx_obj: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Domain pack(s) inside a context: the object itself and every entry of ``domains``."""
+    packs: List[Dict[str, Any]] = [ctx_obj]
+    domains = ctx_obj.get("domains")
+    if isinstance(domains, dict):
+        packs.extend(pack for pack in domains.values() if isinstance(pack, dict))
+    return packs
+
+
+def _extra_numeric_references(ctx_obj: Any) -> List[Dict[str, Any]]:
+    """Numbers the model may cite besides ``top_series`` statistics.
+
+    Covers the step table, step anomalies, load steps, baseline deltas, the
+    cross-domain timeline, the designated peak and deterministic SLA checks.
+    """
+    refs: List[Dict[str, Any]] = []
+    if not isinstance(ctx_obj, dict):
+        return refs
+
+    def _add(section: Any, series: Any, field: str, value: Any, extra_keys: Tuple[str, ...] = ()) -> None:
+        num = _safe_float_value(value)
+        if num is None:
+            return
+        section_label = _clean_text(section).lower()
+        series_name = _clean_text(series).lower()
+        refs.append({
+            "section": section_label,
+            "series": series_name,
+            "field": field,
+            "value": num,
+            "match_keys": _reference_match_keys(section_label, series_name) + [k for k in extra_keys if k],
+        })
+
+    for pack in _context_packs(ctx_obj):
+        for section in pack.get("step_table") or []:
+            if not isinstance(section, dict):
+                continue
+            for row in section.get("rows") or []:
+                if not isinstance(row, dict):
+                    continue
+                _add(section.get("label"), row.get("series"), "change_vs_first_pct", row.get("change_vs_first_pct"))
+                for stat in row.get("per_step") or []:
+                    if not isinstance(stat, dict):
+                        continue
+                    for field in ("mean", "p95", "max"):
+                        _add(section.get("label"), row.get("series"), f"step{stat.get('step')}_{field}", stat.get(field))
+                    tail = stat.get("after_plateau")
+                    if isinstance(tail, dict):
+                        for field in ("mean", "min", "max"):
+                            _add(section.get("label"), row.get("series"), f"step{stat.get('step')}_after_{field}", tail.get(field))
+        for section in pack.get("sections") or []:
+            if not isinstance(section, dict):
+                continue
+            for anomaly in section.get("anomalies") or []:
+                if not isinstance(anomaly, dict):
+                    continue
+                for item in anomaly.get("step_anomalies") or []:
+                    if isinstance(item, dict):
+                        for field in ("value", "reference", "change_pct", "load_change_pct"):
+                            _add(section.get("label"), anomaly.get("series"), f"anomaly_{field}", item.get(field))
+                for window in anomaly.get("windows") or []:
+                    if isinstance(window, dict):
+                        for field in ("peak", "mean", "threshold_high"):
+                            _add(section.get("label"), anomaly.get("series"), f"window_{field}", window.get(field))
+        for step in pack.get("load_steps") or []:
+            if isinstance(step, dict):
+                _add("load_steps", step.get("label"), "rps_level", step.get("rps_level"), ("rps", "ступен", "интервал", "нагрузк"))
+        baseline = pack.get("baseline")
+        if isinstance(baseline, dict):
+            for label, rows in (baseline.get("sections") or {}).items():
+                for series, row in (rows or {}).items():
+                    if isinstance(row, dict):
+                        for field in ("baseline_mean", "baseline_p95", "baseline_max", "delta_mean_pct", "delta_max_pct"):
+                            _add(label, series, field, row.get(field), ("baseline", "предыдущ", "прошл"))
+            for delta in baseline.get("key_deltas") or []:
+                if isinstance(delta, dict):
+                    for field in ("baseline_mean", "baseline_p95", "baseline_max", "delta_mean_pct", "delta_max_pct"):
+                        _add(delta.get("label"), delta.get("series"), field, delta.get(field), ("baseline", "предыдущ", "прошл"))
+
+    timeline = ctx_obj.get("timeline")
+    if isinstance(timeline, dict):
+        for row in timeline.get("rows") or []:
+            if not isinstance(row, dict):
+                continue
+            for index, value in enumerate(row.get("mean_per_step") or []):
+                _add(row.get("label"), row.get("series"), f"timeline_step{index + 1}", value)
+    peak = ctx_obj.get("designated_peak_performance")
+    if isinstance(peak, dict):
+        _add("designated_peak_performance", peak.get("series") or peak.get("source_label"), "stable_max", peak.get("stable_max"), ("rps", "max_rps", "stable_max", "производительност", "нагрузк"))
+    sla = ctx_obj.get("deterministic_sla")
+    if isinstance(sla, dict):
+        for check in sla.get("checks") or []:
+            if not isinstance(check, dict):
+                continue
+            name = _clean_text(check.get("name")).lower()
+            keys = (name, "sla", "порог", "threshold", "целев")
+            _add("deterministic_sla", name, "actual", check.get("actual"), keys)
+            _add("deterministic_sla", name, "threshold", check.get("threshold"), keys)
+    sla_step = ctx_obj.get("sla_step")
+    if isinstance(sla_step, dict):
+        _add("sla_step", sla_step.get("step_label"), "rps", sla_step.get("rps"), ("rps", "ступен", "интервал", "нагрузк", "sla"))
+        for check in sla_step.get("checks") or []:
+            if not isinstance(check, dict):
+                continue
+            name = _clean_text(check.get("name")).lower()
+            keys = (name, "sla", "порог", "threshold", "целев")
+            _add("sla_step", name, "actual", check.get("actual"), keys)
+            _add("sla_step", name, "threshold", check.get("threshold"), keys)
+    return refs
+
+
 def _matching_numeric_references(text: str, refs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     blob = _clean_text(text).lower()
     if not blob:
@@ -1517,6 +1730,12 @@ def _select_best_candidate(
 ) -> Tuple[str, Optional[LLMAnalysis], Dict[str, Any]]:
     if not candidates:
         return "", None, {}
+    if len(candidates) == 1:
+        text, parsed = candidates[0]
+        return text, parsed, {
+            "selected_index": 0,
+            "judge_meta": {"skipped": True, "reason": "single_candidate"},
+        }
     try:
         context_obj = json.loads(data_context) if data_context else {}
     except Exception:
@@ -1580,6 +1799,75 @@ def _select_best_candidate(
     return best_text, best_parsed, {}
 
 
+def _self_consistency_runtime_cfg() -> Dict[str, Any]:
+    """Reads ``llm.self_consistency`` limits used to throttle candidate/critic calls.
+
+    Keys: ``max_candidates`` (cap for ``k``), ``parallel_candidates`` and
+    ``parallel_critics`` (run calls concurrently; default is sequential to avoid
+    bursts against rate-limited providers), ``candidate_workers``,
+    ``critic_workers`` and ``pause_sec_between_calls`` for the sequential mode.
+    """
+    sc_cfg = ((CONFIG.get("llm", {}) or {}).get("self_consistency", {}) or {})
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return max(1, int(sc_cfg.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    try:
+        pause_sec = max(0.0, float(sc_cfg.get("pause_sec_between_calls", 0.0)))
+    except (TypeError, ValueError):
+        pause_sec = 0.0
+    return {
+        "max_candidates": _int("max_candidates", 3),
+        "parallel_candidates": bool(sc_cfg.get("parallel_candidates", True)),
+        "parallel_critics": bool(sc_cfg.get("parallel_critics", True)),
+        "candidate_workers": _int("candidate_workers", 3),
+        "critic_workers": _int("critic_workers", 3),
+        "pause_sec_between_calls": pause_sec,
+    }
+
+
+def _ask_llm_for_usage(domain_key: str, user_prompt: str, data_context: str) -> str:
+    with usage_domain(domain_key):
+        return ask_llm_with_text_data(user_prompt, data_context)
+
+
+def _run_one_llm_call(domain_key: str, prompt: str, data_context: str) -> object:
+    """One candidate call. A provider failure is returned, so the other candidates still run."""
+    try:
+        return _ask_llm_for_usage(domain_key, prompt, data_context)
+    except Exception as exc:
+        logger.error("LLM candidate failed for '%s': %s", domain_key, exc)
+        return exc
+
+
+def _run_llm_calls(
+    prompts: List[str],
+    data_context: str,
+    parallel: bool,
+    workers: int,
+    pause_sec: float,
+    domain_key: str = "unscoped",
+) -> List[object]:
+    """Runs ``ask_llm_with_text_data`` for each prompt either concurrently or one by one.
+
+    Each item is the raw text or the exception that call raised.
+    """
+    if parallel and len(prompts) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(len(prompts), max(1, workers))) as executor:
+            futures = [executor.submit(_run_one_llm_call, domain_key, prompt, data_context) for prompt in prompts]
+            return [f.result() for f in futures]
+    results: List[object] = []
+    for idx, prompt in enumerate(prompts):
+        results.append(_run_one_llm_call(domain_key, prompt, data_context))
+        if idx < len(prompts) - 1 and pause_sec > 0:
+            time.sleep(pause_sec)
+    return results
+
+
 def llm_two_pass_self_consistency(
     user_prompt: str,
     data_context: str,
@@ -1592,7 +1880,7 @@ def llm_two_pass_self_consistency(
     Параметры:
         user_prompt (str): Текстовая инструкция.
         data_context (str): JSON с данными.
-        k (int): Количество кандидатов.
+        k (int): Количество кандидатов (ограничивается ``llm.self_consistency.max_candidates``).
         return_scores (bool): Возвращать ли метрики выбора.
         domain_key (str | None): Домен для выбора judge-рубрики.
 
@@ -1600,31 +1888,75 @@ def llm_two_pass_self_consistency(
         tuple: `(best_text, best_parsed)` или `(best_text, best_parsed, scores)`.
     """
     candidates: list[tuple[str, Optional[LLMAnalysis]]] = []
-    gen_count = max(1, int(k))
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=gen_count) as executor:
-        futures = [executor.submit(ask_llm_with_text_data, user_prompt, data_context) for _ in range(gen_count)]
-        raw_results = [f.result() for f in futures]
+    call_errors: List[BaseException] = []
+    runtime_cfg = _self_consistency_runtime_cfg()
+    gen_count = min(max(1, int(k)), int(runtime_cfg["max_candidates"]))
+    pause_sec = float(runtime_cfg["pause_sec_between_calls"])
+    usage_key = domain_key or "unscoped"
+    if structured_output_enabled():
+        # GigaChat function-calling returns a validated model; the critic pass is not needed.
+        for i in range(gen_count):
+            try:
+                with usage_domain(usage_key):
+                    structured = ask_llm_structured(user_prompt, data_context, LLMAnalysis)
+            except Exception as exc:
+                logger.error("Structured LLM candidate failed for '%s': %s", usage_key, exc)
+                call_errors.append(exc)
+            else:
+                if getattr(structured, "analysis_error", None) is None:
+                    candidates.append((json.dumps(structured.dict(), ensure_ascii=False, indent=2), structured))
+            if i < gen_count - 1 and pause_sec > 0:
+                time.sleep(pause_sec)
+        if not candidates and call_errors:
+            failed = make_failed_llm_analysis(call_errors[0])
+            failed_text = json.dumps(failed.dict(), ensure_ascii=False, indent=2)
+            return (failed_text, failed, {}) if return_scores else (failed_text, failed)
+        best_text, best_parsed, score_info = _select_best_candidate(candidates, data_context, domain_key=domain_key)
+        if best_parsed is not None:
+            best_parsed = fill_missing_verdict_rationale(best_parsed)
+            best_text = json.dumps(best_parsed.dict(), ensure_ascii=False, indent=2)
+        return (best_text, best_parsed, score_info) if return_scores else (best_text, best_parsed)
+    raw_results = _run_llm_calls(
+        [user_prompt] * gen_count,
+        data_context,
+        parallel=bool(runtime_cfg["parallel_candidates"]),
+        workers=int(runtime_cfg["candidate_workers"]),
+        pause_sec=pause_sec,
+        domain_key=usage_key,
+    )
     need_critics = []
     parsed_or_raw: list[tuple[Optional[LLMAnalysis], str]] = []
     for raw in raw_results:
-        p = parse_llm_analysis_strict(raw)
+        if isinstance(raw, BaseException):
+            call_errors.append(raw)
+            continue
+        text = str(raw or "")
+        p = parse_llm_analysis_strict(text)
         if p is None:
-            need_critics.append(raw)
-            parsed_or_raw.append((None, raw))
+            need_critics.append(text)
+            parsed_or_raw.append((None, text))
         else:
-            parsed_or_raw.append((p, raw))
+            parsed_or_raw.append((p, text))
     if need_critics:
-        from concurrent.futures import ThreadPoolExecutor
         critic_prompts = [_build_critic_prompt(r) for r in need_critics]
-        with ThreadPoolExecutor(max_workers=len(need_critics)) as executor:
-            critic_results = [executor.submit(ask_llm_with_text_data, cp, data_context).result() for cp in critic_prompts]
+        critic_results = _run_llm_calls(
+            critic_prompts,
+            data_context,
+            parallel=bool(runtime_cfg["parallel_critics"]),
+            workers=int(runtime_cfg["critic_workers"]),
+            pause_sec=pause_sec,
+            domain_key="critic",
+        )
         ci = 0
         for p, raw in parsed_or_raw:
             if p is None:
                 crit = critic_results[ci]
                 ci += 1
-                p2 = parse_llm_analysis_strict(crit)
+                if isinstance(crit, BaseException):
+                    call_errors.append(crit)
+                    candidates.append((raw, None))
+                    continue
+                p2 = parse_llm_analysis_strict(str(crit or ""))
                 if p2 is not None:
                     candidates.append((json.dumps(p2.dict(), ensure_ascii=False, indent=2), p2))
                 else:
@@ -1645,7 +1977,10 @@ def llm_two_pass_self_consistency(
         except Exception:
             pass
     if best_parsed is None:
-        best_parsed = make_invalid_llm_analysis(best_text or "", reason="failed_strict_validation")
+        failure = call_errors[0] if call_errors else {"reason": "invalid_json", "message": "Ответ модели не удалось разобрать как JSON."}
+        best_parsed = make_failed_llm_analysis(failure, best_text or "")
+    if best_parsed is not None:
+        best_parsed = fill_missing_verdict_rationale(best_parsed)
         best_text = json.dumps(best_parsed.dict(), ensure_ascii=False, indent=2)
     if return_scores:
         return best_text, best_parsed, score_info

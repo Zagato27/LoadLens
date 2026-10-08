@@ -26,7 +26,8 @@ dist/
 
 # Действующие конфиги (игнорируем секреты)
 settings.py
-settings_runtime.json
+# Runtime settings and their backups (e.g. settings_runtime.before-data-sources.json) hold secrets
+settings_runtime*.json
 metrics_config.py
 metrics_config_runtime.json
 AI/config.py
@@ -40,6 +41,12 @@ AI/config.py
 # Локальные/сгенерированные артефакты отчётов и сборщиков метрик
 data_collectors/temporary_files/
 k6-load-testing-results*.json
+opensearch_error_report.md
+opensearch_logs_config.json
+AI/GigaChat/
+
+# Session signing key generated on first start
+.loadlens_secret_key
 
 # Локальные копии/форки проекта
 loadlens_sber/

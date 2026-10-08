@@ -1,325 +1,306 @@
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Настройки</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,400;0,500;0,600;0,700;1,600&display=swap" rel="stylesheet">
-  <style>
-    body { background:#121212; color:#fff; font-family:'Montserrat', Arial, sans-serif; margin:0; }
-    .app-header { position:sticky; top:0; display:flex; align-items:center; gap:12px; z-index:2000; width:100%; max-width:1400px; margin:0 auto; padding:8px 12px; --brandSize:40px; background:#121212; border-bottom:1px solid #2a2a2a; }
-    .app-header .logo { width:var(--brandSize); height:var(--brandSize); object-fit:contain; }
-    .app-header .brand { font-size:var(--brandSize); line-height:var(--brandSize); font-weight:600; font-style:italic; letter-spacing:.2px; color:#eaeaea; }
-    .app-nav { display:flex; gap:16px; margin-left:auto; white-space:nowrap; align-items:center; }
-    .app-nav a.nav-btn { height:36px; padding:8px 4px; background:transparent; border:none; color:#eaeaea; border-bottom:2px solid transparent; cursor:pointer; font-weight:600; font-style:italic; text-decoration:none; display:inline-flex; align-items:center; }
-    .app-nav a.nav-btn:hover { color:#fff; border-bottom-color:#3700b3; }
-    .app-nav a.nav-btn.active { color:#fff; border-bottom-color:#6200ee; }
-    .container { width:90%; max-width:1400px; margin:16px auto; }
-    h2 { margin:8px 0 16px; font-weight:600; font-style:italic; }
-    details { background:#1e1e1e; border:1px solid #333; border-radius:8px; margin-bottom:10px; }
-    summary { cursor:pointer; padding:10px 12px; font-weight:600; outline:none; }
-    .panel { padding: 0 12px 12px 12px; }
-    .editor-wrap { border:1px solid #333; border-radius:8px; background:#0f0f0f; margin:8px 0 10px 0; overflow:hidden; }
-    .editor-header { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 10px; background:#151515; border-bottom:1px solid #333; }
-    .editor-title { font-weight:600; color:#ddd; font-size:13px; }
-    .editor-status { color:#bbb; font-size:12px; }
-    .editor { width:100%; min-height:240px; background:#0f0f0f; }
-    .help { color:#bbbbbb; font-size:13px; line-height:1.5; margin: 8px 0 10px 0; }
-    .btn { height:36px; padding:0 12px; background:#6200ee; border:1px solid #6200ee; color:#fff; border-radius:6px; cursor:pointer; margin-top:8px; }
-    .btn-secondary { background:#2b2b2b; border:1px solid #444; }
-    .btn:hover { background:#3700b3; border-color:#3700b3; }
-    .row { display:flex; gap:8px; align-items:center; }
-    .status { color:#bbb; font-size:13px; margin-left:8px; }
-    .domain-toggle-list { display:flex; flex-wrap:wrap; gap:8px; margin:8px 0 12px 0; }
-    .domain-toggle-list label { display:inline-flex; align-items:center; gap:6px; background:#1e1e1e; border:1px solid #333; border-radius:20px; padding:6px 12px; font-size:13px; color:#ddd; cursor:pointer; }
-    .domain-toggle-list input { width:auto; height:auto; }
-  </style>
-</head>
-<body>
-  <div class="app-header">
-    <img class="logo" src="/assets/logo.png" alt="LoadLens" />
-    <span class="brand">LoadLens</span>
-    <div class="app-nav">
-      <a class="nav-btn" href="/">Дэшборд</a>
-      <a class="nav-btn" href="/new">Новый отчёт</a>
-      <a class="nav-btn" href="/reports">Архив</a>
-      <a class="nav-btn" href="/compare">Сравнение тестов</a>
-      <a class="nav-btn active" href="/settings">Настройки</a>
+{% extends "base.html" %}
+{% set active_nav = 'settings' %}
+{% block title %}Настройки{% endblock %}
+{% block head %}
+<script src="/static/vendor/ace/ace.js"></script>
+<style>
+  .settings-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+  .help { color: var(--text-muted); font-size: 13px; line-height: 1.5; margin: 6px 0 12px; }
+  .help code { background: var(--bg-code); padding: 1px 5px; border-radius: 4px; }
+  .card-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+  .card-actions .status { color: var(--text-muted); font-size: 13px; }
+  .field-warnings { color: var(--warn-fg); font-size: 12px; margin-top: 6px; }
+  .services-table td input[type="text"] { height: 34px; }
+  .project-list { display: grid; gap: 12px; }
+  .project-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; flex-wrap: wrap; }
+  .project-title { font-weight: 600; font-size: 15px; }
+  .project-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .project-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+  .project-card .report-collapsible { margin-top: 10px; }
+  .domain-toggle-list { display: flex; flex-wrap: wrap; gap: 6px; }
+  .domain-toggle-list label { display: inline-flex; align-items: center; gap: 6px; background: var(--bg-elev2); border: 1px solid var(--border); border-radius: 20px; padding: 4px 10px; font-size: 12px; color: var(--text); cursor: pointer; margin: 0; }
+  .domain-toggle-list input { width: auto; height: auto; }
+  .prompt-toolbar { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 8px; }
+  .prompt-toolbar label { margin: 0; display: flex; flex-direction: column; gap: 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); }
+  .prompt-toolbar select { height: 36px; min-width: 200px; }
+  .area-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 14px; margin-bottom: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev); }
+  .area-bar .scope { font-weight: 600; }
+  .area-bar .scope-note { color: var(--text-muted); font-size: 13px; }
+  body:not(.wizard) .wizard-only { display: none !important; }
+  body.wizard .settings-menu, body.wizard .not-in-wizard { display: none !important; }
+  body.wizard .settings-layout { grid-template-columns: 1fr; }
+  .wizard-nav { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
+  .wizard-final { text-align: center; padding: 30px 16px; }
+  .wizard-final h3 { font-style: normal; }
+</style>
+{% endblock %}
+{% block content %}
+  <div class="settings-head">
+    <h2 style="margin:0">Настройки</h2>
+    <div class="page-actions">
+      <a class="btn btn-sm not-in-wizard" href="/settings?wizard=1">Мастер первичной настройки</a>
+      <a class="btn btn-sm wizard-only" href="/settings">Выйти из мастера</a>
     </div>
   </div>
-  <div class="container">
-    <h2>Настройки</h2>
-    <div class="row" style="margin:8px 0 14px 0; gap:12px; align-items:center;">
-      <label for="areaSelect" style="min-width:160px; color:#ccc;">Проектная область:</label>
-      <select id="areaSelect" style="height:36px; background:#1e1e1e; color:#eaeaea; border:1px solid #333; border-radius:6px; padding:6px 10px; min-width:200px;"></select>
-      <button class="btn btn-secondary" id="addAreaBtn" type="button">Добавить область</button>
-        <button class="btn btn-secondary" id="deleteAreaBtn" type="button" style="background:#b00020; border-color:#b00020;">Удалить область</button>
-      <span id="areaStatus" class="status"></span>
-    </div>
 
-    <details open>
-      <summary>Конфигурация отчётов в LoadLens</summary>
-      <div class="panel">
-        <details>
-          <summary>LLM</summary>
-          <div class="panel">
-            <div class="help">Настройка провайдера LLM (perplexity/openai/anthropic), параметры генерации, таймауты и параллелизм. Изменения применяются сразу к новым отчётам.</div>
-            <div class="editor-wrap">
-              <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_llm"></span></div>
-              <div id="ed_llm" class="editor"></div>
-            </div>
-            <div class="row"><button class="btn btn-secondary" data-edit="llm">Редактировать</button><button class="btn" data-save="llm" style="display:none;">Сохранить</button></div>
-          </div>
-        </details>
-        <details>
-          <summary>Источник метрик</summary>
-          <div class="panel">
-            <div class="help">Выберите режим: <code>prometheus</code> (прямое подключение) или <code>grafana_proxy</code> (через Grafana). Укажите URL Prometheus или базовый URL Grafana и параметры доступа/датасорса.</div>
-            <div class="editor-wrap">
-              <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_metrics_source"></span></div>
-              <div id="ed_metrics_source" class="editor"></div>
-            </div>
-            <div class="row"><button class="btn btn-secondary" data-edit="metrics_source">Редактировать</button><button class="btn" data-save="metrics_source" style="display:none;">Сохранить</button></div>
-          </div>
-        </details>
-    <details>
-      <summary>Источник метрик LT (нагрузочное ПО)</summary>
-      <div class="panel">
-        <div class="help">Конфигурация чтения метрик самого инструмента нагрузочного тестирования (lt_framework): <code>prometheus</code> (прямо), <code>grafana_proxy</code> или <code>influxdb</code> (прямое подключение к InfluxDB v2).</div>
-        <div class="editor-wrap">
-          <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_lt_metrics_source"></span></div>
-          <div id="ed_lt_metrics_source" class="editor"></div>
+  <div class="area-bar" id="areaBar">
+    <span class="scope" id="areaScopeLabel">Глобальные настройки</span>
+    <span class="scope-note" id="areaScopeNote">Выберите область в шапке, чтобы задать переопределения для неё; без области редактируются значения по умолчанию.</span>
+  </div>
+
+  <div id="wizardStepper" class="stepper wizard-only" aria-label="Шаги мастера"></div>
+
+  <div class="settings-layout">
+    <nav class="settings-menu" id="settingsMenu" aria-label="Разделы настроек">
+      <button type="button" data-section="projects" class="active">Проекты</button>
+      <button type="button" data-section="connections">Подключения</button>
+      <button type="button" data-section="sla">SLA-критерии</button>
+      <button type="button" data-section="context">Контекст системы</button>
+      <button type="button" data-section="queries">Запросы</button>
+      <button type="button" data-section="prompts">Промпты</button>
+      <button type="button" data-section="services">Сервисы</button>
+      <button type="button" data-section="metrics">Визуализации</button>
+      <button type="button" data-section="appearance">Оформление</button>
+      <button type="button" data-section="users">Пользователи</button>
+    </nav>
+
+    <div class="settings-content">
+      <section id="sec-projects" class="settings-section active" aria-labelledby="h-projects">
+        <h3 id="h-projects">Проекты</h3>
+        <p class="help">Проект — это проектная область со своими подключениями, SLA, запросами, промптами и сервисами. В блоке «Что переопределено» видно, откуда берутся настройки: «общие» — из глобальных; «копия общих» — в проекте лежит копия, она не обновится при изменении глобальных; «свои» — значения проекта отличаются от глобальных.</p>
+        <div class="card-actions" style="margin:0 0 12px">
+          <button type="button" class="btn btn-primary" id="projectCreateBtn">Создать проект</button>
         </div>
-        <div class="row"><button class="btn btn-secondary" data-edit="lt_metrics_source">Редактировать</button><button class="btn" data-save="lt_metrics_source" style="display:none;">Сохранить</button></div>
-      </div>
-    </details>
-        <details>
-          <summary>Хранилище (TimescaleDB)</summary>
-          <div class="panel">
-            <div class="help">Параметры подключения TimescaleDB, имена таблиц (<code>metrics</code>, <code>llm_reports</code>, <code>engineer_reports</code>), батч и настройки гипертаблицы.</div>
-            <div class="editor-wrap">
-              <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_storage_timescale"></span></div>
-              <div id="ed_storage_timescale" class="editor"></div>
-            </div>
-            <div class="row"><button class="btn btn-secondary" data-edit="storage.timescale">Редактировать</button><button class="btn" data-save="storage.timescale" style="display:none;">Сохранить</button></div>
-          </div>
-        </details>
-        <details>
-          <summary>Параметры по умолчанию</summary>
-          <div class="panel">
-            <div class="help">Шаг выборки (<code>step</code>) и интервал ресемплинга (<code>resample_interval</code>) для агрегации временных рядов.</div>
-            <div class="editor-wrap">
-              <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_default_params"></span></div>
-              <div id="ed_default_params" class="editor"></div>
-            </div>
-            <div class="row"><button class="btn btn-secondary" data-edit="default_params">Редактировать</button><button class="btn" data-save="default_params" style="display:none;">Сохранить</button></div>
-          </div>
-        </details>
-        <details>
-          <summary>Контекст тестируемой системы</summary>
-          <div class="panel">
-            <div class="help">
-              Структурированный глобальный контекст о системе: что это за продукт, какие компоненты и зависимости в нем есть, какие пользовательские потоки критичны и на чем нужно делать акцент в анализе. Этот JSON используется как справочный источник для AI-анализа и сохраняется вместе с отчетом как снапшот. Формат задается самим содержимым этого блока. Если контекст не нужен, установите <code>"enabled": false</code> и остальные поля можно не заполнять.
-            </div>
-            <div class="editor-wrap">
-              <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_system_context"></span></div>
-              <div id="ed_system_context" class="editor"></div>
-            </div>
-            <div class="row"><button class="btn btn-secondary" data-edit="system_context">Редактировать</button><button class="btn" data-save="system_context" style="display:none;">Сохранить</button></div>
-          </div>
-        </details>
-        <details>
-          <summary>SLA-критерии</summary>
-          <div class="panel">
-            <div class="help">
-              <p>Пороговые значения SLA для автоматической оценки результата теста.</p>
-              <ul>
-                <li><code>target_rps</code> — целевой RPS. Если достигнут устойчивый <code>stable_max</code>, тест считается успешным даже при последующей деградации.</li>
-                <li><code>max_error_rate_pct</code> — максимальный допустимый процент ошибок.</li>
-                <li><code>max_p95_ms</code> / <code>max_p99_ms</code> — пороги по p95 / p99 задержке в миллисекундах.</li>
-                <li><code>max_cpu_pct</code> / <code>max_memory_pct</code> — пороги CPU / Memory в процентах.</li>
-              </ul>
-              <p>Значение <code>null</code> означает «не проверять». SLA можно задавать как для всей области, так и отдельно для конкретного сервиса.</p>
-            </div>
-            <div class="row" style="gap:12px; align-items:center; margin:8px 0;">
-              <label for="slaServiceSelect" style="min-width:180px; color:#ccc;">Сервис:</label>
-              <select id="slaServiceSelect" style="height:36px; background:#1e1e1e; color:#eaeaea; border:1px solid #333; border-radius:6px; padding:6px 10px; min-width:240px;">
-                <option value="">SLA области (по умолчанию)</option>
-              </select>
-            </div>
-            <div class="editor-wrap">
-              <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_sla"></span></div>
-              <div id="ed_sla" class="editor"></div>
-            </div>
-            <div class="row"><button class="btn btn-secondary" data-edit="sla">Редактировать</button><button class="btn" data-save="sla" style="display:none;">Сохранить</button></div>
-          </div>
-        </details>
-        <details>
-          <summary>Запросы</summary>
-          <div class="panel">
-            <div class="help">
-              <p>Домены и запросы для формирования отчёта.</p>
-              <ul>
-                <li><code>promql_queries</code>/<code>label_keys_list</code>/<code>labels</code> — для источника Prometheus или Grafana Proxy.</li>
-                <li><code>flux_queries</code>/<code>label_tag_keys_list</code>/<code>labels</code> — для источника InfluxDB (Flux). В Flux допускаются плейсхолдеры <code>{bucket}</code>, <code>{start}</code>, <code>{end}</code> (ISO8601 UTC).</li>
-              </ul>
-              <p>Домен <code>lt_framework</code> — метрики инструмента нагрузочного тестирования:</p>
-              <ul>
-                <li>Prometheus: задайте <code>promql_queries</code> (например, RPS и p95 по <code>scenario</code>), <code>label_keys_list</code>, <code>labels</code>.</li>
-                <li>InfluxDB: задайте <code>flux_queries</code> с <code>from(bucket: \"{bucket}\") |> range(start: {start}, stop: {end})</code>, укажите теги для серий в <code>label_tag_keys_list</code> и подписи в <code>labels</code>.</li>
-                <li>Рекомендуется использовать тег <code>scenario</code> как основной ключ серии.</li>
-              </ul>
-            </div>
-            <div class="row" style="gap:12px; align-items:center; margin:8px 0;">
-              <label for="queriesServiceSelect" style="min-width:180px; color:#ccc;">Сервис:</label>
-              <select id="queriesServiceSelect" style="height:36px; background:#1e1e1e; color:#eaeaea; border:1px solid #333; border-radius:6px; padding:6px 10px; min-width:240px;">
-                <option value="">Настройки области (по умолчанию)</option>
-              </select>
-              <button class="btn btn-secondary" id="addServiceBtnQueries" type="button">Добавить сервис</button>
-              <button class="btn btn-secondary" data-delete-service="queries" type="button" style="background:#b00020; border-color:#b00020;">Удалить сервис</button>
-            </div>
-            <div class="editor-wrap">
-              <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_queries"></span></div>
-              <div id="ed_queries" class="editor"></div>
-            </div>
-            <div class="row"><button class="btn btn-secondary" data-edit="queries">Редактировать</button><button class="btn" data-save="queries" style="display:none;">Сохранить</button></div>
-          </div>
-        </details>
-        <details>
-          <summary>Промпты для LLM отчёта</summary>
-          <div class="panel">
-            <div class="help">Редактируйте тексты подсказок (prompts) для разных доменов анализа. Эти значения могут отличаться по проектным областям.</div>
-            <div class="row" style="gap:12px; align-items:center; margin:8px 0;">
-              <label for="promptServiceSelect" style="min-width:180px; color:#ccc;">Сервис:</label>
-              <select id="promptServiceSelect" style="height:36px; background:#1e1e1e; color:#eaeaea; border:1px solid #333; border-radius:6px; padding:6px 10px; min-width:240px;">
-                <option value="">Промпты области (по умолчанию)</option>
-              </select>
-              <button class="btn btn-secondary" id="addServiceBtn" type="button">Добавить сервис</button>
-              <button class="btn btn-secondary" data-delete-service="prompts" type="button" style="background:#b00020; border-color:#b00020;">Удалить сервис</button>
-              <span id="serviceManageStatus" class="status"></span>
-            </div>
-            <div id="serviceMetaPanel" style="display:none; border:1px solid #333; border-radius:8px; padding:10px; margin-bottom:16px;">
-              <div class="row" style="gap:12px; align-items:center; margin-bottom:8px;">
-                <label for="serviceTitleInput" style="min-width:180px; color:#ccc;">Отображаемое имя:</label>
-                <input type="text" id="serviceTitleInput" style="flex:1; height:36px; background:#1e1e1e; color:#eaeaea; border:1px solid #333; border-radius:6px; padding:6px 10px;" placeholder="Например: Core API" />
-              </div>
-              <div class="help">Домены, отмеченные галочкой, будут собираться и анализироваться для выбранного сервиса.</div>
-              <div id="domainToggleList" class="domain-toggle-list"></div>
-              <div class="row" style="gap:12px;">
-                <button class="btn btn-secondary" id="saveServiceMetaBtn" type="button">Сохранить сервис</button>
-                <span id="serviceMetaStatus" class="status"></span>
-              </div>
-            </div>
-            <details>
-              <summary>overall</summary>
-              <div class="panel">
-                <div class="editor-wrap">
-                  <div class="editor-header"><div class="editor-title">Prompt: overall</div><span class="editor-status status" id="st_prompt_overall"></span></div>
-                  <div id="ed_prompt_overall" class="editor"></div>
-                </div>
-                <div class="row"><button class="btn btn-secondary" data-prompt-edit="overall">Редактировать</button><button class="btn" data-prompt-save="overall" style="display:none;">Сохранить</button></div>
-              </div>
-            </details>
-            <details>
-              <summary>database</summary>
-              <div class="panel">
-                <div class="editor-wrap">
-                  <div class="editor-header"><div class="editor-title">Prompt: database</div><span class="editor-status status" id="st_prompt_database"></span></div>
-                  <div id="ed_prompt_database" class="editor"></div>
-                </div>
-                <div class="row"><button class="btn btn-secondary" data-prompt-edit="database">Редактировать</button><button class="btn" data-prompt-save="database" style="display:none;">Сохранить</button></div>
-              </div>
-            </details>
-            <details>
-              <summary>kafka</summary>
-              <div class="panel">
-                <div class="editor-wrap">
-                  <div class="editor-header"><div class="editor-title">Prompt: kafka</div><span class="editor-status status" id="st_prompt_kafka"></span></div>
-                  <div id="ed_prompt_kafka" class="editor"></div>
-                </div>
-                <div class="row"><button class="btn btn-secondary" data-prompt-edit="kafka">Редактировать</button><button class="btn" data-prompt-save="kafka" style="display:none;">Сохранить</button></div>
-              </div>
-            </details>
-            <details>
-              <summary>microservices</summary>
-              <div class="panel">
-                <div class="editor-wrap">
-                  <div class="editor-header"><div class="editor-title">Prompt: microservices</div><span class="editor-status status" id="st_prompt_microservices"></span></div>
-                  <div id="ed_prompt_microservices" class="editor"></div>
-                </div>
-                <div class="row"><button class="btn btn-secondary" data-prompt-edit="microservices">Редактировать</button><button class="btn" data-prompt-save="microservices" style="display:none;">Сохранить</button></div>
-              </div>
-            </details>
-            <details>
-              <summary>jvm</summary>
-              <div class="panel">
-                <div class="editor-wrap">
-                  <div class="editor-header"><div class="editor-title">Prompt: jvm</div><span class="editor-status status" id="st_prompt_jvm"></span></div>
-                  <div id="ed_prompt_jvm" class="editor"></div>
-                </div>
-                <div class="row"><button class="btn btn-secondary" data-prompt-edit="jvm">Редактировать</button><button class="btn" data-prompt-save="jvm" style="display:none;">Сохранить</button></div>
-              </div>
-            </details>
-            <details>
-              <summary>hard_resources</summary>
-              <div class="panel">
-                <div class="editor-wrap">
-                  <div class="editor-header"><div class="editor-title">Prompt: hard_resources</div><span class="editor-status status" id="st_prompt_hard_resources"></span></div>
-                  <div id="ed_prompt_hard_resources" class="editor"></div>
-                </div>
-                <div class="row"><button class="btn btn-secondary" data-prompt-edit="hard_resources">Редактировать</button><button class="btn" data-prompt-save="hard_resources" style="display:none;">Сохранить</button></div>
-              </div>
-            </details>
-          </div>
-        </details>
-      </div>
-    </details>
+        <div id="projectsList" class="project-list"></div>
+      </section>
 
-    <details>
-      <summary>Конфигурация отчётов в Confluence</summary>
-      <div class="panel">
-        <details>
-          <summary>Confluence</summary>
-          <div class="panel">
-            <div class="help">Публикация отчёта: настройки Confluence (базовый URL, пространство, логин/пароль), а также параметры доступа к Grafana (рендер изображений панелей) и Loki (выгрузка логов).</div>
-            <div class="editor-wrap">
-              <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_confluence"></span></div>
-              <div id="ed_confluence" class="editor"></div>
+      <section id="sec-connections" class="settings-section" aria-labelledby="h-connections">
+        <h3 id="h-connections" class="not-in-wizard">Подключения</h3>
+        <p class="help not-in-wizard">Заполните ключевые поля и нажмите «Проверить соединение» — проверка идёт по данным формы ещё до сохранения. Редкие параметры доступны в блоке «Расширенные параметры (JSON)». Пароли и токены показываются как <code>***</code> и хранятся только на сервере. Каталог источников общий для всех областей; привязка доменов и LLM переопределяются для выбранной области. Хранилище и Confluence общие.</p>
+        <div id="connectionCards"></div>
+      </section>
+
+      <section id="sec-sla" class="settings-section" aria-labelledby="h-sla">
+        <h3 id="h-sla">SLA-критерии</h3>
+        <p class="help">Отметьте критерии, которые нужно проверять, и задайте пороги. Главный критерий — целевой RPS: если он достигнут на стабильной ступени, тест считается успешным, а нарушения остальных порогов дают вердикт «Есть риски». Неотмеченные критерии не проверяются.</p>
+        <div class="toolbar" style="margin-bottom:10px">
+          <label>Сервис
+            <select id="slaServiceSelect"><option value="">Область (по умолчанию)</option></select>
+          </label>
+        </div>
+        <div class="card">
+          <div id="slaRows"></div>
+          <h4 style="margin:18px 0 8px; font-style:normal">Определение максимальной производительности</h4>
+          <div class="form-grid two" id="slaPeakFields"></div>
+          <details class="report-collapsible" style="margin-top:14px">
+            <summary><span>Расширенные параметры (JSON)</span></summary>
+            <div class="report-collapsible-body">
+              <div class="editor-wrap"><div class="editor-header"><span class="editor-title">sla</span><span class="dim" id="slaJsonStatus"></span></div><div id="ed_sla" class="ace-host"></div></div>
             </div>
-            <div class="row"><button class="btn btn-secondary" data-edit="confluence">Редактировать</button><button class="btn" data-save="confluence" style="display:none;">Сохранить</button></div>
+          </details>
+          <div class="card-actions">
+            <button type="button" class="btn btn-primary" id="slaSaveBtn" disabled>Сохранить</button>
+            <span class="status" id="slaStatus"></span>
+          </div>
+        </div>
+      </section>
+
+      <section id="sec-context" class="settings-section" aria-labelledby="h-context">
+        <h3 id="h-context">Контекст тестируемой системы</h3>
+        <p class="help">Описание системы, компонентов, критичных потоков и рисков. Используется как справочный контекст для анализа ИИ и сохраняется снимком вместе с каждым отчётом. Заполняйте то, что знаете: пустые блоки не мешают.</p>
+        <div class="card">
+          <div id="contextForm"></div>
+          <details class="report-collapsible" style="margin-top:12px">
+            <summary><span>Расширенный режим (JSON)</span></summary>
+            <div class="report-collapsible-body">
+              <div class="editor-wrap"><div class="editor-header"><span class="editor-title">system_context</span><span class="dim" id="contextJsonStatus"></span></div><div id="ed_system_context" class="ace-host tall"></div></div>
+            </div>
+          </details>
+          <div class="card-actions">
+            <button type="button" class="btn btn-primary" id="contextSaveBtn" disabled>Сохранить</button>
+            <span class="status" id="contextStatus"></span>
+          </div>
+        </div>
+      </section>
+
+      <section id="sec-queries" class="settings-section" aria-labelledby="h-queries">
+        <h3 id="h-queries">Запросы метрик</h3>
+        <p class="help">Запросы метрик по доменам. Нажмите на запрос, чтобы изменить его. Название запроса используется в SLA и при сравнении прогонов, поэтому переименовывайте осторожно. Настройки сервиса переопределяют настройки области.</p>
+        <div class="toolbar" style="margin-bottom:10px">
+          <label>Сервис
+            <select id="queriesServiceSelect"><option value="">Область (по умолчанию)</option></select>
+          </label>
+        </div>
+        <div class="card">
+          <div id="queriesForm"></div>
+          <details class="report-collapsible" style="margin-top:12px">
+            <summary><span>Расширенный режим (JSON)</span></summary>
+            <div class="report-collapsible-body">
+              <div class="editor-wrap"><div class="editor-header"><span class="editor-title">queries</span><span class="dim" id="queriesJsonStatus"></span></div><div id="ed_queries" class="ace-host tall"></div></div>
+            </div>
+          </details>
+          <div class="card-actions">
+            <button type="button" class="btn btn-primary" id="queriesSaveBtn" disabled>Сохранить</button>
+            <span class="status" id="queriesStatus"></span>
+          </div>
+        </div>
+      </section>
+
+      <section id="sec-prompts" class="settings-section" aria-labelledby="h-prompts">
+        <h3 id="h-prompts">Промпты для анализа ИИ</h3>
+        <p class="help">Инструкции модели по доменам. Плейсхолдеры вида <code>{answer_jvm}</code> подставляются автоматически и подсвечены в редакторе — не удаляйте их из итогового промпта. Каждое сохранение попадает в историю, откуда можно восстановить прежнюю версию. Для редактирования нужна выбранная область.</p>
+        <div class="prompt-toolbar">
+          <label>Сервис
+            <select id="promptServiceSelect"><option value="">Область (по умолчанию)</option></select>
+          </label>
+          <label>Домен
+            <select id="promptDomainSelect"></select>
+          </label>
+          <span class="dim" id="promptOverrideNote"></span>
+        </div>
+        <div class="card">
+          <div class="editor-wrap"><div class="editor-header"><span class="editor-title" id="promptEditorTitle">prompt</span><span class="dim" id="promptStatusInline"></span></div><div id="ed_prompt" class="ace-host tall"></div></div>
+          <div class="field-warnings" id="promptWarnings"></div>
+          <div class="card-actions">
+            <button type="button" class="btn btn-primary" id="promptSaveBtn" disabled>Сохранить</button>
+            <button type="button" class="btn" id="promptDiffBtn">Отличия от базового</button>
+            <button type="button" class="btn" id="promptHistoryBtn">История</button>
+            <button type="button" class="btn btn-danger" id="promptResetBtn">Сбросить к базовому</button>
+            <span class="status" id="promptStatus"></span>
+          </div>
+          <div id="promptDiff" class="diff-view" style="display:none; margin-top:12px"></div>
+        </div>
+      </section>
+
+      <section id="sec-services" class="settings-section" aria-labelledby="h-services">
+        <h3 id="h-services">Сервисы</h3>
+        <p class="help">Сервис — идентификатор тестируемой системы внутри области, для которого создаются отчёты. Здесь можно задать отображаемое имя и выбрать домены анализа; запросы, SLA, промпты и визуализации сервиса настраиваются в соответствующих разделах через выбор сервиса.</p>
+        <div class="card">
+          <div class="table-wrap">
+            <table class="data-table services-table">
+              <thead><tr><th>Идентификатор</th><th>Отображаемое имя</th><th>Домены анализа</th><th><span class="visually-hidden">Действия</span></th></tr></thead>
+              <tbody id="servicesBody"></tbody>
+            </table>
+          </div>
+          <div class="card-actions">
+            <button type="button" class="btn" id="addServiceBtn">Добавить сервис</button>
+            <span class="status" id="servicesStatus"></span>
+          </div>
+        </div>
+      </section>
+
+      <section id="sec-metrics" class="settings-section" aria-labelledby="h-metrics">
+        <h3 id="h-metrics">Визуализации (metrics_config)</h3>
+        <p class="help">Панели Grafana и логи Loki для отчёта по шаблону Confluence: <code>page_sample_id</code>, <code>page_parent_id</code>, список <code>metrics</code> с <code>grafana_url</code> и <code>logs</code> с фильтрами. Без выбора сервиса редактируется конфигурация всей области (ключ <code>services</code>).</p>
+        <div class="toolbar" style="margin-bottom:10px">
+          <label>Сервис
+            <select id="metricsServiceSelect"><option value="">Область целиком</option></select>
+          </label>
+        </div>
+        <div class="card">
+          <div class="editor-wrap"><div class="editor-header"><span class="editor-title">metrics_config</span><span class="dim" id="metricsJsonStatus"></span></div><div id="ed_metrics_config" class="ace-host tall"></div></div>
+          <div class="card-actions">
+            <button type="button" class="btn btn-primary" id="metricsSaveBtn" disabled>Сохранить</button>
+            <span class="status" id="metricsStatus"></span>
+          </div>
+        </div>
+      </section>
+
+      <section id="sec-appearance" class="settings-section" aria-labelledby="h-appearance">
+        <h3 id="h-appearance">Оформление</h3>
+        <p class="help">Акцентный цвет всей установки: кнопки, логотип и иконка вкладки. Один для всех областей. Светлая и тёмная тема остаются отдельным переключателем в шапке.</p>
+        <p id="appearanceError" class="field-hint error" hidden></p>
+        <div id="accentPresets" class="accent-presets" role="group" aria-label="Готовые цвета"></div>
+        <div id="accentCustom" class="accent-wheel-wrap" hidden>
+          <div id="accentWheel" class="accent-wheel" role="application" aria-label="Цветовое колесо">
+            <span id="accentMarker" class="accent-marker"></span>
+          </div>
+          <div class="accent-controls">
+            <label for="accentValue">Яркость <input id="accentValue" type="range" min="8" max="96" value="70" /></label>
+            <label for="accentHex">Цвет <input id="accentHex" type="text" maxlength="7" spellcheck="false" autocomplete="off" /></label>
+          </div>
+        </div>
+        <p><button type="button" class="btn btn-primary accent-sample" id="accentSample">Так выглядит кнопка</button></p>
+        <p id="appearanceWarnings" class="field-hint warn"></p>
+        <div class="card-actions">
+          <button type="button" class="btn btn-primary" id="appearanceSave" disabled>Сохранить</button>
+          <button type="button" class="btn" id="appearanceReset">Сбросить к фиолетовому</button>
+          <span class="status" id="appearanceStatus"></span>
+        </div>
+      </section>
+
+      <section id="sec-users" class="settings-section not-in-wizard" aria-labelledby="h-users">
+        <h3 id="h-users">Пользователи</h3>
+        <p class="help"><strong>Наблюдатель</strong> смотрит отчёты, архив, сравнение и прогнозы. <strong>Инженер</strong> дополнительно запускает анализ, публикует в Confluence, пишет заметки и ставит оценки. <strong>Администратор</strong> дополнительно меняет настройки и подключения, удаляет данные и управляет пользователями. Блокировка после неудачных входов снимается кнопкой «Разблокировать».</p>
+        <div class="card">
+          <div class="card-actions" style="margin:0 0 12px">
+            <button type="button" class="btn btn-primary" id="userCreateBtn">Добавить пользователя</button>
+            <span class="status" id="usersStatus"></span>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead><tr><th>Логин</th><th>Имя</th><th>Роль</th><th>Источник</th><th>Статус</th><th>Последний вход</th><th><span class="visually-hidden">Действия</span></th></tr></thead>
+              <tbody id="usersBody"><tr class="empty-row"><td colspan="7">Загрузка…</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <details class="report-collapsible" id="tokensBox" style="margin-top:14px">
+          <summary><span>API-токены всех пользователей</span></summary>
+          <div class="report-collapsible-body">
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead><tr><th>Название</th><th>Владелец</th><th>Начало токена</th><th>Роль</th><th>Истекает</th><th>Использован</th><th>Статус</th><th><span class="visually-hidden">Действия</span></th></tr></thead>
+                <tbody id="allTokensBody"></tbody>
+              </table>
+            </div>
           </div>
         </details>
-        <details>
-          <summary>Ссылки на графики для отчётов</summary>
-          <div class="panel">
-            <div class="help">Перечень сервисов для публикации: ID шаблонной и родительской страницы Confluence, список метрик (панелей Grafana) и логов (Loki), используемых при сборке отчёта. Изменение структуры требует внимательности.</div>
-            <div class="row" style="gap:12px; align-items:center; margin:8px 0;">
-              <label for="metricsServiceSelect" style="min-width:180px; color:#ccc;">Сервис:</label>
-              <select id="metricsServiceSelect" style="height:36px; background:#1e1e1e; color:#eaeaea; border:1px solid #333; border-radius:6px; padding:6px 10px; min-width:240px;">
-                <option value="">Настройки области (по умолчанию)</option>
-              </select>
-              <button class="btn btn-secondary" id="addServiceBtnMetrics" type="button">Добавить сервис</button>
-              <button class="btn btn-secondary" data-delete-service="metrics" type="button" style="background:#b00020; border-color:#b00020;">Удалить сервис</button>
+        <details class="report-collapsible" id="auditBox" style="margin-top:14px">
+          <summary><span>Журнал действий</span></summary>
+          <div class="report-collapsible-body">
+            <div class="card-actions" style="margin:0 0 8px">
+              <button type="button" class="btn btn-sm" id="auditRefreshBtn">Обновить</button>
+              <span class="status" id="auditStatus"></span>
             </div>
-            <div class="editor-wrap">
-              <div class="editor-header"><div class="editor-title">JSON</div><span class="editor-status status" id="st_metrics_config"></span></div>
-              <div id="ed_metrics_config" class="editor"></div>
+            <div class="table-wrap">
+              <table class="data-table">
+                <thead><tr><th>Время</th><th>Кто</th><th>Действие</th><th>Объект</th><th>Подробности</th><th>Адрес</th></tr></thead>
+                <tbody id="auditBody"></tbody>
+              </table>
             </div>
-            <div class="row"><button class="btn btn-secondary" data-edit="metrics_config">Редактировать</button><button class="btn" data-save="metrics_config" style="display:none;">Сохранить</button></div>
           </div>
         </details>
+      </section>
+
+      <section id="sec-wizard-done" class="settings-section wizard-only" aria-labelledby="h-wizard-done">
+        <div class="card wizard-final">
+          <h3 id="h-wizard-done">Настройка завершена</h3>
+          <p class="help">Подключения проверены. Можно загрузить демонстрационный прогон, чтобы посмотреть отчёт без реальных данных, или сразу создать первый отчёт.</p>
+          <div class="wizard-nav" style="justify-content:center">
+            <button type="button" class="btn" id="wizardDemoBtn">Загрузить демо-данные</button>
+            <a class="btn btn-primary" href="/new">Создать первый отчёт</a>
+            <a class="btn" href="/">На дэшборд</a>
+          </div>
+          <div class="status" id="wizardDemoStatus" style="margin-top:10px"></div>
+        </div>
+      </section>
+
+      <div class="wizard-nav wizard-only" id="wizardNav">
+        <button type="button" class="btn" id="wizardPrevBtn">Назад</button>
+        <button type="button" class="btn" id="wizardSkipBtn">Пропустить шаг</button>
+        <button type="button" class="btn btn-primary" id="wizardNextBtn" disabled>Далее</button>
+        <span class="dim" id="wizardHint">Проверьте соединение, чтобы перейти дальше.</span>
       </div>
-    </details>
+    </div>
   </div>
 
-  <!-- Inline JS intentionally removed -->
-  <!-- Ace Editor for JSON/prompt editors -->
-  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.23.4/ace.js"></script>
-  <script defer src="/static/js/common.js"></script>
-  <script defer src="/static/js/settings.js"></script>
-</body>
-</html>
-
-
+  <div class="dirty-bar" id="dirtyBar" role="status">
+    <span>Несохранённые изменения: <strong id="dirtyList"></strong></span>
+    <button type="button" class="btn btn-primary btn-sm" id="dirtySaveAll">Сохранить всё</button>
+  </div>
+{% endblock %}
+{% block scripts %}
+<script defer src="/static/js/settings.js"></script>
+<script defer src="/static/js/projects.js"></script>
+<script defer src="/static/js/users.js"></script>
+{% endblock %}

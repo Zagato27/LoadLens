@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% set active_nav = 'forecasting' %}
+{% block title %}Прогнозирование{% endblock %}
+{% block content %}
+  <h2>Прогнозирование</h2>
+  <p class="dim">Прогноз мощностей по модели USL строится для тестов на максимальную производительность, в данных которых есть ряд среднего времени отклика (и число VU для закрытой модели). Выберите отчёт.</p>
+  <div id="forecastHint" class="report-note" hidden></div>
+  <div class="table-wrap" style="margin-top:12px;">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Отчёт</th>
+          <th>Сервис</th>
+          <th>Тип теста</th>
+          <th>Отчёт создан</th>
+          <th>Вердикт</th>
+          <th>Модель нагрузки</th>
+        </tr>
+      </thead>
+      <tbody id="forecastRows"></tbody>
+    </table>
+  </div>
+{% endblock %}
+{% block scripts %}
+<script defer src="/static/js/forecasting.js"></script>
+{% endblock %}

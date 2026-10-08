@@ -1,404 +1,177 @@
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Создание отчета</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,400;0,500;0,600;0,700;1,600&display=swap" rel="stylesheet">
-  <style>
-    body {
-      display: block;
-      min-height: 100vh;
-      margin: 0;
-      font-family: 'Montserrat', Arial, sans-serif;
-      background-color: #121212;
-      color: #ffffff;
-      padding: 0;
-      box-sizing: border-box;
-    }
-    .app-header { position: sticky; top: 0; display: flex; align-items: center; justify-content: flex-start; gap: 12px; z-index: 2000; width: 100%; max-width: 1400px; margin: 0 auto; padding: 8px 12px; --brandSize: 40px; background: #121212; border-bottom: 1px solid #2a2a2a; }
-    .app-header .logo { width: var(--brandSize); height: var(--brandSize); object-fit: contain; }
-    .app-header .brand { font-size: var(--brandSize); line-height: var(--brandSize); font-weight: 600; font-style: italic; letter-spacing: 0.2px; color: #eaeaea; }
-    .app-nav { display: flex; gap: 16px; margin-left: auto; flex-wrap: nowrap; white-space: nowrap; align-items: center; }
-    .app-nav .nav-btn { height: 36px; padding: 8px 4px; background: transparent; border: none; color: #eaeaea; border-bottom: 2px solid transparent; border-radius: 0; cursor: pointer; font-family: 'Montserrat', Arial, sans-serif; font-weight: 600; font-style: italic; }
-    .app-nav a.nav-btn { display: inline-flex; align-items: center; text-decoration: none; }
-    .app-nav .nav-btn:hover { color: #ffffff; border-bottom-color: #3700b3; }
-    .app-nav .nav-btn.active { color: #ffffff; border-bottom-color: #6200ee; }
-    /* Унификация размеров контролов */
-    select, input, button { height: 40px; font-size: 14px; border-radius: 6px; }
-    /* Явно выравниваем высоту datetime полей под селектор */
-    #reportForm input[type="datetime-local"] { height: 40px; line-height: 40px; padding: 0 8px; box-sizing: border-box; }
-    .tab-btn { height: 36px; font-size: 14px; }
-    h1, h2, h3, h4 { font-weight: 600; font-style: italic; }
-    
-    #form-container {
-      background-color: transparent;
-      padding: 20px 30px;
-      border-radius: 0;
-      box-shadow: none;
-      width: 90%;
-      max-width: 1400px;
-      margin: 0 auto;
-      text-align: center;
-    }
+{% extends "base.html" %}
+{% set active_nav = 'new' %}
+{% block title %}Создание отчёта{% endblock %}
+{% block container_class %}container-narrow{% endblock %}
+{% block head %}
+<style>
+  .form-hint { color: var(--text-muted); font-size: 14px; line-height: 1.5; margin: 0 0 16px; }
+  .tz-label { font-weight: 400; font-size: 12px; color: var(--text-dim); margin-left: 8px; }
+  .presets { margin-bottom: 12px; }
+  .type-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+  .type-card { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev2); cursor: pointer; margin: 0; color: var(--text); font-size: 14px; }
+  .type-card:hover { border-color: var(--accent-hover); }
+  .type-card input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .type-card:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+  .type-card:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 1px; }
+  .type-title { font-weight: 600; }
+  .type-desc { font-size: 12px; color: var(--text-muted); line-height: 1.45; }
+  .progress-card { border: 1px solid var(--border); border-radius: 12px; background: var(--bg-elev); padding: 16px; margin-top: 18px; }
+  .progress-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .progress-head .title { font-weight: 600; }
+  .progress-head .pct { font-variant-numeric: tabular-nums; color: var(--text-muted); }
+  .progressBarWrap { width: 100%; height: 8px; background: var(--bg-input); border-radius: 4px; overflow: hidden; margin-top: 8px; }
+  .progressBarFill { width: 0%; height: 100%; background: var(--accent); transition: width 0.3s ease; }
+  .progressBarFill.error { background: var(--danger); }
+  .progress-message { margin-top: 10px; font-size: 14px; min-height: 20px; }
+  .phase-list { list-style: none; margin: 12px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 6px; }
+  .phase-list li { font-size: 12px; color: var(--text-dim); padding: 6px 8px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--bg-elev2); }
+  .phase-list li::before { content: '○ '; }
+  .phase-list li.current { color: var(--text); border-color: var(--accent); }
+  .phase-list li.current::before { content: '● '; color: var(--accent); }
+  .phase-list li.done { color: var(--ok-fg); }
+  .phase-list li.done::before { content: '✓ '; color: var(--accent); }
+  .phase-list li.failed { color: var(--fail-fg); border-color: var(--fail-border); }
+  .phase-list li.failed::before { content: '✗ '; }
+  .progress-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
+  .reportLink { display: none; text-decoration: none; background: var(--accent); color: #fff; padding: 10px 18px; border-radius: 6px; font-weight: 600; }
+  .reportLink:hover { background: var(--accent-hover); text-decoration: none; }
+  .job-link { font-size: 13px; }
+  details.tech { margin-top: 12px; }
+  details.tech summary { cursor: pointer; color: var(--text-muted); font-size: 13px; }
+  details.tech pre { white-space: pre-wrap; word-break: break-word; background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-size: 12px; }
+</style>
+{% endblock %}
+{% block content %}
+  <h2>Создание отчёта</h2>
+  <p class="form-hint">Укажите окно теста, сервис и тип нагрузки. Сбор метрик и анализ ИИ занимают несколько минут: прогресс виден здесь и в архиве, вкладку можно закрыть.</p>
 
-    /* Панели */
-    .panel { display: none; text-align: left; }
-    .panel.active { display: block; }
-    /* --- Compare styles --- */
-    .cmp-row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
-    .cmp-accordion { margin-top: 16px; }
-    .cmp-acc-item { background: #1e1e1e; border: 1px solid #333; border-radius: 6px; margin-bottom: 8px; }
-    .cmp-acc-header { padding: 10px 12px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
-    .cmp-acc-content { display: none; padding: 10px 12px; border-top: 1px solid #333; }
-    .cmp-pill { display: inline-block; padding: 4px 8px; background: #2b2b2b; border: 1px solid #444; border-radius: 14px; margin: 4px; cursor: pointer; }
-    .cmp-chart-wrap { background: #0f0f0f; border: 1px solid #333; border-radius: 6px; padding: 10px; margin-top: 12px; display: flex; gap: 12px; }
-    .cmp-chart-canvas { flex: 1; min-width: 0; }
-    .cmp-legend-panel { width: 360px; max-width: 45%; background: #1b1b1b; border-left: 1px solid #333; border-radius: 6px; padding: 10px; overflow-y: auto; overflow-x: hidden; white-space: normal; }
-    .cmp-row { gap: 12px; }
-    .cmp-legend-controls { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
-    .cmp-legend-controls button { width: auto; flex: 0 0 auto; display: inline-flex; }
-    .cmp-legend-panel h4 { margin: 0 0 8px; font-weight: normal; color: #ddd; }
-    .cmp-legend-table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; display: table; }
-    .cmp-legend-table thead { display: table-header-group; }
-    .cmp-legend-table tbody { display: table-row-group; }
-    .cmp-legend-table tr { display: table-row; }
-    .cmp-legend-table th, .cmp-legend-table td { display: table-cell; }
-    .cmp-legend-table th, .cmp-legend-table td { border-bottom: 1px solid #2a2a2a; padding: 6px 8px; text-align: left; white-space: normal; word-break: break-word; }
-    .cmp-legend-color { width: 14px; height: 14px; border-radius: 3px; display: inline-block; margin-right: 6px; vertical-align: middle; border: 1px solid #444; }
-    .cmp-legend-row { cursor: pointer; }
-    .cmp-legend-row.hidden { opacity: 0.5; }
-    /* Увеличенная ширина селекторов Run A / Run B */
-    #cmpRunAWrapper, #cmpRunBWrapper { width: clamp(500px, 80vw, 500px); display: block; }
+  <section id="activeJobs" class="jobs-panel" style="display:none" aria-live="polite">
+    <div class="jobs-title"><span>Активные и недавние задачи</span><small id="activeJobsNote"></small></div>
+    <div id="activeJobsList"></div>
+  </section>
 
-    label {
-      display: block;
-      margin-top: 15px;
-      font-size: 0.9rem;
-      color: #bbbbbb;
-      text-align: left; /* Чтобы label не прилипал к центру */
-    }
+  <form id="reportForm" novalidate>
+    <fieldset class="form-section">
+      <legend>Период теста <span class="tz-label" id="tzLabel"></span></legend>
+      <div class="presets seg-group" id="rangePresets" aria-label="Быстрый выбор периода">
+        <button type="button" class="seg-btn" data-minutes="30" aria-pressed="false">Последние 30 мин</button>
+        <button type="button" class="seg-btn" data-minutes="60" aria-pressed="false">Последний час</button>
+        <button type="button" class="seg-btn" data-minutes="120" aria-pressed="false">2 часа</button>
+        <button type="button" class="seg-btn" data-minutes="240" aria-pressed="false">4 часа</button>
+      </div>
+      <div class="form-grid two">
+        <div>
+          <label for="start">Начало</label>
+          <input type="datetime-local" id="start" name="start" required />
+        </div>
+        <div>
+          <label for="end">Окончание</label>
+          <input type="datetime-local" id="end" name="end" required />
+        </div>
+      </div>
+      <div class="field-hint" id="rangeHint"></div>
+    </fieldset>
 
-    input, button {
-      width: 100%;
-      padding: 8px;
-      margin-top: 5px;
-      border-radius: 4px;
-      border: 1px solid #444;
-      background-color: #2b2b2b;
-      color: #ffffff;
-      font-size: 1rem;
-    }
-
-    button {
-      margin-top: 20px;
-      background-color: #6200ee;
-      border: none;
-      cursor: pointer;
-      transition: background-color 0.3s;
-    }
-
-    button:hover {
-      background-color: #3700b3;
-    }
-
-    #responseMessage {
-      margin-top: 20px;
-      font-size: 0.9rem;
-      color: #b3b3b3;
-    }
-
-    /* Прогресс */
-    #progressContainer {
-      margin-top: 15px;
-      display: none;
-      text-align: left;
-    }
-    #progressBarWrap {
-      width: 100%;
-      height: 8px;
-      background: #2b2b2b;
-      border-radius: 4px;
-      overflow: hidden;
-      margin-top: 6px;
-    }
-    #progressBarFill {
-      width: 0%;
-      height: 100%;
-      background: #6200ee; /* основной цвет, как у кнопки */
-      transition: width 0.3s ease;
-    }
-    /* Многоразовые стили для нескольких прогресс-веток */
-    .progressBarWrap { width: 100%; height: 8px; background: #2b2b2b; border-radius: 4px; overflow: hidden; margin-top: 6px; }
-    .progressBarFill { width: 0%; height: 100%; background: #6200ee; transition: width 0.3s ease; }
-    #reportLink {
-      display: none;
-      width: 100%;
-      margin-top: 20px; /* как у кнопки создать отчёт */
-      text-decoration: none;
-      background-color: #6200ee; /* тот же цвет, что и у кнопки */
-      color: #ffffff;
-      padding: 8px;
-      border-radius: 4px;
-      border: none;
-      cursor: pointer;
-      text-align: center;
-      font-size: 1rem;
-      box-sizing: border-box;
-    }
-    #reportLink:hover {
-      background-color: #3700b3; /* hover, как у кнопки */
-    }
-    .reportLink { display: none; width: 100%; margin-top: 20px; text-decoration: none; background-color: #6200ee; color: #ffffff; padding: 8px; border-radius: 4px; border: none; cursor: pointer; text-align: center; font-size: 1rem; box-sizing: border-box; }
-    .reportLink:hover { background-color: #3700b3; }
-    /* Project Area selector */
-    .pa-select { height: 36px; padding: 0 10px; background: #2b2b2b; border: 1px solid #444; border-radius: 6px; color: #eaeaea; font-family: 'Montserrat', Arial, sans-serif; font-weight: 600; font-style: italic; font-size: 14px; }
-
-    /* ---------- Тумблер (toggle) для LLM ---------- */
-    .toggle-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-top: 15px;
-    }
-
-    .switch {
-      position: relative;
-      display: inline-block;
-      width: 46px;
-      height: 24px;
-    }
-
-    .switch input {
-      opacity: 0;
-      width: 0;
-      height: 0;
-    }
-
-    .slider {
-      position: absolute;
-      cursor: pointer;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background-color: #555;
-      transition: 0.2s;
-      border-radius: 24px;
-    }
-
-    .slider:before {
-      position: absolute;
-      content: "";
-      height: 18px;
-      width: 18px;
-      left: 3px;
-      bottom: 3px;
-      background-color: #ffffff;
-      transition: 0.2s;
-      border-radius: 50%;
-    }
-
-    /* Сегментные кнопки выбора цели */
-    .seg-group { display: inline-flex; gap: 8px; }
-    .seg-btn { height: 36px; padding: 0 12px; background: #2b2b2b; border: 1px solid #444; color: #eaeaea; border-radius: 6px; cursor: pointer; font-family: 'Montserrat', Arial, sans-serif; font-weight: 600; font-style: italic; }
-    .seg-btn.active { background: #6200ee; border-color: #6200ee; color: #ffffff; }
-
-    /* Поле названия запуска — как выпадающий список сервиса по размеру */
-    #runNameContainer input#run_name { width: 100%; height: 40px; min-height: 40px; padding: 0 8px; box-sizing: border-box; }
-
-    .switch input:checked + .slider {
-      background-color: #6200ee;
-    }
-
-    .switch input:checked + .slider:before {
-      transform: translateX(22px);
-    }
-
-    /* ---------- Кастомный выпадающий список ---------- */
-    .custom-select-wrapper {
-      position: relative;
-      display: block;
-      background-color: #2b2b2b;
-      color: #ffffff;
-      border: 1px solid #444;
-      border-radius: 4px;
-      margin-top: 5px;
-      cursor: pointer;
-      width: 100%; /* как у input */
-    }
-
-    /* Сам "видимый" селект (надпись) */
-    .custom-select {
-      padding: 0 8px;
-      position: relative;
-      min-height: 40px; /* как у input */
-      display: flex;
-      align-items: center;
-      width: 100%;
-      box-sizing: border-box;
-    }
-
-    /* Стрелочка справа */
-    .custom-select::after {
-      content: '';
-      position: absolute;
-      top: 50%;
-      right: 10px;
-      width: 0;
-      height: 0;
-      border-left: 5px solid transparent;
-      border-right: 5px solid transparent;
-      border-top: 5px solid #ffffff;
-      transform: translateY(-50%);
-    }
-
-    /* Список опций (изначально скрыт) */
-    .custom-options {
-      position: absolute;
-      top: 100%;
-      left: 0;
-      right: 0;
-      background-color: #2b2b2b;
-      border: 1px solid #444;
-      border-top: none;
-      max-height: 200px;
-      overflow-y: auto; /* Полоса прокрутки */
-      z-index: 1000;
-      display: none; /* По умолчанию скрыто */
-    }
-
-    .custom-option {
-      padding: 8px;
-      cursor: pointer;
-      border-bottom: 1px solid #444;
-    }
-
-    .custom-option.disabled {
-      color: #777;
-      cursor: default;
-      pointer-events: none;
-    }
-
-    .custom-option:last-child {
-      border-bottom: none;
-    }
-
-    .custom-option:hover {
-      background-color: #444;
-    }
-
-    /*
-      Когда у .custom-select-wrapper появляется класс .open
-      — показываем список опций
-    */
-    .custom-select-wrapper.open .custom-options {
-      display: block;
-    }
-  </style>
-</head>
-<body>
-  <div class="app-header">
-    <img class="logo" src="/assets/logo.png" alt="LoadLens" />
-    <span class="brand">LoadLens</span>
-    <div class="app-nav">
-      <select id="projectAreaSelect" class="pa-select">
-        <option value="">Все области</option>
+    <fieldset class="form-section">
+      <legend>Сервис</legend>
+      <select id="service" name="service" required aria-describedby="serviceHint">
+        <option value="">Загрузка списка сервисов…</option>
       </select>
-      <a id="navDashboard" class="nav-btn" href="/">Дэшборд</a>
-      <a id="navReport" class="nav-btn active" href="/new">Новый отчёт</a>
-      <a id="navReports" class="nav-btn" href="/reports">Архив</a>
-      <a id="navCompare" class="nav-btn" href="/compare">Сравнение тестов</a>
-      <a id="navSettings" class="nav-btn" href="/settings">Настройки</a>
-    </div>
-  </div>
-  <div id="form-container">
-    <div id="panelReport" class="panel active">
-    <h2>Создание отчета</h2>
-    <form id="reportForm">
-      <div class="toggle-row">
-        <label>Куда сохранить отчёт?</label>
-        <div class="seg-group" id="targetGroup">
-          <button type="button" class="seg-btn" id="target_btn_conf" data-value="confluence">Confluence</button>
-          <button type="button" class="seg-btn" id="target_btn_web" data-value="web">LoadLens</button>
+      <div class="field-hint" id="serviceHint">Список сервисов задаётся в настройках (раздел «Сервисы»).</div>
+    </fieldset>
+
+    <fieldset class="form-section">
+      <legend>Тип теста</legend>
+      <div class="type-cards" id="testTypeGroup" role="radiogroup" aria-describedby="testTypeHint">
+        <label class="type-card">
+          <input type="radio" name="test_type" value="step" />
+          <span class="type-title">Ступенчатый (max perf)</span>
+          <span class="type-desc">Поиск последней стабильной ступени нагрузки и точки деградации; max RPS считается по ступени, а не по пику.</span>
+        </label>
+        <label class="type-card">
+          <input type="radio" name="test_type" value="soak" />
+          <span class="type-title">Долговременный (soak)</span>
+          <span class="type-desc">Стабильность под длительной нагрузкой: дрейф метрик, утечки памяти, накопление очередей.</span>
+        </label>
+        <label class="type-card">
+          <input type="radio" name="test_type" value="spike" />
+          <span class="type-title">Всплески (spike)</span>
+          <span class="type-desc">Реакция на резкий рост нагрузки: overshoot задержек и время восстановления.</span>
+        </label>
+        <label class="type-card">
+          <input type="radio" name="test_type" value="stress" />
+          <span class="type-title">Стресс</span>
+          <span class="type-desc">Поведение за пределами проектной мощности: точка отказа и лимитирующий ресурс.</span>
+        </label>
+      </div>
+      <div class="field-hint" id="testTypeHint">Тип теста подбирает инструкции для анализа ИИ и метод расчёта максимальной производительности.</div>
+    </fieldset>
+
+    <fieldset class="form-section">
+      <legend>Публикация</legend>
+      <div class="seg-group" id="targetGroup" role="group" aria-label="Куда публиковать отчёт">
+        <button type="button" class="seg-btn active" data-target="web" aria-pressed="true">Веб-отчёт</button>
+        <button type="button" class="seg-btn" data-target="confluence" aria-pressed="false">Веб-отчёт + Confluence (по шаблону)</button>
+      </div>
+      <div class="field-hint" id="targetHint">Веб-отчёт доступен всегда. Вариант с Confluence дополнительно копирует страницу-шаблон из настроек сервиса и показывает те же этапы сбора и анализа. Для графиков Grafana и логов Loki нужен запущенный Celery-воркер.</div>
+    </fieldset>
+
+    <fieldset class="form-section">
+      <legend>Параметры</legend>
+      <div class="form-grid two">
+        <div>
+          <label for="run_name">Название запуска <span class="optional">(необязательно)</span></label>
+          <input type="text" id="run_name" name="run_name" maxlength="200" placeholder="Напр.: release-2.5-step; иначе run-ГГГГММДД-ЧЧММСС" />
+          <div class="field-hint" id="runNameHint"></div>
         </div>
-        <input type="hidden" id="target_mode" value="" />
-      </div>
-
-      <div id="stepStart" style="display:none">
-        <label for="start">Время начала</label>
-        <input type="datetime-local" id="start" name="start" required />
-      </div>
-
-      <div id="stepEnd" style="display:none">
-        <label for="end">Время окончания</label>
-        <input type="datetime-local" id="end" name="end" required />
-      </div>
-
-      <div id="stepService" style="display:none">
-        <label for="service">Сервис</label>
-        <!-- Родительский контейнер для "шапки" и списка -->
-        <div class="custom-select-wrapper" id="serviceWrapper">
-          <!-- Шапка, на которую кликают для раскрытия списка -->
-          <div class="custom-select" id="serviceSelect">
-            Выберите сервис
+        <div>
+          <label id="llmLabel">Анализ ИИ</label>
+          <div class="seg-group" id="llmGroup" role="group" aria-labelledby="llmLabel">
+            <button type="button" class="seg-btn active" id="use_llm_btn_yes" data-value="yes" aria-pressed="true">Включить</button>
+            <button type="button" class="seg-btn" id="use_llm_btn_no" data-value="no" aria-pressed="false">Только собрать метрики</button>
           </div>
-          <!-- Сами опции, появятся при .open у родителя -->
-          <div class="custom-options" id="serviceOptions">
-            <!-- Опции добавятся динамически из JS -->
-          </div>
+          <div class="field-hint">Без анализа ИИ отчёт будет содержать только графики метрик.</div>
         </div>
       </div>
+    </fieldset>
 
-      <div id="stepTestType" class="toggle-row" style="display:none">
-        <label>Тип теста</label>
-        <div class="seg-group" id="testTypeGroup">
-          <button type="button" class="seg-btn" data-value="step" id="tt_step">Ступенчатый (max perf)</button>
-          <button type="button" class="seg-btn" data-value="soak" id="tt_soak">Долговременный (soak)</button>
-          <button type="button" class="seg-btn" data-value="spike" id="tt_spike">Всплески (spike)</button>
-          <button type="button" class="seg-btn" data-value="stress" id="tt_stress">Стресс</button>
-        </div>
-        <input type="hidden" id="test_type" value="" />
-      </div>
-
-      <div id="stepLLM" class="toggle-row" style="display:none">
-        <label>Включить анализ результатов ИИ?</label>
-        <div class="seg-group" id="llmGroup">
-          <button type="button" class="seg-btn active" id="use_llm_btn_yes" data-value="yes">Да</button>
-          <button type="button" class="seg-btn" id="use_llm_btn_no" data-value="no">Нет</button>
-        </div>
-        <input type="hidden" id="use_llm_mode" value="yes" />
-      </div>
-
-      <div id="runNameContainer" style="display:none">
-        <label for="run_name">Название запуска</label>
-        <input type="text" id="run_name" name="run_name" placeholder="Напр.: Nightly-2025-10-30" />
-      </div>
-
-      <button id="createBtn" type="button" style="display:none">Создать отчет</button>
-    </form>
-    <div id="progressContainer">
-      <div id="progressBranchConfluence" style="display:none; margin-top:8px; text-align:left;">
-        <div id="progressConfluenceText">Прогресс (Confluence): 0% — Инициализация…</div>
-        <div class="progressBarWrap"><div id="progressConfluenceBarFill" class="progressBarFill"></div></div>
-        <a id="confluenceLink" class="reportLink" href="#" target="_blank">Открыть в Confluence</a>
-      </div>
-      <div id="progressBranchWeb" style="display:none; margin-top:12px; text-align:left;">
-        <div id="progressWebText">Прогресс (LoadLens): 0% — Инициализация…</div>
-        <div class="progressBarWrap"><div id="progressWebBarFill" class="progressBarFill"></div></div>
-        <a id="webLink" class="reportLink" href="#" target="_blank">Открыть в LoadLens</a>
-      </div>
+    <div class="form-actions">
+      <button id="createBtn" type="submit" class="btn btn-primary btn-lg">Создать отчёт</button>
+      <span id="formError" class="form-error" role="alert"></span>
     </div>
-    <p id="responseMessage"></p>
+  </form>
+
+  <section id="progressContainer" class="progress-card" style="display:none" aria-live="polite">
+    <div class="progress-head">
+      <div class="title" id="progressTitle">Формирование отчёта</div>
+      <div class="pct" id="progressPct">0%</div>
     </div>
-
-  </div>
-
-  <!-- Legacy inline JS removed; actual logic lives in static/js/new.js -->
-  <script defer src="/static/js/common.js"></script>
-  <script defer src="/static/js/new.js"></script>
-  </body>
-  </html>
-  
+    <div class="progressBarWrap"><div id="progressBarFill" class="progressBarFill"></div></div>
+    <div id="progressMessage" class="progress-message">Инициализация…</div>
+    <ol class="phase-list" id="phaseList">
+      <li data-phase="prepare">Подготовка</li>
+      <li data-phase="charts" data-confluence-only hidden>Графики и логи</li>
+      <li data-phase="attachments" data-confluence-only hidden>Вложения Confluence</li>
+      <li data-phase="collect">Сбор метрик</li>
+      <li data-phase="sla" data-llm-only="1">Проверка SLA</li>
+      <li data-phase="save_metrics">Сохранение метрик</li>
+      <li data-phase="llm" data-llm-only="1">Анализ ИИ по доменам</li>
+      <li data-phase="final" data-llm-only="1">Итоговый анализ</li>
+      <li data-phase="save" data-llm-only="1">Сохранение результатов</li>
+      <li data-phase="finish">Готово</li>
+    </ol>
+    <div class="progress-actions">
+      <a id="webLink" class="reportLink" href="#">Открыть отчёт</a>
+      <a id="confluenceLink" class="reportLink" href="#" target="_blank" rel="noopener">Открыть в Confluence</a>
+      <a id="jobLink" class="job-link" href="#" style="display:none">Ссылка на эту задачу (можно вернуться позже)</a>
+      <a id="newReportLink" class="job-link" href="/new" style="display:none">Создать ещё один отчёт</a>
+    </div>
+    <details class="tech" id="progressErrorDetails" style="display:none">
+      <summary>Технические детали ошибки</summary>
+      <pre id="progressErrorText"></pre>
+    </details>
+  </section>
+{% endblock %}
+{% block scripts %}
+<script defer src="/static/js/new.js"></script>
+{% endblock %}

@@ -3,24 +3,69 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
+
 from flask import Blueprint, jsonify, render_template, request
 
 from loadlens_app.core import (
-    CONFIG_RUNTIME_PATH,
     LOCKED_PROMPT_DOMAINS,
     METRICS_RUNTIME_PATH,
     PROMPT_DOMAIN_FILES,
     _active_area_prompts,
-    _active_metrics_config,
     _available_domain_keys,
     _delete_service_data,
     _find_area_for_service,
+    _list_project_areas,
+    _load_base_prompts,
     _load_settings_runtime_data,
     _save_settings_runtime_data,
     _services_map_for_area,
 )
 
 settings_bp = Blueprint("settings", __name__)
+
+PROMPT_HISTORY_LIMIT = 10
+
+
+def _history_scope(area: str, service: str) -> str:
+    """Key of the prompt history bucket: per area, optionally per service."""
+    return f"{area}:{service}" if service else area
+
+
+def _current_prompt_override(runtime: dict, area: str, service: str, domain: str) -> str:
+    """Currently stored override text for the scope (empty if none)."""
+    per_area = runtime.get("per_area") if isinstance(runtime.get("per_area"), dict) else {}
+    area_entry = per_area.get(area) if isinstance(per_area.get(area), dict) else {}
+    if service:
+        services = area_entry.get("services") if isinstance(area_entry.get("services"), dict) else {}
+        scope = services.get(service) if isinstance(services.get(service), dict) else {}
+    else:
+        scope = area_entry
+    prompts = scope.get("prompts") if isinstance(scope.get("prompts"), dict) else {}
+    value = prompts.get(domain)
+    return value if isinstance(value, str) else ""
+
+
+def _record_prompt_history(runtime: dict, area: str, service: str, domain: str, previous_text: str) -> None:
+    """Keeps the last PROMPT_HISTORY_LIMIT replaced versions per scope and domain."""
+    if not previous_text.strip():
+        return
+    history = runtime.get("prompt_history")
+    if not isinstance(history, dict):
+        history = {}
+    scope_key = _history_scope(area, service)
+    scope_bucket = history.get(scope_key)
+    if not isinstance(scope_bucket, dict):
+        scope_bucket = {}
+    versions = scope_bucket.get(domain)
+    if not isinstance(versions, list):
+        versions = []
+    if versions and isinstance(versions[0], dict) and versions[0].get("text") == previous_text:
+        return
+    versions.insert(0, {"saved_at": datetime.now(timezone.utc).isoformat(), "text": previous_text})
+    scope_bucket[domain] = versions[:PROMPT_HISTORY_LIMIT]
+    history[scope_key] = scope_bucket
+    runtime["prompt_history"] = history
 
 
 @settings_bp.route("/settings", methods=["GET"])
@@ -41,50 +86,22 @@ def delete_service():
     return jsonify({"status": "ok"})
 
 
-@settings_bp.route("/areas/<area_name>", methods=["DELETE"])
-def delete_area(area_name: str):
-    """Удаляет область, все её сервисы и соответствующие runtime-конфиги."""
-    area_name = (area_name or "").strip()
-    if not area_name:
-        return jsonify({"error": "area_name обязателен"}), 400
-    services = list(_services_map_for_area(area_name))
-    for service in services:
-        _delete_service_data(area_name, service)
-    runtime = _load_settings_runtime_data()
-    if isinstance(runtime.get("per_area"), dict) and area_name in runtime["per_area"]:
-        del runtime["per_area"][area_name]
-        _save_settings_runtime_data(runtime)
-    metrics_rt = {}
-    try:
-        if METRICS_RUNTIME_PATH.exists():
-            with METRICS_RUNTIME_PATH.open("r", encoding="utf-8") as f:
-                metrics_rt = json.load(f)
-    except Exception:
-        metrics_rt = {}
-    if isinstance(metrics_rt, dict) and area_name in metrics_rt:
-        del metrics_rt[area_name]
-        with METRICS_RUNTIME_PATH.open("w", encoding="utf-8") as f:
-            json.dump(metrics_rt, f, ensure_ascii=False, indent=2)
-    return jsonify({"status": "ok"})
-
-
 @settings_bp.route("/prompts", methods=["GET"])
 def get_prompts():
-    """Возвращает тексты промптов для выбранной области/сервиса."""
+    """Возвращает тексты промптов для выбранной области/сервиса.
+
+    Без области отдаются базовые тексты из файлов (глобальный уровень);
+    область берётся из параметра ``area`` или выводится из ``service``.
+    """
     try:
         area = (request.args.get("area") or "").strip()
         service = (request.args.get("service") or "").strip()
-        areas_meta = _active_metrics_config().keys()
-        area_ids = list(areas_meta)
+        area_ids = [a["id"] for a in _list_project_areas()]
         if service and not area:
             derived = _find_area_for_service(service)
             if derived:
                 area = derived
-        if not area:
-            cookie_area = _find_area_for_service(service) or ""
-            if cookie_area in area_ids:
-                area = cookie_area
-        active_area = area if area in area_ids else (area_ids[0] if area_ids else "")
+        active_area = area if area in area_ids else ""
         services_map = _services_map_for_area(active_area) if active_area else {}
         services_payload = []
         for sid, meta in services_map.items():
@@ -94,12 +111,12 @@ def get_prompts():
             services_payload.append({"id": sid, "title": title})
         if service and service not in services_map:
             service = ""
-        prompts = _active_area_prompts(active_area if active_area in area_ids else None, service or None)
+        prompts = _active_area_prompts(active_area or None, service or None)
         filtered_prompts = {k: v for k, v in prompts.items() if k not in LOCKED_PROMPT_DOMAINS}
         return jsonify(
             {
                 "areas": area_ids,
-                "active_area": active_area if active_area in area_ids else "",
+                "active_area": active_area,
                 "services": services_payload,
                 "active_service": service if service else "",
                 "domains": filtered_prompts,
@@ -129,6 +146,9 @@ def post_prompts():
         if not isinstance(text, str):
             return jsonify({"error": "text должен быть строкой"}), 400
         existing = _load_settings_runtime_data()
+        previous = _current_prompt_override(existing, area, service, domain)
+        if previous != text:
+            _record_prompt_history(existing, area, service, domain, previous)
         if "per_area" not in existing or not isinstance(existing.get("per_area"), dict):
             existing["per_area"] = {}
         if area not in existing["per_area"] or not isinstance(existing["per_area"].get(area), dict):
@@ -157,6 +177,33 @@ def post_prompts():
         return jsonify({"status": "ok"})
     except Exception as e:  # pragma: no cover
         return jsonify({"error": str(e)}), 500
+
+
+@settings_bp.route("/prompts/defaults", methods=["GET"])
+def get_prompt_defaults():
+    """Базовые тексты промптов из AI/prompts/*.txt (без runtime-переопределений)."""
+    base = _load_base_prompts()
+    return jsonify({"domains": {k: v for k, v in base.items() if k not in LOCKED_PROMPT_DOMAINS}})
+
+
+@settings_bp.route("/prompts/history", methods=["GET"])
+def get_prompt_history():
+    """Последние сохранённые версии промпта для области (и, опционально, сервиса)."""
+    domain = (request.args.get("domain") or "").strip()
+    area = (request.args.get("area") or "").strip()
+    service = (request.args.get("service") or "").strip()
+    if domain not in PROMPT_DOMAIN_FILES or domain in LOCKED_PROMPT_DOMAINS:
+        return jsonify({"error": "неверный domain"}), 400
+    if not area and service:
+        area = _find_area_for_service(service) or ""
+    if not area:
+        return jsonify({"error": "area обязательна"}), 400
+    runtime = _load_settings_runtime_data()
+    history = runtime.get("prompt_history") if isinstance(runtime.get("prompt_history"), dict) else {}
+    scope_bucket = history.get(_history_scope(area, service))
+    versions = scope_bucket.get(domain) if isinstance(scope_bucket, dict) else None
+    clean = [v for v in (versions or []) if isinstance(v, dict) and isinstance(v.get("text"), str)]
+    return jsonify({"domain": domain, "area": area, "service": service, "versions": clean})
 
 
 @settings_bp.route("/service_meta", methods=["POST"])
@@ -236,43 +283,5 @@ def delete_service_meta():
         return jsonify({"error": str(e)}), 500
 
 
-@settings_bp.route("/areas", methods=["POST"])
-def create_area():
-    """Создаёт новую область (перезаписи в runtime) без перезапуска приложения."""
-    data = request.get_json(silent=True) or {}
-    name = (data.get("name") or "").strip()
-    if not name:
-        return jsonify({"error": "name обязателен"}), 400
-    active = _active_metrics_config() or {}
-    if name in active:
-        return jsonify({"error": "область уже существует"}), 400
-
-    runtime = {}
-    try:
-        if METRICS_RUNTIME_PATH.exists():
-            with METRICS_RUNTIME_PATH.open("r", encoding="utf-8") as f:
-                runtime = json.load(f)
-    except Exception:
-        runtime = {}
-    if not isinstance(runtime, dict):
-        runtime = {}
-    runtime[name] = {"services": {}}
-    with METRICS_RUNTIME_PATH.open("w", encoding="utf-8") as f:
-        json.dump(runtime, f, ensure_ascii=False, indent=2)
-
-    existing = {}
-    try:
-        if CONFIG_RUNTIME_PATH.exists():
-            with CONFIG_RUNTIME_PATH.open("r", encoding="utf-8") as f:
-                existing = json.load(f)
-    except Exception:
-        existing = {}
-    if "per_area" not in existing or not isinstance(existing.get("per_area"), dict):
-        existing["per_area"] = {}
-    if name not in existing["per_area"]:
-        existing["per_area"][name] = {}
-    with CONFIG_RUNTIME_PATH.open("w", encoding="utf-8") as f:
-        json.dump(existing, f, ensure_ascii=False, indent=2)
-    return jsonify({"status": "ok"})
 
 
