@@ -145,13 +145,15 @@ LoadLens собирает метрики теста из Prometheus и InfluxDB 
    POSTGRES_PASSWORD=<пароль БД>
    POSTGRES_DB=loadtesting
    APP_PORT=5000
+   # Пароль Redis (брокер Celery), обязателен
+   REDIS_PASSWORD=<случайная строка, например: openssl rand -hex 32>
    # Ключ подписи сессий и первый администратор
    LOADLENS_SECRET_KEY=<длинная случайная строка, например: openssl rand -hex 32>
    LOADLENS_ADMIN_USER=admin
    LOADLENS_ADMIN_PASSWORD=<пароль не короче 10 символов, без логина внутри>
    ```
 
-2. Скопируйте `settings.example.py` в `settings.py` и укажите в `storage.timescale` те же учётные данные БД (хост `timescaledb`).
+2. Скопируйте `settings.example.py` в `settings.py` и укажите в `storage.timescale` те же учётные данные БД (хост `timescaledb`). Скопируйте `metrics_config.example.py` в `metrics_config.py` и создайте `settings_runtime.json` и `metrics_config_runtime.json` с содержимым `{}`, если их нет. Эти файлы не попадают в образ: compose монтирует их в контейнеры.
 3. Запустите из директории `docker/`:
    ```bash
    cd docker

@@ -15,13 +15,15 @@ def _inject_appearance() -> dict[str, dict[str, str]]:
 
 
 @appearance_bp.route("/assets/logo.png")
-def logo() -> Response | tuple[str, int]:
+def logo() -> Response | tuple[Response, int]:
     """Recolored logo. ``c`` is ``rrggbb``; without it the stored accent is used."""
     raw = request.args.get("c")
     try:
         accent = parse_accent(raw) if raw else current_accent()
-    except AppearanceError as exc:
-        return str(exc), 400
+    except AppearanceError:
+        # Public endpoint: answer with JSON and never echo the value. The former text/html body
+        # carried the raw parameter and executed injected markup (reflected XSS).
+        return jsonify({"error": "Параметр c должен быть цветом в формате rrggbb"}), 400
     return Response(recolored_logo(accent), mimetype="image/png")
 
 

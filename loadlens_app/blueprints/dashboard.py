@@ -40,6 +40,7 @@ from loadlens_app.core import (
     _services_map_for_area,
     _ts_conn,
     convert_to_timestamp,
+    run_name_problem,
 )
 from loadlens_app.demo_data import DemoAlreadyExistsError, seed_demo_run
 from loadlens_app.jobs import (
@@ -711,6 +712,15 @@ def list_runs():
         return jsonify({"error": str(e)}), 500
 
 
+def _text_field(data: dict, *keys: str) -> str:
+    """First non-empty string among ``keys``, stripped; values of other types count as missing."""
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 def _run_name_taken(run_name: str, service: str) -> bool:
     cfg = _storage_cfg()
     schema = cfg.get("schema", "public")
@@ -737,15 +747,17 @@ def _run_name_taken(run_name: str, service: str) -> bool:
 def create_report():
     """Создаёт задачу формирования отчёта (Confluence и/или веб)."""
     data = request.json or {}
+    if not isinstance(data, dict):
+        data = {}
     start_str = data.get("start")
     end_str = data.get("end")
-    service = data.get("service")
-    project_area = (data.get("project_area") or data.get("area") or data.get("projectArea") or "").strip()
-    test_type = (data.get("test_type") or "").strip()
+    service = _text_field(data, "service")
+    project_area = _text_field(data, "project_area", "area", "projectArea")
+    test_type = _text_field(data, "test_type")
     use_llm = bool(data.get("use_llm", True))
     save_to_db = bool(data.get("save_to_db", False))
     web_only = bool(data.get("web_only", False))
-    run_name = data.get("run_name") if isinstance(data.get("run_name"), str) else None
+    run_name = _text_field(data, "run_name")
 
     if not all([start_str, end_str, service]):
         return jsonify({"status": "error", "message": "Укажите время начала, окончания и сервис"}), 400
@@ -760,24 +772,25 @@ def create_report():
         }), 400
     if end <= start:
         return jsonify({"status": "error", "message": "Время окончания должно быть позже времени начала"}), 400
+    run_name_error = run_name_problem(run_name) if run_name else None
+    if run_name_error:
+        return jsonify({"status": "error", "message": run_name_error}), 400
 
-    preferred_area = project_area or _find_area_for_service(service) or service
-    _bootstrap_service_configs(preferred_area, service)
+    # Reports run only for services an administrator has configured, and nothing is written to the
+    # runtime configuration before that is checked: otherwise a request could create areas and
+    # services that everyone sees, and the service name also ends up in file names of the report.
+    service_area = _find_area_for_service(service)
+    if not service_area:
+        return jsonify({"status": "error", "message": f"Сервис '{service}' не найден в настройках"}), 400
+    if project_area and project_area != service_area:
+        return jsonify({"status": "error", "message": f"Сервис '{service}' принадлежит другой области"}), 400
+    project_area = service_area
+    _bootstrap_service_configs(service_area, service)
 
-    metrics_area, service_metrics_cfg = _metrics_service_entry(service)
+    _metrics_area, service_metrics_cfg = _metrics_service_entry(service)
     if not service_metrics_cfg:
         return jsonify({"status": "error", "message": f"Конфигурация для сервиса '{service}' не найдена"}), 400
 
-    service_area = _find_area_for_service(service) or metrics_area
-    if project_area:
-        if not service_area:
-            return jsonify({"status": "error", "message": f"Сервис '{service}' не привязан к области '{project_area}'"}), 400
-        if service_area != project_area:
-            return jsonify({"status": "error", "message": f"Сервис '{service}' принадлежит другой области"}), 400
-    else:
-        project_area = service_area or ""
-
-    run_name = (run_name or "").strip()
     if run_name:
         try:
             taken = _run_name_taken(run_name, service)

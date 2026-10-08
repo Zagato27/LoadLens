@@ -767,6 +767,82 @@ def test_create_report_rejects_service_from_another_area(client):
     assert "другой области" in resp.get_json()["message"]
 
 
+def _runtime_files_state():
+    paths = (core.CONFIG_RUNTIME_PATH, core.METRICS_RUNTIME_PATH)
+    return {str(p): (p.read_bytes() if p.exists() else None) for p in paths}
+
+
+def test_create_report_rejects_unknown_service_without_writing_config(client, monkeypatch):
+    """A report request must not create areas or services: they would be visible to everyone."""
+    from loadlens_app.blueprints import dashboard
+
+    monkeypatch.setattr(dashboard, "_find_area_for_service", core._find_area_for_service)
+    monkeypatch.setattr(dashboard, "_metrics_service_entry", core._metrics_service_entry)
+    monkeypatch.setattr(dashboard, "_bootstrap_service_configs", core._bootstrap_service_configs)
+    before = _runtime_files_state()
+    resp = client.post("/create_report", json={
+        "start": "2024-11-01T10:00",
+        "end": "2024-11-01T11:00",
+        "service": "../../../../tmp/loadlens-probe",
+        "project_area": "unknown-area",
+    })
+    assert resp.status_code == 400
+    assert "не найден" in resp.get_json()["message"]
+    assert _runtime_files_state() == before
+
+
+def test_create_report_checks_the_area_before_bootstrapping(client, monkeypatch):
+    from loadlens_app.blueprints import dashboard
+
+    bootstrapped = []
+    monkeypatch.setattr(dashboard, "_bootstrap_service_configs", lambda area, service: bootstrapped.append((area, service)))
+    window = {"start": "2024-11-01T10:00", "end": "2024-11-01T11:00", "service": "demo", "web_only": True, "use_llm": False}
+    assert client.post("/create_report", json={**window, "project_area": "other-area"}).status_code == 400
+    assert bootstrapped == []
+    accepted = client.post("/create_report", json=window)
+    assert accepted.status_code == 200
+    assert accepted.get_json()["project_area"] == "demo"
+    assert bootstrapped == [("demo", "demo")]
+
+
+@pytest.mark.parametrize("run_name", ["r" * 181, "nightly/../../x", "<b>run</b>", "a\\b"])
+def test_create_report_rejects_bad_run_names(client, run_name):
+    resp = client.post("/create_report", json={
+        "start": "2024-11-01T10:00",
+        "end": "2024-11-01T11:00",
+        "service": "demo",
+        "run_name": run_name,
+    })
+    assert resp.status_code == 400
+    assert "Имя отчёта" in resp.get_json()["message"]
+
+
+def test_create_report_ignores_non_string_fields(client):
+    resp = client.post("/create_report", json={
+        "start": "2024-11-01T10:00",
+        "end": "2024-11-01T11:00",
+        "service": ["demo"],
+    })
+    assert resp.status_code == 400
+
+
+def test_temporary_file_names_stay_in_their_directory(monkeypatch, tmp_path):
+    from data_collectors import temp_files
+
+    monkeypatch.setattr(temp_files, "TEMP_DIR", tmp_path / "temporary_files")
+    for raw in ("../../../../tmp/x_logs_123", "..", "a/b\\c", 'cpu"><ac:macro', "ЦПУ узла_svc_1", ""):
+        name = temp_files.safe_basename(raw)
+        assert name and "/" not in name and "\\" not in name and '"' not in name and "<" not in name
+        assert not name.startswith(".")
+        assert temp_files.safe_basename(name) == name
+        path = Path(temp_files.temp_file_path(raw, ".log"))
+        assert path.parent == temp_files.TEMP_DIR
+        assert temp_files.is_temp_file(path)
+    assert temp_files.safe_basename("ЦПУ узла_svc_1") == "ЦПУ_узла_svc_1"
+    assert not temp_files.is_temp_file(temp_files.TEMP_DIR / ".." / "settings.py")
+    assert not temp_files.is_temp_file(tmp_path / "elsewhere.log")
+
+
 def test_create_report_assigns_run_name_and_tracks_job(client):
     resp = client.post("/create_report", json={
         "start": "2024-11-01T10:00:00+03:00",
@@ -2058,3 +2134,13 @@ def test_appearance_accent_recolors_pages_and_logo(client):
         assert palette_css(accent_palette("#6200ee")) == ""
     finally:
         CONFIG["appearance"] = original
+
+
+def test_logo_rejects_a_bad_color_without_reflecting_it(client):
+    payload = "<img src=x onerror=alert(document.domain)>"
+    resp = client.get("/assets/logo.png", query_string={"c": payload})
+    body = resp.get_data(as_text=True)
+    assert resp.status_code == 400
+    assert resp.mimetype == "application/json"
+    assert payload not in body and "<" not in body and "onerror" not in body
+    assert "error" in resp.get_json()

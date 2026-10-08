@@ -9,7 +9,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "${TSDB_PORT:-5432}:5432"
+      # Loopback only: the app reaches the database over the compose network. Set TSDB_BIND=0.0.0.0
+      # in docker/.env only if another host really has to connect to the database directly.
+      - "${TSDB_BIND:-127.0.0.1}:${TSDB_PORT:-5432}:5432"
     volumes:
       - tsdb_data:/var/lib/postgresql/data
       - ./initdb:/docker-entrypoint-initdb.d:ro
@@ -23,7 +25,15 @@ services:
   redis:
     image: redis:7.4-alpine
     container_name: ltar_redis
-    command: ["redis-server", "--save", "20", "1", "--loglevel", "warning"]
+    environment:
+      # Celery messages and results pass through Redis, so it must not accept unauthenticated clients.
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in docker/.env}
+      # Lets redis-cli (healthcheck, manual checks) authenticate without the password in its arguments.
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    command:
+      - sh
+      - -c
+      - exec redis-server --save 20 1 --loglevel warning --requirepass "$$REDIS_PASSWORD"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -45,8 +55,9 @@ services:
       - "${APP_PORT:-5000}:5000"
     environment:
       # Приложение по умолчанию читает настройки TimescaleDB из settings.py
-      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
-      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+      # The broker URL carries the Redis password: keep REDIS_PASSWORD URL-safe (openssl rand -hex 32).
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://:${REDIS_PASSWORD}@redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD}@redis:6379/0}
       CELERY_TASK_ALWAYS_EAGER: ${CELERY_TASK_ALWAYS_EAGER:-0}
       # Authentication (see docker/env.example). Empty values fall back to settings.py.
       LOADLENS_AUTH_ENABLED: ${LOADLENS_AUTH_ENABLED:-1}
@@ -58,8 +69,26 @@ services:
     volumes:
       # Хранение рендеров/картинок между рестартами
       - ../data_collectors/temporary_files:/app/data_collectors/temporary_files
-      # Для безопасного переопределения локального settings.py (опционально, раскомментируйте):
-      # - ../settings.py:/app/settings.py:ro
+      # Configuration with secrets is mounted from the repository root and never baked into the image
+      # (.dockerignore excludes it). Long syntax: a missing file stops `docker compose up` with an error
+      # instead of silently turning into a directory. Create the files first (docker/DOCKER_SETUP.md).
+      - type: bind
+        source: ../settings.py
+        target: /app/settings.py
+        read_only: true
+      - type: bind
+        source: ../metrics_config.py
+        target: /app/metrics_config.py
+        read_only: true
+      # Written by the settings page, so changes survive re-creating the container
+      - type: bind
+        source: ../settings_runtime.json
+        target: /app/settings_runtime.json
+      - type: bind
+        source: ../metrics_config_runtime.json
+        target: /app/metrics_config_runtime.json
+      # GigaChat mTLS certificate and key (llm.gigachat.cert_file / key_file); may stay empty
+      - ../AI/GigaChat:/app/AI/GigaChat:ro
     restart: unless-stopped
 
   celery_worker:
@@ -71,13 +100,29 @@ services:
       - timescaledb
       - redis
     environment:
-      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
-      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://:${REDIS_PASSWORD}@redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD}@redis:6379/0}
       CELERY_TASK_ALWAYS_EAGER: ${CELERY_TASK_ALWAYS_EAGER:-0}
     command: celery -A loadlens_app.celery_app worker --loglevel=info
     volumes:
       - ../data_collectors/temporary_files:/app/data_collectors/temporary_files
-      # - ../settings.py:/app/settings.py:ro
+      # The worker imports the app package, which reads the same configuration (read-only here).
+      - type: bind
+        source: ../settings.py
+        target: /app/settings.py
+        read_only: true
+      - type: bind
+        source: ../metrics_config.py
+        target: /app/metrics_config.py
+        read_only: true
+      - type: bind
+        source: ../settings_runtime.json
+        target: /app/settings_runtime.json
+        read_only: true
+      - type: bind
+        source: ../metrics_config_runtime.json
+        target: /app/metrics_config_runtime.json
+        read_only: true
     restart: unless-stopped
 
 volumes:
@@ -85,5 +130,4 @@ volumes:
     driver: local
   redis_data:
     driver: local
-
 

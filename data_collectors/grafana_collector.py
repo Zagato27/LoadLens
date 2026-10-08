@@ -7,6 +7,8 @@ import numpy as np
 from requests.auth import HTTPBasicAuth
 import requests
 import shutil
+
+from data_collectors.temp_files import temp_file_path
 # import yaml
 
 # with open('config.yaml', 'r') as file:
@@ -97,7 +99,7 @@ def downloadImagesLogin(image_url, filename, username, password):
 
     try:
         prepared_url = _prepare_render_url(image_url)
-        target_path = f'data_collectors/temporary_files/{filename}.jpg'
+        target_path = temp_file_path(filename, ".jpg")
 
         # Отправка GET запроса для получения изображения с базовой аутентификацией
         with requests.get(

@@ -21,6 +21,7 @@ from confluence_manager.update_confluence_template import (
 )
 from data_collectors.grafana_collector import downloadImagesLogin, send_file_to_attachment
 from data_collectors.loki_collector import fetch_loki_logs, send_loki_file_to_attachment
+from data_collectors.temp_files import is_temp_file, safe_basename, temp_file_path
 from loadlens_app.celery_app import celery_app
 from loadlens_app.core import (
     _active_system_context as _core_active_system_context,
@@ -410,7 +411,7 @@ def _download_img_with_retry(image_url: str, file_basename: str, username: str, 
         delay_sec = min(5 * (attempt + 1), 20) if "/render/" in image_url else (attempt + 1)
         try:
             downloadImagesLogin(image_url, file_basename, username, password)
-            path = f"data_collectors/temporary_files/{file_basename}.jpg"
+            path = temp_file_path(file_basename, ".jpg")
             if os.path.exists(path) and os.path.getsize(path) > 0:
                 return True
             logger.warning("Файл не создан или пуст: %s", path)
@@ -488,6 +489,10 @@ def download_loki_logs_task(self, loki_url: str, start_ts: int, end_ts: int, fil
 
 @celery_app.task(bind=True, autoretry_for=(Exception,), retry_kwargs={"max_retries": 3, "countdown": 2})
 def upload_attachment_task(self, kind: str, url_basic: str, username: str, password: str, page_id: str, file_path: str) -> bool:  # pragma: no cover - celery worker
+    # The path arrives through the broker: upload only files the report downloaded itself.
+    if not is_temp_file(file_path):
+        logger.warning("Вложение вне каталога временных файлов отклонено: %s", file_path)
+        return False
     auth = HTTPBasicAuth(username, password)
     if kind == "grafana":
         ok = _attach_with_retry(send_file_to_attachment, url_basic, auth, page_id, file_path)
@@ -746,8 +751,9 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
     for metric in service_config["metrics"]:
         name = metric["name"]
         grafana_url = f"{grafana_base_url}{metric['grafana_url']}&from={start}&to={end}"
-        file_basename = f"{name}_{service}_{copy_page_id}"
-        file_path = f"data_collectors/temporary_files/{file_basename}.jpg"
+        # One safe path component: it names the file and goes verbatim into ri:filename below.
+        file_basename = safe_basename(f"{name}_{service}_{copy_page_id}")
+        file_path = temp_file_path(file_basename, ".jpg")
         metric_items.append({
             "name": name,
             "placeholder": f"$${name}$$",
@@ -758,8 +764,8 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
 
     for log in service_config.get("logs", []):
         placeholder = log["placeholder"]
-        file_basename = f"{service}_{placeholder}_{copy_page_id}"
-        file_path = f"data_collectors/temporary_files/{file_basename}.log"
+        file_basename = safe_basename(f"{service}_{placeholder}_{copy_page_id}")
+        file_path = temp_file_path(file_basename, ".log")
         log_items.append({
             "placeholder": f"$${placeholder}$$",
             "filter_query": log["filter_query"],

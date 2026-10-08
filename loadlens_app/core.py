@@ -625,6 +625,20 @@ def _delete_run_data(run_name: str) -> None:
     conn.close()
 
 
+RUN_NAME_MAX_LEN = 180
+# Run names appear in URLs, file names and Confluence pages.
+RUN_NAME_FORBIDDEN_CHARS = ("/", "\\", "<", ">", "\x00")
+
+
+def run_name_problem(name: str) -> str | None:
+    """Why ``name`` cannot name a run, or None when it can."""
+    if len(name) > RUN_NAME_MAX_LEN:
+        return f"Имя отчёта: не длиннее {RUN_NAME_MAX_LEN} символов"
+    if any(ch in name for ch in RUN_NAME_FORBIDDEN_CHARS):
+        return "Имя отчёта содержит недопустимые символы: / \\ < >"
+    return None
+
+
 def _rename_run_data(old_run_name: str, new_run_name: str) -> dict:
     old_name = str(old_run_name or "").strip()
     new_name = str(new_run_name or "").strip()
@@ -632,9 +646,9 @@ def _rename_run_data(old_run_name: str, new_run_name: str) -> dict:
         raise ValueError("Текущее имя отчёта не задано")
     if not new_name:
         raise ValueError("Новое имя отчёта не задано")
-    if len(new_name) > 180:
+    if len(new_name) > RUN_NAME_MAX_LEN:
         raise ValueError("Новое имя отчёта слишком длинное")
-    if any(ch in new_name for ch in ("/", "\\", "<", ">", "\x00")):
+    if any(ch in new_name for ch in RUN_NAME_FORBIDDEN_CHARS):
         raise ValueError("Новое имя отчёта содержит недопустимые символы: / \\ < >")
     if old_name == new_name:
         return {"status": "ok", "renamed": 0, "run_name": new_name}
@@ -774,6 +788,8 @@ __all__ = [
     "_per_area_config",
     "_prompt_templates_for_scope",
     "_rename_run_data",
+    "RUN_NAME_MAX_LEN",
+    "run_name_problem",
     "_resolve_services_filter",
     "_resolve_services_for_area",
     "_save_metrics_runtime_data",

@@ -1,35 +1,58 @@
+# Build context of docker/Dockerfile is the repository root. Patterns match from the root, so
+# "**/" is needed for anything that can appear in subdirectories.
+
 # VCS
 .git
 .gitignore
 
 # Python
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-*.so
-*.egg-info/
-.pytest_cache/
-.mypy_cache/
+**/__pycache__
+**/*.py[cod]
+**/*.so
+**/*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
 
-# Environments/IDEs
-.venv/
-venv/
-.idea/
-.vscode/
+# Environments, IDEs, local tooling
+.venv
+venv
+.idea
+.vscode
+.claude
+.deepeval
 
 # Build artifacts
-build/
-dist/
+build
+dist
 *.spec
 
-
 # Local overrides
-*.local.*
-*.secrets.*
+**/*.local.*
+**/*.secrets.*
 
-# Session signing key (generated at runtime, never baked into an image)
+# Secrets and live configuration. Anyone who can pull an image can read its layers, so these are
+# mounted at run time instead (docker/docker-compose.yml) and never copied into the image.
+settings.py
+settings_runtime*.json
+metrics_config.py
+metrics_config_runtime.json
+AI/config.py
+AI/GigaChat
+**/.env
+**/.env.*
 .loadlens_secret_key
 
-.git
-__pycache__/
+# Local data: downloaded charts and logs, load test results, generated reports
+data_collectors/temporary_files
+k6-load-testing-results*.json
+opensearch_error_report.md
+opensearch_logs_config.json
+loadlens_sber
+**/*.log
+
+# Not needed at run time
+docker
+docs
+tests
+G-Eval.pdf

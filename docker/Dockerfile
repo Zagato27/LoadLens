@@ -25,7 +25,9 @@ COPY requirements.txt .
 # Устанавливаем зависимости Python
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копируем остальной код приложения в контейнер
+# Копируем остальной код приложения в контейнер.
+# Secrets and live configs (settings.py, settings_runtime*.json, metrics_config*, .env) are excluded by
+# .dockerignore and mounted at run time by docker-compose.yml: an image must never contain them.
 COPY . .
 
 # Открываем порт для взаимодействия (опционально, если нужно)

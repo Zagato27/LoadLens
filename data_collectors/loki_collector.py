@@ -4,6 +4,8 @@ import os
 import shutil
 from requests.auth import HTTPBasicAuth
 
+from data_collectors.temp_files import temp_file_path
+
 # Функция для отправки логов как вложения на Confluence
 def send_loki_file_to_attachment(url_basic, auth, page_id, file_path):
     """
@@ -71,7 +73,7 @@ def fetch_loki_logs(loki_url, start_timestamp, end_timestamp, filter_query, file
                 log_entries.append(f"{datetime.fromtimestamp(int(timestamp) / 1e9)} - {log}")
 
         # Сохранение логов в файл
-        file_path = f'data_collectors/temporary_files/{filename}.log'
+        file_path = temp_file_path(filename, ".log")
 
         with open(file_path, 'w', encoding='utf-8') as file:
             for log_entry in log_entries:
