@@ -1,0 +1,120 @@
+schema_version = 1
+id = "runtime-go"
+version = 1
+title = "Go runtime: client_golang"
+category = "runtime"
+stack = ["go"]
+domain = "jvm"
+language = "promql"
+domain_title = "Go runtime"
+verified = true
+description = """
+Стандартные коллекторы client_golang: go_* и process_*. Ряды пишутся в домен «JVM» с префиксом \
+«Go runtime», потому что план ресурсов берёт CPU сервисов оттуда. CPU процесса приходит в ядрах: \
+укажите лимит CPU контейнера (или GOMAXPROCS), чтобы получить долю 0..1. В Kubernetes точнее пакет \
+«Контейнеры: CPU и память от лимита».
+"""
+requires_metrics = ["go_goroutines", "go_memstats_heap_alloc_bytes", "process_cpu_seconds_total"]
+prompt_addendum = """
+Это сервис на Go, а не JVM: «heap» — go_memstats_heap_alloc_bytes (живые и ещё не собранные объекты), \
+кучи с жёстким максимумом нет; go_goroutines — горутины (рост без возврата указывает на утечку горутин), \
+go_gc_duration_seconds — паузы stop-the-world GC, go_memstats_alloc_bytes_total — скорость аллокаций, \
+process_resident_memory_bytes — RSS процесса.
+"""
+
+[variables.service_label]
+title = "Лейбл с именем сервиса"
+default = "job"
+pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
+
+[variables.matchers]
+title = "Дополнительные матчеры"
+default = ""
+
+[variables.cpu_limit_cores]
+title = "Ядер на экземпляр"
+default = "1"
+pattern = '^[0-9]+(\.[0-9]+)?$'
+help = "Лимит CPU контейнера или GOMAXPROCS: CPU процесса делится на это число."
+
+[variables.window]
+title = "Окно rate()"
+default = "2m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[sla]
+service_cpu_query = "@runtime.cpu"
+
+[[queries]]
+label = "Go runtime: CPU (share of limit) by ({{service_label}}, instance)"
+role = "runtime.cpu"
+unit = "fraction"
+required = true
+query = '(sum by ({{service_label}}, instance) (rate(process_cpu_seconds_total{ {{service_label}}!="", {{matchers}} }[{{window}}])) / {{cpu_limit_cores}}) and on ({{service_label}}, instance) go_info{ {{service_label}}!="", {{matchers}} }'
+keys = ["{{service_label}}", "instance"]
+description = "CPU процесса как доля 0..1 от заданного числа ядер. Учитываются только процессы с go_info."
+
+[[queries]]
+label = "Go runtime: heap alloc (bytes) by ({{service_label}}, instance)"
+role = "runtime.heap_used"
+unit = "bytes"
+required = true
+query = 'sum by ({{service_label}}, instance) (go_memstats_heap_alloc_bytes{ {{service_label}}!="", {{matchers}} })'
+keys = ["{{service_label}}", "instance"]
+description = "Занятая куча Go."
+
+[[queries]]
+label = "Go runtime: resident memory (bytes) by ({{service_label}}, instance)"
+role = "runtime.rss"
+unit = "bytes"
+query = 'sum by ({{service_label}}, instance) (process_resident_memory_bytes{ {{service_label}}!="", {{matchers}} }) and on ({{service_label}}, instance) go_info{ {{service_label}}!="", {{matchers}} }'
+keys = ["{{service_label}}", "instance"]
+description = "RSS процесса."
+
+[[queries]]
+label = "Go runtime: goroutines by ({{service_label}}, instance)"
+role = "runtime.goroutines"
+unit = "count"
+query = 'sum by ({{service_label}}, instance) (go_goroutines{ {{service_label}}!="", {{matchers}} })'
+keys = ["{{service_label}}", "instance"]
+description = "Горутины."
+
+[[queries]]
+label = "Go runtime: GC pause avg (s) by ({{service_label}}, instance)"
+role = "runtime.gc_pause_avg"
+unit = "seconds"
+query = 'sum by ({{service_label}}, instance) (rate(go_gc_duration_seconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}])) / sum by ({{service_label}}, instance) (rate(go_gc_duration_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}", "instance"]
+description = "Средняя пауза stop-the-world GC, с."
+
+[[queries]]
+label = "Go runtime: GC cycles per second by ({{service_label}}, instance)"
+role = "runtime.gc_rate"
+unit = "per_second"
+query = 'sum by ({{service_label}}, instance) (rate(go_gc_duration_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}", "instance"]
+description = "Циклы GC в секунду."
+
+[[queries]]
+label = "Go runtime: allocation rate (bytes/s) by ({{service_label}}, instance)"
+role = "runtime.alloc_rate"
+unit = "bytes_per_second"
+query = 'sum by ({{service_label}}, instance) (rate(go_memstats_alloc_bytes_total{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}", "instance"]
+description = "Скорость аллокаций: растёт с нагрузкой и определяет частоту GC."
+
+[[queries]]
+label = "Go runtime: OS threads by ({{service_label}}, instance)"
+role = "runtime.threads"
+unit = "count"
+query = 'sum by ({{service_label}}, instance) (go_threads{ {{service_label}}!="", {{matchers}} })'
+keys = ["{{service_label}}", "instance"]
+description = "Потоки ОС процесса Go."
+
+[[queries]]
+label = "Go runtime: open file descriptors by ({{service_label}}, instance)"
+role = "runtime.open_fds"
+unit = "count"
+query = 'sum by ({{service_label}}, instance) (process_open_fds{ {{service_label}}!="", {{matchers}} }) and on ({{service_label}}, instance) go_info{ {{service_label}}!="", {{matchers}} }'
+keys = ["{{service_label}}", "instance"]
+description = "Открытые файловые дескрипторы и сокеты."

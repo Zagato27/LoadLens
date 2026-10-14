@@ -1,0 +1,68 @@
+schema_version = 1
+id = "k8s-workload-cpu"
+version = 1
+title = "Контейнеры: CPU и память от лимита (cAdvisor + kube-state-metrics)"
+category = "runtime"
+stack = ["kubernetes", "go", "python", "java", "nodejs"]
+domain = "jvm"
+language = "promql"
+domain_title = "Контейнеры"
+description = """
+CPU и память контейнеров для сервиса на любом языке: cAdvisor (kubelet) и лимиты из kube-state-metrics 2.x. \
+Сервис — имя контейнера, экземпляр — под. CPU считается долей лимита контейнера, поэтому подходит для \
+плана ресурсов; контейнеры без CPU-лимита в ряд не попадают. Ряды пишутся в домен «JVM».
+"""
+requires_metrics = ["container_cpu_usage_seconds_total", "kube_pod_container_resource_limits"]
+prompt_addendum = """
+Ряды «Containers» — метрики контейнеров Kubernetes: CPU как доля лимита контейнера (1.0 — упор в лимит, \
+дальше троттлинг), working set памяти (при достижении лимита памяти контейнер убивает OOM killer) и лимит \
+памяти. Сервис — имя контейнера, экземпляр — под.
+"""
+
+[variables.namespace]
+title = "Namespace (регулярное выражение)"
+default = ".+"
+pattern = '^[^"\n\r{}]*$'
+
+[variables.container]
+title = "Контейнер (регулярное выражение)"
+default = ".+"
+pattern = '^[^"\n\r{}]*$'
+help = "Ограничьте сервисами теста, например orders|payments."
+
+[variables.ksm_matchers]
+title = "Матчеры kube-state-metrics"
+default = 'job=~".*kube-state-metrics.*"'
+
+[variables.window]
+title = "Окно rate()"
+default = "2m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[sla]
+service_cpu_query = "@runtime.cpu"
+
+[[queries]]
+label = "Containers: CPU usage (share of limit) by (application, instance)"
+role = "runtime.cpu"
+unit = "fraction"
+required = true
+query = 'label_replace(label_replace(sum by (namespace, pod, container) (rate(container_cpu_usage_seconds_total{namespace=~"{{namespace}}", container=~"{{container}}", container!="", container!="POD"}[{{window}}])) / sum by (namespace, pod, container) (kube_pod_container_resource_limits{resource="cpu", namespace=~"{{namespace}}", container=~"{{container}}", {{ksm_matchers}} }), "application", "$1", "container", "(.*)"), "instance", "$1", "pod", "(.*)")'
+keys = ["application", "instance"]
+description = "CPU контейнера как доля его лимита, 0..1."
+
+[[queries]]
+label = "Containers: memory working set (bytes) by (application, instance)"
+role = "runtime.rss"
+unit = "bytes"
+query = 'label_replace(label_replace(sum by (namespace, pod, container) (container_memory_working_set_bytes{namespace=~"{{namespace}}", container=~"{{container}}", container!="", container!="POD"}), "application", "$1", "container", "(.*)"), "instance", "$1", "pod", "(.*)")'
+keys = ["application", "instance"]
+description = "Working set памяти контейнера: по нему срабатывает OOM killer."
+
+[[queries]]
+label = "Containers: memory limit (bytes) by (application, instance)"
+role = "runtime.memory_limit"
+unit = "bytes"
+query = 'label_replace(label_replace(sum by (namespace, pod, container) (kube_pod_container_resource_limits{resource="memory", namespace=~"{{namespace}}", container=~"{{container}}", {{ksm_matchers}} }), "application", "$1", "container", "(.*)"), "instance", "$1", "pod", "(.*)")'
+keys = ["application", "instance"]
+description = "Лимит памяти контейнера."

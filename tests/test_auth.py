@@ -419,8 +419,11 @@ def test_token_lifecycle_and_limits():
     identity = service.authenticate_token(plain)
     assert identity.user.username == "eve" and identity.role is Role.VIEWER
 
+    default, _ = service.create_token(engineer, "default", actor=actor)
+    assert default.role is Role.VIEWER  # least privilege unless a role is chosen
+
     # A demotion of the owner lowers every token the owner holds.
-    wide, wide_plain = service.create_token(engineer, "wide", actor=actor)
+    wide, wide_plain = service.create_token(engineer, "wide", role="engineer", actor=actor)
     assert service.authenticate_token(wide_plain).role is Role.ENGINEER
     repo.update_user(engineer.id, {"role": Role.VIEWER})
     service.invalidate_user()
@@ -639,6 +642,40 @@ def test_state_changing_requests_are_audited_without_secrets(repo):
     assert events["report.create"].details["run_name"] == "run-7" and events["report.create"].details["job_id"] == "job-1"
     assert events["report.create"].actor_name == "p-admin" and events["report.create"].via == "session"
     assert "SECRET-VALUE" not in json.dumps([e.details for e in repo.list_audit()])
+
+
+def test_config_changes_record_target_hosts_in_the_audit_log(repo, logged_in, monkeypatch):
+    import copy
+
+    monkeypatch.setitem(core.CONFIG, "confluence", copy.deepcopy(core.CONFIG.get("confluence") or {}))
+    admin = logged_in("admin")
+    body = {"section": "confluence", "data": {"base_url": "https://user:SECRET-PW@wiki.corp:8443/x", "password": "SECRET-NEW"}}
+    assert admin.post("/config", json=body).status_code == 200
+    event = next(e for e in repo.list_audit() if e.action == "config.update")
+    assert event.details["targets"] == ["wiki.corp:8443"]
+    assert "SECRET" not in json.dumps(event.details)
+
+
+def test_job_errors_are_shown_to_admins_only(logged_in):
+    from loadlens_app.jobs import JOB_KIND_REPORT, JOB_STATUS_ERROR, job_store
+
+    job = job_store.create(JOB_KIND_REPORT, run_name="nightly", service="svc", message="Сбор метрик")
+    job_store.update(job.job_id, status=JOB_STATUS_ERROR, message="Ошибка на этапе «Сбор метрик»", error="HTTP 502 from grafana.internal")
+    viewer, admin = logged_in("viewer"), logged_in("admin")
+
+    seen_by_viewer = viewer.get(f"/job_status/{job.job_id}").get_json()
+    assert seen_by_viewer["error"] is None and seen_by_viewer["message"] == "Ошибка на этапе «Сбор метрик»"
+    assert admin.get(f"/job_status/{job.job_id}").get_json()["error"] == "HTTP 502 from grafana.internal"
+    listed = viewer.get("/jobs", query_string={"status": "error"}).get_json()["jobs"]
+    assert listed and all(item["error"] is None for item in listed)
+
+
+def test_login_page_inline_script_matches_the_csp_nonce(app):
+    import re
+
+    page = Browser(app).get("/login")
+    nonce = re.search(r"'nonce-([^']+)'", page.headers["Content-Security-Policy"]).group(1)
+    assert f'<script nonce="{nonce}">' in page.get_data(as_text=True)
 
 
 def test_refused_requests_are_not_audited(repo):
@@ -1010,7 +1047,7 @@ def test_token_management_over_http(app, logged_in):
 
 def test_bearer_tokens_authenticate_without_a_cookie_or_csrf(app, logged_in):
     engineer = logged_in("engineer")
-    plain = engineer.post("/auth/tokens", json={"name": "ci"}).get_json()["token"]
+    plain = engineer.post("/auth/tokens", json={"name": "ci", "role": "engineer"}).get_json()["token"]
     header = {"Authorization": f"Bearer {plain}"}
 
     api_client = Browser(app)
@@ -1023,12 +1060,30 @@ def test_bearer_tokens_authenticate_without_a_cookie_or_csrf(app, logged_in):
 
 def test_a_leaked_token_cannot_mint_tokens_or_administer_users(app, logged_in):
     admin = logged_in("admin")
-    plain = admin.post("/auth/tokens", json={"name": "ci"}).get_json()["token"]
+    plain = admin.post("/auth/tokens", json={"name": "ci", "role": "admin"}).get_json()["token"]
     header = {"Authorization": f"Bearer {plain}"}
     api_client = Browser(app)
     for method, url in (("POST", "/auth/tokens"), ("GET", "/auth/tokens"), ("GET", "/auth/users"), ("POST", "/auth/password"), ("GET", "/auth/audit")):
         response = api_client.request(method, url, json={}, headers=header)
         assert response.status_code == 403 and response.get_json()["code"] == "session_required", (method, url)
+
+
+def test_an_admin_token_cannot_reach_settings_secrets_or_delete_data(app, logged_in):
+    admin = logged_in("admin")
+    plain = admin.post("/auth/tokens", json={"name": "ops", "role": "admin"}).get_json()["token"]
+    header = {"Authorization": f"Bearer {plain}"}
+    api_client = Browser(app)
+    refused = (
+        ("GET", "/config"), ("POST", "/config"), ("POST", "/config/test_connection"), ("POST", "/config/llm_models"),
+        ("POST", "/config/query_preview"), ("GET", "/config/grafana_datasources"),
+        ("GET", "/prompts"), ("POST", "/prompts"), ("POST", "/projects"), ("DELETE", "/projects/demo"),
+        ("DELETE", "/runs/old-run"), ("POST", "/demo/seed"), ("DELETE", "/service"),
+    )
+    for method, url in refused:
+        response = api_client.request(method, url, json={}, headers=header)
+        assert response.status_code == 403 and response.get_json()["code"] == "session_required", (method, url)
+    assert api_client.get("/settings", headers=header).status_code == 403  # the page answers with HTML
+    assert api_client.get("/project_areas", headers=header).status_code == 200  # plain reads still work
 
 
 def test_a_token_is_capped_by_its_own_role(app, logged_in):

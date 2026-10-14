@@ -2,6 +2,7 @@
 
 Use it to create the first administrator or to recover access (lost password, locked account).
 It talks to the same database as the web app, taken from ``storage.timescale`` in settings.py.
+``hash-password`` is the exception: it only prints a hash for ``auth.recovery_password_hash``.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import sys
 from typing import Optional, Sequence
 
 from .models import Role
+from .passwords import PasswordPolicyError, hash_password, validate_password
 from .service import Actor, AuthError, AuthService
 
 _ACTOR = Actor(name="cli", via="cli")
@@ -79,6 +81,20 @@ def _list_users(service: AuthService, args: argparse.Namespace) -> None:
         print(f"{user.username:<24}{user.role.key:<10}{user.provider:<10}{status}")
 
 
+RECOVERY_PASSWORD_MIN_LENGTH = 12
+
+
+def _hash_password(_service: Optional[AuthService], args: argparse.Namespace) -> None:
+    """Prints a password hash for ``auth.recovery_password_hash``; needs no database."""
+    password = validate_password(_read_password(args), username=args.username or "", min_length=RECOVERY_PASSWORD_MIN_LENGTH)
+    print(hash_password(password))
+    print(
+        "Добавьте хэш в settings.py, раздел auth: recovery_password_hash, а логин в recovery_user "
+        "(или в переменные LOADLENS_RECOVERY_PASSWORD_HASH и LOADLENS_RECOVERY_USER), затем перезапустите приложение.",
+        file=sys.stderr,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m loadlens_app.auth", description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
@@ -111,18 +127,26 @@ def build_parser() -> argparse.ArgumentParser:
     unlock.set_defaults(handler=_unlock)
 
     commands.add_parser("list-users", help="показать пользователей").set_defaults(handler=_list_users)
+
+    hashed = commands.add_parser(
+        "hash-password",
+        help="хэш пароля аварийного администратора для auth.recovery_password_hash (база не нужна)",
+    )
+    hashed.add_argument("--username", help="логин аварийного администратора: пароль не должен его содержать")
+    hashed.add_argument("--password-env", metavar="VAR", help="взять пароль из переменной окружения вместо запроса")
+    hashed.set_defaults(handler=_hash_password, offline=True)
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None, service: Optional[AuthService] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        if service is None:
+        if service is None and not getattr(args, "offline", False):
             from .web import build_service
 
             service = build_service()
         args.handler(service, args)
-    except AuthError as exc:
+    except (AuthError, PasswordPolicyError) as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:  # database unreachable, bad settings, ...

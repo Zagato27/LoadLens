@@ -6,7 +6,7 @@
   <meta name="csrf-token" content="{{ csrf_token }}" />
   <meta name="loadlens-role" content="{{ role_key }}" />
   <title>{% block title %}LoadLens{% endblock %}</title>
-  <script>
+  <script nonce="{{ csp_nonce }}">
     // Apply the saved theme before first paint to avoid a flash.
     (function () {
       try {
@@ -54,6 +54,14 @@
     </nav>
   </header>
   <main id="main" class="container {% block container_class %}{% endblock %}">
+    {% if storage_down and role_rank >= 3 %}
+    <div class="banner banner-fail" id="storageDownBanner" role="status">
+      <div>
+        <div class="banner-title">Хранилище недоступно</div>
+        Отчёты и архив сейчас не загружаются. <a href="/recovery">Проверить и исправить подключение</a>
+      </div>
+    </div>
+    {% endif %}
     {% block content %}{% endblock %}
   </main>
   <script defer src="/static/js/common.js"></script>

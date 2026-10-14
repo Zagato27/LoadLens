@@ -3,6 +3,7 @@ Domain Focus: lt_framework
 Evaluation Criteria Addendum
 - Ищите RPS/throughput, error rate, latency percentiles, saturation point, peak_performance для capacity/step тестов, drop point, признаки нестабильного стенда.
 - Для stability/soak тестов не требуйте peak_performance: оценивайте удержание нагрузки и отсутствие накопительной деградации.
+- Для spike тестов не требуйте peak_performance: оценивайте рост p95 и ошибок в окне всплеска относительно фона и возврат к фону после него.
 - Хороший кандидат не путает peak throughput с кратковременным всплеском и аккуратно говорит о стабильной производительности.
 - Рекомендации должны быть полезны для сценария нагрузки: profile, pacing, generators, target RPS, think time, checks.
 

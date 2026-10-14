@@ -1,9 +1,11 @@
 # Build context of docker/Dockerfile is the repository root. Patterns match from the root, so
 # "**/" is needed for anything that can appear in subdirectories.
 
-# VCS
+# VCS and CI
 .git
 .gitignore
+.gitattributes
+.github
 
 # Python
 **/__pycache__
@@ -13,6 +15,10 @@
 .pytest_cache
 .mypy_cache
 .ruff_cache
+.coverage
+.coverage.*
+htmlcov
+coverage.xml
 
 # Environments, IDEs, local tooling
 .venv
@@ -35,6 +41,7 @@ dist
 # mounted at run time instead (docker/docker-compose.yml) and never copied into the image.
 settings.py
 settings_runtime*.json
+**/.*.json.*.tmp
 metrics_config.py
 metrics_config_runtime.json
 AI/config.py
@@ -55,4 +62,6 @@ loadlens_sber
 docker
 docs
 tests
+requirements-dev.txt
 G-Eval.pdf
+body.json

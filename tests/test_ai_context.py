@@ -522,10 +522,46 @@ def test_old_reports_without_verification_still_parse():
     assert parsed.findings[0].verification is None and parsed.verification_summary is None
 
 
+# ---- network settings ---------------------------------------------------------------
+
+def test_llm_network_settings_are_per_request_and_leave_the_environment_alone(monkeypatch):
+    import os
+
+    for name in ("HTTPS_PROXY", "HTTP_PROXY", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"):
+        monkeypatch.delenv(name, raising=False)
+    sent = {}
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
+
+    def fake_post(url, **kwargs):
+        sent.update(url=url, **kwargs)
+        return FakeResponse()
+
+    monkeypatch.setattr(providers_module.requests, "post", fake_post)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    pcfg = {
+        "api_base_url": "https://llm.example/v1", "api_key": "k", "model": "m",
+        "proxies": {"https": "http://proxy.example:3128", "http": ""}, "ca_bundle": "/etc/ca.pem",
+    }
+    providers_module._openai_call([{"role": "user", "content": "hi"}], pcfg)
+    assert sent["proxies"] == {"https": "http://proxy.example:3128"} and sent["verify"] == "/etc/ca.pem"
+    assert not any(os.environ.get(name) for name in ("HTTPS_PROXY", "HTTP_PROXY", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"))
+    assert providers_module._tls_verify({"verify": False, "ca_bundle": "/x"}) is False
+    assert providers_module._tls_verify({"insecure_skip_verify": True}) is False
+    assert providers_module._tls_verify({}) is True
+
+
 # ---- structured output --------------------------------------------------------------
 
 def test_ask_llm_structured_requires_client_support(monkeypatch):
-    monkeypatch.setattr(providers_module, "_llm_env_applied", True)
     monkeypatch.setattr(providers_module, "_get_gigachat_client", lambda *_a, **_k: object())
     with pytest.raises(RuntimeError, match="structured_output"):
         providers_module.ask_llm_structured("prompt", "{}", LLMAnalysis)
@@ -544,7 +580,6 @@ def test_ask_llm_structured_returns_schema_instance(monkeypatch):
         def with_structured_output(self, schema):
             return FakeRunnable(schema)
 
-    monkeypatch.setattr(providers_module, "_llm_env_applied", True)
     monkeypatch.setattr(providers_module, "_get_gigachat_client", lambda *_a, **_k: FakeClient())
     monkeypatch.setattr(providers_module, "_wait_llm_slot", lambda gcfg: None)
     result = providers_module.ask_llm_structured("prompt", "{}", LLMAnalysis)
@@ -587,6 +622,11 @@ def test_self_consistency_skips_judge_for_one_candidate(monkeypatch):
     assert isinstance(parsed, LLMAnalysis)
     assert scores["judge_meta"]["skipped"] is True
     assert scores["judge_meta"]["reason"] == "single_candidate"
+    # The data check needs no model call, so the report still gets a reliability level.
+    assert "judge" not in scores and "final_score" not in scores
+    assert isinstance(scores["data_score"], float) and 0.0 <= scores["data_score"] <= 1.0
+    assert set(scores["data_score_details"]) >= {"label_grounding", "numeric_grounding", "overall"}
+    assert 0.0 <= scores["confidence"] <= 1.0
 
 
 def test_self_consistency_calls_judge_for_two_candidates(monkeypatch):
@@ -1259,3 +1299,70 @@ def test_unusable_llm_answer_becomes_analysis_error(monkeypatch):
     assert parsed.analysis_error is not None
     assert parsed.analysis_error.reason == "output_truncated"
     assert parsed.findings == []
+
+
+def _two_candidates(monkeypatch, judge):
+    llm_cfg = scoring_module.CONFIG.setdefault("llm", {})
+    sc_cfg = llm_cfg.setdefault("self_consistency", {})
+    monkeypatch.setitem(sc_cfg, "max_candidates", 2)
+    monkeypatch.setitem(sc_cfg, "pause_sec_between_calls", 0)
+    monkeypatch.setattr(scoring_module, "structured_output_enabled", lambda: False)
+    monkeypatch.setattr(scoring_module, "ask_llm_with_text_data", lambda *_a, **_k: VALID_ANALYSIS)
+    monkeypatch.setattr(scoring_module, "judge_candidates_with_llm", judge)
+    return scoring_module.llm_two_pass_self_consistency(
+        "prompt", json.dumps({"sections": []}), k=2, return_scores=True, domain_key="final"
+    )[2]
+
+
+@pytest.mark.parametrize(
+    "judge_result, reason",
+    [
+        (({}, {"domain_key": "final", "scores_returned": 0}), "no_scores"),
+        (({0: {"overall": 0.9, "factual": 0.9, "completeness": 0.9, "specificity": 0.9}}, {}), "partial_scores"),
+        (None, "error"),
+    ],
+)
+def test_missing_judge_scores_do_not_count_as_zero(monkeypatch, judge_result, reason):
+    def judge(*_a, **_k):
+        if judge_result is None:
+            raise RuntimeError("HTTP 429 Too Many Requests")
+        return judge_result
+
+    # A raising judge is caught in _select_best_candidate and kept as judge_meta.error.
+    scores = _two_candidates(monkeypatch, judge)
+    assert scores["judge_meta"]["unavailable"] is True and scores["judge_meta"]["reason"] == reason
+    assert "judge" not in scores
+    expected = (0.35 * scores["data_score"] + 0.05 * scores["confidence"]) / 0.4
+    assert scores["final_score"] == pytest.approx(expected)
+
+
+def test_judge_numbering_from_one_is_aligned(monkeypatch):
+    def judge(*_a, **_k):
+        return {1: {"overall": 0.3}, 2: {"overall": 0.8}}, {"domain_key": "final"}
+
+    scores = _two_candidates(monkeypatch, judge)
+    assert "unavailable" not in scores["judge_meta"]
+    assert scores["selected_index"] == 1 and scores["judge"]["overall"] == pytest.approx(0.8)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"scores": [{"index": 0, "overall": 0.4}, {"index": 1, "overall": 0.7}]}',
+        'Оценки:\n```json\n[{"index": 0, "overall": 0.4}, {"index": 1, "overall": 0.7}]\n```',
+        'Вот результат: [{"index": 0, "overall": 0.4}, {"index": 1, "overall": 0.7}] — готово',
+        '{"results": [{"index": 0, "overall": 0.4}, {"index": 1, "overall": 0.7}]}',
+        '{"scores": {"0": {"overall": 0.4}, "1": {"overall": 0.7}}}',
+        '{"0": {"overall": 0.4}, "1": {"overall": 0.7}}',
+        '[{"overall": 0.4}, {"overall": 0.7}]',
+        '<think>сравниваю кандидатов</think>{"scores": [{"index": 0, "overall": 0.4}, {"index": 1, "overall": 0.7}]}',
+    ],
+)
+def test_judge_answers_in_common_shapes_are_parsed(raw):
+    scores = scoring_module._parse_judge_scores(raw)
+    assert set(scores) == {0, 1}
+    assert scores[1]["overall"] == pytest.approx(0.7)
+
+
+def test_unparseable_judge_answer_gives_no_scores():
+    assert scoring_module._parse_judge_scores("Кандидат 2 лучше, у него больше конкретики.") == {}

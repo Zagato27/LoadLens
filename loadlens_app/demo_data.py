@@ -27,6 +27,8 @@ DEMO_RUN_NAME = "demo-checkout-step"
 DEMO_SERVICE = "demo-checkout"
 DEMO_TEST_TYPE = "step"
 DEMO_DURATION_MIN = 60
+DEMO_RPS_LABEL = "LT (InfluxQL): RPS sum by all groups"
+DEMO_P95_BY_REQUEST_LABEL = "LT (InfluxQL): http_req_duration p95(ms) by group & name"
 _STEP_LEVELS = [50.0, 100.0, 150.0, 200.0, 250.0]
 _STEP_MINUTES = 10
 _DROP_MINUTE = (len(_STEP_LEVELS) - 1) * _STEP_MINUTES + 5
@@ -103,12 +105,17 @@ def _lt_frames(index: pd.DatetimeIndex, rps: List[float], rng: random.Random) ->
     forecast_rng = random.Random(7)
     response = [_demo_response(value, minute, forecast_rng) for minute, value in enumerate(rps)]
     vus = [value * (seconds + _DEMO_THINK_S) for value, seconds in zip(rps, response)]
+    # Labels and units follow the lt-k6-influxql query pack: latencies in milliseconds.
+    p95_ms = [v * 1000.0 for v in p95]
+    error_pct = [0.2 + v / 250.0 * 0.05 + (0.25 if v > 230 else 0.0) for v in rps]
     return [
         {"label": "LT (InfluxQL): RPS by group & name", "df": _series_frame(index, {"group=checkout|name=POST /checkout": checkout, "group=search|name=GET /search": search})},
         {"label": "LT (InfluxQL): checks per second by group & check", "df": _series_frame(index, {"group=checkout|check=status is 200": [c * 0.6 for c in checks], "group=search|check=status is 200": [c * 0.4 for c in checks]})},
-        {"label": "LT (InfluxQL): http_req_duration p95(seconds) by group & name", "df": _series_frame(index, {"group=checkout|name=POST /checkout": p95, "group=search|name=GET /search": [v * 0.7 for v in p95]})},
-        {"label": "LT (InfluxQL): RPS sum by all groups", "df": _series_frame(index, {"all": rps})},
-        {"label": "LT (InfluxQL): http_req_duration mean(seconds)", "df": _series_frame(index, {"http_req_duration": response})},
+        {"label": DEMO_P95_BY_REQUEST_LABEL, "df": _series_frame(index, {"group=checkout|name=POST /checkout": p95_ms, "group=search|name=GET /search": [v * 0.7 for v in p95_ms]})},
+        {"label": DEMO_RPS_LABEL, "df": _series_frame(index, {"all": rps})},
+        {"label": "LT (InfluxQL): http_req_duration p95(ms) total", "df": _series_frame(index, {"http_req_duration": p95_ms})},
+        {"label": "LT (InfluxQL): http_req_duration mean(ms)", "df": _series_frame(index, {"http_req_duration": [s * 1000.0 for s in response]})},
+        {"label": "LT (InfluxQL): error rate (%)", "df": _series_frame(index, {"http_req_failed": error_pct})},
         {"label": "LT (InfluxQL): VUs", "df": _series_frame(index, {"vus": vus})},
     ]
 
@@ -299,8 +306,8 @@ def seed_demo_run(now: datetime | None = None) -> dict:
     results["load_step_table"] = load_step_report_from_frames(
         steps,
         domains["lt_framework"],
-        rps_query="LT (InfluxQL): RPS sum by all groups",
-        latency_query="LT (InfluxQL): http_req_duration p95(seconds) by group & name",
+        rps_query=DEMO_RPS_LABEL,
+        latency_query=DEMO_P95_BY_REQUEST_LABEL,
     )
     save_llm_results(results, run_meta, storage_cfg)
     return {

@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 
+from AI.storage_state import is_storage_error
+
 from . import passwords
 from .config import AuthSettings
 from .models import ApiToken, AuditEvent, ExternalIdentity, Role, User, utcnow
@@ -316,6 +318,20 @@ class AuthService:
             except Exception:
                 logger.warning("auth: initial administrator was not created, will retry", exc_info=True)
 
+    def store_available(self) -> bool:
+        """False only when the user store cannot be reached (storage outage).
+
+        Other failures return True so the caller takes the usual path and reports them as before.
+        """
+        try:
+            self.repo.count_users()
+            return True
+        except Exception as exc:
+            if is_storage_error(exc):
+                return False
+            logger.warning("auth: user store check failed", exc_info=True)
+            return True
+
     def has_users(self) -> bool:
         if self._users_exist:
             return True
@@ -515,7 +531,8 @@ class AuthService:
         label = self._clean_text(name, _MAX_TOKEN_NAME, "Название")
         if not label:
             raise ValidationError("Укажите название токена")
-        token_role = self._parse_role(role) if role else user.role
+        # A token is a long-lived credential that leaves the browser: read-only unless asked otherwise.
+        token_role = self._parse_role(role) if role else Role.VIEWER
         if token_role > user.role:
             raise ForbiddenError("Роль токена не может быть выше вашей роли")
         days = self.settings.token_default_days if expires_in_days is None else expires_in_days

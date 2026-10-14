@@ -1,0 +1,85 @@
+schema_version = 1
+id = "db-mongodb-exporter"
+version = 1
+title = "MongoDB: Percona mongodb_exporter"
+category = "database"
+stack = ["mongodb"]
+domain = "database"
+language = "promql"
+description = """
+Метрики percona/mongodb_exporter 0.30+ из serverStatus (mongodb_ss_*): операции в секунду, соединения и их \
+доля, средняя задержка операций, память процесса и заполнение кэша WiredTiger. В режиме --compatible-mode \
+экспортер отдаёт и старые имена, этот пакет их не использует.
+"""
+requires_metrics = ["mongodb_ss_opcounters", "mongodb_ss_connections"]
+prompt_addendum = """
+Метрики MongoDB: средняя задержка по reads/writes/commands из opLatencies, кэш WiredTiger выше 80 % \
+от размера — вытеснение страниц и рост дисковых чтений, доля соединений около 100 % — новые клиенты ждут.
+"""
+
+[variables.matchers]
+title = "Дополнительные матчеры"
+default = ""
+
+[variables.window]
+title = "Окно rate()"
+default = "2m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[[queries]]
+label = "DB (MongoDB): operations per second by server"
+role = "db.queries_rate"
+unit = "per_second"
+required = true
+query = 'label_replace(sum by (instance) (rate(mongodb_ss_opcounters{ {{matchers}} }[{{window}}])), "server", "$1", "instance", "(.*)")'
+keys = ["server"]
+description = "Все операции в секунду."
+
+[[queries]]
+label = "DB (MongoDB): operations per second by type"
+role = "db.queries_rate"
+unit = "per_second"
+query = 'sum by (legacy_op_type) (rate(mongodb_ss_opcounters{ {{matchers}} }[{{window}}]))'
+keys = ["legacy_op_type"]
+description = "query, insert, update, delete, getmore, command."
+
+[[queries]]
+label = "DB (MongoDB): current connections by server"
+role = "db.connections"
+unit = "count"
+required = true
+query = 'label_replace(sum by (instance) (mongodb_ss_connections{conn_type="current", {{matchers}} }), "server", "$1", "instance", "(.*)")'
+keys = ["server"]
+description = "Открытые соединения."
+
+[[queries]]
+label = "DB (MongoDB): connections used (%) by server"
+role = "db.connections_pct"
+unit = "percent"
+query = 'label_replace(100 * sum by (instance) (mongodb_ss_connections{conn_type="current", {{matchers}} }) / (sum by (instance) (mongodb_ss_connections{conn_type="current", {{matchers}} }) + sum by (instance) (mongodb_ss_connections{conn_type="available", {{matchers}} })), "server", "$1", "instance", "(.*)")'
+keys = ["server"]
+description = "Доля занятых соединений от доступных, %."
+
+[[queries]]
+label = "DB (MongoDB): average operation latency (sec) by type"
+role = "db.query_avg"
+unit = "seconds"
+query = 'sum by (op_type) (rate(mongodb_ss_opLatencies_latency{ {{matchers}} }[{{window}}])) / sum by (op_type) (rate(mongodb_ss_opLatencies_ops{ {{matchers}} }[{{window}}])) / 1000000'
+keys = ["op_type"]
+description = "Средняя задержка reads, writes, commands, с (MongoDB считает в микросекундах)."
+
+[[queries]]
+label = "DB (MongoDB): resident memory (bytes) by server"
+role = "db.memory_used"
+unit = "bytes"
+query = 'label_replace(sum by (instance) (mongodb_ss_mem_resident{ {{matchers}} }) * 1048576, "server", "$1", "instance", "(.*)")'
+keys = ["server"]
+description = "Резидентная память mongod (MongoDB отдаёт мегабайты)."
+
+[[queries]]
+label = "DB (MongoDB): WiredTiger cache used (%) by server"
+role = "db.memory_pct"
+unit = "percent"
+query = 'label_replace(100 * sum by (instance) (mongodb_ss_wt_cache_bytes_currently_in_the_cache{ {{matchers}} }) / sum by (instance) (mongodb_ss_wt_cache_maximum_bytes_configured{ {{matchers}} }), "server", "$1", "instance", "(.*)")'
+keys = ["server"]
+description = "Заполнение кэша WiredTiger, %."

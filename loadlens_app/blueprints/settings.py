@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 
 from flask import Blueprint, jsonify, render_template, request
 
+from loadlens_app.errors import internal_error
+
 from loadlens_app.core import (
     LOCKED_PROMPT_DOMAINS,
     METRICS_RUNTIME_PATH,
@@ -17,7 +19,9 @@ from loadlens_app.core import (
     _find_area_for_service,
     _list_project_areas,
     _load_base_prompts,
+    _load_metrics_runtime_data,
     _load_settings_runtime_data,
+    _save_metrics_runtime_data,
     _save_settings_runtime_data,
     _services_map_for_area,
 )
@@ -123,7 +127,7 @@ def get_prompts():
             }
         )
     except Exception as e:  # pragma: no cover
-        return jsonify({"error": str(e)}), 500
+        return internal_error(e)
 
 
 @settings_bp.route("/prompts", methods=["POST"])
@@ -176,7 +180,7 @@ def post_prompts():
         _save_settings_runtime_data(existing)
         return jsonify({"status": "ok"})
     except Exception as e:  # pragma: no cover
-        return jsonify({"error": str(e)}), 500
+        return internal_error(e)
 
 
 @settings_bp.route("/prompts/defaults", methods=["GET"])
@@ -238,7 +242,7 @@ def update_service_meta():
         _save_settings_runtime_data(runtime)
         return jsonify({"status": "ok", "service": service, "meta": svc_entry})
     except Exception as e:  # pragma: no cover
-        return jsonify({"error": str(e)}), 500
+        return internal_error(e)
 
 
 @settings_bp.route("/service_meta", methods=["DELETE"])
@@ -264,23 +268,16 @@ def delete_service_meta():
         if changed:
             _save_settings_runtime_data(runtime)
 
-        metrics_rt = {}
-        try:
-            if METRICS_RUNTIME_PATH.exists():
-                with METRICS_RUNTIME_PATH.open("r", encoding="utf-8") as f:
-                    metrics_rt = json.load(f)
-        except Exception:
-            metrics_rt = {}
+        metrics_rt = _load_metrics_runtime_data()
         if isinstance(metrics_rt.get(area), dict):
             services_entry = metrics_rt[area].get("services")
             if isinstance(services_entry, dict) and service in services_entry:
                 del services_entry[service]
-                with METRICS_RUNTIME_PATH.open("w", encoding="utf-8") as f:
-                    json.dump(metrics_rt, f, ensure_ascii=False, indent=2)
+                _save_metrics_runtime_data(metrics_rt)
 
         return jsonify({"status": "ok", "service": service, "area": area})
     except Exception as e:  # pragma: no cover
-        return jsonify({"error": str(e)}), 500
+        return internal_error(e)
 
 
 

@@ -1,0 +1,81 @@
+schema_version = 1
+id = "http-python-flask"
+version = 1
+title = "HTTP: Flask (prometheus-flask-exporter)"
+category = "http"
+stack = ["python", "flask"]
+domain = "microservices"
+language = "promql"
+description = """
+Гистограмма flask_http_request_duration_seconds из prometheus-flask-exporter (лейблы method, path, \
+status). Запросы считаются по её _count. С gunicorn используйте GunicornPrometheusMetrics, иначе \
+каждый воркер отдаёт свои значения.
+"""
+requires_metrics = ["flask_http_request_duration_seconds_count"]
+prompt_addendum = """
+Метрики Flask: flask_http_request_duration_seconds — гистограмма запросов по path, method и status, \
+flask_http_request_exceptions_total — необработанные исключения. Времена в секундах.
+"""
+
+[variables.service_label]
+title = "Лейбл с именем сервиса"
+default = "job"
+pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
+
+[variables.matchers]
+title = "Дополнительные матчеры"
+default = ""
+
+[variables.window]
+title = "Окно rate()"
+default = "1m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[[queries]]
+label = "HTTP (Flask): request rate (RPS) by service"
+role = "http.rps"
+unit = "per_second"
+required = true
+query = 'sum by ({{service_label}}) (rate(flask_http_request_duration_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}"]
+description = "Входящие запросы в секунду."
+
+[[queries]]
+label = "HTTP (Flask): average request time (sec) by service"
+role = "http.avg_latency"
+unit = "seconds"
+query = 'sum by ({{service_label}}) (rate(flask_http_request_duration_seconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}])) / sum by ({{service_label}}) (rate(flask_http_request_duration_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}"]
+description = "Среднее время обработки, с."
+
+[[queries]]
+label = "HTTP (Flask): p95 request time (sec) by service"
+role = "http.p95"
+unit = "seconds"
+query = 'histogram_quantile(0.95, sum by (le, {{service_label}}) (rate(flask_http_request_duration_seconds_bucket{ {{service_label}}!="", {{matchers}} }[{{window}}])))'
+keys = ["{{service_label}}"]
+description = "p95 времени обработки, с."
+
+[[queries]]
+label = "HTTP (Flask): 5xx error rate (%) by service"
+role = "http.error_rate_pct"
+unit = "percent"
+query = '100 * (sum by ({{service_label}}) (rate(flask_http_request_duration_seconds_count{status=~"5..", {{service_label}}!="", {{matchers}} }[{{window}}])) or 0 * sum by ({{service_label}}) (rate(flask_http_request_duration_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))) / sum by ({{service_label}}) (rate(flask_http_request_duration_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}"]
+description = "Доля ответов 5xx, %."
+
+[[queries]]
+label = "HTTP (Flask): RPS by service & path (top 20)"
+role = "http.rps_by_route"
+unit = "per_second"
+query = 'topk(20, sum by ({{service_label}}, path) (rate(flask_http_request_duration_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}])))'
+keys = ["{{service_label}}", "path"]
+description = "Самые нагруженные пути."
+
+[[queries]]
+label = "HTTP (Flask): p95 request time (sec) by service & path (top 20)"
+role = "http.p95_by_route"
+unit = "seconds"
+query = 'topk(20, histogram_quantile(0.95, sum by (le, {{service_label}}, path) (rate(flask_http_request_duration_seconds_bucket{ {{service_label}}!="", {{matchers}} }[{{window}}]))))'
+keys = ["{{service_label}}", "path"]
+description = "Самые медленные пути по p95."

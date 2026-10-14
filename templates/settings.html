@@ -90,8 +90,13 @@
         </div>
         <div class="card">
           <div id="slaRows"></div>
-          <h4 style="margin:18px 0 8px; font-style:normal">Определение максимальной производительности</h4>
-          <div class="form-grid two" id="slaPeakFields"></div>
+          <div class="sla-unit-row" id="slaUnitRow"></div>
+          <h4 class="sla-subhead">Определение максимальной производительности</h4>
+          <p class="help sla-subhelp">Запрос RPS выбирается в строке «Целевой RPS». Здесь — как находить стабильные ступени нагрузки.</p>
+          <div id="slaPeakFields"></div>
+          <h4 class="sla-subhead">Прогноз мощностей</h4>
+          <p class="help sla-subhelp">Запросы и модель нагрузки для страницы «Прогнозирование».</p>
+          <div id="slaForecastFields"></div>
           <details class="report-collapsible" style="margin-top:14px">
             <summary><span>Расширенные параметры (JSON)</span></summary>
             <div class="report-collapsible-body">
@@ -107,8 +112,16 @@
 
       <section id="sec-context" class="settings-section" aria-labelledby="h-context">
         <h3 id="h-context">Контекст тестируемой системы</h3>
-        <p class="help">Описание системы, компонентов, критичных потоков и рисков. Используется как справочный контекст для анализа ИИ и сохраняется снимком вместе с каждым отчётом. Заполняйте то, что знаете: пустые блоки не мешают.</p>
+        <p class="help">Описание системы, компонентов, критичных потоков и рисков. Используется как справочный контекст для анализа ИИ и сохраняется снимком вместе с каждым отчётом. Заполняйте то, что знаете: пустые блоки не мешают. Сервис может иметь свой контекст: он заменяет контекст области целиком.</p>
+        <div class="toolbar context-toolbar" style="margin-bottom:10px">
+          <label>Сервис
+            <select id="contextServiceSelect"><option value="">Область (по умолчанию)</option></select>
+          </label>
+          <span class="dim" id="contextOverrideNote"></span>
+          <button type="button" class="btn" id="contextImportBtn" data-min-role="admin">Заполнить из документа</button>
+        </div>
         <div class="card">
+          <div id="contextImportBanner" class="ctx-import-banner" role="status" hidden></div>
           <div id="contextForm"></div>
           <details class="report-collapsible" style="margin-top:12px">
             <summary><span>Расширенный режим (JSON)</span></summary>

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -398,6 +399,11 @@ def _backup(path: Path) -> None:
     if backup.exists():
         return
     shutil.copyfile(path, backup)
+    try:
+        os.chmod(backup, 0o600)
+    except OSError:
+        pass
+    logger.warning("Копия %s с паролями сохранена в %s: удалите её, когда убедитесь, что миграция прошла", path.name, backup.name)
 
 
 def _apply(runtime: dict, result: MigrationResult, config: dict) -> None:

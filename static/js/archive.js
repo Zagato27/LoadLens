@@ -357,10 +357,26 @@
       link.href = '/reports/' + encodeURIComponent(job.run_name);
       link.textContent = 'К отчёту';
     }
+    const actions = document.createElement('span');
+    actions.className = 'job-actions';
+    actions.appendChild(link);
+    const dismiss = LL.jobDismissButton(job, loadJobsStrip);
+    if (dismiss) actions.appendChild(dismiss);
     row.appendChild(pill);
     row.appendChild(info);
-    row.appendChild(link);
+    row.appendChild(actions);
     return row;
+  }
+
+  // Finished rows currently shown: "Очистить завершённые" hides exactly these.
+  let finishedJobIds = [];
+
+  async function clearFinishedJobs() {
+    const btn = $('jobsStripClear');
+    btn.disabled = true;
+    await LL.dismissJobs(finishedJobIds);
+    btn.disabled = false;
+    loadJobsStrip();
   }
 
   async function loadJobsStrip() {
@@ -373,6 +389,8 @@
       const payload = await resp.json();
       const jobs = Array.isArray(payload && payload.jobs) ? payload.jobs : [];
       list.innerHTML = '';
+      finishedJobIds = jobs.filter((j) => j.status !== 'running').map((j) => j.job_id);
+      $('jobsStripClear').hidden = !finishedJobIds.length;
       if (!jobs.length) {
         strip.style.display = 'none';
         if (jobsTimer) { clearInterval(jobsTimer); jobsTimer = null; }
@@ -418,6 +436,9 @@
   }
 
   document.addEventListener('DOMContentLoaded', async () => {
+    // The filters apply as they change; the form itself never submits (CSP forbids inline handlers).
+    const filtersForm = document.getElementById('filtersForm');
+    if (filtersForm) filtersForm.addEventListener('submit', (e) => e.preventDefault());
     wireControls();
     await loadFilterOptions();
     // Deep link from breadcrumbs / dashboard: /reports?service=X
@@ -434,6 +455,7 @@
       state.service = preService;
     }
     await loadPage();
+    $('jobsStripClear').addEventListener('click', clearFinishedJobs);
     loadJobsStrip();
   });
 })();

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+import os
 import secrets
 import time
 from dataclasses import dataclass
@@ -14,6 +15,9 @@ from flask import Flask, Response, current_app, g, jsonify, redirect, render_tem
 from flask.sessions import SecureCookieSessionInterface
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+from AI import storage_state
+
+from . import recovery
 from .config import AuthSettings, load_auth_settings, resolve_secret_key
 from .models import Role, User
 from .policy import Rule, rule_for, unclassified
@@ -46,6 +50,8 @@ class AuthContext:
 
 
 _ANONYMOUS = AuthContext(user=None, role=Role.VIEWER, via="anonymous")
+# A recovery session: administrator rank, but the gate admits it only to endpoints marked recovery_ok.
+_RECOVERY = AuthContext(user=None, role=Role.ADMIN, via="recovery")
 
 
 def get_service() -> AuthService:
@@ -62,6 +68,35 @@ def current_actor() -> Actor:
 
 
 # ---- helpers ---------------------------------------------------------------------------------
+
+
+def csp_nonce() -> str:
+    """Nonce of this response for the few inline scripts of the templates."""
+    nonce = g.get("csp_nonce")
+    if not nonce:
+        nonce = g.csp_nonce = secrets.token_urlsafe(16)
+    return nonce
+
+
+def content_security_policy(nonce: Optional[str]) -> str:
+    """Same-origin scripts (plus the nonce), no plugins, images only from this site.
+
+    Inline styles stay allowed: the templates and the Ace editor use them, and they cannot run code.
+    """
+    scripts = "'self'" + (f" 'nonce-{nonce}'" if nonce else "")
+    return (
+        "default-src 'self'; "
+        f"script-src {scripts}; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; "
+        "font-src 'self'; "
+        "connect-src 'self'; "
+        "worker-src 'self' blob:; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'; "
+        "frame-ancestors 'self'"
+    )
 
 
 def csrf_token() -> str:
@@ -149,6 +184,82 @@ def _resolve_auth(service: AuthService, settings: AuthSettings) -> tuple[AuthCon
     return AuthContext(user=user, role=user.role, via="session"), False
 
 
+def storage_unavailable_response(rule: Rule) -> Response:
+    """503 while the storage database is down: a page for browser pages, JSON for the API.
+
+    The address of the database stays in the log and on the recovery page; an unidentified visitor
+    only learns what kind of failure it is and how to sign in for recovery.
+    """
+    status = storage_state.status()
+    retry = max(1, int(round(status.retry_in or storage_state.DEFAULT_RETRY_SECONDS)))
+    settings = get_service().settings
+    if rule.page and request.method in ("GET", "HEAD"):
+        html = render_template(
+            "storage_unavailable.html",
+            storage=status,
+            # Without sign-in every visitor is an administrator; a recovery session is one too.
+            show_details=not settings.enabled or current_auth().via == "recovery",
+            auth_enabled=settings.enabled,
+            recovery_configured=recovery.configured(settings),
+            retry_seconds=retry,
+        )
+        response = Response(html, status=503, mimetype="text/html")
+    else:
+        response = json_error(
+            "Хранилище недоступно: вход и данные отчётов временно не работают",
+            503,
+            "storage_unavailable",
+            recovery_url="/login" if settings.enabled else "/recovery",
+        )
+    response.headers["Retry-After"] = str(retry)
+    return response
+
+
+def storage_unavailable_for_request() -> Response:
+    """The outage answer for the current request (used by the error helpers of the views)."""
+    return storage_unavailable_response(rule_for(request.endpoint))
+
+
+def _recovery_ended(rule: Rule, message: str, target: str) -> Response:
+    if rule.page and request.method in ("GET", "HEAD"):
+        return redirect(target)
+    return json_error(message, 401, "recovery_ended", login_url=target)
+
+
+def _recovery_gate(service: AuthService, rule: Rule) -> Optional[Response]:
+    """Requests of a recovery session: only ``recovery_ok`` endpoints, and only while the user store is down."""
+    expired = recovery.expired(session)
+    if rule.role is None:
+        # Public endpoints (static files, the login form, /auth/me) skip the store check.
+        if not expired:
+            g.auth = _RECOVERY
+        if request.method not in SAFE_METHODS and rule.csrf and not _csrf_valid():
+            return json_error("Сессия устарела, обновите страницу и повторите действие", 403, "csrf_failed")
+        return None
+    ip = request.remote_addr or ""
+    if expired:
+        recovery.log("session expired", ip=ip)
+        session.clear()
+        return _recovery_ended(rule, "Аварийная сессия истекла, войдите снова", "/login")
+    if service.store_available():
+        recovery.log("session ended: storage is reachable again", ip=ip)
+        session.clear()
+        return _recovery_ended(rule, "Хранилище снова доступно, войдите обычным способом", "/login?recovered=1")
+    g.auth = _RECOVERY
+    if not rule.recovery_ok:
+        if rule.page and request.method in ("GET", "HEAD"):
+            return redirect("/recovery")
+        return json_error(
+            "Недоступно в режиме восстановления: сначала исправьте подключение к хранилищу",
+            403,
+            "recovery_only",
+            recovery_url="/recovery",
+        )
+    if request.method not in SAFE_METHODS and rule.csrf and not _csrf_valid():
+        return json_error("Сессия устарела, обновите страницу и повторите действие", 403, "csrf_failed")
+    return None
+
+
 def _gate() -> Optional[Response]:
     service = get_service()
     settings = service.settings
@@ -161,12 +272,19 @@ def _gate() -> Optional[Response]:
         return None
     rule = rule_for(endpoint)
 
+    if recovery.is_recovery(session):
+        return _recovery_gate(service, rule)
+
     try:
         context, bad_token = _resolve_auth(service, settings)
-    except Exception:
-        logger.exception("auth: failed to resolve the current user")
+    except Exception as exc:
         if rule.role is None:
+            if request.method not in SAFE_METHODS and rule.csrf and not _csrf_valid():
+                return json_error("Сессия устарела, обновите страницу и повторите действие", 403, "csrf_failed")
             return None
+        if storage_state.is_storage_error(exc):
+            return storage_unavailable_response(rule)
+        logger.exception("auth: failed to resolve the current user")
         return json_error("Сервис авторизации временно недоступен", 503, "auth_unavailable")
     g.auth = context
 
@@ -205,6 +323,9 @@ def _audit_details(response: Response) -> dict:
     for key in _AUDIT_ARG_KEYS:
         if request.args.get(key):
             details[key] = request.args[key][:50]
+    extra = g.get("audit_extra")
+    if isinstance(extra, dict):
+        details.update(extra)
     if response.is_json and not response.direct_passthrough:
         payload = response.get_json(silent=True)
         if isinstance(payload, dict) and isinstance(payload.get("job_id"), str):
@@ -216,6 +337,9 @@ def _after_request(response: Response) -> Response:
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     response.headers.setdefault("Referrer-Policy", "same-origin")
+    # LOADLENS_CSP_REPORT_ONLY=1 reports violations to the browser console instead of blocking them.
+    csp_header = "Content-Security-Policy-Report-Only" if os.getenv("LOADLENS_CSP_REPORT_ONLY") == "1" else "Content-Security-Policy"
+    response.headers.setdefault(csp_header, content_security_policy(g.get("csp_nonce")))
     endpoint = request.endpoint or ""
     rule = rule_for(endpoint)
     # Pages and data behind the login must not be served from a browser or proxy cache afterwards
@@ -227,7 +351,12 @@ def _after_request(response: Response) -> Response:
     if rule.audit and request.method not in SAFE_METHODS and response.status_code < 400:
         try:
             service = get_service()
-            if service.settings.enabled:
+            auth = current_auth()
+            if auth.via == "recovery" or (service.settings.enabled and storage_state.is_down()):
+                # The audit table lives in the unreachable database: keep the trail in the application log.
+                actor = recovery.ACTOR_NAME if auth.via == "recovery" else current_actor().label
+                recovery.log(f"audit {rule.audit}", ip=request.remote_addr or "", actor=actor, details=_audit_details(response))
+            elif service.settings.enabled:
                 service.audit(rule.audit, current_actor(), details=_audit_details(response))
         except Exception:
             logger.warning("auth: audit hook failed", exc_info=True)
@@ -254,6 +383,10 @@ def _inject_template_context() -> dict:
         "role_rank": int(auth.role),
         "role_key": auth.role.key,
         "csrf_token": csrf_token() if enabled else "",
+        "csp_nonce": csp_nonce(),
+        "recovery_mode": auth.via == "recovery",
+        # Known outage only (no connection attempt here): the page banner links to the recovery page.
+        "storage_down": storage_state.is_down(),
     }
 
 
@@ -303,6 +436,7 @@ def init_auth(
     service = build_service(repository=repository, config=config, env=env)
     settings = service.settings
     app.extensions[EXTENSION_KEY] = service
+    app.extensions[recovery.EXTENSION_KEY] = recovery.RecoveryLimiter()
 
     key, source = resolve_secret_key(settings, key_file)
     app.secret_key = key

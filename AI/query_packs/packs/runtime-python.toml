@@ -1,0 +1,88 @@
+schema_version = 1
+id = "runtime-python"
+version = 1
+title = "Python runtime: prometheus_client"
+category = "runtime"
+stack = ["python"]
+domain = "jvm"
+language = "promql"
+domain_title = "Python runtime"
+verified = true
+description = """
+Стандартные коллекторы prometheus_client: process_* и python_gc_*. Ряды пишутся в домен «JVM» с префиксом \
+«Python runtime», потому что план ресурсов берёт CPU сервисов оттуда. CPU процесса приходит в ядрах. \
+В multiprocess-режиме (gunicorn с PROMETHEUS_MULTIPROC_DIR) метрик process_* нет — тогда CPU и память \
+берите из пакета «Контейнеры: CPU и память от лимита».
+"""
+requires_metrics = ["python_info", "process_cpu_seconds_total", "python_gc_collections_total"]
+prompt_addendum = """
+Это сервис на Python, а не JVM: из-за GIL один процесс редко использует больше одного ядра, \
+параллелизм дают воркеры (gunicorn, uvicorn) — каждый отдельный процесс. process_resident_memory_bytes — \
+RSS процесса, python_gc_collections_total — сборки по поколениям (generation 2 — полные), \
+process_open_fds — файлы и сокеты.
+"""
+
+[variables.service_label]
+title = "Лейбл с именем сервиса"
+default = "job"
+pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
+
+[variables.matchers]
+title = "Дополнительные матчеры"
+default = ""
+
+[variables.cpu_limit_cores]
+title = "Ядер на экземпляр"
+default = "1"
+pattern = '^[0-9]+(\.[0-9]+)?$'
+help = "Для одного процесса Python обычно 1: GIL не даёт занять больше ядра."
+
+[variables.window]
+title = "Окно rate()"
+default = "2m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[sla]
+service_cpu_query = "@runtime.cpu"
+
+[[queries]]
+label = "Python runtime: CPU (share of limit) by ({{service_label}}, instance)"
+role = "runtime.cpu"
+unit = "fraction"
+required = true
+query = '(sum by ({{service_label}}, instance) (rate(process_cpu_seconds_total{ {{service_label}}!="", {{matchers}} }[{{window}}])) / {{cpu_limit_cores}}) and on ({{service_label}}, instance) python_info{ {{service_label}}!="", {{matchers}} }'
+keys = ["{{service_label}}", "instance"]
+description = "CPU процесса как доля 0..1 от заданного числа ядер."
+
+[[queries]]
+label = "Python runtime: resident memory (bytes) by ({{service_label}}, instance)"
+role = "runtime.rss"
+unit = "bytes"
+required = true
+query = 'sum by ({{service_label}}, instance) (process_resident_memory_bytes{ {{service_label}}!="", {{matchers}} }) and on ({{service_label}}, instance) python_info{ {{service_label}}!="", {{matchers}} }'
+keys = ["{{service_label}}", "instance"]
+description = "RSS процесса."
+
+[[queries]]
+label = "Python runtime: GC collections per second by ({{service_label}}, instance, generation)"
+role = "runtime.gc_rate"
+unit = "per_second"
+query = 'sum by ({{service_label}}, instance, generation) (rate(python_gc_collections_total{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}", "instance", "generation"]
+description = "Сборки мусора по поколениям."
+
+[[queries]]
+label = "Python runtime: GC objects collected per second by ({{service_label}}, instance)"
+role = "runtime.gc_collected_rate"
+unit = "per_second"
+query = 'sum by ({{service_label}}, instance) (rate(python_gc_objects_collected_total{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}", "instance"]
+description = "Объекты, собранные GC, в секунду."
+
+[[queries]]
+label = "Python runtime: open file descriptors by ({{service_label}}, instance)"
+role = "runtime.open_fds"
+unit = "count"
+query = 'sum by ({{service_label}}, instance) (process_open_fds{ {{service_label}}!="", {{matchers}} }) and on ({{service_label}}, instance) python_info{ {{service_label}}!="", {{matchers}} }'
+keys = ["{{service_label}}", "instance"]
+description = "Открытые файловые дескрипторы и сокеты."

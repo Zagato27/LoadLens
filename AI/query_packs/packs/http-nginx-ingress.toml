@@ -1,0 +1,83 @@
+schema_version = 1
+id = "http-nginx-ingress"
+version = 1
+title = "HTTP: ingress-nginx"
+category = "http"
+stack = ["kubernetes", "nginx"]
+domain = "microservices"
+language = "promql"
+description = """
+Метрики контроллера ingress-nginx: запросы и время ответа по ingress, а также время ответа апстрима \
+(сервиса за ingress). Разница между ними — время самого ingress и сети.
+"""
+requires_metrics = ["nginx_ingress_controller_requests", "nginx_ingress_controller_request_duration_seconds_bucket"]
+prompt_addendum = """
+Метрики ingress-nginx: request_duration — полное время запроса на ingress, response_duration — время \
+ответа апстрима. Если растёт первое при стабильном втором, узкое место в ingress (CPU, соединения), а не \
+в сервисе.
+"""
+
+[variables.service_label]
+title = "Лейбл с именем сервиса"
+default = "ingress"
+pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
+help = "ingress, service или host."
+
+[variables.matchers]
+title = "Дополнительные матчеры"
+default = ""
+help = 'Например namespace="shop".'
+
+[variables.window]
+title = "Окно rate()"
+default = "1m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[[queries]]
+label = "HTTP (ingress-nginx): request rate (RPS) by ingress"
+role = "http.rps"
+unit = "per_second"
+required = true
+query = 'sum by ({{service_label}}) (rate(nginx_ingress_controller_requests{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}"]
+description = "Запросы в секунду через ingress."
+
+[[queries]]
+label = "HTTP (ingress-nginx): average request time (sec) by ingress"
+role = "http.avg_latency"
+unit = "seconds"
+query = 'sum by ({{service_label}}) (rate(nginx_ingress_controller_request_duration_seconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}])) / sum by ({{service_label}}) (rate(nginx_ingress_controller_request_duration_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}"]
+description = "Среднее полное время запроса на ingress, с."
+
+[[queries]]
+label = "HTTP (ingress-nginx): p95 request time (sec) by ingress"
+role = "http.p95"
+unit = "seconds"
+query = 'histogram_quantile(0.95, sum by (le, {{service_label}}) (rate(nginx_ingress_controller_request_duration_seconds_bucket{ {{service_label}}!="", {{matchers}} }[{{window}}])))'
+keys = ["{{service_label}}"]
+description = "p95 полного времени запроса, с."
+
+[[queries]]
+label = "HTTP (ingress-nginx): 5xx error rate (%) by ingress"
+role = "http.error_rate_pct"
+unit = "percent"
+query = '100 * (sum by ({{service_label}}) (rate(nginx_ingress_controller_requests{status=~"5..", {{service_label}}!="", {{matchers}} }[{{window}}])) or 0 * sum by ({{service_label}}) (rate(nginx_ingress_controller_requests{ {{service_label}}!="", {{matchers}} }[{{window}}]))) / sum by ({{service_label}}) (rate(nginx_ingress_controller_requests{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}"]
+description = "Доля ответов 5xx, %."
+
+[[queries]]
+label = "HTTP (ingress-nginx): RPS by ingress & path (top 20)"
+role = "http.rps_by_route"
+unit = "per_second"
+query = 'topk(20, sum by ({{service_label}}, path) (rate(nginx_ingress_controller_requests{ {{service_label}}!="", {{matchers}} }[{{window}}])))'
+keys = ["{{service_label}}", "path"]
+description = "Самые нагруженные пути."
+
+[[queries]]
+label = "HTTP (ingress-nginx): upstream average response time (sec) by ingress"
+role = "http.client_avg_latency"
+unit = "seconds"
+query = 'sum by ({{service_label}}) (rate(nginx_ingress_controller_response_duration_seconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}])) / sum by ({{service_label}}) (rate(nginx_ingress_controller_response_duration_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}"]
+description = "Среднее время ответа апстрима (сервиса за ingress), с."

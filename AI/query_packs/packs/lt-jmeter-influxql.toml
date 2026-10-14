@@ -1,0 +1,121 @@
+schema_version = 1
+id = "lt-jmeter-influxql"
+version = 1
+title = "JMeter Backend Listener → InfluxDB (InfluxQL)"
+category = "load_tool"
+stack = ["jmeter", "influxdb"]
+domain = "lt_framework"
+language = "influxql"
+description = """
+Встроенный InfluxdbBackendListenerClient JMeter: measurement jmeter, теги application, transaction, \
+statut; поля count, countError, avg, pct95.0, pct99.0, maxAT. Строки transaction="all" — сводка по всем \
+семплерам, transaction="internal" — потоки. RPS = count за интервал отправки, делённый на его длину. \
+Перцентили JMeter считает по скользящему окну семплов (backend_metrics_window), значения в мс.
+"""
+requires_metrics = ["jmeter"]
+prompt_addendum = """
+Метрики JMeter Backend Listener: transaction — имя семплера (all — сводка, internal — потоки), \
+statut — ok/ko/all, count — семплы за интервал отправки, countError — ошибки, avg и pct95.0 — время ответа \
+в мс по скользящему окну семплов, maxAT — максимум активных потоков (аналог VU).
+"""
+
+[variables.measurement]
+title = "Measurement"
+default = "jmeter"
+pattern = '^[A-Za-z0-9_.-]+$'
+
+[variables.application]
+title = "Application (регулярное выражение)"
+default = ".*"
+pattern = '^[^/\n\r]*$'
+help = "Значение поля application в Backend Listener. По умолчанию — все приложения."
+
+[variables.send_interval_sec]
+title = "Интервал отправки, с"
+default = "5"
+pattern = '^[1-9][0-9]*$'
+help = "Как часто Backend Listener пишет точки (по умолчанию 5 с)."
+
+[variables.load_model]
+title = "Модель нагрузки сценария"
+default = "closed"
+choices = ["open", "closed"]
+help = "Thread Group — closed; Arrivals/Free-Form Arrivals Thread Group — open."
+
+[sla]
+max_performance_query = "@lt.rps_total"
+p95_query = "@lt.p95_total"
+p99_query = "@lt.p99_total"
+mean_latency_query = "@lt.mean_latency_total"
+error_rate_query = "@lt.error_rate_pct"
+vus_query = "@lt.vus"
+latency_unit = "ms"
+load_model = "{{load_model}}"
+
+[[queries]]
+label = "LT (JMeter): RPS total"
+role = "lt.rps_total"
+unit = "per_second"
+required = true
+query = '''SELECT sum("count") / {{send_interval_sec}} FROM "{{measurement}}" WHERE "application" =~ /^{{application}}$/ AND "transaction" = 'all' AND "statut" = 'all' AND $timeFilter GROUP BY time({{send_interval_sec}}s) fill(null)'''
+description = "Общий RPS теста: семплы за интервал отправки, делённые на его длину."
+
+[[queries]]
+label = "LT (JMeter): RPS by transaction"
+role = "lt.rps_by_request"
+unit = "per_second"
+query = '''SELECT sum("count") / {{send_interval_sec}} FROM "{{measurement}}" WHERE "application" =~ /^{{application}}$/ AND "transaction" <> 'all' AND "transaction" <> 'internal' AND "statut" = 'all' AND $timeFilter GROUP BY time({{send_interval_sec}}s), "transaction" fill(null)'''
+keys = ["transaction"]
+description = "RPS по семплерам."
+
+[[queries]]
+label = "LT (JMeter): p95(ms) total"
+role = "lt.p95_total"
+unit = "ms"
+query = '''SELECT mean("pct95.0") FROM "{{measurement}}" WHERE "application" =~ /^{{application}}$/ AND "transaction" = 'all' AND "statut" = 'all' AND $timeFilter GROUP BY time($__interval) fill(null)'''
+description = "p95 времени ответа всех семплов, мс."
+
+[[queries]]
+label = "LT (JMeter): p99(ms) total"
+role = "lt.p99_total"
+unit = "ms"
+query = '''SELECT mean("pct99.0") FROM "{{measurement}}" WHERE "application" =~ /^{{application}}$/ AND "transaction" = 'all' AND "statut" = 'all' AND $timeFilter GROUP BY time($__interval) fill(null)'''
+description = "p99 времени ответа всех семплов, мс."
+
+[[queries]]
+label = "LT (JMeter): p95(ms) by transaction"
+role = "lt.p95_by_request"
+unit = "ms"
+query = '''SELECT mean("pct95.0") FROM "{{measurement}}" WHERE "application" =~ /^{{application}}$/ AND "transaction" <> 'all' AND "transaction" <> 'internal' AND "statut" = 'all' AND $timeFilter GROUP BY time($__interval), "transaction" fill(null)'''
+keys = ["transaction"]
+description = "p95 по семплерам, мс."
+
+[[queries]]
+label = "LT (JMeter): mean response time(ms)"
+role = "lt.mean_latency_total"
+unit = "ms"
+required = true
+query = '''SELECT mean("avg") FROM "{{measurement}}" WHERE "application" =~ /^{{application}}$/ AND "transaction" = 'all' AND "statut" = 'all' AND $timeFilter GROUP BY time($__interval) fill(null)'''
+description = "Среднее время ответа, мс."
+
+[[queries]]
+label = "LT (JMeter): error rate (%)"
+role = "lt.error_rate_pct"
+unit = "percent"
+query = '''SELECT sum("countError") / sum("count") * 100 FROM "{{measurement}}" WHERE "application" =~ /^{{application}}$/ AND "transaction" = 'all' AND "statut" = 'all' AND $timeFilter GROUP BY time($__interval) fill(null)'''
+description = "Доля ошибочных семплов, %."
+
+[[queries]]
+label = "LT (JMeter): errors per second by transaction"
+role = "lt.errors_by_request"
+unit = "per_second"
+query = '''SELECT sum("count") / {{send_interval_sec}} FROM "{{measurement}}" WHERE "application" =~ /^{{application}}$/ AND "transaction" <> 'all' AND "transaction" <> 'internal' AND "statut" = 'ko' AND $timeFilter GROUP BY time({{send_interval_sec}}s), "transaction" fill(null)'''
+keys = ["transaction"]
+description = "Ошибочные семплы в секунду по семплерам."
+
+[[queries]]
+label = "LT (JMeter): active threads"
+role = "lt.vus"
+unit = "count"
+query = '''SELECT max("maxAT") FROM "{{measurement}}" WHERE "application" =~ /^{{application}}$/ AND "transaction" = 'internal' AND $timeFilter GROUP BY time({{send_interval_sec}}s) fill(null)'''
+description = "Активные потоки JMeter (аналог VU)."

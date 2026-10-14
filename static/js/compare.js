@@ -20,7 +20,9 @@
     agg: 'p95',
     schema: {},
     charts: {},
-    pickers: {}
+    pickers: {},
+    // Domain titles stored with the reports (run A wins when both have one).
+    domainTitles: {}
   };
 
   // Background plugin for chart area
@@ -123,6 +125,17 @@
     const minutes = Math.round((Number(row.end_ms) - Number(row.start_ms)) / 60000);
     return `${minutes} мин`;
   }
+  // Peak for step/stress, held RPS for soak, spike level for spike.
+  function keyRpsText(row, peak) {
+    const parsed = parsedOf(row);
+    const has = (v) => v !== undefined && v !== null && v !== '';
+    if (has(peak.max_rps)) return parsed.saturation ? `${peak.max_rps} (точка насыщения)` : String(peak.max_rps);
+    const held = (parsed.stability_under_load || {}).actual_rps;
+    if (has(held)) return `${held} (удержано)`;
+    const spike = (parsed.spike_analysis || {}).max_spike_rps;
+    if (has(spike)) return `${spike} (всплеск)`;
+    return '—';
+  }
   function renderVerdicts(a, b) {
     const order = ['final', 'lt_framework', 'microservices', 'jvm', 'database', 'kafka', 'hard_resources', 'application_logs'];
     const domains = order.filter((d) => a[d] || b[d]);
@@ -133,11 +146,11 @@
     ];
     cells.push('<div>Итоговый вердикт</div>', `<div>${pill(finalA && finalA.verdict)}</div>`, `<div>${pill(finalB && finalB.verdict)}</div>`);
     cells.push('<div>Вердикт по SLA</div>', `<div>${pill(finalA && finalA.sla_verdict)}</div>`, `<div>${pill(finalB && finalB.sla_verdict)}</div>`);
-    cells.push(`<div>${ui.term('stable_max', 'Максимальный RPS')}</div>`, `<div>${esc(peakA.max_rps !== undefined && peakA.max_rps !== null ? peakA.max_rps : '—')}</div>`, `<div>${esc(peakB.max_rps !== undefined && peakB.max_rps !== null ? peakB.max_rps : '—')}</div>`);
+    cells.push(`<div>${ui.term('stable_max', 'Макс. RPS / ключевой RPS типа теста')}</div>`, `<div>${esc(keyRpsText(finalA, peakA))}</div>`, `<div>${esc(keyRpsText(finalB, peakB))}</div>`);
     cells.push('<div>Тип теста</div>', `<div>${esc(LL.testTypeLabel(finalA && finalA.test_type))}</div>`, `<div>${esc(LL.testTypeLabel(finalB && finalB.test_type))}</div>`);
     cells.push('<div>Длительность окна</div>', `<div>${esc(durationText(finalA))}</div>`, `<div>${esc(durationText(finalB))}</div>`);
     domains.filter((d) => d !== 'final').forEach((d) => {
-      cells.push(`<div>${esc(LL.domainTitle(d))}</div>`, `<div>${pill(a[d] && (a[d].verdict || a[d].llm_verdict))}</div>`, `<div>${pill(b[d] && (b[d].verdict || b[d].llm_verdict))}</div>`);
+      cells.push(`<div>${esc(LL.domainTitleFor(d, state.domainTitles))}</div>`, `<div>${pill(a[d] && (a[d].verdict || a[d].llm_verdict))}</div>`, `<div>${pill(b[d] && (b[d].verdict || b[d].llm_verdict))}</div>`);
     });
     $('verdictGrid').innerHTML = cells.join('');
     const findingsHtml = (row, label) => {
@@ -355,7 +368,7 @@
       const btn = document.createElement('button');
       btn.className = `tab ${i === 0 ? 'active' : ''}`;
       btn.dataset.target = `cmp-panel-${i}`;
-      btn.textContent = `${LL.domainTitle(d)} (${(state.schema[d] || []).length})`;
+      btn.textContent = `${LL.domainTitleFor(d, state.domainTitles)} (${(state.schema[d] || []).length})`;
       nav.appendChild(btn);
       const panel = document.createElement('div');
       panel.id = `cmp-panel-${i}`;
@@ -373,6 +386,7 @@
     $('compareHint').textContent = 'Загружаем…';
     try {
       const [a, b] = await Promise.all([loadLlmRows(state.runA.value), loadLlmRows(state.runB.value)]);
+      state.domainTitles = Object.assign({}, LL.reportDomainTitles(Object.values(b)), LL.reportDomainTitles(Object.values(a)));
       renderVerdicts(a, b);
       await loadSchema();
       $('metricsCompare').hidden = false;

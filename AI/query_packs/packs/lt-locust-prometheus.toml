@@ -1,0 +1,97 @@
+schema_version = 1
+id = "lt-locust-prometheus"
+version = 1
+title = "Locust → Prometheus (locust_exporter)"
+category = "load_tool"
+stack = ["locust", "prometheus"]
+domain = "lt_framework"
+language = "promql"
+verified = true
+description = """
+Метрики ContainerSolutions/locust_exporter, который опрашивает веб-интерфейс Locust: текущий RPS и ошибки \
+по запросам (строка name="Aggregated" — сводка), p95 текущего окна и пользователи. Среднее время ответа \
+Locust считает с начала теста, поэтому по ступеням оно запаздывает. Задержки в миллисекундах.
+"""
+requires_metrics = ["locust_requests_current_rps", "locust_users"]
+prompt_addendum = """
+Метрики Locust: current_rps и current_fail_per_sec — текущие значения, avg_response_time — среднее с начала \
+теста (накопительное, в мс), current_response_time_percentile_95 — p95 последних запросов, users — активные \
+пользователи (закрытая модель нагрузки).
+"""
+
+[variables.matchers]
+title = "Дополнительные матчеры"
+default = ""
+
+[variables.load_model]
+title = "Модель нагрузки сценария"
+default = "closed"
+choices = ["open", "closed"]
+help = "Пользователи Locust — закрытая модель; constant_throughput / constant_pacing ближе к открытой."
+
+[sla]
+max_performance_query = "@lt.rps_total"
+p95_query = "@lt.p95_total"
+mean_latency_query = "@lt.mean_latency_total"
+error_rate_query = "@lt.error_rate_pct"
+vus_query = "@lt.vus"
+latency_unit = "ms"
+load_model = "{{load_model}}"
+
+[[queries]]
+label = "LT (Locust): RPS total"
+role = "lt.rps_total"
+unit = "per_second"
+required = true
+query = 'label_replace(sum(locust_requests_current_rps{name="Aggregated", {{matchers}} }), "series", "all", "", "")'
+keys = ["series"]
+description = "Общий RPS теста."
+
+[[queries]]
+label = "LT (Locust): RPS by name"
+role = "lt.rps_by_request"
+unit = "per_second"
+query = 'topk(20, sum by (name) (locust_requests_current_rps{name!="Aggregated", {{matchers}} }))'
+keys = ["name"]
+description = "RPS по имени запроса."
+
+[[queries]]
+label = "LT (Locust): response time p95(ms) current"
+role = "lt.p95_total"
+unit = "ms"
+query = 'label_replace(max(locust_requests_current_response_time_percentile_95{ {{matchers}} }), "series", "all", "", "")'
+keys = ["series"]
+description = "p95 времени ответа последних запросов, мс."
+
+[[queries]]
+label = "LT (Locust): average response time(ms) since start"
+role = "lt.mean_latency_total"
+unit = "ms"
+required = true
+query = 'label_replace(max(locust_requests_avg_response_time{name="Aggregated", {{matchers}} }), "series", "all", "", "")'
+keys = ["series"]
+description = "Среднее время ответа с начала теста, мс (накопительное)."
+
+[[queries]]
+label = "LT (Locust): error rate (%)"
+role = "lt.error_rate_pct"
+unit = "percent"
+query = 'label_replace(100 * sum(locust_requests_current_fail_per_sec{name="Aggregated", {{matchers}} }) / sum(locust_requests_current_rps{name="Aggregated", {{matchers}} }), "series", "all", "", "")'
+keys = ["series"]
+description = "Доля ошибок в текущем окне, %."
+
+[[queries]]
+label = "LT (Locust): failures per second by name"
+role = "lt.errors_by_request"
+unit = "per_second"
+query = 'topk(20, sum by (name) (locust_requests_current_fail_per_sec{name!="Aggregated", {{matchers}} }))'
+keys = ["name"]
+description = "Ошибки в секунду по запросам."
+
+[[queries]]
+label = "LT (Locust): users"
+role = "lt.vus"
+unit = "count"
+query = 'label_replace(sum(locust_users{ {{matchers}} }), "series", "all", "", "")'
+keys = ["series"]
+description = "Активные пользователи Locust."

@@ -28,6 +28,7 @@ from AI.limit_explanation import (
 from AI.providers import ask_llm_with_text_data, usage_domain
 from loadlens_app.core import _ts_conn
 from loadlens_app.forecast import ForecastReport, _storage, build_forecast
+from loadlens_app.limits import consume_llm
 from settings import CONFIG
 
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "AI" / "prompts" / "forecast_limit_prompt.txt"
@@ -313,12 +314,17 @@ def _ask_model(context: ExplanationContext) -> str:
         raise ExplanationError(f"Модель {llm.provider} / {llm.model} не ответила: {exc}", 502, "llm_failed") from exc
 
 
-def generate_explanation(run_id: str) -> ExplanationView:
-    """Asks the model, checks its numbers and caches the result for the run."""
+def generate_explanation(run_id: str, budget_owner: Optional[str] = None) -> ExplanationView:
+    """Asks the model, checks its numbers and caches the result for the run.
+
+    With ``budget_owner`` the call counts against that user's daily LLM budget.
+    """
     with _generation_slot(run_id):
         context = _context(run_id)
         if context.window is None:
             raise ExplanationError("Предел по данным не виден — разбирать нечего", 422, "no_limit")
+        if budget_owner is not None and context.llm is not None:
+            consume_llm(budget_owner, "explanation")
         raw = _ask_model(context)
         explanation = parse_explanation(raw)
         check = check_explanation(explanation, context.payload["facts"], context.findings)

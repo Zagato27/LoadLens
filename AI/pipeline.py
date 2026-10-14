@@ -41,7 +41,12 @@ from AI.db_store import (
 )
 from AI.data_sources import ResolvedSource, domain_query_language, resolve_domain_source
 from AI.opensearch_logs import APPLICATION_LOGS_DOMAIN, collect_application_logs
+from AI.query_packs import block_roles, domain_titles, prompt_addenda, resolve_sla_refs, series_annotations
 from AI.sla_evaluator import _find_section_by_label, evaluate_sla, extract_target_rps_from_pack
+from AI.test_profile import is_capacity_like, mode_of, normalize_test_type, profile_for, resolve_step_detection
+from AI.stability import build_stability_payload, compute_trends, hold_window_from_labeled
+from AI.spike import analyze_spikes, build_spike_payload, detect_spikes_from_labeled, spike_load_steps, spike_windows_ctx
+from AI.saturation import build_saturation
 
 
 logger = logging.getLogger(__name__)
@@ -266,6 +271,8 @@ def _sla_step_context(
     window = result.get("stable_window")
     if not isinstance(window, dict) or not window.get("start") or not window.get("end"):
         return None
+    if str(window.get("kind") or "step") != "step":
+        return None
     start = to_utc(window["start"])
     end = to_utc(window["end"])
     step = next((item for item in reversed(load_steps) if to_utc(item.start) <= start <= to_utc(item.end)), None)
@@ -406,124 +413,71 @@ def _designated_window_ctx(window: Optional[Dict[str, Any]], shift_hours: int) -
     }
 
 
+_RECONCILED_MODES = frozenset({"stability", "spike"})
+_PRIMARY_CHECK_NAMES = frozenset({"target_rps", "error_rate", "p95_latency", "p99_latency", "recovery"})
+_SECONDARY_CHECK_NAMES = frozenset({"cpu_usage", "memory_usage"})
+
+
+def _downgrade_verdict(result: Dict[str, Any], verdict: str, note: str) -> None:
+    """Sets the reconciled verdict and keeps the «SLA verdict: …» prefix of the summary in step."""
+    previous = str(result.get("verdict") or "")
+    result["verdict"] = verdict
+    summary = str(result.get("summary") or "").strip()
+    prefix = f"SLA verdict: {previous}."
+    if previous and summary.startswith(prefix):
+        summary = f"SLA verdict: {verdict}." + summary[len(prefix):]
+    result["summary"] = f"{summary}; {note}" if summary else note
+
+
 def _reconcile_sla_for_test_profile(
     sla_result: Dict[str, Any] | None,
     test_profile: Dict[str, Any] | None,
+    flagged_trends: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Приводит SLA verdict к политике конкретного профиля теста.
 
-    Для stability/soak тестов ресурсные превышения являются рисками, но не
+    Для soak и spike тестов ресурсные превышения являются рисками, но не
     самостоятельным основанием для "Провал", если primary SLA не нарушены.
+    Для soak неблагоприятный тренд (``flagged_trends``) понижает «Успешно» до «Есть риски».
     """
     result = dict(sla_result or {})
-    mode = str((test_profile or {}).get("mode") or result.get("test_mode") or "").strip().lower()
+    mode = mode_of(test_profile) if test_profile else str(result.get("test_mode") or "").strip().lower()
     checks = [dict(item) for item in (result.get("checks") or []) if isinstance(item, dict)]
-    if mode != "stability" or not checks:
+    if mode not in _RECONCILED_MODES or not checks:
         return result
+    result["test_mode"] = mode
 
-    primary_names = {"target_rps", "error_rate", "p95_latency", "p99_latency"}
-    secondary_names = {"cpu_usage", "memory_usage"}
     failed_primary = [
         item for item in checks
-        if item.get("passed") is False and str(item.get("name") or "") in primary_names
+        if item.get("passed") is False and str(item.get("name") or "") in _PRIMARY_CHECK_NAMES
     ]
     failed_secondary = [
         item for item in checks
-        if item.get("passed") is False and str(item.get("name") or "") in secondary_names
+        if item.get("passed") is False and str(item.get("name") or "") in _SECONDARY_CHECK_NAMES
     ]
     if failed_primary:
-        result["test_mode"] = "stability"
         return result
     if failed_secondary and str(result.get("verdict") or "") == "Провал":
-        result["verdict"] = "Есть риски"
-        result["test_mode"] = "stability"
-        summary = str(result.get("summary") or "").strip()
-        note = (
-            "Режим stability: ресурсные превышения CPU/memory трактуются как риски, "
-            "но без нарушений target_rps/error_rate/p95/p99 не переводят тест в «Провал»."
+        _downgrade_verdict(
+            result,
+            "Есть риски",
+            f"Режим {mode}: ресурсные превышения CPU/memory трактуются как риски, "
+            "но без нарушений target_rps/error_rate/p95/p99 не переводят тест в «Провал».",
         )
-        result["summary"] = f"{summary}; {note}" if summary else note
         for item in checks:
-            if str(item.get("name") or "") in secondary_names:
+            if str(item.get("name") or "") in _SECONDARY_CHECK_NAMES:
                 item.setdefault("category", "secondary")
-            elif str(item.get("name") or "") in primary_names:
+            elif str(item.get("name") or "") in _PRIMARY_CHECK_NAMES:
                 item.setdefault("category", "primary")
         result["checks"] = checks
-    else:
-        result["test_mode"] = "stability"
-    return result
-
-
-def _test_profile_from_type(test_type: str | None) -> Dict[str, Any]:
-    raw = str(test_type or "").strip()
-    normalized = raw.lower().replace("-", "_").replace(" ", "_")
-    stability_aliases = {
-        "soak",
-        "stability",
-        "stable",
-        "endurance",
-        "long",
-        "long_run",
-        "longevity",
-        "reliability",
-        "стабильность",
-        "стаб",
-        "длительный",
-        "длительная_нагрузка",
-    }
-    stability_markers = (
-        "stability",
-        "stable",
-        "soak",
-        "endurance",
-        "longevity",
-        "reliability",
-        "стабил",
-        "длительн",
-    )
-    capacity_aliases = {
-        "step",
-        "capacity",
-        "max",
-        "max_performance",
-        "stress",
-        "load",
-        "ступенчатый",
-        "поиск_максимума",
-    }
-    if normalized in stability_aliases or any(marker in normalized for marker in stability_markers):
-        mode = "stability"
-    elif normalized in capacity_aliases:
-        mode = "capacity"
-    else:
-        mode = "capacity"
-    return {
-        "test_type": raw,
-        "mode": mode,
-        "peak_performance_applicable": mode == "capacity",
-        "focus": (
-            "Оценить удержание заданной нагрузки на всем интервале без накопления деградации."
-            if mode == "stability"
-            else "Определить максимальную устойчивую производительность и момент деградации."
-        ),
-    }
-
-
-def _augment_prompt_with_test_profile(prompt: str, test_profile: Dict[str, Any]) -> str:
-    if not isinstance(test_profile, dict):
-        return prompt
-    if test_profile.get("mode") == "stability":
-        prefix = (
-            "ПРОФИЛЬ ТЕСТА: STABILITY/SOAK.\n"
-            "Это тест стабильности, а не поиск максимальной производительности. "
-            "Не определяйте peak_performance и не делайте вывод о максимальном RPS. "
-            "Оценивайте удержание заданной нагрузки на всем интервале, просадки RPS, latency, errors/checks, "
-            "ресурсные тренды, backlog/lag и признаки накопления деградации. "
-            "Если нужно упомянуть производительность, формулируйте это как стабильность под заданной нагрузкой, "
-            "а не как максимальную производительность.\n\n"
+    trends = [str(item) for item in (flagged_trends or []) if str(item).strip()]
+    if mode == "stability" and trends and str(result.get("verdict") or "") == "Успешно":
+        _downgrade_verdict(
+            result,
+            "Есть риски",
+            "Пороги SLA выполнены, но за окно удержания найден неблагоприятный тренд: " + ", ".join(trends),
         )
-        return f"{prefix}{prompt or ''}"
-    return prompt
+    return result
 
 
 def read_prompt_from_file(filename: str) -> str:
@@ -1172,7 +1126,8 @@ def _prometheus_via_ds_query(
     g_cfg: dict, ds: GrafanaDatasource, promql: str, start_ts: float, end_ts: float, step_seconds: int,
 ) -> dict:
     step_seconds = max(int(step_seconds), 1)
-    points = max(1, int((float(end_ts) - float(start_ts)) / step_seconds) + 1)
+    # Prometheus refuses more than 11000 points per series; Grafana coarsens the interval to fit.
+    points = max(1, min(11_000, int((float(end_ts) - float(start_ts)) / step_seconds) + 1))
     body = _post_ds_query(g_cfg, {
         "from": str(int(float(start_ts) * 1000)),
         "to": str(int(float(end_ts) * 1000)),
@@ -2343,6 +2298,7 @@ def _load_baseline_context(
     services = [str(item).strip() for item in area_services] if isinstance(area_services, list) else None
     if not service and not services:
         return {"available": False, "reason": "сервис запуска не задан"}
+    test_type = normalize_test_type(str((run_meta or {}).get("test_type") or "")) or None
     schema = str(storage_cfg.get("schema", "public"))
     try:
         conn = _db_connect(storage_cfg)
@@ -2352,11 +2308,13 @@ def _load_baseline_context(
                 exclude_run_name=run_name, mode=settings["mode"], service=service or None,
                 services=services, project_area=project_area or None,
                 before=datetime.fromtimestamp(start_ts + 1, tz=timezone.utc),
+                test_type=test_type,
             )
             if previous is None:
                 label = "успешный прогон" if settings["mode"] == BASELINE_MODE_PREVIOUS_SUCCESS else "прогон"
                 scope = f"области «{project_area}»" if project_area else f"сервиса «{service}»"
-                return {"available": False, "reason": f"для {scope} нет более раннего {label}а"}
+                type_note = f" типа «{test_type}»" if test_type else ""
+                return {"available": False, "reason": f"для {scope} нет более раннего {label}а{type_note}", "test_type": test_type}
             stats = load_run_metric_stats(conn, schema, str(storage_cfg.get("table", "metrics")), previous.run_name)
         finally:
             conn.close()
@@ -2366,6 +2324,7 @@ def _load_baseline_context(
     return {
         "available": True,
         "mode": settings["mode"],
+        "test_type": test_type,
         "run_name": previous.run_name,
         "verdict": previous.verdict,
         "created_at": previous.created_at.isoformat() if previous.created_at else None,
@@ -2484,6 +2443,9 @@ def _compact_overall_context(ctx: Dict[str, Any]) -> Dict[str, Any]:
     return packed
 
 
+MODE_PAYLOAD_KEYS = ("stability_under_load", "spike_analysis", "saturation")
+
+
 def _compact_verification_context(base_ctx: Dict[str, Any]) -> Dict[str, Any]:
     baseline = base_ctx.get("baseline") if isinstance(base_ctx.get("baseline"), dict) else {}
     return {
@@ -2494,6 +2456,7 @@ def _compact_verification_context(base_ctx: Dict[str, Any]) -> Dict[str, Any]:
         "designated_peak_performance": base_ctx.get("designated_peak_performance"),
         "baseline": {k: baseline.get(k) for k in ("available", "reason", "run_name", "verdict", "key_deltas") if k in baseline},
         "test_profile": base_ctx.get("test_profile"),
+        **{key: base_ctx[key] for key in MODE_PAYLOAD_KEYS if key in base_ctx},
     }
 
 
@@ -2523,6 +2486,86 @@ def _run_verification_pass(final_parsed: LLMAnalysis, base_ctx: Dict[str, Any], 
         final_parsed.verdict, re_verified.verdict, summary.unverified,
     )
     return re_verified
+
+
+AUX_CPU_ROLES = frozenset({"runtime.cpu"})
+AUX_MEMORY_ROLES = frozenset({"runtime.heap_used", "runtime.heap_max", "runtime.rss", "runtime.memory_limit"})
+
+
+def _aux_resource_sections(jvm_pack: Optional[Dict[str, Any]], jvm_block: Any) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """CPU and memory sections of the runtime domain shown next to microservice latency.
+
+    Roles from installed query packs choose them (Go, Python and container metrics included);
+    without roles the Micrometer label names are matched, as before packs existed.
+    """
+    try:
+        roles = block_roles(jvm_block)
+    except Exception:
+        logger.warning("Query pack roles of the jvm domain are unreadable; using label names", exc_info=True)
+        roles = {}
+    cpu_labels = {label for label, role in roles.items() if role in AUX_CPU_ROLES}
+    mem_labels = {label for label, role in roles.items() if role in AUX_MEMORY_ROLES}
+    cpu: List[Dict[str, Any]] = []
+    mem: List[Dict[str, Any]] = []
+    for sec in (jvm_pack or {}).get("sections", []) or []:
+        if not isinstance(sec, dict):
+            continue
+        lbl = str(sec.get("label", ""))
+        if lbl in cpu_labels or (not cpu_labels and "Process CPU usage" in lbl):
+            cpu.append(sec)
+        if lbl in mem_labels or (not mem_labels and ("Heap used" in lbl or "Heap max" in lbl)):
+            mem.append(sec)
+    return cpu, mem
+
+
+def _annotate_sections(pack: Dict[str, Any], block: Any) -> None:
+    """Adds meaning, unit and description of pack queries to the context sections of a domain."""
+    try:
+        annotations = series_annotations(block)
+    except Exception:
+        logger.warning("Query pack metadata is unavailable; context sections stay without units", exc_info=True)
+        return
+    if not annotations:
+        return
+    for section in pack.get("sections") or []:
+        if isinstance(section, dict):
+            note = annotations.get(str(section.get("label") or ""))
+            if note:
+                section.update(note)
+
+
+def _sla_with_role_refs(sla: Dict[str, Any], queries: Dict[str, Any]) -> Dict[str, Any]:
+    """SLA whose empty or dead query references are taken from query-pack roles (a live reference wins)."""
+    try:
+        resolved, filled = resolve_sla_refs(sla, queries)
+    except Exception:
+        logger.warning("SLA references could not be resolved from query roles", exc_info=True)
+        return dict(sla or {})
+    replaced = {name: (str((sla or {}).get(name)), label) for name, label in filled.items() if str((sla or {}).get(name) or "").strip()}
+    if replaced:
+        logger.warning("SLA references name missing queries, role queries used instead: %s", replaced)
+    empty = {name: label for name, label in filled.items() if name not in replaced}
+    if empty:
+        logger.info("SLA references taken from query roles: %s", empty)
+    return resolved
+
+
+def _report_domain_titles(queries: Any) -> Dict[str, str]:
+    """Domain titles that differ from the defaults (Go or Python runtime in «jvm»), stored with the report."""
+    try:
+        return domain_titles(queries if isinstance(queries, dict) else {}, DOMAIN_TITLES)
+    except Exception:
+        logger.warning("Domain titles of query packs are unavailable", exc_info=True)
+        return {}
+
+
+def _stack_notes(block: Any) -> List[tuple[str, str]]:
+    """Metric notes of the query packs installed in the domain, for the domain prompt."""
+    try:
+        return prompt_addenda(block)
+    except Exception:
+        logger.warning("Query pack notes are unavailable for the prompt", exc_info=True)
+        return []
 
 
 def _collect_domain_frames(
@@ -2661,18 +2704,17 @@ def uploadFromLLM(
     resample = (cfg.get("default_params", {}) or {}).get("resample_interval") or CONFIG["default_params"]["resample_interval"]
     logger.info("Metric sampling: step=%s resample_interval=%s", step, resample)
 
-    sla_early = (cfg.get("sla") or CONFIG.get("sla") or {})
+    sla_early = _sla_with_role_refs(cfg.get("sla") or CONFIG.get("sla") or {}, cfg.get("queries") or CONFIG.get("queries") or {})
     try:
         min_stable_min = float(sla_early.get("min_stable_minutes", 5.0))
     except (TypeError, ValueError):
         min_stable_min = 5.0
     run_test_type = str((run_meta or {}).get("test_type") or "").strip().lower()
-    test_profile = _test_profile_from_type(run_test_type)
-    peak_performance_applicable = bool(test_profile.get("peak_performance_applicable", True))
-    use_step_profile = _cfg_bool(
-        sla_early.get("step_detection_enabled"),
-        default=(run_test_type == "step" and peak_performance_applicable),
-    )
+    profile = profile_for(run_test_type)
+    test_profile = profile.to_dict()
+    peak_performance_applicable = profile.peak_performance_applicable
+    use_step_profile = resolve_step_detection(profile, sla_early)
+    peak_not_applicable_reason = f"not_applicable_for_{profile.test_type or 'this'}_test"
     preset_raw = str(sla_early.get("step_detection_preset") or "balanced").strip().lower()
     preset_name = preset_raw if preset_raw in {"strict", "balanced", "lenient"} else "balanced"
     preset_map: Dict[str, Dict[str, Any]] = {
@@ -2765,6 +2807,8 @@ def uploadFromLLM(
         )
 
     queries = cfg.get("queries") or CONFIG.get("queries") or {}
+    report_titles = _report_domain_titles(queries)
+    title_of = lambda key: report_titles.get(key) or _domain_title(key)  # noqa: E731
     # Определяем доступные домены (включая lt_framework и application_logs, если заданы)
     domain_keys = ["jvm", "database", "kafka", "microservices", "hard_resources"]
     if isinstance(queries.get("lt_framework"), dict):
@@ -2788,7 +2832,7 @@ def uploadFromLLM(
                 domain_data[key] = _empty_domain_payload(key)
                 continue
             _progress(
-                f"Сбор метрик: {_domain_title(key)} ({collected_count + 1}/{len(collect_keys)})",
+                f"Сбор метрик: {title_of(key)} ({collected_count + 1}/{len(collect_keys)})",
                 _phase_percent(PROGRESS_COLLECT_START, PROGRESS_COLLECT_END, collected_count, len(collect_keys)),
             )
             collected_count += 1
@@ -2819,16 +2863,29 @@ def uploadFromLLM(
 
     _progress("Подготовка контекста: ступени нагрузки и baseline", PROGRESS_COLLECT_END)
     shift_hours = _time_shift_hours()
+    lt_labeled_all = domain_data.get("lt_framework", {}).get("labeled") or []
+    perf_label_early = str(sla_early.get("max_performance_query") or "")
     run_steps = _derive_steps_for_run(
-        lt_labeled=domain_data.get("lt_framework", {}).get("labeled") or [],
-        perf_label=str(sla_early.get("max_performance_query") or ""),
+        lt_labeled=lt_labeled_all,
+        perf_label=perf_label_early,
         stable_cfg=lt_stable_cfg,
         min_stable_minutes=min_stable_min,
         start_ts=start_ts,
         end_ts=end_ts,
         shift_hours=shift_hours,
     )
+    lt_mode_entries: Dict[str, Any] = {}
+    if profile.mode == "spike":
+        spike_profile = detect_spikes_from_labeled(lt_labeled_all, perf_label_early)
+        spike_steps = spike_load_steps(spike_profile, start_ts, end_ts, shift_hours) if spike_profile else []
+        if spike_steps:
+            run_steps = RunSteps(steps=spike_steps, rps_drop=None)
+        lt_mode_entries["spike_profile"] = analyze_spikes(spike_profile, lt_labeled_all, sla_early, end_ts, shift_hours)
+        logger.info("Spike detection: %d spike(s)", len(lt_mode_entries["spike_profile"].get("spikes") or []))
     load_steps = run_steps.steps
+    if profile.mode == "stability":
+        hold = hold_window_from_labeled(lt_labeled_all, perf_label_early, load_steps)
+        lt_mode_entries["hold_window"] = hold.to_dict(shift_hours) if hold is not None else None
     anomaly_cfg = {
         "step_elasticity_threshold": _cfg_float(sla_early.get("step_elasticity_threshold"), 2.0),
         "step_drift_pct": _cfg_float(sla_early.get("step_drift_pct"), 20.0),
@@ -2851,11 +2908,14 @@ def uploadFromLLM(
             top_n=15,
             min_stable_minutes=min_stable_min,
             stable_detection_cfg=lt_stable_cfg if key == "lt_framework" else None,
-            include_stable_max=(key == "lt_framework"),
+            include_stable_max=(key == "lt_framework" and peak_performance_applicable),
             steps=load_steps,
             start_ts=start_ts,
             anomaly_cfg=anomaly_cfg,
         )
+        if key == "lt_framework":
+            pack.update(lt_mode_entries)
+        _annotate_sections(pack, queries.get(key))
         ctx_obj: Dict[str, Any] = {
             "domain": key,
             "time_range": time_range_ctx,
@@ -2897,17 +2957,16 @@ def uploadFromLLM(
             )
 
     _progress("Проверка SLA-критериев", PROGRESS_SLA)
-    sla_cfg = copy.deepcopy(cfg.get("sla") or CONFIG.get("sla") or {})
-    if not peak_performance_applicable:
-        stability_required_rps = sla_cfg.get("required_rps", sla_cfg.get("stability_required_rps"))
-        if stability_required_rps is not None:
-            sla_cfg["target_rps"] = stability_required_rps
-        else:
-            sla_cfg["target_rps"] = None
+    sla_cfg = copy.deepcopy(sla_early)
     sla_result = evaluate_sla(domain_data, sla_cfg, test_profile=test_profile)
-    sla_result = _reconcile_sla_for_test_profile(sla_result, test_profile)
+    soak_trends: List[Dict[str, Any]] = []
+    if profile.mode == "stability":
+        soak_trends = compute_trends(domain_data, sla_cfg, lt_mode_entries.get("hold_window"), anomaly_cfg["step_drift_pct"])
+    sla_result = _reconcile_sla_for_test_profile(
+        sla_result, test_profile, flagged_trends=[t["title"] for t in soak_trends if t.get("flagged")],
+    )
     sla_window = sla_result.get("stable_window") if isinstance(sla_result.get("stable_window"), dict) else None
-    if sla_window is not None and peak_performance_applicable:
+    if sla_window is not None and peak_performance_applicable and is_capacity_like(profile.mode):
         # SLA keeps the last report step where latency/errors still hold; the peak must be the same step.
         designated_peak = float(sla_window["level"])
         designated_series = str(sla_window.get("series") or "") or designated_series
@@ -2917,7 +2976,7 @@ def uploadFromLLM(
     logger.info(
         "SLA pipeline result: verdict=%s, mode=%s, failed=%s",
         sla_result.get("verdict"),
-        sla_result.get("test_mode") or test_profile.get("mode"),
+        sla_result.get("test_mode") or profile.mode,
         [
             c.get("name")
             for c in (sla_result.get("checks") or [])
@@ -2925,11 +2984,39 @@ def uploadFromLLM(
         ],
     )
     deterministic_sla = _deterministic_sla_context(sla_result)
+    mode_payloads: Dict[str, Any] = {}
+    if profile.mode == "stability":
+        mode_payloads["stability_under_load"] = build_stability_payload(
+            focus=profile.focus,
+            hold=lt_mode_entries.get("hold_window"),
+            trends=soak_trends,
+            target_check=deterministic_sla.get("target_rps_check"),
+            sla_summary=deterministic_sla.get("summary"),
+            drift_pct=anomaly_cfg["step_drift_pct"],
+        )
+    elif profile.mode == "spike":
+        mode_payloads["spike_analysis"] = build_spike_payload(
+            lt_mode_entries.get("spike_profile"),
+            focus=profile.focus,
+            target_rps=(deterministic_sla.get("target_rps_check") or {}).get("threshold"),
+            sla_summary=deterministic_sla.get("summary"),
+        )
+    elif profile.mode == "stress":
+        mode_payloads["saturation"] = build_saturation(
+            sla_window=sla_window,
+            sla_checks=sla_result.get("checks") or [],
+            load_steps=load_steps,
+            rps_drop=run_steps.rps_drop,
+            hr_labeled=(domain_data.get("hard_resources") or {}).get("labeled") or [],
+            sla_cfg=sla_cfg,
+            shift_hours=shift_hours,
+            designated_peak=designated_peak,
+        )
     load_step_table = _load_step_table_for_report(
         load_steps,
         (domain_data.get("lt_framework") or {}).get("labeled") or [],
         sla_cfg,
-        sla_window,
+        sla_window if profile.mode != "stability" else None,
     )
     sla_step_ctx = _sla_step_context(sla_result, load_steps, shift_hours)
     for key in domain_keys:
@@ -2943,6 +3030,10 @@ def uploadFromLLM(
             continue
         if sla_step_ctx is not None:
             ctx_obj["sla_step"] = sla_step_ctx
+        if lt_mode_entries.get("hold_window"):
+            ctx_obj["hold_window"] = lt_mode_entries["hold_window"]
+        if profile.mode == "spike":
+            ctx_obj["spike_windows"] = spike_windows_ctx(lt_mode_entries.get("spike_profile"))
         payload["ctx"] = json.dumps(ctx_obj, ensure_ascii=False)
 
     # Сохранение метрик доменов в TimescaleDB
@@ -2992,13 +3083,16 @@ def uploadFromLLM(
 
     context_guide = read_prompt_from_file(os.path.join(prompt_dir, "_context_guide.txt"))
     response_format = read_prompt_from_file(os.path.join(prompt_dir, "_response_format.txt"))
-    analysis_guidance = build_analysis_guidance(sla_early, active_system_context, run_test_type)
+    analysis_guidance = build_analysis_guidance(sla_early, active_system_context, profile.test_type or run_test_type)
 
     def _domain_prompt(base_text: str, domain: str) -> str:
         return assemble_prompt(
             _augment_prompt_with_system_context(base_text, system_context_brief),
             context_guide,
-            build_analysis_guidance(sla_early, active_system_context, run_test_type, domain=domain),
+            build_analysis_guidance(
+                sla_early, active_system_context, profile.test_type or run_test_type, domain=domain,
+                stack_notes=_stack_notes(queries.get(domain)),
+            ),
             response_format,
         )
 
@@ -3025,17 +3119,7 @@ def uploadFromLLM(
         json.dumps({"domain": APPLICATION_LOGS_DOMAIN, "intervals": []}, ensure_ascii=False),
     )
 
-    cpu_sections = []
-    mem_sections = []
-    try:
-        for sec in jvm_pack.get("sections", []):
-            lbl = str(sec.get("label", ""))
-            if "Process CPU usage" in lbl:
-                cpu_sections.append(sec)
-            if "Heap used" in lbl or "Heap max" in lbl:
-                mem_sections.append(sec)
-    except Exception:
-        pass
+    cpu_sections, mem_sections = _aux_resource_sections(jvm_pack, queries.get("jvm"))
     ms_ctx_raw = domain_data.get("microservices", {}).get("ctx") or ""
     try:
         ms_ctx_obj = json.loads(ms_ctx_raw) if ms_ctx_raw else {"domain": "microservices", "time_range": time_range_ctx, "test_profile": test_profile, **ms_pack}
@@ -3091,7 +3175,7 @@ def uploadFromLLM(
                     results_map[key] = ("{}", None, {})
                 llm_done += 1
                 _progress(
-                    f"Анализ ИИ: готово {llm_done}/{len(domains_jobs)} ({_domain_title(key)})",
+                    f"Анализ ИИ: готово {llm_done}/{len(domains_jobs)} ({title_of(key)})",
                     _phase_percent(PROGRESS_LLM_START, PROGRESS_LLM_END, llm_done, len(domains_jobs)),
                 )
 
@@ -3102,7 +3186,7 @@ def uploadFromLLM(
         import time as _time
         logger.info("Retrying %d failed domain(s) sequentially: %s", len(failed_keys), failed_keys)
         for retry_key in failed_keys:
-            _progress(f"Повторный анализ ИИ: {_domain_title(retry_key)}", PROGRESS_LLM_END)
+            _progress(f"Повторный анализ ИИ: {title_of(retry_key)}", PROGRESS_LLM_END)
             _time.sleep(5)
             prompt_r, ctx_r = jobs_by_key[retry_key]
             try:
@@ -3213,16 +3297,16 @@ def uploadFromLLM(
             "source_label": designated_source_label or perf_query_label or None,
             "stable_max": designated_peak,
             "not_applicable": not peak_performance_applicable,
-            "reason": "not_applicable_for_stability_test" if not peak_performance_applicable else None,
+            "reason": peak_not_applicable_reason if not peak_performance_applicable else None,
             "value_type": (
                 "stable_max" if str(designated_method or "").startswith("stable_max")
                 else ("max" if str(designated_method or "").startswith("peak_max") else None)
             ),
             "series": designated_series,
             "method": designated_method,
-            "stable_window": _designated_window_ctx(sla_window, shift_hours),
+            "stable_window": _designated_window_ctx(sla_window if is_capacity_like(profile.mode) else None, shift_hours),
             "note": (
-                "Для stability/soak тестов peak_performance не применяется; оценивайте удержание нагрузки."
+                f"Для теста «{profile.label_ru}» peak_performance не применяется. {profile.focus}"
                 if not peak_performance_applicable
                 else (
                     "ЕДИНСТВЕННЫЙ источник peak_performance.max_rps. "
@@ -3231,6 +3315,7 @@ def uploadFromLLM(
             ),
         },
         "deterministic_sla": deterministic_sla,
+        **mode_payloads,
         "domains": {
             "jvm": jvm_pack,
             "database": database_pack,
@@ -3315,22 +3400,18 @@ def uploadFromLLM(
     if isinstance(final_payload, dict):
         final_payload["test_profile"] = test_profile
         final_payload["deterministic_sla"] = deterministic_sla
+        if report_titles:
+            final_payload["domain_titles"] = report_titles
         if load_step_table:
             final_payload["load_step_table"] = load_step_table
+        for payload_key, payload_value in mode_payloads.items():
+            final_payload[payload_key] = payload_value
         if not peak_performance_applicable:
-            target_check = deterministic_sla.get("target_rps_check") if isinstance(deterministic_sla, dict) else None
             final_payload["peak_performance"] = {
                 "not_applicable": True,
-                "reason": "not_applicable_for_stability_test",
+                "reason": peak_not_applicable_reason,
                 "method": None,
-                "note": "Для теста стабильности максимальная производительность не рассчитывается.",
-            }
-            final_payload["stability_under_load"] = {
-                "mode": "stability",
-                "target_rps": (target_check or {}).get("threshold") if isinstance(target_check, dict) else None,
-                "actual_rps": (target_check or {}).get("actual") if isinstance(target_check, dict) else None,
-                "sla_summary": deterministic_sla.get("summary") if isinstance(deterministic_sla, dict) else None,
-                "focus": test_profile.get("focus"),
+                "note": f"Для теста «{profile.label_ru}» максимальная производительность не рассчитывается.",
             }
         elif designated_peak is not None:
             peak_obj = final_payload.get("peak_performance")
@@ -3354,7 +3435,7 @@ def uploadFromLLM(
             if sla_verdict == "Есть риски" and original_verdict == "Провал":
                 rationale = str(final_payload.get("verdict_rationale") or "").strip()
                 correction = (
-                    "Итоговый вердикт скорректирован по deterministic_sla: для stability/soak теста "
+                    f"Итоговый вердикт скорректирован по deterministic_sla: для теста «{profile.label_ru}» "
                     "ресурсные превышения CPU/memory считаются рисками, а не самостоятельным провалом, "
                     "если primary SLA по target RPS, error rate и latency не нарушены."
                 )

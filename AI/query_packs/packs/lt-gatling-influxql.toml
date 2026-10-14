@@ -1,0 +1,121 @@
+schema_version = 1
+id = "lt-gatling-influxql"
+version = 1
+title = "Gatling Graphite → InfluxDB (InfluxQL)"
+category = "load_tool"
+stack = ["gatling", "influxdb"]
+domain = "lt_framework"
+language = "influxql"
+description = """
+Graphite-вывод Gatling (data.writers = [graphite]) в InfluxDB 1.x с graphite-шаблоном \
+`gatling.*.*.*.* measurement.simulation.request.status.field`. Тогда запросы попадают в measurement \
+gatling с тегами simulation, request (allRequests — сводка), status (ok/ko/all), а пользователи — \
+в строки request="users", status="allUsers" с полем active. count — запросы за writePeriod \
+(gatling.data.graphite.writePeriod, по умолчанию 1 с). Значения времени в мс.
+"""
+requires_metrics = ["gatling"]
+prompt_addendum = """
+Метрики Gatling через Graphite: request — имя запроса (allRequests — сводка), status — ok/ko/all, count — \
+запросы за период записи, mean и percentiles95/99 — время ответа в мс за период записи, active — активные \
+пользователи сценария (allUsers — все сценарии).
+"""
+
+[variables.measurement]
+title = "Measurement"
+default = "gatling"
+pattern = '^[A-Za-z0-9_.-]+$'
+
+[variables.simulation]
+title = "Simulation (регулярное выражение)"
+default = ".*"
+pattern = '^[^/\n\r]*$'
+help = "Имя симуляции в нижнем регистре, как его пишет Gatling. По умолчанию — все симуляции."
+
+[variables.write_period_sec]
+title = "Период записи, с"
+default = "1"
+pattern = '^[1-9][0-9]*$'
+
+[variables.load_model]
+title = "Модель нагрузки сценария"
+default = "open"
+choices = ["open", "closed"]
+help = "open — constantUsersPerSec, rampUsersPerSec; closed — constantConcurrentUsers, rampConcurrentUsers."
+
+[sla]
+max_performance_query = "@lt.rps_total"
+p95_query = "@lt.p95_total"
+p99_query = "@lt.p99_total"
+mean_latency_query = "@lt.mean_latency_total"
+error_rate_query = "@lt.error_rate_pct"
+vus_query = "@lt.vus"
+latency_unit = "ms"
+load_model = "{{load_model}}"
+
+[[queries]]
+label = "LT (Gatling): RPS total"
+role = "lt.rps_total"
+unit = "per_second"
+required = true
+query = '''SELECT sum("count") / {{write_period_sec}} FROM "{{measurement}}" WHERE "simulation" =~ /^{{simulation}}$/ AND "request" = 'allRequests' AND "status" = 'all' AND $timeFilter GROUP BY time({{write_period_sec}}s) fill(null)'''
+description = "Общий RPS теста."
+
+[[queries]]
+label = "LT (Gatling): RPS by request"
+role = "lt.rps_by_request"
+unit = "per_second"
+query = '''SELECT sum("count") / {{write_period_sec}} FROM "{{measurement}}" WHERE "simulation" =~ /^{{simulation}}$/ AND "request" <> 'allRequests' AND "request" <> 'users' AND "status" = 'all' AND $timeFilter GROUP BY time({{write_period_sec}}s), "request" fill(null)'''
+keys = ["request"]
+description = "RPS по запросам."
+
+[[queries]]
+label = "LT (Gatling): p95(ms) total"
+role = "lt.p95_total"
+unit = "ms"
+query = '''SELECT mean("percentiles95") FROM "{{measurement}}" WHERE "simulation" =~ /^{{simulation}}$/ AND "request" = 'allRequests' AND "status" = 'all' AND $timeFilter GROUP BY time($__interval) fill(null)'''
+description = "p95 времени ответа всех запросов, мс."
+
+[[queries]]
+label = "LT (Gatling): p99(ms) total"
+role = "lt.p99_total"
+unit = "ms"
+query = '''SELECT mean("percentiles99") FROM "{{measurement}}" WHERE "simulation" =~ /^{{simulation}}$/ AND "request" = 'allRequests' AND "status" = 'all' AND $timeFilter GROUP BY time($__interval) fill(null)'''
+description = "p99 времени ответа всех запросов, мс."
+
+[[queries]]
+label = "LT (Gatling): p95(ms) by request"
+role = "lt.p95_by_request"
+unit = "ms"
+query = '''SELECT mean("percentiles95") FROM "{{measurement}}" WHERE "simulation" =~ /^{{simulation}}$/ AND "request" <> 'allRequests' AND "request" <> 'users' AND "status" = 'all' AND $timeFilter GROUP BY time($__interval), "request" fill(null)'''
+keys = ["request"]
+description = "p95 по запросам, мс."
+
+[[queries]]
+label = "LT (Gatling): mean response time(ms)"
+role = "lt.mean_latency_total"
+unit = "ms"
+required = true
+query = '''SELECT mean("mean") FROM "{{measurement}}" WHERE "simulation" =~ /^{{simulation}}$/ AND "request" = 'allRequests' AND "status" = 'all' AND $timeFilter GROUP BY time($__interval) fill(null)'''
+description = "Среднее время ответа, мс."
+
+[[queries]]
+label = "LT (Gatling): error rate (%)"
+role = "lt.error_rate_pct"
+unit = "percent"
+query = '''SELECT sum("ko") / sum("total") * 100 FROM (SELECT "count" AS "ko" FROM "{{measurement}}" WHERE "simulation" =~ /^{{simulation}}$/ AND "request" = 'allRequests' AND "status" = 'ko' AND $timeFilter), (SELECT "count" AS "total" FROM "{{measurement}}" WHERE "simulation" =~ /^{{simulation}}$/ AND "request" = 'allRequests' AND "status" = 'all' AND $timeFilter) WHERE $timeFilter GROUP BY time($__interval) fill(null)'''
+description = "Доля ошибочных запросов, %. Нужны подзапросы InfluxQL (InfluxDB 1.2+); проверьте кнопкой «Проверить». Без ошибок в окне серий нет."
+
+[[queries]]
+label = "LT (Gatling): errors per second by request"
+role = "lt.errors_by_request"
+unit = "per_second"
+query = '''SELECT sum("count") / {{write_period_sec}} FROM "{{measurement}}" WHERE "simulation" =~ /^{{simulation}}$/ AND "request" <> 'allRequests' AND "request" <> 'users' AND "status" = 'ko' AND $timeFilter GROUP BY time({{write_period_sec}}s), "request" fill(null)'''
+keys = ["request"]
+description = "Ошибочные запросы в секунду по запросам."
+
+[[queries]]
+label = "LT (Gatling): active users"
+role = "lt.vus"
+unit = "count"
+query = '''SELECT max("active") FROM "{{measurement}}" WHERE "simulation" =~ /^{{simulation}}$/ AND "request" = 'users' AND "status" = 'allUsers' AND $timeFilter GROUP BY time({{write_period_sec}}s) fill(null)'''
+description = "Активные пользователи всех сценариев (аналог VU)."

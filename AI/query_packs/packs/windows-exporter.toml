@@ -1,0 +1,91 @@
+schema_version = 1
+id = "windows-exporter"
+version = 1
+title = "Узлы Windows: windows_exporter"
+category = "infrastructure"
+stack = ["windows"]
+domain = "hard_resources"
+language = "promql"
+description = """
+Ресурсы Windows-серверов из prometheus-community/windows_exporter (коллекторы cpu, cs, os, memory, \
+logical_disk, net, system): CPU и память в процентах (источник SLA по CPU и памяти), очередь процессора на \
+ядро, загрузка и заполнение дисков, сеть. Подходят имена до и после 0.30 (память из cs/os или memory). \
+Узел называется по адресу instance без порта.
+"""
+requires_metrics = ["windows_cpu_time_total", "windows_logical_disk_free_bytes"]
+prompt_addendum = """
+Метрики Windows: CPU % — доля не-idle времени всех ядер, очередь процессора на ядро выше 2 — потоки ждут \
+CPU, загрузка диска — доля времени, когда том не простаивает.
+"""
+
+[variables.matchers]
+title = "Дополнительные матчеры"
+default = ""
+help = 'Например job="windows".'
+
+[variables.window]
+title = "Окно rate()"
+default = "2m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[sla]
+cpu_query = "@node.cpu_pct"
+memory_query = "@node.mem_pct"
+
+[[queries]]
+label = "Windows nodes: CPU usage (%) by node"
+role = "node.cpu_pct"
+unit = "percent"
+required = true
+query = 'label_replace(100 * (1 - avg by (instance) (rate(windows_cpu_time_total{mode="idle", {{matchers}} }[{{window}}]))), "node", "$1", "instance", "([^:]+).*")'
+keys = ["node"]
+description = "CPU узла, %."
+
+[[queries]]
+label = "Windows nodes: Memory usage (%) by node"
+role = "node.mem_pct"
+unit = "percent"
+required = true
+query = 'label_replace(100 * (1 - max by (instance) (windows_os_physical_memory_free_bytes{ {{matchers}} } or windows_memory_physical_free_bytes{ {{matchers}} }) / max by (instance) (windows_cs_physical_memory_bytes{ {{matchers}} } or windows_memory_physical_total_bytes{ {{matchers}} })), "node", "$1", "instance", "([^:]+).*")'
+keys = ["node"]
+description = "Занятая физическая память, %."
+
+[[queries]]
+label = "Windows nodes: processor queue per core by node"
+role = "node.load_per_core"
+unit = "ratio"
+query = 'label_replace(max by (instance) (windows_system_processor_queue_length{ {{matchers}} }) / count by (instance) (windows_cpu_time_total{mode="idle", {{matchers}} }), "node", "$1", "instance", "([^:]+).*")'
+keys = ["node"]
+description = "Потоки в очереди к процессору на одно ядро."
+
+[[queries]]
+label = "Windows nodes: Disk utilization of the busiest volume (%) by node"
+role = "node.disk_util_pct"
+unit = "percent"
+query = 'label_replace(100 * (1 - min by (instance) (rate(windows_logical_disk_idle_seconds_total{volume!~"HarddiskVolume.*", {{matchers}} }[{{window}}]))), "node", "$1", "instance", "([^:]+).*")'
+keys = ["node"]
+description = "Доля времени, когда самый занятый том не простаивает, %."
+
+[[queries]]
+label = "Windows nodes: Network receive (bytes/s) by node"
+role = "node.net_rx"
+unit = "bytes_per_second"
+query = 'label_replace(sum by (instance) (rate(windows_net_bytes_received_total{nic!~".*(Loopback|isatap).*", {{matchers}} }[{{window}}])), "node", "$1", "instance", "([^:]+).*")'
+keys = ["node"]
+description = "Входящий трафик."
+
+[[queries]]
+label = "Windows nodes: Network transmit (bytes/s) by node"
+role = "node.net_tx"
+unit = "bytes_per_second"
+query = 'label_replace(sum by (instance) (rate(windows_net_bytes_sent_total{nic!~".*(Loopback|isatap).*", {{matchers}} }[{{window}}])), "node", "$1", "instance", "([^:]+).*")'
+keys = ["node"]
+description = "Исходящий трафик."
+
+[[queries]]
+label = "Windows nodes: Disk used (%) by node"
+role = "node.fs_used_pct"
+unit = "percent"
+query = 'label_replace(100 * max by (instance) (1 - windows_logical_disk_free_bytes{volume!~"HarddiskVolume.*", {{matchers}} } / windows_logical_disk_size_bytes{volume!~"HarddiskVolume.*", {{matchers}} }), "node", "$1", "instance", "([^:]+).*")'
+keys = ["node"]
+description = "Заполнение самого занятого тома, %."

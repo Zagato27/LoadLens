@@ -6,8 +6,11 @@ import math
 from typing import Any
 
 import psycopg2
-from flask import Blueprint, jsonify, make_response, redirect, render_template, request, session
+from flask import Blueprint, current_app, jsonify, make_response, redirect, render_template, request, session
 
+from AI import storage_state
+
+from . import recovery
 from .models import Role
 from .service import AuthError, LoginStatus
 from .web import current_actor, current_auth, csrf_token, establish_session, get_service, json_error, safe_next
@@ -51,7 +54,7 @@ def healthz():
 # ---- login / logout ------------------------------------------------------------------------------
 
 
-def _login_page(error: str = "", username: str = "", next_url: str = "/") -> str:
+def _login_page(error: str = "", username: str = "", next_url: str = "/", recovered: bool = False) -> str:
     service = get_service()
     return render_template(
         "login.html",
@@ -61,7 +64,58 @@ def _login_page(error: str = "", username: str = "", next_url: str = "/") -> str
         no_users=not service.has_users(),
         providers=[p.label for p in service.providers if p.label],
         active_nav="",
+        recovered=recovered,
+        recovery_login=False,
     )
+
+
+def _recovery_login_page(error: str = "", username: str = "", status: int = 200):
+    """The login form while the storage database is down: only the recovery administrator can sign in."""
+    service = get_service()
+    html = render_template(
+        "login.html",
+        error=error,
+        username=username,
+        next_url="/recovery",
+        no_users=False,
+        providers=[],
+        active_nav="",
+        recovered=False,
+        recovery_login=True,
+        recovery_configured=recovery.configured(service.settings),
+        storage=storage_state.status(),
+    )
+    return make_response(html, status)
+
+
+def _recovery_login_submit(service, username: str, password: str, as_json: bool):
+    ip = request.remote_addr or ""
+
+    def reply(message: str, status: int, code: str, wait: int = 0):
+        response = json_error(message, status, code) if as_json else _recovery_login_page(message, username, status)
+        if wait:
+            response.headers["Retry-After"] = str(wait)
+        return response
+
+    if not recovery.configured(service.settings):
+        recovery.log("login refused: no recovery administrator configured", ip=ip, user=username)
+        return reply("Хранилище недоступно, а аварийный администратор не настроен", 503, "recovery_not_configured")
+    limiter = current_app.extensions[recovery.EXTENSION_KEY]
+    wait = limiter.retry_after(ip, username)
+    if wait > 0:
+        recovery.log("login throttled", ip=ip, user=username)
+        seconds = max(1, math.ceil(wait))
+        return reply(f"Слишком много попыток входа. Повторите через {math.ceil(seconds / 60)} мин.", 429, "throttled", seconds)
+    if not recovery.verify(service.settings, username, password):
+        limiter.failure(ip, username)
+        recovery.log("login failed", ip=ip, user=username)
+        return reply("Неверный логин или пароль аварийного администратора", 401, "invalid_credentials")
+    limiter.success(ip, username)
+    recovery.establish(session)
+    recovery.log("login", ip=ip, user=username)
+    if as_json:
+        return jsonify({"ok": True, "redirect": "/recovery", "recovery": True, "csrf_token": session["csrf"]})
+    return redirect("/recovery", 303)
 
 
 @auth_bp.route("/login", methods=["GET"])
@@ -69,11 +123,15 @@ def login_page():
     service = get_service()
     if not service.settings.enabled:
         return redirect("/")
-    service.ensure_bootstrap()
     next_url = safe_next(request.args.get("next"))
+    if not service.store_available():
+        if recovery.is_recovery(session) and not recovery.expired(session):
+            return redirect("/recovery")
+        return _recovery_login_page()
+    service.ensure_bootstrap()
     if current_auth().authenticated:
         return redirect(next_url)
-    return _login_page(next_url=next_url)
+    return _login_page(next_url=next_url, recovered=request.args.get("recovered") == "1")
 
 
 @auth_bp.route("/login", methods=["POST"])
@@ -87,6 +145,8 @@ def login_submit():
     password = payload.get("password")
     next_url = safe_next(payload.get("next"))
 
+    if not service.store_available():
+        return _recovery_login_submit(service, username, password if isinstance(password, str) else "", as_json)
     service.ensure_bootstrap()
     outcome = service.login(username, password if isinstance(password, str) else "", ip=request.remote_addr or "")
     if outcome.status is LoginStatus.OK:
@@ -120,6 +180,8 @@ def logout():
     auth = current_auth()
     if auth.user is not None and auth.via == "session":
         get_service().audit("logout", current_actor())
+    elif auth.via == "recovery":
+        recovery.log("logout", ip=request.remote_addr or "")
     session.clear()
     if request.is_json:
         return jsonify({"ok": True, "redirect": "/login"})

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import threading
-import uuid
+from urllib.parse import quote
 
 from flask import (
     Blueprint,
+    g,
     jsonify,
     make_response,
     redirect,
@@ -22,7 +23,7 @@ from AI.db_store import (
 )
 from AI.scoring import parse_llm_analysis_strict
 from settings import CONFIG
-from update_page import default_run_name, update_report
+from update_page import _effective_config_for_scope, default_run_name, update_report
 
 from loadlens_app.confluence_export import load_publication, publish_report
 from loadlens_app.core import (
@@ -40,21 +41,30 @@ from loadlens_app.core import (
     _services_map_for_area,
     _ts_conn,
     convert_to_timestamp,
+    public_base_url,
     run_name_problem,
 )
+from loadlens_app.auth import Role, current_auth
 from loadlens_app.demo_data import DemoAlreadyExistsError, seed_demo_run
+from loadlens_app.errors import internal_error
+from loadlens_app.html_sanitizer import sanitize_html
+from loadlens_app.limits import LimitError, check_job_slot, check_report_window, consume_llm
 from loadlens_app.jobs import (
     JOB_KIND_CONFLUENCE,
     JOB_KIND_REPORT,
     JOB_STATUS_DONE,
     JOB_STATUS_ERROR,
     JOB_STATUSES,
+    JobStoreError,
     job_store,
 )
 
 dashboard_bp = Blueprint("dashboard", __name__)
 
 JOBS_LIST_MAX_LIMIT = 100
+JOBS_DISMISS_MAX_IDS = 100
+JOB_ID_MAX_LENGTH = 64
+ENGINEER_NOTE_MAX_CHARS = 200_000
 DASHBOARD_RECENT_RUNS = 5
 DASHBOARD_VERDICTS_PER_SERVICE = 5
 PROJECT_AREA_COOKIE_MAX_AGE = 60 * 60 * 24 * 365
@@ -65,6 +75,15 @@ def _job_failure_message(job_id: str) -> str:
     current = job_store.get(job_id)
     stage = (current.message or "").strip() if current else ""
     return f"Ошибка на этапе «{stage}»" if stage else "Ошибка выполнения задачи"
+
+
+def _job_view(job) -> dict:
+    """Job state for the client. The raw error (upstream bodies, exception text) is shown to admins only;
+    everyone else sees the failed phase in ``message``."""
+    data = job.to_dict()
+    if data.get("error") and current_auth().role < Role.ADMIN:
+        data["error"] = None
+    return data
 
 
 def _storage_cfg() -> dict:
@@ -84,23 +103,28 @@ def _report_page(service: str = "") -> object:
     return resp
 
 
-def _assign_run_id(conn, schema: str, llm_table: str, run_name: str, service: str) -> str:
-    """Gives one id to every stored row of a run that was saved before ids existed."""
-    new_id = uuid.uuid4().hex
-    service_sql = " AND COALESCE(service, '') = %s" if service else ""
-    params: tuple = (new_id, run_name, service) if service else (new_id, run_name)
-    with conn.cursor() as cur:
-        cur.execute(
-            f"UPDATE {schema}.{llm_table} SET run_id = %s "
-            f"WHERE run_name = %s AND COALESCE(run_id, '') = ''{service_sql}",
-            params,
-        )
-        cur.execute(
-            "UPDATE public.metrics SET run_id = %s "
-            f"WHERE run_name = %s AND COALESCE(run_id, '') = ''{service_sql}",
-            params,
-        )
-    return new_id
+def _job_owner() -> str:
+    """Key the per-user limits count against."""
+    user = current_auth().user
+    return user.username if user is not None else "local"
+
+
+def _limit_error(exc: LimitError):
+    return jsonify({"status": "error", "error": str(exc), "message": str(exc), "code": exc.code}), exc.status_code
+
+
+def _report_step(area: str, service: str) -> str:
+    """Query step the report will use; the window limit checks the number of points with it."""
+    try:
+        cfg = _effective_config_for_scope(area, service)
+    except Exception:
+        cfg = CONFIG
+    return str(((cfg.get("default_params") or {}).get("step")) or "")
+
+
+def _escape_like(text: str) -> str:
+    """A search string matched literally inside ILIKE ... ESCAPE."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _lookup_report_ref(run_id: str = "", run_name: str = "", service: str = "") -> dict | None:
@@ -157,10 +181,9 @@ def _lookup_report_ref(run_id: str = "", run_name: str = "", service: str = "") 
                 row = cur.fetchone()
             if row is None or not row[1]:
                 return None
+            # A run saved before ids existed has none until the migration runs; it opens by name.
             found_id = str(row[0] or "").strip()
             found_service = service or str(row[2] or "")
-            if not found_id:
-                found_id = _assign_run_id(conn, schema, llm_table, row[1], found_service)
             return {"run_id": found_id, "run_name": row[1], "service": found_service}
     except Exception:
         return None
@@ -189,8 +212,8 @@ def reports_page():
 
 @dashboard_bp.route("/report_ref/<run_id>", methods=["GET"])
 def report_ref(run_id: str):
-    """Name and service for the report page addressed by ``run_id``."""
-    ref = _lookup_report_ref(run_id=run_id)
+    """Name and service for the report page addressed by ``run_id`` (or, for old runs, by name)."""
+    ref = _lookup_report_ref(run_id=run_id) or _lookup_report_ref(run_name=run_id)
     if ref is None:
         return jsonify({"error": "Отчёт не найден"}), 404
     return jsonify(ref)
@@ -204,16 +227,19 @@ def reports_page_run(token: str):
         return _report_page(by_id.get("service") or "")
     by_name = _lookup_report_ref(run_name=token)
     if by_name is not None and by_name.get("run_id"):
-        return redirect(f"/reports/{by_name['run_id']}", code=302)
+        return redirect(f"/reports/{quote(by_name['run_id'], safe='')}", code=302)
+    if by_name is not None:
+        return _report_page(by_name.get("service") or "")
     return render_template("reports.html")
 
 
 @dashboard_bp.route("/reports/<service>/<run_name>")
 def reports_page_service_run(service: str, run_name: str):
-    """Legacy address ``/reports/<service>/<run_name>`` redirects to ``/reports/<run_id>``."""
+    """Legacy address ``/reports/<service>/<run_name>`` redirects to ``/reports/<run_id>`` (or the name)."""
     ref = _lookup_report_ref(run_name=run_name, service=service)
-    if ref is not None and ref.get("run_id"):
-        return redirect(f"/reports/{ref['run_id']}", code=302)
+    if ref is not None:
+        target = ref.get("run_id") or ref.get("run_name") or run_name
+        return redirect(f"/reports/{quote(target, safe='')}", code=302)
     return _report_page(service)
 
 
@@ -255,7 +281,10 @@ def get_services():
 
 
 def _group_service_rows(rows: list) -> list[dict]:
-    """Groups (service, run_name, verdict, created_at, max_rps, test_type) rows, newest first per service."""
+    """Groups (service, run_name, verdict, created_at, max_rps, test_type) rows, newest first per service.
+
+    ``max_rps`` is the peak for step/stress runs, the held RPS for soak and the spike level for spike runs.
+    """
     grouped: dict[str, dict] = {}
     for service, run_name, verdict, created_at, max_rps, test_type in rows:
         entry = grouped.get(service)
@@ -349,7 +378,11 @@ def dashboard_data():
                   SELECT service, run_name,
                          COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS verdict,
                          created_at,
-                         parsed->'peak_performance'->>'max_rps' AS max_rps,
+                         COALESCE(
+                           parsed->'peak_performance'->>'max_rps',
+                           parsed->'stability_under_load'->>'actual_rps',
+                           parsed->'spike_analysis'->>'max_spike_rps'
+                         ) AS max_rps,
                          test_type,
                          ROW_NUMBER() OVER (PARTITION BY service ORDER BY created_at DESC) AS rn
                   FROM {schema}.{table}
@@ -396,7 +429,7 @@ def dashboard_data():
             "recent_runs": recent_runs,
         })
     except Exception as e:  # pragma: no cover - defensive
-        return jsonify({"error": str(e)}), 500
+        return internal_error(e)
 
 
 @dashboard_bp.route("/demo/seed", methods=["POST"])
@@ -407,7 +440,7 @@ def demo_seed():
     except DemoAlreadyExistsError as e:
         return jsonify({"status": "exists", "message": str(e), "run_name": e.run_name, "report_url": e.report_url}), 409
     except Exception as e:
-        return jsonify({"error": f"Не удалось создать демо-прогон: {e}"}), 500
+        return internal_error(e, "Не удалось создать демо-прогон")
     resp = jsonify({"status": "ok", **result})
     if result.get("area"):
         # Switch the UI to the demo area so the new run is visible right away.
@@ -480,7 +513,7 @@ def llm_reports():
             )
         return jsonify(data)
     except Exception as e:  # pragma: no cover
-        return jsonify({"error": str(e)}), 500
+        return internal_error(e)
 
 
 @dashboard_bp.route("/llm_context", methods=["GET"])
@@ -530,7 +563,7 @@ def llm_context():
             })
         return jsonify(data)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return internal_error(e)
 
 
 @dashboard_bp.route("/llm_feedback", methods=["GET"])
@@ -547,7 +580,7 @@ def llm_feedback_get():
             conn.close()
         return jsonify(data)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return internal_error(e)
 
 
 @dashboard_bp.route("/llm_feedback", methods=["PUT"])
@@ -564,8 +597,11 @@ def llm_feedback_put():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return internal_error(e)
 
+
+RUNS_MAX_LIMIT = 500
+RUNS_MAX_OFFSET = 1_000_000
 
 RUNS_SORT_COLUMNS = {
     "run_name": "run_name",
@@ -595,8 +631,11 @@ def list_runs():
         service_filter = (request.args.get("service") or "").strip()
         verdict_filter = (request.args.get("verdict") or "").strip()
         test_type_filter = (request.args.get("test_type") or "").strip()
-        offset = int(request.args.get("offset", "0") or 0)
-        limit = int(request.args.get("limit", "20") or 20)
+        try:
+            offset = min(RUNS_MAX_OFFSET, max(0, int(request.args.get("offset", "0") or 0)))
+            limit = min(RUNS_MAX_LIMIT, max(1, int(request.args.get("limit", "20") or 20)))
+        except ValueError:
+            return jsonify({"error": "offset и limit должны быть целыми числами"}), 400
         sort_key = (request.args.get("sort", "end_time") or "end_time").lower()
         sort_sql = RUNS_SORT_COLUMNS.get(sort_key, "end_time")
         dir_sql = "ASC" if (request.args.get("dir", "desc") or "desc").lower() == "asc" else "DESC"
@@ -607,8 +646,9 @@ def list_runs():
         base_params: list = [*svc_params]
         where_q = ""
         if q:
-            where_q = " AND (run_name ILIKE %s OR service ILIKE %s)"
-            base_params.extend([f"%{q}%", f"%{q}%"])
+            where_q = " AND (run_name ILIKE %s ESCAPE '\\' OR service ILIKE %s ESCAPE '\\')"
+            pattern = f"%{_escape_like(q)}%"
+            base_params.extend([pattern, pattern])
         final_params: list = [*svc_params]
 
         filter_clauses: list[str] = []
@@ -682,12 +722,7 @@ def list_runs():
                 (*base_params, *final_params, *filter_params, offset, limit),
             )
             rows = cur.fetchall()
-            stored = []
-            for r in rows:
-                run_id = str(r[9] or "").strip() if len(r) > 9 else ""
-                if not run_id and r[0] and len(r) > 9:
-                    run_id = _assign_run_id(conn, schema, llm_table, str(r[0]), str(r[3] or ""))
-                stored.append((*r[:9], run_id))
+            stored = [(*r[:9], str(r[9] or "").strip() if len(r) > 9 else "") for r in rows]
         conn.close()
         out = []
         for r in stored:
@@ -709,7 +744,7 @@ def list_runs():
         response.headers["X-Total-Count"] = str(total)
         return response
     except Exception as e:  # pragma: no cover
-        return jsonify({"error": str(e)}), 500
+        return internal_error(e)
 
 
 def _text_field(data: dict, *keys: str) -> str:
@@ -799,9 +834,18 @@ def create_report():
         if taken:
             return jsonify({"status": "error", "message": f"Запуск '{run_name}' уже существует для сервиса '{service}'. Выберите другое имя."}), 400
 
+    owner = _job_owner()
+    try:
+        check_report_window(start, end, _report_step(project_area, service))
+        check_job_slot(*job_store.running_counts(owner))
+        if use_llm:
+            consume_llm(owner, "report")
+    except LimitError as exc:
+        return _limit_error(exc)
+
     # Name the run up front so the job is identifiable in the archive while it runs.
     run_name = run_name or default_run_name()
-    job = job_store.create(JOB_KIND_REPORT, run_name=run_name, service=service, message="Инициализация…")
+    job = job_store.create(JOB_KIND_REPORT, run_name=run_name, service=service, message="Инициализация…", owner=owner)
     job_id = job.job_id
 
     def _progress_cb(msg: str, pct: int | None = None):
@@ -851,7 +895,7 @@ def job_status(job_id: str):
     job = job_store.get(job_id)
     if job is None:
         return jsonify({"status": "not_found"}), 404
-    return jsonify(job.to_dict()), 200
+    return jsonify(_job_view(job)), 200
 
 
 @dashboard_bp.route("/jobs", methods=["GET"])
@@ -868,7 +912,32 @@ def list_jobs():
         return jsonify({"error": "limit должен быть целым числом"}), 400
     limit = max(1, min(limit, JOBS_LIST_MAX_LIMIT))
     jobs = job_store.list(statuses=statuses, limit=limit)
-    return jsonify({"jobs": [j.to_dict() for j in jobs]}), 200
+    return jsonify({"jobs": [_job_view(j) for j in jobs]}), 200
+
+
+@dashboard_bp.route("/jobs/dismiss", methods=["POST"])
+def dismiss_jobs():
+    """Скрывает завершившиеся задачи из списка; выполняющиеся остаются.
+
+    Тело: ``{"job_ids": [...]}`` — идентификаторы строк, которые видел пользователь. Задачи остаются
+    в таблице и открываются по ссылке. Ответ: ``dismissed`` и ``skipped_running`` (списки идентификаторов).
+    """
+    body = request.get_json(silent=True)
+    job_ids = body.get("job_ids") if isinstance(body, dict) else None
+    if not isinstance(job_ids, list) or not job_ids:
+        return jsonify({"error": "Укажите job_ids — непустой список идентификаторов задач"}), 400
+    if len(job_ids) > JOBS_DISMISS_MAX_IDS:
+        return jsonify({"error": f"Не больше {JOBS_DISMISS_MAX_IDS} задач за один запрос"}), 400
+    if any(not isinstance(job_id, str) or not job_id.strip() or len(job_id) > JOB_ID_MAX_LENGTH for job_id in job_ids):
+        return jsonify({"error": "job_ids должен содержать строковые идентификаторы задач"}), 400
+    try:
+        dismissed, skipped = job_store.dismiss(job_id.strip() for job_id in job_ids)
+    except JobStoreError as exc:
+        return jsonify({"error": str(exc), "code": "jobs_dismiss_unavailable"}), 503
+    except Exception as exc:
+        return internal_error(exc, "Не удалось очистить список задач")
+    g.audit_extra = {"dismissed": len(dismissed), "skipped_running": len(skipped), "job_ids": dismissed[:20]}
+    return jsonify({"dismissed": dismissed, "skipped_running": skipped}), 200
 
 
 @dashboard_bp.route("/runs/<run_name>", methods=["DELETE"])
@@ -880,7 +949,7 @@ def delete_run(run_name: str):
         _delete_run_data(run_name)
         return jsonify({"status": "ok", "message": "Отчёт удалён"})
     except Exception as e:  # pragma: no cover
-        return jsonify({"error": str(e)}), 500
+        return internal_error(e)
 
 
 @dashboard_bp.route("/runs/<run_name>", methods=["PATCH"])
@@ -902,7 +971,7 @@ def rename_run(run_name: str):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:  # pragma: no cover
-        return jsonify({"error": str(e)}), 500
+        return internal_error(e)
     renamed = result["run_name"]
     ref = _lookup_report_ref(run_name=renamed, service=service)
     result["run_id"] = (ref or {}).get("run_id") or ""
@@ -970,9 +1039,9 @@ def get_engineer_summary():
         conn.close()
         if not row:
             return jsonify({"run_name": run_name, "content_html": "", "created_at": None})
-        return jsonify({"run_name": run_name, "content_html": row[0] or "", "created_at": row[1].isoformat() if row[1] else None})
+        return jsonify({"run_name": run_name, "content_html": sanitize_html(row[0] or ""), "created_at": row[1].isoformat() if row[1] else None})
     except Exception as e:  # pragma: no cover
-        return jsonify({"error": str(e)}), 500
+        return internal_error(e)
 
 
 @dashboard_bp.route("/engineer_summary", methods=["POST"])
@@ -985,6 +1054,10 @@ def post_engineer_summary():
         return jsonify({"error": "run_name обязателен"}), 400
     if not isinstance(content_html, str):
         content_html = ""
+    if len(content_html) > ENGINEER_NOTE_MAX_CHARS:
+        return jsonify({"error": f"Заметка длиннее {ENGINEER_NOTE_MAX_CHARS} символов"}), 400
+    # Stored as formatting-only HTML: viewers and the Confluence export get no scripts or forms.
+    content_html = sanitize_html(content_html)
     try:
         cfg = _storage_cfg()
         schema = cfg.get("schema", "public")
@@ -1019,7 +1092,7 @@ def post_engineer_summary():
         conn.close()
         return jsonify({"status": "ok"})
     except Exception as e:  # pragma: no cover
-        return jsonify({"error": str(e)}), 500
+        return internal_error(e)
 
 
 @dashboard_bp.route("/confluence_publication", methods=["GET"])
@@ -1034,7 +1107,7 @@ def get_confluence_publication():
             return jsonify({"run_name": run_name, "page_id": None, "page_url": None})
         return jsonify({"run_name": run_name, **publication})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return internal_error(e)
 
 
 @dashboard_bp.route("/publish_confluence", methods=["POST"])
@@ -1043,11 +1116,18 @@ def publish_confluence():
     data = request.get_json(silent=True) or {}
     run_name = (data.get("run_name") or "").strip()
     service = (data.get("service") or "").strip()
-    source_url = (data.get("source_url") or "").strip()
     if not run_name:
         return jsonify({"error": "run_name обязателен"}), 400
+    owner = _job_owner()
+    try:
+        check_job_slot(*job_store.running_counts(owner))
+    except LimitError as exc:
+        return _limit_error(exc)
+    # The link on the Confluence page is built here, never taken from the request body.
+    ref = _lookup_report_ref(run_name=run_name, service=service) or {}
+    source_url = f"{public_base_url()}/reports/{quote(ref.get('run_id') or run_name, safe='')}"
 
-    job = job_store.create(JOB_KIND_CONFLUENCE, run_name=run_name, service=service, message="Публикация в Confluence…")
+    job = job_store.create(JOB_KIND_CONFLUENCE, run_name=run_name, service=service, message="Публикация в Confluence…", owner=owner)
     job_id = job.job_id
 
     def _progress_cb(msg: str, pct: int | None = None):

@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   timescaledb:
     image: timescale/timescaledb:latest-pg16
@@ -8,6 +6,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+      # Unprivileged role the application connects with (initdb/03_app_role.sh); empty keeps POSTGRES_USER.
+      APP_DB_USER: ${APP_DB_USER:-}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-}
     ports:
       # Loopback only: the app reaches the database over the compose network. Set TSDB_BIND=0.0.0.0
       # in docker/.env only if another host really has to connect to the database directly.
@@ -41,6 +42,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: ${REDIS_MEMORY_LIMIT:-512m}
     restart: unless-stopped
 
   app:
@@ -64,8 +69,12 @@ services:
       LOADLENS_SECRET_KEY: ${LOADLENS_SECRET_KEY:-}
       LOADLENS_ADMIN_USER: ${LOADLENS_ADMIN_USER:-}
       LOADLENS_ADMIN_PASSWORD: ${LOADLENS_ADMIN_PASSWORD:-}
+      LOADLENS_RECOVERY_USER: ${LOADLENS_RECOVERY_USER:-}
+      LOADLENS_RECOVERY_PASSWORD_HASH: ${LOADLENS_RECOVERY_PASSWORD_HASH:-}
       LOADLENS_COOKIE_SECURE: ${LOADLENS_COOKIE_SECURE:-}
       LOADLENS_TRUSTED_PROXIES: ${LOADLENS_TRUSTED_PROXIES:-}
+      # Gives ids to runs saved before ids existed, once, in the background (python -m loadlens_app.migrations).
+      LOADLENS_RUN_MIGRATIONS: ${LOADLENS_RUN_MIGRATIONS:-1}
     volumes:
       # Хранение рендеров/картинок между рестартами
       - ../data_collectors/temporary_files:/app/data_collectors/temporary_files
@@ -89,6 +98,13 @@ services:
         target: /app/metrics_config_runtime.json
       # GigaChat mTLS certificate and key (llm.gigachat.cert_file / key_file); may stay empty
       - ../AI/GigaChat:/app/AI/GigaChat:ro
+    # Caps for one container; tune them in docker/.env.
+    deploy:
+      resources:
+        limits:
+          cpus: "${APP_CPUS:-2}"
+          memory: ${APP_MEMORY_LIMIT:-2g}
+          pids: 512
     restart: unless-stopped
 
   celery_worker:
@@ -123,6 +139,12 @@ services:
         source: ../metrics_config_runtime.json
         target: /app/metrics_config_runtime.json
         read_only: true
+    deploy:
+      resources:
+        limits:
+          cpus: "${WORKER_CPUS:-1}"
+          memory: ${WORKER_MEMORY_LIMIT:-1g}
+          pids: 256
     restart: unless-stopped
 
 volumes:

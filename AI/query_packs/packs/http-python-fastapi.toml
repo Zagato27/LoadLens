@@ -1,0 +1,83 @@
+schema_version = 1
+id = "http-python-fastapi"
+version = 1
+title = "HTTP: FastAPI / Starlette (prometheus-fastapi-instrumentator)"
+category = "http"
+stack = ["python", "fastapi", "starlette"]
+domain = "microservices"
+language = "promql"
+verified = true
+description = """
+Метрики prometheus-fastapi-instrumentator по умолчанию: http_requests_total (handler, status — коды \
+сгруппированы как 2xx/5xx), http_request_duration_seconds по handler и http_request_duration_highr_seconds \
+с подробными бакетами для общего p95.
+"""
+requires_metrics = ["http_requests_total", "http_request_duration_highr_seconds_bucket"]
+prompt_addendum = """
+Метрики FastAPI: http_requests_total — запросы по handler и status (2xx, 4xx, 5xx), \
+http_request_duration_highr_seconds — гистограмма без лейблов для точных перцентилей, \
+http_request_duration_seconds — по handler. Времена в секундах.
+"""
+
+[variables.service_label]
+title = "Лейбл с именем сервиса"
+default = "job"
+pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
+
+[variables.matchers]
+title = "Дополнительные матчеры"
+default = ""
+
+[variables.window]
+title = "Окно rate()"
+default = "1m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[[queries]]
+label = "HTTP (FastAPI): request rate (RPS) by service"
+role = "http.rps"
+unit = "per_second"
+required = true
+query = 'sum by ({{service_label}}) (rate(http_requests_total{handler!="/metrics", {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}"]
+description = "Входящие запросы в секунду."
+
+[[queries]]
+label = "HTTP (FastAPI): average request time (sec) by service"
+role = "http.avg_latency"
+unit = "seconds"
+query = 'sum by ({{service_label}}) (rate(http_request_duration_highr_seconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}])) / sum by ({{service_label}}) (rate(http_request_duration_highr_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}"]
+description = "Среднее время обработки, с."
+
+[[queries]]
+label = "HTTP (FastAPI): p95 request time (sec) by service"
+role = "http.p95"
+unit = "seconds"
+query = 'histogram_quantile(0.95, sum by (le, {{service_label}}) (rate(http_request_duration_highr_seconds_bucket{ {{service_label}}!="", {{matchers}} }[{{window}}])))'
+keys = ["{{service_label}}"]
+description = "p95 времени обработки, с."
+
+[[queries]]
+label = "HTTP (FastAPI): 5xx error rate (%) by service"
+role = "http.error_rate_pct"
+unit = "percent"
+query = '100 * (sum by ({{service_label}}) (rate(http_requests_total{status=~"5..", handler!="/metrics", {{service_label}}!="", {{matchers}} }[{{window}}])) or 0 * sum by ({{service_label}}) (rate(http_requests_total{handler!="/metrics", {{service_label}}!="", {{matchers}} }[{{window}}]))) / sum by ({{service_label}}) (rate(http_requests_total{handler!="/metrics", {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}"]
+description = "Доля ответов 5xx, %."
+
+[[queries]]
+label = "HTTP (FastAPI): RPS by service & handler (top 20)"
+role = "http.rps_by_route"
+unit = "per_second"
+query = 'topk(20, sum by ({{service_label}}, handler) (rate(http_requests_total{handler!="/metrics", {{service_label}}!="", {{matchers}} }[{{window}}])))'
+keys = ["{{service_label}}", "handler"]
+description = "Самые нагруженные обработчики."
+
+[[queries]]
+label = "HTTP (FastAPI): p95 request time (sec) by service & handler (top 20)"
+role = "http.p95_by_route"
+unit = "seconds"
+query = 'topk(20, histogram_quantile(0.95, sum by (le, {{service_label}}, handler) (rate(http_request_duration_seconds_bucket{handler!="/metrics", {{service_label}}!="", {{matchers}} }[{{window}}]))))'
+keys = ["{{service_label}}", "handler"]
+description = "Самые медленные обработчики по p95 (грубые бакеты по умолчанию)."

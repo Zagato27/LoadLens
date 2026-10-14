@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Вход — LoadLens</title>
-  <script>
+  <script nonce="{{ csp_nonce }}">
     // Apply the saved theme before first paint to avoid a flash.
     (function () {
       try {
@@ -27,6 +27,20 @@
       {% if error %}
       <div class="auth-alert" role="alert">{{ error }}</div>
       {% endif %}
+      {% if recovered %}
+      <div class="auth-info" role="status">Хранилище снова доступно. Войдите обычным способом.</div>
+      {% endif %}
+      {% if recovery_login %}
+      <div class="auth-alert outage-banner" role="status">
+        <strong>Хранилище недоступно: {{ storage.title | lower }}.</strong>
+        Обычный вход временно не работает: пользователи хранятся в этой базе.
+      </div>
+      {% if recovery_configured %}
+      <p class="auth-note recovery-note">Войдите как аварийный администратор. Сессия действует до 30 минут, открывает только настройку подключения к хранилищу и завершится сама, когда база ответит.</p>
+      {% else %}
+      {% include "_recovery_setup.html" %}
+      {% endif %}
+      {% endif %}
       {% if no_users %}
       <div class="auth-info">
         <strong>Пользователей пока нет.</strong>
@@ -35,6 +49,7 @@
         Либо задайте переменные <code>LOADLENS_ADMIN_USER</code> и <code>LOADLENS_ADMIN_PASSWORD</code> и перезагрузите страницу.
       </div>
       {% endif %}
+      {% if not recovery_login or recovery_configured %}
       <form method="post" action="/login" autocomplete="on">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
         <input type="hidden" name="next" value="{{ next_url }}" />
@@ -48,8 +63,9 @@
             <input id="password" name="password" type="password" autocomplete="current-password" required />
           </div>
         </div>
-        <button type="submit" class="btn btn-primary btn-lg">Войти</button>
+        <button type="submit" class="btn btn-primary btn-lg">{% if recovery_login %}Войти для восстановления{% else %}Войти{% endif %}</button>
       </form>
+      {% endif %}
       {% if providers %}
       <p class="auth-note">{{ providers | join(' · ') }}</p>
       {% endif %}

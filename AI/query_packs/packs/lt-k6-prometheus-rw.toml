@@ -1,0 +1,121 @@
+schema_version = 1
+id = "lt-k6-prometheus-rw"
+version = 1
+title = "k6 → Prometheus remote write (trend stats)"
+category = "load_tool"
+stack = ["k6", "prometheus"]
+domain = "lt_framework"
+language = "promql"
+verified = true
+description = """
+Вывод k6 `--out experimental-prometheus-rw` со статистиками trend: задайте \
+K6_PROMETHEUS_RW_TREND_STATS="p(95),p(99),avg". Статистики trend k6 считает сам, поэтому общий p95 — \
+худший p95 среди серий. Для точных перцентилей по окнам используйте пакет с native histograms. \
+Чтобы отделить прогон от других тестов, добавьте матчер testid и запускайте k6 с --tag testid=...
+"""
+requires_metrics = ["k6_http_reqs_total", "k6_http_req_duration_p95", "k6_vus"]
+prompt_addendum = """
+Метрики k6 в Prometheus: k6_http_reqs_total — счётчик запросов (expected_response="false" — неуспешные), \
+k6_http_req_duration_p95/p99/avg — статистики времени ответа, которые k6 считает сам (в отчёте переведены \
+в мс), k6_vus — виртуальные пользователи, k6_checks_rate — доля успешных проверок.
+"""
+
+[variables.matchers]
+title = "Дополнительные матчеры"
+default = ""
+help = 'Например testid="checkout-2025-01-15". Пусто — все метрики k6.'
+
+[variables.window]
+title = "Окно rate()"
+default = "1m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[variables.load_model]
+title = "Модель нагрузки сценария"
+default = "open"
+choices = ["open", "closed"]
+help = "open — executors constant/ramping-arrival-rate, closed — ramping-vus, constant-vus, per-vu-iterations."
+
+[sla]
+max_performance_query = "@lt.rps_total"
+p95_query = "@lt.p95_total"
+p99_query = "@lt.p99_total"
+mean_latency_query = "@lt.mean_latency_total"
+error_rate_query = "@lt.error_rate_pct"
+vus_query = "@lt.vus"
+latency_unit = "ms"
+load_model = "{{load_model}}"
+
+[[queries]]
+label = "LT (k6 Prometheus): RPS total"
+role = "lt.rps_total"
+unit = "per_second"
+required = true
+query = 'label_replace(sum(rate(k6_http_reqs_total{ {{matchers}} }[{{window}}])), "series", "all", "", "")'
+keys = ["series"]
+description = "Общий RPS теста."
+
+[[queries]]
+label = "LT (k6 Prometheus): RPS by name"
+role = "lt.rps_by_request"
+unit = "per_second"
+query = 'topk(20, sum by (name) (rate(k6_http_reqs_total{ {{matchers}} }[{{window}}])))'
+keys = ["name"]
+description = "RPS по имени запроса, 20 самых нагруженных."
+
+[[queries]]
+label = "LT (k6 Prometheus): http_req_duration p95(ms) worst"
+role = "lt.p95_total"
+unit = "ms"
+query = 'label_replace(1000 * max(k6_http_req_duration_p95{ {{matchers}} }), "series", "all", "", "")'
+keys = ["series"]
+description = "Худший p95 среди серий k6, мс."
+
+[[queries]]
+label = "LT (k6 Prometheus): http_req_duration p99(ms) worst"
+role = "lt.p99_total"
+unit = "ms"
+query = 'label_replace(1000 * max(k6_http_req_duration_p99{ {{matchers}} }), "series", "all", "", "")'
+keys = ["series"]
+description = "Худший p99 среди серий k6, мс."
+
+[[queries]]
+label = "LT (k6 Prometheus): http_req_duration p95(ms) by name"
+role = "lt.p95_by_request"
+unit = "ms"
+query = 'topk(20, 1000 * max by (name) (k6_http_req_duration_p95{ {{matchers}} }))'
+keys = ["name"]
+description = "p95 по имени запроса, мс."
+
+[[queries]]
+label = "LT (k6 Prometheus): http_req_duration mean(ms)"
+role = "lt.mean_latency_total"
+unit = "ms"
+required = true
+query = 'label_replace(1000 * avg(k6_http_req_duration_avg{ {{matchers}} }), "series", "all", "", "")'
+keys = ["series"]
+description = "Среднее время ответа по сериям k6 без взвешивания по числу запросов, мс."
+
+[[queries]]
+label = "LT (k6 Prometheus): error rate (%)"
+role = "lt.error_rate_pct"
+unit = "percent"
+query = 'label_replace(100 * (sum(rate(k6_http_reqs_total{expected_response="false", {{matchers}} }[{{window}}])) or vector(0)) / sum(rate(k6_http_reqs_total{ {{matchers}} }[{{window}}])), "series", "all", "", "")'
+keys = ["series"]
+description = "Доля запросов с неожидаемым статусом, %."
+
+[[queries]]
+label = "LT (k6 Prometheus): VUs"
+role = "lt.vus"
+unit = "count"
+query = 'label_replace(sum(k6_vus{ {{matchers}} }), "series", "all", "", "")'
+keys = ["series"]
+description = "Виртуальные пользователи всех экземпляров k6."
+
+[[queries]]
+label = "LT (k6 Prometheus): checks passed (%) by check"
+role = "lt.checks_pct"
+unit = "percent"
+query = '100 * avg by (check) (k6_checks_rate{ {{matchers}} })'
+keys = ["check"]
+description = "Доля успешных проверок k6, %."

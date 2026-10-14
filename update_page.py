@@ -9,6 +9,8 @@ import traceback  # для детального вывода ошибок (оп�
 import uuid
 from datetime import datetime  # если ещё не импортирован
 
+from urllib.parse import urlsplit
+
 from requests.auth import HTTPBasicAuth
 
 from AI.main import uploadFromLLM
@@ -150,7 +152,6 @@ _PROMPT_DOMAIN_FILES = {
     'lt_framework': 'lt_framework_prompt.txt',
     'application_logs': 'application_logs_prompt.txt',
 }
-_LLM_PROMPT_DOMAINS = ('overall', 'jvm', 'database', 'kafka', 'microservices', 'hard_resources', 'lt_framework', 'application_logs')
 
 
 def default_run_name(now: datetime | None = None) -> str:
@@ -261,130 +262,6 @@ def _domain_keys_from_config(cfg: dict) -> list[str]:
     return keys
 
 
-def _sla_prompt_block(sla_cfg: dict) -> str:
-    """Формирует текстовый блок SLA-критериев для вставки в промпт."""
-    if not isinstance(sla_cfg, dict):
-        return ""
-    lines = []
-    mapping = {
-        "target_rps": ("Целевой RPS (target_rps)", ""),
-        "max_error_rate_pct": ("Макс. % ошибок", "%"),
-        "max_p95_ms": ("Макс. p95 latency", " ms"),
-        "max_p99_ms": ("Макс. p99 latency", " ms"),
-        "max_cpu_pct": ("Макс. CPU usage", "%"),
-        "max_memory_pct": ("Макс. Memory usage", "%"),
-    }
-    for key, (label, unit) in mapping.items():
-        val = sla_cfg.get(key)
-        if val is not None:
-            try:
-                lines.append(f"  - {label}: {float(val)}{unit}")
-            except (TypeError, ValueError):
-                pass
-    if not lines:
-        return ""
-    perf_query = str(sla_cfg.get("max_performance_query") or "").strip()
-    try:
-        stable_min = float(sla_cfg.get("min_stable_minutes", 5.0))
-    except (TypeError, ValueError):
-        stable_min = 5.0
-    raw_peak_fallback = sla_cfg.get("target_rps_allow_peak_fallback", True)
-    if isinstance(raw_peak_fallback, bool):
-        allow_peak_fallback = raw_peak_fallback
-    else:
-        allow_peak_fallback = str(raw_peak_fallback).strip().lower() in {"1", "true", "yes", "y", "on"}
-    source_note = ""
-    if perf_query:
-        source_note += f"  - Метрика макс. производительности: «{perf_query}» (stable_max)\n"
-    source_note += f"  - Мин. длительность стабильной ступени: {stable_min} мин\n"
-    source_note += (
-        "  - Fallback для target_rps при отсутствии stable_max: "
-        + ("РАЗРЕШЕН (использовать peak max)" if allow_peak_fallback else "ЗАПРЕЩЕН (только stable_max)")
-        + "\n"
-    )
-    return (
-        "\n[SLA-критерии заказчика]\n"
-        + "\n".join(lines)
-        + "\n" + source_note
-        + "- ВАЖНО: если target_rps достигнут (stable_max >= target_rps), "
-        "тест считается успешным, даже если потом была деградация.\n"
-        + "- Учитывай эти пороги при формировании verdict и рекомендаций.\n"
-    )
-
-
-def _test_type_overlays(tt: str) -> dict:
-    t = (tt or '').strip().lower()
-    step = (
-        "[Профиль теста: Ступенчатый поиск максимальной производительности]\n"
-        "- Цели: найти последнюю стабильную ступень — максимальный уровень нагрузки,\n"
-        "  который система выдержала стабильно (без деградации) не менее 5-10 минут.\n"
-        "- ВАЖНО: max_rps — это НЕ кратковременный пик, а стабильная устойчивая нагрузка.\n"
-        "  Используй поле stable_max из домена lt_framework (если есть) вместо max.\n"
-        "- KPI: stable_max (устойчивый RPS), время последней стабильной ступени, момент деградации,\n"
-        "  доля ошибок у порога.\n"
-        "- Проверки: SLA p95/p99, рост ошибок/таймаутов у порога, узкие места ресурсов.\n"
-        "- Вывод: peak_performance {max_rps=значение_stable_max, max_time=время_ступени,\n"
-        "  drop_time=момент_деградации, method='last_stable_step'}.\n"
-    )
-    soak = (
-        "[Профиль теста: Долговременная стабильность (soak)]\n"
-        "- Цели: стабильность под длительной нагрузкой, отсутствие деградации.\n"
-        "- KPI: тренды p95/p99, ошибок/час, дрейф CPU/MEM/GC, утечки (рост памяти/дескрипторов).\n"
-        "- Проверки: дрейф метрик (<=X%/ч), отсутствие накопления очередей, устойчивость RPS.\n"
-        "- Вывод: признаки leak_suspect, drift_metrics, стабильность пропускной способности.\n"
-    )
-    spike = (
-        "[Профиль теста: Всплески (spike)]\n"
-        "- Цели: реакция на резкий рост/падение нагрузки и восстановление.\n"
-        "- KPI: overshoot латентности, время восстановления t_recovery, ошибки в окне спайка.\n"
-        "- Проверки: просадки RPS, рост очередей, время стабилизации.\n"
-        "- Вывод: recovery_time_s, autoscaling_reaction_s, overshoot_pct, уязвимые компоненты.\n"
-    )
-    stress = (
-        "[Профиль теста: Стресс]\n"
-        "- Цели: поведение за пределами проектной мощности.\n"
-        "- KPI: saturation_rps, точка деградации/отказа, наклон деградации, типы ошибок.\n"
-        "- Проверки: лимитирующие ресурсы/бутылочные горлышки, устойчивость деградации.\n"
-        "- Вывод: saturation_point, failure_mode, limiting_resource, запас до предела.\n"
-    )
-    if t in ('step','ступенчатый','поиск максимальной производительности','max'):
-        block = step
-    elif t in ('soak','endurance','долговременный','стабильность'):
-        block = soak
-    elif t in ('spike','всплеск','всплески'):
-        block = spike
-    elif t in ('stress','стресс'):
-        block = stress
-    else:
-        block = ''
-    dom_overlay = ("\n\n"+block) if block else ''
-    return {
-        'overall': block,
-        'jvm': dom_overlay,
-        'database': dom_overlay,
-        'kafka': dom_overlay,
-        'microservices': dom_overlay,
-        'hard_resources': dom_overlay,
-        'lt_framework': dom_overlay,
-        'application_logs': dom_overlay,
-    }
-
-
-def _build_final_prompts(base_prompt_templates: dict, test_type: str | None, sla_cfg: dict) -> dict:
-    """Combines base prompt texts with the test-type overlay and the SLA block for every LLM domain."""
-    overlays = _test_type_overlays(test_type)
-    sla_block = _sla_prompt_block(sla_cfg or {})
-    final_prompts: dict[str, str] = {}
-    for key in _LLM_PROMPT_DOMAINS:
-        base_text = base_prompt_templates.get(key, '') or ''
-        overlay = overlays.get(key, '') or ''
-        if key == 'overall':
-            final_prompts[key] = (overlay + sla_block + ("\n\n" if (overlay or sla_block) and base_text else '') + base_text).strip()
-        else:
-            final_prompts[key] = (base_text + overlay + sla_block).strip()
-    return final_prompts
-
-
 def _await_task(async_result):
     """Возвращает результат Celery-задачи с таймаутом."""
     return async_result.get(timeout=_TASK_TIMEOUT)
@@ -473,27 +350,56 @@ def _attach_with_retry(func, *args, max_attempts: int = 3, **kwargs) -> bool:
     return False
 
 
+_LEGACY_KEYS = ("user", "password", "grafana_login", "grafana_pass", "url_basic", "grafana_base_url", "loki_url")
+
+
+def _legacy_settings() -> dict:
+    """Confluence, Grafana and Loki settings of the template flow, read where the task runs.
+
+    Credentials never travel through the broker. The worker takes them from its own configuration,
+    including changes saved to settings_runtime.json after it started.
+    """
+    runtime = _load_settings_runtime_data()
+    return {key: runtime.get(key, CONFIG.get(key)) for key in _LEGACY_KEYS}
+
+
+def _same_origin(url: str, base: str) -> bool:
+    try:
+        left, right = urlsplit(str(url)), urlsplit(str(base))
+    except ValueError:
+        return False
+    return bool(right.netloc) and (left.scheme.lower(), left.netloc.lower()) == (right.scheme.lower(), right.netloc.lower())
+
+
 @celery_app.task(bind=True, autoretry_for=(Exception,), retry_kwargs={"max_retries": 3, "countdown": 2})
-def download_grafana_image_task(self, image_url: str, file_basename: str, username: str, password: str) -> bool:  # pragma: no cover - celery worker
-    if _download_img_with_retry(image_url, file_basename, username, password):
+def download_grafana_image_task(self, image_url: str, file_basename: str) -> bool:  # pragma: no cover - celery worker
+    settings = _legacy_settings()
+    # The URL arrives through the broker: the Grafana login is only ever sent to the configured Grafana.
+    if not _same_origin(image_url, settings.get("grafana_base_url") or ""):
+        logger.warning("Адрес графика не совпадает с grafana_base_url, загрузка отклонена")
+        return False
+    if _download_img_with_retry(image_url, file_basename, settings.get("grafana_login") or "", settings.get("grafana_pass") or ""):
         return True
     raise RuntimeError(f"Не удалось загрузить изображение {file_basename}")
 
 
 @celery_app.task(bind=True, autoretry_for=(Exception,), retry_kwargs={"max_retries": 3, "countdown": 2})
-def download_loki_logs_task(self, loki_url: str, start_ts: int, end_ts: int, filter_query: str, file_basename: str) -> bool:  # pragma: no cover - celery worker
+def download_loki_logs_task(self, start_ts: int, end_ts: int, filter_query: str, file_basename: str) -> bool:  # pragma: no cover - celery worker
+    loki_url = _legacy_settings().get("loki_url") or ""
     if _download_log_with_retry(loki_url, start_ts, end_ts, filter_query, file_basename):
         return True
     raise RuntimeError(f"Не удалось получить логи {file_basename}")
 
 
 @celery_app.task(bind=True, autoretry_for=(Exception,), retry_kwargs={"max_retries": 3, "countdown": 2})
-def upload_attachment_task(self, kind: str, url_basic: str, username: str, password: str, page_id: str, file_path: str) -> bool:  # pragma: no cover - celery worker
+def upload_attachment_task(self, kind: str, page_id: str, file_path: str) -> bool:  # pragma: no cover - celery worker
     # The path arrives through the broker: upload only files the report downloaded itself.
     if not is_temp_file(file_path):
         logger.warning("Вложение вне каталога временных файлов отклонено: %s", file_path)
         return False
-    auth = HTTPBasicAuth(username, password)
+    settings = _legacy_settings()
+    url_basic = settings.get("url_basic") or ""
+    auth = HTTPBasicAuth(settings.get("user") or "", settings.get("password") or "")
     if kind == "grafana":
         ok = _attach_with_retry(send_file_to_attachment, url_basic, auth, page_id, file_path)
     else:
@@ -502,31 +408,6 @@ def upload_attachment_task(self, kind: str, url_basic: str, username: str, passw
         return True
     raise RuntimeError(f"Не удалось загрузить вложение {file_path}")
 
-
-@celery_app.task(bind=True, autoretry_for=(Exception,), retry_kwargs={"max_retries": 3, "countdown": 2})
-def generate_llm_results_task(
-    self,
-    start_ts: float,
-    end_ts: float,
-    save_to_db: bool,
-    run_meta: dict | None,
-    only_collect: bool,
-    ef_config: dict | None,
-    prompts_override: dict | None,
-    active_domains: list[str] | None,
-    system_context: dict | None,
-):  # pragma: no cover - celery worker
-    return uploadFromLLM(
-        start_ts,
-        end_ts,
-        save_to_db=save_to_db,
-        run_meta=run_meta,
-        only_collect=only_collect,
-        ef_config=ef_config,
-        prompts_override=prompts_override,
-        active_domains=active_domains,
-        system_context=system_context,
-    )
 
 def _load_area_overrides(area_name: str) -> dict:
     try:
@@ -556,10 +437,10 @@ def _service_entry(area_name: str | None, service_name: str | None) -> dict:
     return svc_entry if isinstance(svc_entry, dict) else {}
 
 
-# Only these sections are edited per service in the settings UI. Bootstrap copies
-# the rest onto each service once; merging them would freeze the first snapshot
-# and ignore later area changes (notably default_params.resample_interval).
-_SERVICE_CONFIG_OVERRIDES = frozenset({"queries", "sla"})
+# Only these sections are edited per service in the settings UI. Older versions copied the
+# other sections onto each service; merging those copies would freeze a snapshot and ignore
+# later area changes (notably default_params.resample_interval).
+_SERVICE_CONFIG_OVERRIDES = frozenset({"queries", "sla", "system_context"})
 
 
 def _effective_config_for_scope(area_name: str, service_name: str | None = None) -> dict:
@@ -684,7 +565,7 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
                 run_meta=run_meta,
                 only_collect=not use_llm,
                 ef_config=ef_cfg,
-                prompts_override=_build_final_prompts(base_prompt_templates, test_type, ef_cfg.get("sla") or {}),
+                prompts_override=base_prompt_templates,
                 active_domains=active_domains,
                 system_context=system_context_snapshot,
                 progress_callback=_progress,
@@ -776,11 +657,11 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
     download_jobs: list[tuple[str, dict, object]] = []
     for m in metric_items:
         download_jobs.append(
-            ("metric", m, download_grafana_image_task.delay(m["grafana_url"], m["file_basename"], grafana_login, grafana_pass))
+            ("metric", m, download_grafana_image_task.delay(m["grafana_url"], m["file_basename"]))
         )
     for l in log_items:
         download_jobs.append(
-            ("log", l, download_loki_logs_task.delay(loki_url, start, end, l["filter_query"], l["file_basename"]))
+            ("log", l, download_loki_logs_task.delay(start, end, l["filter_query"], l["file_basename"]))
         )
     download_total = len(download_jobs)
     for index, (kind, item, job) in enumerate(download_jobs, start=1):
@@ -803,7 +684,7 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
             attachment_jobs.append(
                 (
                     (m["placeholder"], f'<ac:image><ri:attachment ri:filename="{m["file_basename"]}.jpg" /></ac:image>'),
-                    upload_attachment_task.delay("grafana", url_basic, user, password, copy_page_id, m["file_path"]),
+                    upload_attachment_task.delay("grafana", copy_page_id, m["file_path"]),
                 )
             )
         else:
@@ -824,7 +705,7 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
                             f'</ac:structured-macro>'
                         ),
                     ),
-                    upload_attachment_task.delay("logs", url_basic, user, password, copy_page_id, l["file_path"]),
+                    upload_attachment_task.delay("logs", copy_page_id, l["file_path"]),
                 )
             )
         else:
@@ -885,7 +766,6 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
         "area_services": _resolve_services_for_area(area_name) or [service],
     }
     if use_llm or save_to_db:
-        final_prompts = _build_final_prompts(base_prompt_templates, test_type, ef_cfg.get("sla") or {})
         results = uploadFromLLM(
             start / 1000,
             end / 1000,
@@ -893,7 +773,7 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
             run_meta=run_meta,
             only_collect=not use_llm,
             ef_config=ef_cfg,
-            prompts_override=final_prompts,
+            prompts_override=base_prompt_templates,
             active_domains=active_domains,
             system_context=system_context_snapshot,
             progress_callback=_pipeline_progress,
@@ -1044,16 +924,36 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
                 data_score_details = (s or {}).get("data_score_details") or {}
                 final_score = (s or {}).get("final_score")
                 conf = (s or {}).get("confidence")
-                rows = [
-                    ("Оценка текста судьей", _pct(overall)),
-                    ("Эвристическая проверка по данным", _pct(data_score)),
-                    ("Итог для выбора кандидата", _pct(final_score)),
-                    ("Точность относительно данных", _pct(factual)),
-                    ("Полнота покрытия важных наблюдений", _pct(completeness)),
-                    ("Конкретика по метрикам и компонентам", _pct(specificity)),
-                ]
-                if isinstance(conf, (int, float)):
-                    rows.insert(3, ("Уверенность модели", _pct(float(conf))))
+                judge_meta = (s or {}).get("judge_meta") or {}
+                judge_skipped = bool(judge_meta.get("skipped"))
+                if judge_meta.get("unavailable"):
+                    # The judge ran but gave no usable scores; the result rests on the data check.
+                    rows = [
+                        ("Судья", "не дал оценку"),
+                        ("Эвристическая проверка по данным", _pct(data_score)),
+                        ("Итог без судьи", _pct(final_score)),
+                    ]
+                    if isinstance(conf, (int, float)):
+                        rows.append(("Уверенность модели", _pct(float(conf))))
+                elif judge_skipped:
+                    # One answer from the model: nothing to choose from, so only the data check ran.
+                    rows = [
+                        ("Судья", "не запускался: модель дала один вариант ответа"),
+                        ("Эвристическая проверка по данным", _pct(data_score)),
+                    ]
+                    if isinstance(conf, (int, float)):
+                        rows.append(("Уверенность модели", _pct(float(conf))))
+                else:
+                    rows = [
+                        ("Оценка текста судьей", _pct(overall)),
+                        ("Эвристическая проверка по данным", _pct(data_score)),
+                        ("Итог для выбора кандидата", _pct(final_score)),
+                        ("Точность относительно данных", _pct(factual)),
+                        ("Полнота покрытия важных наблюдений", _pct(completeness)),
+                        ("Конкретика по метрикам и компонентам", _pct(specificity)),
+                    ]
+                    if isinstance(conf, (int, float)):
+                        rows.insert(3, ("Уверенность модели", _pct(float(conf))))
                 if isinstance(data_score_details, dict) and data_score_details:
                     rows.append(("Привязка выводов к метрикам и сериям", _pct(data_score_details.get("label_grounding"))))
                     claims_total = int(data_score_details.get("numeric_claims_total") or 0)
@@ -1100,7 +1000,8 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
             logger.warning("Не удалось добавить оценки судьи: %s", e)
 
         if llm_replacements:
-            update_confluence_page_multi(url_basic, user, password, copy_page_id, llm_replacements)
+            # Model output is text: it is encoded for the template, never inserted as storage markup.
+            update_confluence_page_multi(url_basic, user, password, copy_page_id, llm_replacements, as_text=True)
         _progress("ИИ-анализ завершён. Финализация отчёта…", 95)
         logger.info("✓ Плейсхолдеры LLM обновлены за один проход")
     except Exception as e:

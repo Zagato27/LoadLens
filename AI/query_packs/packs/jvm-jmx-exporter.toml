@@ -1,0 +1,103 @@
+schema_version = 1
+id = "jvm-jmx-exporter"
+version = 1
+title = "JVM: Prometheus JMX exporter, client_java"
+category = "runtime"
+stack = ["java", "jmx"]
+domain = "jvm"
+language = "promql"
+domain_title = "JVM"
+description = """
+JVM-метрики Prometheus client_java (hotspot exports) — их отдают javaagent JMX exporter, приложения на \
+simpleclient и Dropwizard-мосты. Подходят имена client_java 0.x (jvm_memory_bytes_used) и 1.x \
+(jvm_memory_used_bytes). CPU процесса приходит в ядрах: укажите лимит CPU контейнера или число ядер, \
+чтобы получить долю 0..1.
+"""
+requires_metrics = ["jvm_threads_current", "jvm_gc_collection_seconds_count", "process_cpu_seconds_total"]
+prompt_addendum = """
+Метрики client_java: jvm_memory_bytes_used / jvm_memory_used_bytes{area="heap"} — занятая куча, \
+jvm_gc_collection_seconds — время сборок по сборщикам (gc), jvm_threads_current — потоки, \
+process_cpu_seconds_total — CPU процесса, в отчёте пересчитан в долю от заданного числа ядер.
+"""
+
+[variables.service_label]
+title = "Лейбл с именем сервиса"
+default = "job"
+pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
+
+[variables.matchers]
+title = "Дополнительные матчеры"
+default = ""
+help = 'Например job=~"orders|payments".'
+
+[variables.cpu_limit_cores]
+title = "Ядер на экземпляр"
+default = "1"
+pattern = '^[0-9]+(\.[0-9]+)?$'
+help = "Лимит CPU контейнера или число ядер хоста: CPU процесса делится на это число."
+
+[variables.window]
+title = "Окно rate()"
+default = "2m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[sla]
+service_cpu_query = "@runtime.cpu"
+
+[[queries]]
+label = "JVM (JMX exporter): Heap used (bytes) by ({{service_label}}, instance)"
+role = "runtime.heap_used"
+unit = "bytes"
+required = true
+query = 'sum by ({{service_label}}, instance) (jvm_memory_bytes_used{area="heap", {{service_label}}!="", {{matchers}} } or jvm_memory_used_bytes{area="heap", {{service_label}}!="", {{matchers}} })'
+keys = ["{{service_label}}", "instance"]
+description = "Занятая куча экземпляра."
+
+[[queries]]
+label = "JVM (JMX exporter): Heap max (bytes) by ({{service_label}}, instance)"
+role = "runtime.heap_max"
+unit = "bytes"
+query = 'sum by ({{service_label}}, instance) (jvm_memory_bytes_max{area="heap", {{service_label}}!="", {{matchers}} } > 0 or jvm_memory_max_bytes{area="heap", {{service_label}}!="", {{matchers}} } > 0)'
+keys = ["{{service_label}}", "instance"]
+description = "Максимум кучи."
+
+[[queries]]
+label = "JVM (JMX exporter): Process CPU (share of limit) by ({{service_label}}, instance)"
+role = "runtime.cpu"
+unit = "fraction"
+required = true
+query = '(sum by ({{service_label}}, instance) (rate(process_cpu_seconds_total{ {{service_label}}!="", {{matchers}} }[{{window}}])) / {{cpu_limit_cores}}) and on ({{service_label}}, instance) (jvm_threads_current{ {{service_label}}!="", {{matchers}} } or jvm_threads_live_threads{ {{service_label}}!="", {{matchers}} })'
+keys = ["{{service_label}}", "instance"]
+description = "CPU процесса JVM как доля 0..1 от заданного числа ядер. Процессы без JVM-метрик отбрасываются."
+
+[[queries]]
+label = "JVM (JMX exporter): GC time (%) by ({{service_label}}, instance)"
+role = "runtime.gc_time_pct"
+unit = "percent"
+query = '100 * sum by ({{service_label}}, instance) (rate(jvm_gc_collection_seconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}", "instance"]
+description = "Доля времени в сборках мусора, %."
+
+[[queries]]
+label = "JVM (JMX exporter): GC collection avg (s) by ({{service_label}}, instance)"
+role = "runtime.gc_pause_avg"
+unit = "seconds"
+query = 'sum by ({{service_label}}, instance) (rate(jvm_gc_collection_seconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}])) / sum by ({{service_label}}, instance) (rate(jvm_gc_collection_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}", "instance"]
+description = "Средняя длительность сборки, с."
+
+[[queries]]
+label = "JVM (JMX exporter): GC collections per second by ({{service_label}}, instance)"
+role = "runtime.gc_rate"
+unit = "per_second"
+query = 'sum by ({{service_label}}, instance) (rate(jvm_gc_collection_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}", "instance"]
+description = "Частота сборок мусора."
+
+[[queries]]
+label = "JVM (JMX exporter): Threads by ({{service_label}}, instance)"
+role = "runtime.threads"
+unit = "count"
+query = 'sum by ({{service_label}}, instance) (jvm_threads_current{ {{service_label}}!="", {{matchers}} })'
+keys = ["{{service_label}}", "instance"]
+description = "Потоки JVM."

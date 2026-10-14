@@ -75,7 +75,7 @@
         <label for="tokenRole">Роль
           <select id="tokenRole">
             {% for role in roles %}
-            <option value="{{ role.key }}"{% if role.key == role_key %} selected{% endif %}>{{ role.label }}</option>
+            <option value="{{ role.key }}"{% if role.key == 'viewer' %} selected{% endif %}>{{ role.label }}</option>
             {% endfor %}
           </select>
         </label>

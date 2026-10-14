@@ -1,0 +1,37 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# Native histograms are on for k6 remote write; keep the classic _bucket/_count/_sum series as well
+# (scrape_classic_histograms in Prometheus 2.x, always_scrape_classic_histograms in 3.x),
+# otherwise apps that expose both (Prometheus itself) lose the series the packs query.
+
+scrape_configs:
+  - scrape_classic_histograms: true
+    job_name: prometheus
+    static_configs: [{targets: ["localhost:9090"]}]
+  - scrape_classic_histograms: true
+    job_name: node
+    static_configs: [{targets: ["node-exporter:9100"]}]
+  - scrape_classic_histograms: true
+    job_name: postgres
+    static_configs: [{targets: ["postgres-exporter:9187"]}]
+  - scrape_classic_histograms: true
+    job_name: pgbouncer
+    static_configs: [{targets: ["pgbouncer-exporter:9127"]}]
+  - scrape_classic_histograms: true
+    job_name: redis
+    static_configs: [{targets: ["redis-exporter:9121"]}]
+  - scrape_classic_histograms: true
+    job_name: keycloak
+    metrics_path: /metrics
+    static_configs: [{targets: ["keycloak:9000"]}]
+  - scrape_classic_histograms: true
+    job_name: pyapp
+    static_configs: [{targets: ["pyapp:8000"]}]
+  - scrape_classic_histograms: true
+    job_name: kafka-exporter
+    static_configs: [{targets: ["kafka-exporter:9308"]}]
+  - scrape_classic_histograms: true
+    job_name: locust
+    static_configs: [{targets: ["locust-exporter:9646"]}]

@@ -1,3 +1,4 @@
+import contextvars
 import os
 import json
 import random
@@ -15,8 +16,29 @@ from settings import CONFIG
 
 
 logger = logging.getLogger(__name__)
-_llm_env_init_lock = threading.Lock()
-_llm_env_applied = False
+
+# Provider keys from the server environment (OPENAI_API_KEY ...) belong to the saved provider address.
+# A connection check of an unsaved form that points elsewhere runs without them, see without_env_keys().
+_ENV_KEYS_ALLOWED: contextvars.ContextVar[bool] = contextvars.ContextVar("llm_env_keys_allowed", default=True)
+
+
+@contextmanager
+def without_env_keys() -> Iterator[None]:
+    token = _ENV_KEYS_ALLOWED.set(False)
+    try:
+        yield
+    finally:
+        _ENV_KEYS_ALLOWED.reset(token)
+
+
+def _env_key(*names: str) -> str:
+    if not _ENV_KEYS_ALLOWED.get():
+        return ""
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value
+    return ""
 _llm_provider_name = (CONFIG.get("llm", {}) or {}).get("provider", "perplexity").lower()
 _llm_provider_cfg = (CONFIG.get("llm", {}) or {}).get(_llm_provider_name, {})
 _llm_semaphore = threading.Semaphore(int(_llm_provider_cfg.get("max_concurrent", 4)))
@@ -278,27 +300,27 @@ def _perplexity_model(pcfg: dict) -> str:
     return fallback
 
 
-def _ensure_llm_network_env(gcfg: dict) -> None:
-    proxies = (gcfg or {}).get("proxies", {}) or {}
-    ca_bundle = (gcfg or {}).get("ca_bundle")
-    insecure = bool((gcfg or {}).get("insecure_skip_verify", False))
+# Proxies and CA bundles are passed to every request explicitly. They used to be written into
+# os.environ on the first call, which sent all later HTTP traffic of the process (Grafana,
+# Confluence, OpenSearch) through whatever proxy that first, possibly unsaved, configuration named.
+def _tls_verify(pcfg: dict) -> bool | str:
+    """``verify`` for requests: ``False``, ``True`` or the path of a CA bundle."""
+    pcfg = pcfg or {}
+    if pcfg.get("insecure_skip_verify"):
+        return False
+    raw = pcfg.get("verify", True)
+    if isinstance(raw, str):
+        return raw.strip() or True
+    if raw is False:
+        return False
+    return str(pcfg.get("ca_bundle") or "").strip() or True
 
-    https_proxy = proxies.get("https") or proxies.get("HTTPS")
-    http_proxy = proxies.get("http") or proxies.get("HTTP")
 
-    if https_proxy:
-        os.environ["HTTPS_PROXY"] = https_proxy
-    if http_proxy:
-        os.environ["HTTP_PROXY"] = http_proxy
-
-    if ca_bundle and not insecure:
-        os.environ["REQUESTS_CA_BUNDLE"] = ca_bundle
-        os.environ["SSL_CERT_FILE"] = ca_bundle
-
-    if insecure:
-        os.environ["PYTHONHTTPSVERIFY"] = "0"
-        os.environ.pop("REQUESTS_CA_BUNDLE", None)
-        os.environ.pop("SSL_CERT_FILE", None)
+def _request_proxies(pcfg: dict) -> dict | None:
+    """Proxies of this provider for one request; ``None`` when none are set."""
+    raw = (pcfg or {}).get("proxies") or {}
+    proxies = {str(k).lower(): str(v).strip() for k, v in raw.items() if isinstance(v, str) and v.strip()} if isinstance(raw, dict) else {}
+    return proxies or None
 
 
 def _strip_think(text: str) -> str:
@@ -416,16 +438,11 @@ def _perplexity_call(messages: list[dict], pcfg: dict) -> str:
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "Authorization": f"Bearer {os.getenv('PPLX_API_KEY') or os.getenv('PERPLEXITY_API_KEY') or pcfg.get('api_key', '')}",
+        "Authorization": f"Bearer {_env_key('PPLX_API_KEY', 'PERPLEXITY_API_KEY') or pcfg.get('api_key', '')}",
     }
 
-    proxies = (pcfg or {}).get("proxies", {}) or None
-    verify_cfg = pcfg.get("verify", True)
-    verify = True
-    if isinstance(verify_cfg, bool):
-        verify = verify_cfg
-    elif isinstance(verify_cfg, str) and verify_cfg.strip():
-        verify = verify_cfg.strip() if os.path.exists(verify_cfg.strip()) else True
+    proxies = _request_proxies(pcfg)
+    verify = _tls_verify(pcfg)
 
     req_max_tokens = _effective_max_tokens(pcfg, default=1200, default_cap=32768)
     if api_type == "agent":
@@ -486,11 +503,10 @@ def _openai_call(messages: list[dict], pcfg: dict) -> str:
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY') or pcfg.get('api_key', '')}",
+        "Authorization": f"Bearer {_env_key('OPENAI_API_KEY') or pcfg.get('api_key', '')}",
     }
-    proxies = (pcfg or {}).get("proxies", {}) or None
-    verify_cfg = pcfg.get("verify", True)
-    verify = True if isinstance(verify_cfg, bool) else (verify_cfg.strip() if isinstance(verify_cfg, str) and verify_cfg.strip() else True)
+    proxies = _request_proxies(pcfg)
+    verify = _tls_verify(pcfg)
     req_max_tokens = _effective_max_tokens(pcfg, default=1200, default_cap=32768)
     payload = {
         "model": pcfg.get("model", "gpt-4o-mini"),
@@ -705,12 +721,11 @@ def _anthropic_call(messages: list[dict], pcfg: dict, system_text: str) -> str:
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "x-api-key": os.getenv('ANTHROPIC_API_KEY') or pcfg.get('api_key', ''),
+        "x-api-key": _env_key('ANTHROPIC_API_KEY') or pcfg.get('api_key', ''),
         "anthropic-version": "2023-06-01",
     }
-    proxies = (pcfg or {}).get("proxies", {}) or None
-    verify_cfg = pcfg.get("verify", True)
-    verify = True if isinstance(verify_cfg, bool) else (verify_cfg.strip() if isinstance(verify_cfg, str) and verify_cfg.strip() else True)
+    proxies = _request_proxies(pcfg)
+    verify = _tls_verify(pcfg)
 
     user_parts = []
     for m in messages:
@@ -768,11 +783,13 @@ def _get_gigachat_client(pcfg: dict | None = None):
     from langchain_gigachat.chat_models import GigaChat as LC_GigaChat
 
     base_url = _normalize_gigachat_base_url(pcfg.get("base_url") or pcfg.get("api_base_url"))
-    verify_param = pcfg.get("verify")
-    verify_ssl_certs = verify_param if isinstance(verify_param, bool) else True
-    if isinstance(verify_param, str) and verify_param.strip():
-        os.environ["REQUESTS_CA_BUNDLE"] = verify_param
-        os.environ["SSL_CERT_FILE"] = verify_param
+    tls = _tls_verify(pcfg)
+    verify_ssl_certs = tls is not False
+    if _request_proxies(pcfg):
+        logger.warning(
+            "llm.gigachat.proxies is ignored: GigaChat uses HTTPS_PROXY/HTTP_PROXY of the server process "
+            "(set them in the service environment, with NO_PROXY for internal hosts)"
+        )
     gen = (pcfg.get("generation") or {})
     client_kwargs = {
         "model": str(pcfg.get("model") or "GigaChat-Pro"),
@@ -780,6 +797,7 @@ def _get_gigachat_client(pcfg: dict | None = None):
         "key_file": pcfg.get("key_file"),
         "base_url": base_url,
         "verify_ssl_certs": verify_ssl_certs,
+        **({"ca_bundle_file": tls} if isinstance(tls, str) else {}),
         "timeout": int(pcfg.get("request_timeout_sec", 120)),
         "max_tokens": _effective_max_tokens(pcfg, default=1200, default_cap=32768),
         "temperature": float(gen.get("temperature", 0.2)),
@@ -883,13 +901,6 @@ def ask_llm_with_text_data(
     pcfg = llm_root.get(provider, {})
     if isinstance(llm_config, dict) and isinstance(llm_config.get(provider), dict):
         pcfg = llm_config[provider]
-    global _llm_env_applied
-    if not _llm_env_applied:
-        with _llm_env_init_lock:
-            if not _llm_env_applied:
-                _ensure_llm_network_env(pcfg)
-                _llm_env_applied = True
-
     gen = (pcfg.get("generation") or {})
     force_json = bool(gen.get("force_json_in_prompt", True))
     if isinstance(llm_config, dict) and "force_json" in llm_config:

@@ -1,0 +1,82 @@
+schema_version = 1
+id = "http-otel"
+version = 1
+title = "HTTP: OpenTelemetry (semconv 1.23+)"
+category = "http"
+stack = ["opentelemetry", "java", "go", "python", "nodejs", "dotnet"]
+domain = "microservices"
+language = "promql"
+description = """
+Стабильные HTTP-метрики OpenTelemetry: http_server_request_duration_seconds с лейблами http_route и \
+http_response_status_code после экспорта в Prometheus. Так пишут Java agent 2.x, инструментации Go, \
+Python, Node.js и .NET. Для старых имён (http_server_duration_milliseconds) используйте пакет \
+«HTTP: OpenTelemetry (semconv до 1.23)».
+"""
+requires_metrics = ["http_server_request_duration_seconds_count"]
+prompt_addendum = """
+Метрики OpenTelemetry HTTP: http_server_request_duration_seconds — гистограмма входящих запросов по \
+http_route, http_request_method и http_response_status_code. Времена в секундах.
+"""
+
+[variables.service_label]
+title = "Лейбл с именем сервиса"
+default = "job"
+pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
+
+[variables.matchers]
+title = "Дополнительные матчеры"
+default = ""
+
+[variables.window]
+title = "Окно rate()"
+default = "1m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[[queries]]
+label = "HTTP (OTel): request rate (RPS) by service"
+role = "http.rps"
+unit = "per_second"
+required = true
+query = 'sum by ({{service_label}}) (rate(http_server_request_duration_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}"]
+description = "Входящие запросы в секунду."
+
+[[queries]]
+label = "HTTP (OTel): average request time (sec) by service"
+role = "http.avg_latency"
+unit = "seconds"
+query = 'sum by ({{service_label}}) (rate(http_server_request_duration_seconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}])) / sum by ({{service_label}}) (rate(http_server_request_duration_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}"]
+description = "Среднее время обработки, с."
+
+[[queries]]
+label = "HTTP (OTel): p95 request time (sec) by service"
+role = "http.p95"
+unit = "seconds"
+query = 'histogram_quantile(0.95, sum by (le, {{service_label}}) (rate(http_server_request_duration_seconds_bucket{ {{service_label}}!="", {{matchers}} }[{{window}}])))'
+keys = ["{{service_label}}"]
+description = "p95 времени обработки, с."
+
+[[queries]]
+label = "HTTP (OTel): 5xx error rate (%) by service"
+role = "http.error_rate_pct"
+unit = "percent"
+query = '100 * (sum by ({{service_label}}) (rate(http_server_request_duration_seconds_count{http_response_status_code=~"5..", {{service_label}}!="", {{matchers}} }[{{window}}])) or 0 * sum by ({{service_label}}) (rate(http_server_request_duration_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))) / sum by ({{service_label}}) (rate(http_server_request_duration_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}"]
+description = "Доля ответов 5xx, %."
+
+[[queries]]
+label = "HTTP (OTel): RPS by service & route (top 20)"
+role = "http.rps_by_route"
+unit = "per_second"
+query = 'topk(20, sum by ({{service_label}}, http_route) (rate(http_server_request_duration_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}])))'
+keys = ["{{service_label}}", "http_route"]
+description = "Самые нагруженные маршруты."
+
+[[queries]]
+label = "HTTP (OTel): p95 request time (sec) by service & route (top 20)"
+role = "http.p95_by_route"
+unit = "seconds"
+query = 'topk(20, histogram_quantile(0.95, sum by (le, {{service_label}}, http_route) (rate(http_server_request_duration_seconds_bucket{ {{service_label}}!="", {{matchers}} }[{{window}}]))))'
+keys = ["{{service_label}}", "http_route"]
+description = "Самые медленные маршруты по p95."

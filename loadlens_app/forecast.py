@@ -44,7 +44,9 @@ from AI.capacity_forecast import (
 )
 from AI.context_pack import DEFAULT_ELASTICITY_THRESHOLD, format_iso, to_utc
 from AI.db_store import StoredFinalReport, list_final_reports, load_final_report, load_run_frames
-from AI.pipeline import _cfg_float, _designated_rps_series, _test_profile_from_type, _time_shift_hours
+from AI.query_packs import ROLES, resolve_sla_refs
+from AI.pipeline import _cfg_float, _designated_rps_series, _time_shift_hours
+from AI.test_profile import profile_for
 from AI.resource_plan import (
     MAX_CPU_FRACTION,
     MIN_PLAN_STEPS,
@@ -66,15 +68,18 @@ from AI.resource_plan import (
 )
 from AI.sla_evaluator import _safe_float, _worst_series_p95
 from loadlens_app.core import _find_area_for_service, _ts_conn
+from loadlens_app.errors import log_failure
 from settings import CONFIG
 from update_page import _effective_config_for_scope
 
 LT_DOMAIN = "lt_framework"
-SERVICES_CPU_DOMAIN = "jvm"
-NODES_CPU_DOMAIN = "hard_resources"
+# Domains of the CPU series follow the query-pack role registry (runtime.cpu, node.cpu_pct).
+SERVICES_CPU_DOMAIN = ROLES["runtime.cpu"].domain
+NODES_CPU_DOMAIN = ROLES["node.cpu_pct"].domain
 NODE_CPU_SCALE = 0.01  # sla.cpu_query is node CPU in percent
 DEFAULT_CPU_CEILING_PCT = 80.0
 SETTING_HINT = "SLA-критерии → Определение максимальной производительности"
+FORECAST_NOT_APPLICABLE = "Прогноз строится только для ступенчатых и стресс-тестов"
 
 
 class ForecastError(Exception):
@@ -157,8 +162,8 @@ def build_forecast(
 ) -> ForecastReport:
     """Fits the model on the stored samples of a run and evaluates the target load."""
     report = _stored_report(run_id)
-    if _test_profile_from_type(report.test_type).get("mode") != "capacity":
-        raise ForecastError("Прогноз строится только для тестов на максимальную производительность", 422, "not_applicable")
+    if not profile_for(report.test_type).forecast_allowed:
+        raise ForecastError(FORECAST_NOT_APPLICABLE, 422, "not_applicable")
     settings = _forecast_settings(_scope_sla(report))
     start, cutoff, cutoff_kind = _window(report)
     inputs = _input_series(_stored_frames(run_id, settings), settings, start, cutoff)
@@ -188,8 +193,14 @@ def _stored_report(run_id: str) -> StoredFinalReport:
 
 def _scope_sla(report: StoredFinalReport) -> dict[str, Any]:
     area = report.project_area or _find_area_for_service(report.service) or ""
-    sla = _effective_config_for_scope(area, report.service or None).get("sla") or {}
-    return sla if isinstance(sla, dict) else {}
+    return _resolved_sla(_effective_config_for_scope(area, report.service or None))
+
+
+def _resolved_sla(cfg: dict[str, Any]) -> dict[str, Any]:
+    """SLA of the scope with empty query references filled from query-pack roles."""
+    sla = cfg.get("sla") if isinstance(cfg.get("sla"), dict) else {}
+    queries = cfg.get("queries") if isinstance(cfg.get("queries"), dict) else {}
+    return resolve_sla_refs(sla, queries)[0]
 
 
 def _missing_setting(title: str) -> ForecastError:
@@ -556,8 +567,8 @@ class ForecastAvailability:
 
 def forecast_availability(test_type: str, series_labels: Optional[list[str]], sla: dict[str, Any]) -> ForecastAvailability:
     """Whether a stored report can be forecast: capacity test, forecast settings, required series."""
-    if _test_profile_from_type(test_type).get("mode") != "capacity":
-        return ForecastAvailability(False, "not_applicable", "Прогноз строится только для тестов на максимальную производительность")
+    if not profile_for(test_type).forecast_allowed:
+        return ForecastAvailability(False, "not_applicable", FORECAST_NOT_APPLICABLE)
     try:
         settings = _forecast_settings(sla)
     except ForecastError as exc:
@@ -579,8 +590,7 @@ def forecast_availability(test_type: str, series_labels: Optional[list[str]], sl
 def _sla_cached(area: str, service: str, cache: dict[tuple[str, str], dict[str, Any]]) -> dict[str, Any]:
     key = (area, service)
     if key not in cache:
-        sla = _effective_config_for_scope(area, service or None).get("sla") or {}
-        cache[key] = sla if isinstance(sla, dict) else {}
+        cache[key] = _resolved_sla(_effective_config_for_scope(area, service or None))
     return cache[key]
 
 
@@ -659,5 +669,6 @@ def forecast_status(run_id: str) -> ForecastAvailability:
 
 
 def database_unavailable(exc: psycopg2.Error) -> ForecastError:
-    """Maps a database failure to the API error the page shows."""
-    return ForecastError(f"База данных недоступна: {exc}", 502, "database")
+    """Maps a database failure to the API error the page shows; the details stay in the server log."""
+    error_id = log_failure(exc, "База данных недоступна")
+    return ForecastError(f"База данных недоступна. Код ошибки: {error_id}", 502, "database")

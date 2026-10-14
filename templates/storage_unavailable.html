@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  {# Re-check by itself: the storage breaker lets one request through after the pause. #}
+  <meta http-equiv="refresh" content="{{ [retry_seconds, 15] | max }}" />
+  <title>Хранилище недоступно — LoadLens</title>
+  <script nonce="{{ csp_nonce }}">
+    // Apply the saved theme before first paint to avoid a flash.
+    (function () {
+      try {
+        var saved = localStorage.getItem('loadlens.theme');
+        if (saved === 'light' || saved === 'dark') document.documentElement.setAttribute('data-theme', saved);
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="icon" href="/assets/logo.png?c={{ appearance.key }}" type="image/png" />
+  <link rel="stylesheet" href="/static/css/app.css" />
+  <style id="accentVars">{{ appearance.css }}</style>
+</head>
+<body>
+  <main class="auth-page" id="main">
+    <div class="auth-card auth-card-wide">
+      <div class="auth-brand">
+        <img class="logo" src="/assets/logo.png?c={{ appearance.key }}" alt="" />
+        <span class="brand">LoadLens</span>
+      </div>
+      <h1 class="outage-title">Хранилище недоступно</h1>
+      <div class="auth-alert" role="alert">
+        <strong>{{ storage.title }}.</strong> {{ storage.hint }}
+      </div>
+      {% if show_details and (storage.address or storage.message) %}
+      <dl class="outage-details">
+        {% if storage.address %}<dt>Адрес</dt><dd><code>{{ storage.address }}</code></dd>{% endif %}
+        {% if storage.message %}<dt>Ответ</dt><dd><code>{{ storage.message }}</code></dd>{% endif %}
+      </dl>
+      {% endif %}
+      <p class="outage-text">Отчёты, архив и вход пользователей хранятся в этой базе, поэтому они временно не работают. Страница проверит подключение снова через {{ [retry_seconds, 15] | max }}&nbsp;с.</p>
+      {% if not auth_enabled %}
+      <a class="btn btn-primary btn-lg" href="/recovery">Исправить подключение</a>
+      {% elif recovery_configured %}
+      <a class="btn btn-primary btn-lg" href="/login">Войти как аварийный администратор</a>
+      <p class="auth-note">Аварийный вход открывает только настройку подключения к хранилищу.</p>
+      {% else %}
+      {% include "_recovery_setup.html" %}
+      {% endif %}
+    </div>
+  </main>
+</body>
+</html>

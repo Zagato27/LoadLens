@@ -75,7 +75,7 @@ CRITIC_PROMPT_FALLBACK = (
     "Каждый элемент evidence_items должен быть объектом {metric, observed_value, threshold, note}. "
     "Если component не указан — извлеките его из evidence_summary/evidence по лейблам application|service|job|pod|instance, иначе 'unknown'. "
     "Если severity отсутствует — используйте 'low'. Поле peak_performance допускается только для lt_framework/overall; "
-    "в остальных доменах удаляйте его. Если test_profile.mode='stability' или peak_performance.not_applicable=true, "
+    "в остальных доменах удаляйте его. Если test_profile.mode не 'capacity' и не 'stress' (soak, spike) или peak_performance.not_applicable=true, "
     "не требуйте max_rps и не добавляйте его. "
     "Поле verdict ДОЛЖНО быть одним из: 'Успешно' | 'Есть риски' | 'Провал' | 'Недостаточно данных'. Синонимы нормализуйте к ближайшему значению. "
     "Никакого текста вне JSON. Если данных недостаточно — верните verdict='Недостаточно данных'.\n\nПроект ответа:\n{{CANDIDATE}}"
@@ -1049,28 +1049,83 @@ def _build_judge_prompt(
     return prompt_text, meta
 
 
-def _parse_judge_scores(raw_text: str) -> Dict[int, Dict[str, Any]]:
-    parsed = None
+# Keys under which models put the list of per-candidate scores besides the requested "scores".
+_JUDGE_LIST_KEYS = ("scores", "candidates", "results", "evaluations", "items")
+
+
+def _judge_payload(raw_text: str) -> Any:
+    """JSON value of a judge answer: the whole text, a fenced block, or an object or list inside prose."""
+    text = str(raw_text or "")
     try:
-        parsed = _extract_json_like(raw_text) or json.loads(raw_text)
+        text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE)
     except Exception:
-        parsed = None
+        pass
+    parsed = _json_loads_lenient(text.strip())
+    if parsed is not None:
+        return parsed
+    for block in text.split("```")[1::2]:
+        body = block.strip()
+        if body.lower().startswith("json"):
+            body = body[4:].strip()
+        parsed = _json_loads_lenient(body)
+        if parsed is not None:
+            return parsed
+    obj = _extract_json_like(text)
+    if obj is not None:
+        return obj
+    start, end = text.find("["), text.rfind("]")
+    if start != -1 and end > start:
+        return _json_loads_lenient(text[start:end + 1])
+    return None
+
+
+def _judge_items(parsed: Any) -> List[Any]:
+    """Per-candidate entries of a judge answer in the shapes models actually return."""
     if isinstance(parsed, list):
-        scores = parsed
-    elif isinstance(parsed, dict):
-        scores = parsed.get("scores")
-    else:
-        scores = None
-    if not isinstance(scores, list):
-        return {}
+        return parsed
+    if not isinstance(parsed, dict):
+        return []
+    for key in _JUDGE_LIST_KEYS:
+        value = parsed.get(key)
+        if isinstance(value, list):
+            return value
+        if isinstance(value, dict):
+            parsed = value  # {"scores": {"0": {...}, "1": {...}}}
+            break
+    if "index" in parsed:
+        return [parsed]
+    return [
+        {**value, "index": value.get("index", int(str(key).strip()))}
+        for key, value in parsed.items()
+        if str(key).strip().isdigit() and isinstance(value, dict)
+    ]
+
+
+def _parse_judge_scores(raw_text: str) -> Dict[int, Dict[str, Any]]:
     result: Dict[int, Dict[str, Any]] = {}
-    for item in scores:
+    for position, item in enumerate(_judge_items(_judge_payload(raw_text))):
+        if not isinstance(item, dict):
+            continue
         try:
-            score_item = JudgeScoreItem.parse_obj(item)
+            # Entries without an index are taken in the order of the candidates.
+            score_item = JudgeScoreItem.parse_obj({**item, "index": item.get("index", position)})
         except ValidationError:
             continue
         result[int(score_item.index)] = score_item.dict()
     return result
+
+
+def _align_judge_indexes(scores: Dict[Any, Dict[str, Any]], count: int) -> Dict[int, Dict[str, Any]]:
+    """Scores keyed 0..count-1; a judge that numbered the candidates from 1 is shifted back."""
+    aligned: Dict[int, Dict[str, Any]] = {}
+    for key, value in (scores or {}).items():
+        try:
+            aligned[int(key)] = value
+        except (TypeError, ValueError):
+            continue
+    if count and 0 not in aligned and set(aligned) == set(range(1, count + 1)):
+        aligned = {key - 1: value for key, value in aligned.items()}
+    return aligned
 
 
 def _build_critic_prompt(candidate_text: str) -> str:
@@ -1521,7 +1576,61 @@ def _extra_numeric_references(ctx_obj: Any) -> List[Dict[str, Any]]:
             keys = (name, "sla", "порог", "threshold", "целев")
             _add("sla_step", name, "actual", check.get("actual"), keys)
             _add("sla_step", name, "threshold", check.get("threshold"), keys)
+    _add_test_type_numeric_references(ctx_obj, _add)
     return refs
+
+
+_HOLD_KEYS = ("rps", "удерж", "окно", "интервал", "hold", "нагрузк")
+_SPIKE_KEYS = ("всплеск", "spike", "фон", "восстанов", "overshoot", "p95", "ошиб", "rps")
+_SATURATION_KEYS = ("насыщ", "saturation", "ступен", "rps", "ресурс", "cpu", "памят", "memory")
+
+
+def _add_test_type_numeric_references(ctx_obj: Dict[str, Any], add: Any) -> None:
+    """Registers numbers of the soak hold window and trends, spike analysis and stress saturation via ``add``."""
+    holds: List[Any] = [ctx_obj.get("hold_window")]
+    spikes: List[Any] = []
+    for pack in _context_packs(ctx_obj):
+        holds.append(pack.get("hold_window"))
+        profile = pack.get("spike_profile")
+        if isinstance(profile, dict):
+            spikes.extend(profile.get("spikes") or [])
+    stability = ctx_obj.get("stability_under_load")
+    if isinstance(stability, dict):
+        holds.append(stability.get("hold"))
+        for trend in stability.get("trends") or []:
+            if isinstance(trend, dict):
+                keys = (str(trend.get("metric_kind") or ""), str(trend.get("title") or "").lower(), "тренд", "дрейф", "рост")
+                for field in ("first", "last", "change_pct", "slope_per_hour"):
+                    add("stability_under_load", trend.get("series") or trend.get("label"), f"trend_{field}", trend.get(field), keys)
+    for hold in holds:
+        if isinstance(hold, dict):
+            for field in ("level_rps", "actual_rps_mean", "min_bucket_rps", "drop_pct", "duration_min"):
+                add("hold_window", hold.get("series") or hold.get("source_label"), field, hold.get(field), _HOLD_KEYS)
+    analysis = ctx_obj.get("spike_analysis")
+    if isinstance(analysis, dict):
+        spikes.extend(analysis.get("spikes") or [])
+        for field in ("baseline_rps", "threshold_rps", "max_spike_rps"):
+            add("spike_analysis", analysis.get("series"), field, analysis.get(field), _SPIKE_KEYS)
+    spikes.extend(item for item in ctx_obj.get("spike_windows") or [] if isinstance(item, dict))
+    for spike in spikes:
+        if not isinstance(spike, dict):
+            continue
+        name = spike.get("label")
+        for field in ("level_rps", "peak_rps", "duration_sec", "overshoot_p95_pct", "overshoot_error_rate_pp", "recovery_time_sec", "rps_after"):
+            add("spike_analysis", name, field, spike.get(field), _SPIKE_KEYS)
+        for phase in ("pre", "during"):
+            stats = spike.get(phase)
+            if isinstance(stats, dict):
+                for field in ("p95", "error_rate_pct"):
+                    add("spike_analysis", name, f"{phase}_{field}", stats.get(field), _SPIKE_KEYS)
+    saturation = ctx_obj.get("saturation")
+    if isinstance(saturation, dict):
+        for field in ("saturation_rps", "first_degraded_rps"):
+            add("saturation", saturation.get("saturation_step_label"), field, saturation.get(field), _SATURATION_KEYS)
+        resource = saturation.get("limiting_resource")
+        if isinstance(resource, dict):
+            for field in ("value", "threshold", "growth_pct"):
+                add("saturation", resource.get("series") or resource.get("label"), f"resource_{field}", resource.get(field), _SATURATION_KEYS)
 
 
 def _matching_numeric_references(text: str, refs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1723,6 +1832,22 @@ def score_candidate_by_data(parsed: Optional[LLMAnalysis], context_obj: Dict[str
     return float(score_candidate_by_data_details(parsed, context_obj).get("overall", 0.0) or 0.0)
 
 
+# Weights of the candidate score; without usable judge scores the other two are renormalized.
+JUDGE_WEIGHT = 0.6
+DATA_WEIGHT = 0.35
+CONFIDENCE_WEIGHT = 0.05
+
+
+def _candidate_confidence(parsed: Optional[LLMAnalysis]) -> float:
+    """The model's own confidence of a parsed answer, clamped to 0..1 (0 when absent)."""
+    if not isinstance(parsed, LLMAnalysis) or parsed.confidence is None:
+        return 0.0
+    try:
+        return float(max(0.0, min(float(parsed.confidence), 1.0)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _select_best_candidate(
     candidates: List[Tuple[str, Optional[LLMAnalysis]]],
     data_context: str,
@@ -1730,16 +1855,22 @@ def _select_best_candidate(
 ) -> Tuple[str, Optional[LLMAnalysis], Dict[str, Any]]:
     if not candidates:
         return "", None, {}
-    if len(candidates) == 1:
-        text, parsed = candidates[0]
-        return text, parsed, {
-            "selected_index": 0,
-            "judge_meta": {"skipped": True, "reason": "single_candidate"},
-        }
     try:
         context_obj = json.loads(data_context) if data_context else {}
     except Exception:
         context_obj = {}
+    if len(candidates) == 1:
+        # Nothing to choose from, so no judge call. The data check needs no model call and still tells
+        # how well the answer is grounded; the report shows its level instead of the judge's.
+        text, parsed = candidates[0]
+        details = score_candidate_by_data_details(parsed, context_obj)
+        return text, parsed, {
+            "selected_index": 0,
+            "judge_meta": {"skipped": True, "reason": "single_candidate"},
+            "data_score": float(details.get("overall", 0.0) or 0.0),
+            "data_score_details": dict(details),
+            "confidence": _candidate_confidence(parsed),
+        }
     try:
         judge_scores, judge_meta = judge_candidates_with_llm(
             [text for (text, _) in candidates],
@@ -1749,27 +1880,34 @@ def _select_best_candidate(
     except Exception as exc:
         logger.warning("Judge failed for domain '%s': %s", domain_key, exc)
         judge_scores, judge_meta = {}, {"domain_key": _normalize_judge_domain_key(domain_key) or None, "error": str(exc)}
+    judge_scores = _align_judge_indexes(judge_scores, len(candidates))
+    judged = [idx for idx in range(len(candidates)) if idx in judge_scores]
+    # A judge that failed or scored only some candidates must not count as zero for the rest:
+    # then every candidate is ranked by the data check and its own confidence alone.
+    use_judge = len(judged) == len(candidates)
+    if not use_judge:
+        reason = "error" if (judge_meta or {}).get("error") else ("partial_scores" if judged else "no_scores")
+        judge_meta = {**(judge_meta or {}), "unavailable": True, "reason": reason, "scored_candidates": len(judged)}
+        logger.warning("Judge gave no usable scores for domain '%s' (%s): candidates ranked by the data check", domain_key, reason)
     scored: List[Tuple[float, int]] = []
     data_score_details_map: Dict[int, Dict[str, Any]] = {}
     for idx, (text, parsed) in enumerate(candidates):
-        judge_entry = judge_scores.get(idx) or judge_scores.get(str(idx)) or {}
+        judge_entry = judge_scores.get(idx) or {}
         judge_overall = float(judge_entry.get("overall", 0.0) or 0.0)
         data_score_details = score_candidate_by_data_details(parsed, context_obj)
         data_score_details_map[idx] = data_score_details
         data_score = float(data_score_details.get("overall", 0.0) or 0.0)
-        conf = 0.0
-        if isinstance(parsed, LLMAnalysis) and parsed.confidence is not None:
-            try:
-                conf = float(parsed.confidence)
-            except Exception:
-                conf = 0.0
-        final_score = 0.6 * judge_overall + 0.35 * data_score + 0.05 * max(0.0, min(conf, 1.0))
+        conf = _candidate_confidence(parsed)
+        if use_judge:
+            final_score = JUDGE_WEIGHT * judge_overall + DATA_WEIGHT * data_score + CONFIDENCE_WEIGHT * conf
+        else:
+            final_score = (DATA_WEIGHT * data_score + CONFIDENCE_WEIGHT * conf) / (DATA_WEIGHT + CONFIDENCE_WEIGHT)
         scored.append((final_score, idx))
     if scored:
         scored.sort(key=lambda x: x[0], reverse=True)
         best_idx = scored[0][1]
         best_text, best_parsed = candidates[best_idx]
-        judge_entry = judge_scores.get(best_idx) or judge_scores.get(str(best_idx)) or {}
+        judge_entry = judge_scores.get(best_idx) or {}
         data_score_details_best = data_score_details_map.get(best_idx) or score_candidate_by_data_details(best_parsed, context_obj)
         data_score_best = float(data_score_details_best.get("overall", 0.0) or 0.0)
         conf_best = 0.0
@@ -1781,19 +1919,20 @@ def _select_best_candidate(
         final_score_best = [s for s in scored if s[1] == best_idx][0][0]
         score_info = {
             "selected_index": best_idx,
-            "judge": {
-                "overall": float(judge_entry.get("overall", 0.0) or 0.0),
-                "factual": float(judge_entry.get("factual", 0.0) or 0.0),
-                "completeness": float(judge_entry.get("completeness", 0.0) or 0.0),
-                "specificity": float(judge_entry.get("specificity", 0.0) or 0.0),
-                "rubric": dict(judge_entry.get("rubric") or {}),
-            },
             "judge_meta": dict(judge_meta or {}),
             "data_score": float(data_score_best),
             "data_score_details": dict(data_score_details_best or {}),
             "confidence": float(max(0.0, min(conf_best, 1.0))),
             "final_score": float(final_score_best),
         }
+        if use_judge:
+            score_info["judge"] = {
+                "overall": float(judge_entry.get("overall", 0.0) or 0.0),
+                "factual": float(judge_entry.get("factual", 0.0) or 0.0),
+                "completeness": float(judge_entry.get("completeness", 0.0) or 0.0),
+                "specificity": float(judge_entry.get("specificity", 0.0) or 0.0),
+                "rubric": dict(judge_entry.get("rubric") or {}),
+            }
         return best_text, best_parsed, score_info
     best_text, best_parsed = _choose_best_candidate(candidates)
     return best_text, best_parsed, {}

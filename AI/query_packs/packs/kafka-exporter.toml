@@ -1,0 +1,78 @@
+schema_version = 1
+id = "kafka-exporter"
+version = 1
+title = "Kafka: kafka_exporter (danielqsj)"
+category = "messaging"
+stack = ["kafka"]
+domain = "kafka"
+language = "promql"
+verified = true
+description = """
+Метрики kafka_exporter: отставание consumer group, скорость записи в топики по смещениям партиций, \
+участники групп и недореплицированные партиции. Служебные топики (__consumer_offsets и т. п.) исключены.
+"""
+requires_metrics = ["kafka_consumergroup_lag", "kafka_topic_partition_current_offset"]
+prompt_addendum = """
+Метрики kafka_exporter: kafka_consumergroup_lag — отставание группы в сообщениях (рост на ступени \
+означает, что консьюмеры не успевают), kafka_topic_partition_current_offset — смещение конца партиции \
+(его скорость — входящие сообщения), kafka_consumergroup_current_offset — прочитанное группой.
+"""
+
+[variables.matchers]
+title = "Дополнительные матчеры"
+default = ""
+help = 'Например topic=~"orders.*".'
+
+[variables.window]
+title = "Окно rate()"
+default = "2m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[[queries]]
+label = "Kafka: consumergroup lag by topic & group"
+role = "kafka.consumer_lag"
+unit = "count"
+required = true
+query = 'sum by (topic, consumergroup) (kafka_consumergroup_lag{topic!~"__.+", {{matchers}} })'
+keys = ["topic", "consumergroup"]
+description = "Отставание consumer group в сообщениях."
+
+[[queries]]
+label = "Kafka: messages in per second by topic"
+role = "kafka.messages_in"
+unit = "per_second"
+query = 'sum by (topic) (rate(kafka_topic_partition_current_offset{topic!~"__.+", {{matchers}} }[{{window}}]))'
+keys = ["topic"]
+description = "Запись в топик, сообщений в секунду."
+
+[[queries]]
+label = "Kafka: consumed messages per second by topic & group"
+role = "kafka.consumed_rate"
+unit = "per_second"
+query = 'sum by (topic, consumergroup) (rate(kafka_consumergroup_current_offset{topic!~"__.+", {{matchers}} }[{{window}}]))'
+keys = ["topic", "consumergroup"]
+description = "Чтение группой, сообщений в секунду."
+
+[[queries]]
+label = "Kafka: consumer group members by group"
+role = "kafka.consumer_members"
+unit = "count"
+query = 'max by (consumergroup) (kafka_consumergroup_members{ {{matchers}} })'
+keys = ["consumergroup"]
+description = "Участники consumer group: падение означает ребалансировку или упавший консьюмер."
+
+[[queries]]
+label = "Kafka: under-replicated partitions by topic"
+role = "kafka.under_replicated"
+unit = "count"
+query = 'sum by (topic) (kafka_topic_partition_under_replicated_partition{topic!~"__.+", {{matchers}} }) > 0'
+keys = ["topic"]
+description = "Недореплицированные партиции (показываются только ненулевые)."
+
+[[queries]]
+label = "Kafka: brokers"
+role = "kafka.brokers"
+unit = "count"
+query = 'label_replace(max(kafka_brokers{ {{matchers}} }), "series", "cluster", "", "")'
+keys = ["series"]
+description = "Брокеры в кластере."

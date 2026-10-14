@@ -5,7 +5,7 @@
   const JOBS_REFRESH_MS = 5000;
   const LONG_WINDOW_WARN_MINUTES = 24 * 60;
   const SERVICE_HINT = 'Список сервисов задаётся в настройках (раздел «Сервисы»).';
-  const TEST_TYPE_HINT = 'Тип теста подбирает инструкции для анализа ИИ и метод расчёта максимальной производительности.';
+  const TEST_TYPE_HINT = 'Тип теста определяет программный анализ и инструкции для ИИ: поиск максимума, удержание нагрузки, реакцию на всплески или точку насыщения.';
 
   // Phase boundaries mirror the progress budget in AI/pipeline.py and update_page.py.
   // The Confluence template path spends 0..40 on charts and attachments, then maps the pipeline into 40..94.
@@ -432,10 +432,26 @@
       link.href = job.page_url;
       link.textContent = 'Открыть страницу';
     }
+    const actions = document.createElement('span');
+    actions.className = 'job-actions';
+    actions.appendChild(link);
+    const dismiss = LL.jobDismissButton(job, loadActiveJobs);
+    if (dismiss) actions.appendChild(dismiss);
     row.appendChild(pill);
     row.appendChild(info);
-    row.appendChild(link);
+    row.appendChild(actions);
     return row;
+  }
+
+  // Finished rows currently shown: "Очистить завершённые" hides exactly these.
+  let finishedJobIds = [];
+
+  async function clearFinishedJobs() {
+    const btn = $('activeJobsClear');
+    btn.disabled = true;
+    await LL.dismissJobs(finishedJobIds);
+    btn.disabled = false;
+    loadActiveJobs();
   }
 
   async function loadActiveJobs() {
@@ -448,6 +464,8 @@
       const payload = await resp.json();
       const jobs = Array.isArray(payload && payload.jobs) ? payload.jobs : [];
       list.innerHTML = '';
+      finishedJobIds = jobs.filter((j) => j.status !== 'running').map((j) => j.job_id);
+      $('activeJobsClear').hidden = !finishedJobIds.length;
       if (!jobs.length) {
         panel.style.display = 'none';
         if (jobsTimer) { clearInterval(jobsTimer); jobsTimer = null; }
@@ -470,6 +488,7 @@
     $('tzLabel').textContent = LL.timeZoneLabel();
     await LL.initProjectArea();
     await loadServices();
+    $('activeJobsClear').addEventListener('click', clearFinishedJobs);
     loadActiveJobs();
 
     document.querySelectorAll('#rangePresets .seg-btn').forEach((btn) => {

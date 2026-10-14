@@ -6,6 +6,7 @@ import psycopg2
 from flask import Blueprint, jsonify, request
 
 from loadlens_app.core import _active_project_area
+from loadlens_app.errors import internal_error
 from loadlens_app.projects import (
     ProjectError,
     create_project,
@@ -32,7 +33,7 @@ def _text(data: dict, key: str) -> str:
 def _failure(exc: Exception):
     if isinstance(exc, ProjectError):
         return jsonify({"error": str(exc)}), exc.status_code
-    return jsonify({"error": f"База данных недоступна: {exc}"}), 502
+    return internal_error(exc, "База данных недоступна", 502)
 
 
 @projects_bp.route("/projects", methods=["GET"])

@@ -1,0 +1,81 @@
+schema_version = 1
+id = "http-python-django"
+version = 1
+title = "HTTP: Django (django-prometheus)"
+category = "http"
+stack = ["python", "django"]
+domain = "microservices"
+language = "promql"
+description = """
+Метрики django-prometheus: ответы по статусам, задержка с учётом middleware (общий p95) и по view. \
+В multiprocess-режиме gunicorn нужен PROMETHEUS_MULTIPROC_DIR, иначе значения воркеров не сводятся.
+"""
+requires_metrics = ["django_http_responses_total_by_status_total", "django_http_requests_latency_including_middlewares_seconds_bucket"]
+prompt_addendum = """
+Метрики Django: django_http_responses_total_by_status_total — ответы по status, \
+django_http_requests_latency_including_middlewares_seconds — время запроса с middleware, \
+django_http_requests_latency_seconds_by_view_method — время по view. Времена в секундах.
+"""
+
+[variables.service_label]
+title = "Лейбл с именем сервиса"
+default = "job"
+pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
+
+[variables.matchers]
+title = "Дополнительные матчеры"
+default = ""
+
+[variables.window]
+title = "Окно rate()"
+default = "1m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[[queries]]
+label = "HTTP (Django): request rate (RPS) by service"
+role = "http.rps"
+unit = "per_second"
+required = true
+query = 'sum by ({{service_label}}) (rate(django_http_responses_total_by_status_total{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}"]
+description = "Ответы в секунду."
+
+[[queries]]
+label = "HTTP (Django): average request time (sec) by service"
+role = "http.avg_latency"
+unit = "seconds"
+query = 'sum by ({{service_label}}) (rate(django_http_requests_latency_including_middlewares_seconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}])) / sum by ({{service_label}}) (rate(django_http_requests_latency_including_middlewares_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}"]
+description = "Среднее время запроса с middleware, с."
+
+[[queries]]
+label = "HTTP (Django): p95 request time (sec) by service"
+role = "http.p95"
+unit = "seconds"
+query = 'histogram_quantile(0.95, sum by (le, {{service_label}}) (rate(django_http_requests_latency_including_middlewares_seconds_bucket{ {{service_label}}!="", {{matchers}} }[{{window}}])))'
+keys = ["{{service_label}}"]
+description = "p95 времени запроса, с."
+
+[[queries]]
+label = "HTTP (Django): 5xx error rate (%) by service"
+role = "http.error_rate_pct"
+unit = "percent"
+query = '100 * (sum by ({{service_label}}) (rate(django_http_responses_total_by_status_total{status=~"5..", {{service_label}}!="", {{matchers}} }[{{window}}])) or 0 * sum by ({{service_label}}) (rate(django_http_responses_total_by_status_total{ {{service_label}}!="", {{matchers}} }[{{window}}]))) / sum by ({{service_label}}) (rate(django_http_responses_total_by_status_total{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}"]
+description = "Доля ответов 5xx, %."
+
+[[queries]]
+label = "HTTP (Django): RPS by service & view (top 20)"
+role = "http.rps_by_route"
+unit = "per_second"
+query = 'topk(20, sum by ({{service_label}}, view) (rate(django_http_requests_latency_seconds_by_view_method_count{ {{service_label}}!="", {{matchers}} }[{{window}}])))'
+keys = ["{{service_label}}", "view"]
+description = "Самые нагруженные view."
+
+[[queries]]
+label = "HTTP (Django): p95 request time (sec) by service & view (top 20)"
+role = "http.p95_by_route"
+unit = "seconds"
+query = 'topk(20, histogram_quantile(0.95, sum by (le, {{service_label}}, view) (rate(django_http_requests_latency_seconds_by_view_method_bucket{ {{service_label}}!="", {{matchers}} }[{{window}}]))))'
+keys = ["{{service_label}}", "view"]
+description = "Самые медленные view по p95."

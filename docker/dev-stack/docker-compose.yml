@@ -1,0 +1,198 @@
+# Dev stack for checking query packs against real exporters (see README.md in this directory).
+# Every port is published on 127.0.0.1 only. Nothing here is for production.
+#
+#   docker compose up -d                      # core: Prometheus, Grafana, InfluxDB, exporters, Keycloak, FastAPI app
+#   docker compose --profile kafka up -d      # + Kafka and kafka_exporter
+#   docker compose --profile locust up -d     # + Locust and locust_exporter
+#   docker compose run --rm k6                # load: InfluxDB 1.x + Prometheus remote write (trend stats)
+#   docker compose run --rm k6-native         # load: Prometheus remote write with native histograms
+#   python check_packs.py                     # runs the pack queries through LoadLens
+
+name: loadlens-dev-stack
+
+x-restart: &restart
+  restart: unless-stopped
+
+services:
+  prometheus:
+    <<: *restart
+    image: prom/prometheus:v2.53.2
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=2d
+      - --web.enable-remote-write-receiver
+      - --enable-feature=native-histograms
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["127.0.0.1:19090:9090"]
+
+  grafana:
+    <<: *restart
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: devstack-admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+    ports: ["127.0.0.1:13000:3000"]
+    depends_on: [prometheus, influxdb]
+
+  influxdb:
+    <<: *restart
+    image: influxdb:1.8
+    environment:
+      INFLUXDB_DB: k6
+      INFLUXDB_HTTP_FLUX_ENABLED: "true"
+      INFLUXDB_HTTP_AUTH_ENABLED: "false"
+    ports: ["127.0.0.1:18086:8086"]
+
+  node-exporter:
+    <<: *restart
+    image: prom/node-exporter:v1.8.2
+    hostname: devstack-node
+
+  postgres:
+    <<: *restart
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: devstack
+      POSTGRES_PASSWORD: devstack
+      POSTGRES_DB: keycloak
+
+  postgres-exporter:
+    <<: *restart
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      DATA_SOURCE_NAME: postgresql://devstack:devstack@postgres:5432/keycloak?sslmode=disable
+    depends_on: [postgres]
+
+  pgbouncer:
+    <<: *restart
+    image: edoburu/pgbouncer:latest
+    environment:
+      DB_HOST: postgres
+      DB_USER: devstack
+      DB_PASSWORD: devstack
+      DB_NAME: keycloak
+      AUTH_TYPE: scram-sha-256
+      POOL_MODE: transaction
+      DEFAULT_POOL_SIZE: "4"
+      MAX_CLIENT_CONN: "200"
+      ADMIN_USERS: devstack
+    depends_on: [postgres]
+
+  pgbouncer-exporter:
+    <<: *restart
+    image: prometheuscommunity/pgbouncer-exporter:latest
+    command: ["--pgBouncer.connectionString=postgres://devstack:devstack@pgbouncer:5432/pgbouncer?sslmode=disable"]
+    depends_on: [pgbouncer]
+
+  redis:
+    <<: *restart
+    image: redis:7-alpine
+    command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
+
+  redis-exporter:
+    <<: *restart
+    image: oliver006/redis_exporter:v1.62.0
+    environment:
+      REDIS_ADDR: redis://redis:6379
+    depends_on: [redis]
+
+  keycloak:
+    <<: *restart
+    # A Quarkus app with Micrometer: jvm_*, process_cpu_usage, http_server_requests_seconds on :9000/metrics.
+    image: quay.io/keycloak/keycloak:26.0
+    command: ["start-dev"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: devstack-admin
+      KC_METRICS_ENABLED: "true"
+      KC_HTTP_METRICS_HISTOGRAMS_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: devstack
+      KC_DB_PASSWORD: devstack
+    depends_on: [postgres]
+    ports: ["127.0.0.1:18080:8080"]
+
+  pyapp:
+    <<: *restart
+    # FastAPI with prometheus-fastapi-instrumentator. Packages come from pyapp/wheels when it holds wheels
+    # (networks whose TLS proxy breaks pip inside containers, see README), otherwise from PyPI.
+    image: python:3.12-slim
+    working_dir: /app
+    command:
+      - sh
+      - -c
+      - >-
+        if ls /app/wheels/*.whl >/dev/null 2>&1;
+        then pip install --no-cache-dir -q --no-index --find-links /app/wheels -r requirements.txt;
+        else pip install --no-cache-dir -q -r requirements.txt; fi
+        && uvicorn app:app --host 0.0.0.0 --port 8000
+    volumes:
+      - ./pyapp:/app:ro
+    ports: ["127.0.0.1:18000:8000"]
+
+  kafka:
+    <<: *restart
+    profiles: [kafka]
+    image: apache/kafka:3.8.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_NUM_PARTITIONS: 3
+
+  kafka-exporter:
+    <<: *restart
+    profiles: [kafka]
+    image: danielqsj/kafka-exporter:v1.8.0
+    command: ["--kafka.server=kafka:9092"]
+    depends_on: [kafka]
+
+  locust:
+    profiles: [locust]
+    image: locustio/locust:2.31.8
+    command: ["-f", "/mnt/locust/locustfile.py", "--host", "http://pyapp:8000", "--users", "30", "--spawn-rate", "5", "--autostart", "--run-time", "6m"]
+    volumes:
+      - ./locust:/mnt/locust:ro
+    depends_on: [pyapp]
+
+  locust-exporter:
+    <<: *restart
+    profiles: [locust]
+    image: containersol/locust_exporter:latest
+    command: ["--locust.uri=http://locust:8089"]
+
+  k6:
+    profiles: [load]
+    image: grafana/k6:0.54.0
+    command: ["run", "--tag", "testid=devstack", "--out", "influxdb=http://influxdb:8086/k6", "--out", "experimental-prometheus-rw", "/scripts/load.js"]
+    environment:
+      K6_PROMETHEUS_RW_SERVER_URL: http://prometheus:9090/api/v1/write
+      K6_PROMETHEUS_RW_TREND_STATS: p(95),p(99),avg
+    volumes:
+      - ./k6:/scripts:ro
+    depends_on: [prometheus, influxdb, keycloak, pyapp]
+
+  k6-native:
+    profiles: [load]
+    image: grafana/k6:0.54.0
+    command: ["run", "--tag", "testid=devstack-native", "--out", "experimental-prometheus-rw", "/scripts/load.js"]
+    environment:
+      K6_PROMETHEUS_RW_SERVER_URL: http://prometheus:9090/api/v1/write
+      K6_PROMETHEUS_RW_TREND_AS_NATIVE_HISTOGRAM: "true"
+      K6_DURATION_SCALE: "0.5"
+    volumes:
+      - ./k6:/scripts:ro
+    depends_on: [prometheus, keycloak, pyapp]

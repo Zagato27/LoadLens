@@ -6,8 +6,8 @@
     if (!total) return '';
     const parts = [];
     if (missingSeries) parts.push(`${missingSeries} — нет нужных рядов в данных (добавьте запросы в «Нагрузочный инструмент» и перегенерируйте отчёт)`);
-    if (missingSettings) parts.push(`${missingSettings} — не заданы настройки прогноза (SLA-критерии → Определение максимальной производительности)`);
-    return `Ещё ${total} отчётов тестов на максимальную производительность пока без прогноза: ${parts.join(', ')}.`;
+    if (missingSettings) parts.push(`${missingSettings} — не заданы настройки прогноза (SLA-критерии → Прогноз мощностей)`);
+    return `Ещё ${total} ступенчатых и стресс-тестов пока без прогноза: ${parts.join(', ')}.`;
   }
 
   function showHint(text) {

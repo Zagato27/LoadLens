@@ -1,0 +1,4 @@
+# Tests and the dependency audit; not installed into the Docker image.
+-r requirements.txt
+pytest==9.1.1
+pip-audit==2.10.1

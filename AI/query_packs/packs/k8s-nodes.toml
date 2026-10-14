@@ -1,0 +1,55 @@
+schema_version = 1
+id = "k8s-nodes"
+version = 1
+title = "Kubernetes: ноды (kube-state-metrics)"
+category = "infrastructure"
+stack = ["kubernetes"]
+domain = "hard_resources"
+language = "promql"
+description = """
+Состояние нод из kube-state-metrics 2.x: готовность, CPU и memory requests относительно allocatable \
+(насколько плотно расписаны поды) и число подов. Фактическую загрузку CPU и памяти нод даёт пакет \
+node_exporter — ставьте их вместе.
+"""
+requires_metrics = ["kube_node_status_condition", "kube_node_status_allocatable", "kube_pod_container_resource_requests"]
+prompt_addendum = """
+Метрики нод Kubernetes: Ready=0 — нода недоступна для подов, requests % от allocatable около 100 — новым \
+подам (в том числе от HPA) не хватит места и они останутся в Pending.
+"""
+
+[variables.ksm_matchers]
+title = "Матчеры kube-state-metrics"
+default = 'job=~".*kube-state-metrics.*"'
+
+[[queries]]
+label = "K8s nodes: Ready by node"
+role = "node.ready"
+unit = "count"
+query = 'max by (node) (kube_node_status_condition{condition="Ready", status="true", {{ksm_matchers}} })'
+keys = ["node"]
+description = "1 — нода готова, 0 — нет."
+
+[[queries]]
+label = "K8s nodes: CPU requests (% of allocatable) by node"
+role = "node.cpu_requests_pct"
+unit = "percent"
+required = true
+query = '100 * sum by (node) (kube_pod_container_resource_requests{resource="cpu", node!="", {{ksm_matchers}} }) / sum by (node) (kube_node_status_allocatable{resource="cpu", {{ksm_matchers}} })'
+keys = ["node"]
+description = "Сумма CPU requests подов ноды от allocatable, %."
+
+[[queries]]
+label = "K8s nodes: Memory requests (% of allocatable) by node"
+role = "node.mem_requests_pct"
+unit = "percent"
+query = '100 * sum by (node) (kube_pod_container_resource_requests{resource="memory", node!="", {{ksm_matchers}} }) / sum by (node) (kube_node_status_allocatable{resource="memory", {{ksm_matchers}} })'
+keys = ["node"]
+description = "Сумма memory requests подов ноды от allocatable, %."
+
+[[queries]]
+label = "K8s nodes: Pods by node"
+role = "node.pods"
+unit = "count"
+query = 'count by (node) (kube_pod_info{node!="", {{ksm_matchers}} })'
+keys = ["node"]
+description = "Поды на ноде."

@@ -17,7 +17,7 @@
 - Если присутствует verdict_rationale, сохраните его как короткое обоснование verdict: сначала 1 краткий вывод, затем 2-4 ключевых фактора списком. Не дублируйте findings буквально.
 - Поле peak_performance допускается только для lt_framework/overall: {max_rps, max_time, drop_time, method}; для остальных доменов удалите его из ответа.
 - Если peak_performance оставлен для capacity/step теста, max_rps должен отражать последнюю стабильную ступень нагрузки (>= 5 мин стабильности), а НЕ кратковременный пик; method="last_stable_step".
-- Если test_profile.mode="stability" или peak_performance.not_applicable=true, не требуйте max_rps и не добавляйте его; допустим объект peak_performance с not_applicable=true и reason.
+- Если test_profile.mode не "capacity" и не "stress" (soak — "stability", всплески — "spike") или peak_performance.not_applicable=true, не требуйте max_rps и не добавляйте его; допустим объект peak_performance с not_applicable=true и reason.
 - Поле verdict ДОЛЖНО принимать одно из значений: "Успешно" | "Есть риски" | "Провал" | "Недостаточно данных". Если в исходном ответе используются синонимы (например, "regress", "warning", "ok", "fail", "no data"), нормализуйте их к ближайшему из перечисленных значений.
 - Никакого текста вне JSON. Если данных недостаточно, верните verdict="Недостаточно данных".
 

@@ -1,0 +1,111 @@
+schema_version = 1
+id = "db-mysqld-exporter"
+version = 1
+title = "MySQL / MariaDB: mysqld_exporter"
+category = "database"
+stack = ["mysql", "mariadb"]
+domain = "database"
+language = "promql"
+description = """
+Метрики prometheus/mysqld_exporter (коллекторы по умолчанию): запросы и транзакции, соединения и их доля \
+от max_connections, выполняющиеся потоки, медленные запросы, ожидания блокировок строк InnoDB, попадания \
+в buffer pool и отставание реплики.
+"""
+requires_metrics = ["mysql_global_status_queries", "mysql_global_status_threads_connected", "mysql_global_variables_max_connections"]
+prompt_addendum = """
+Метрики MySQL: threads_running — запросы, выполняющиеся прямо сейчас (рост при стабильной нагрузке — \
+ожидание блокировок или диска), innodb_row_lock_waits — ожидания блокировок строк, buffer pool hit ниже \
+99 % — чтения с диска, slow_queries — запросы дольше long_query_time.
+"""
+
+[variables.matchers]
+title = "Дополнительные матчеры"
+default = ""
+help = 'Например instance=~"mysql-main.*".'
+
+[variables.window]
+title = "Окно rate()"
+default = "2m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[[queries]]
+label = "DB (MySQL): queries per second by server"
+role = "db.queries_rate"
+unit = "per_second"
+required = true
+query = 'label_replace(sum by (instance) (rate(mysql_global_status_queries{ {{matchers}} }[{{window}}])), "server", "$1", "instance", "(.*)")'
+keys = ["server"]
+description = "Все выполненные запросы в секунду."
+
+[[queries]]
+label = "DB (MySQL): transactions per second by server"
+role = "db.tps"
+unit = "per_second"
+query = 'label_replace(sum by (instance) (rate(mysql_global_status_commands_total{command=~"commit|rollback", {{matchers}} }[{{window}}])), "server", "$1", "instance", "(.*)")'
+keys = ["server"]
+description = "COMMIT и ROLLBACK в секунду."
+
+[[queries]]
+label = "DB (MySQL): connections by server"
+role = "db.connections"
+unit = "count"
+query = 'label_replace(sum by (instance) (mysql_global_status_threads_connected{ {{matchers}} }), "server", "$1", "instance", "(.*)")'
+keys = ["server"]
+description = "Открытые соединения."
+
+[[queries]]
+label = "DB (MySQL): connections used (% of max_connections) by server"
+role = "db.connections_pct"
+unit = "percent"
+required = true
+query = 'label_replace(100 * max by (instance) (mysql_global_status_threads_connected{ {{matchers}} }) / max by (instance) (mysql_global_variables_max_connections{ {{matchers}} }), "server", "$1", "instance", "(.*)")'
+keys = ["server"]
+description = "Доля занятых соединений, %."
+
+[[queries]]
+label = "DB (MySQL): running threads by server"
+role = "db.threads_running"
+unit = "count"
+query = 'label_replace(sum by (instance) (mysql_global_status_threads_running{ {{matchers}} }), "server", "$1", "instance", "(.*)")'
+keys = ["server"]
+description = "Выполняющиеся запросы."
+
+[[queries]]
+label = "DB (MySQL): slow queries per second by server"
+role = "db.slow_queries"
+unit = "per_second"
+query = 'label_replace(sum by (instance) (rate(mysql_global_status_slow_queries{ {{matchers}} }[{{window}}])), "server", "$1", "instance", "(.*)")'
+keys = ["server"]
+description = "Запросы дольше long_query_time."
+
+[[queries]]
+label = "DB (MySQL): InnoDB row lock waits per second by server"
+role = "db.lock_waits"
+unit = "per_second"
+query = 'label_replace(sum by (instance) (rate(mysql_global_status_innodb_row_lock_waits{ {{matchers}} }[{{window}}])), "server", "$1", "instance", "(.*)")'
+keys = ["server"]
+description = "Ожидания блокировок строк InnoDB."
+
+[[queries]]
+label = "DB (MySQL): InnoDB buffer pool hit ratio (%) by server"
+role = "db.cache_hit_pct"
+unit = "percent"
+query = 'label_replace(100 * (1 - sum by (instance) (rate(mysql_global_status_innodb_buffer_pool_reads{ {{matchers}} }[{{window}}])) / sum by (instance) (rate(mysql_global_status_innodb_buffer_pool_read_requests{ {{matchers}} }[{{window}}]))), "server", "$1", "instance", "(.*)")'
+keys = ["server"]
+description = "Чтения страниц из buffer pool без обращения к диску, %."
+
+[[queries]]
+label = "DB (MySQL): replication lag (s) by server"
+role = "db.replication_lag"
+unit = "seconds"
+query = 'label_replace(max by (instance) (mysql_slave_status_seconds_behind_master{ {{matchers}} }), "server", "$1", "instance", "(.*)")'
+keys = ["server"]
+description = "Отставание реплики, с (есть только на репликах)."
+
+[[queries]]
+label = "DB (MySQL): commands per second by command (top 10)"
+role = "db.queries_rate"
+unit = "per_second"
+query = 'topk(10, sum by (command) (rate(mysql_global_status_commands_total{ {{matchers}} }[{{window}}])))'
+keys = ["command"]
+description = "Самые частые команды: select, insert, update…"

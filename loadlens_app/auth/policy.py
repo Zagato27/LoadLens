@@ -7,6 +7,9 @@ Role guide:
   viewer    reads reports, archive, comparison and forecasts
   engineer  also runs analyses, publishes to Confluence, writes notes and votes
   admin     also changes settings, connections and secrets, manages users, deletes data
+
+Settings, connections, projects, prompts and deletions are ``session_only``: an API token, even an
+administrator's, is refused there, so a leaked token can neither reach stored secrets nor destroy data.
 """
 
 from __future__ import annotations
@@ -27,14 +30,15 @@ class Rule:
     audit: str = ""  # audit action recorded after a successful state-changing request
     csrf: bool = True  # unsafe methods need the CSRF token unless the request uses an API token
     password_change_ok: bool = False  # reachable while a password change is being enforced
+    recovery_ok: bool = False  # reachable by a recovery session while the storage database is down
 
 
 PUBLIC = Rule(None)
 _DEFAULT = Rule(A)
 
 
-def _read(role: Role = V) -> Rule:
-    return Rule(role)
+def _read(role: Role = V, **kwargs) -> Rule:
+    return Rule(role, **kwargs)
 
 
 def _page(role: Role = V, **kwargs) -> Rule:
@@ -78,7 +82,7 @@ POLICY: dict[str, Rule] = {
     "dashboard.new_report_page": _page(E),
     "dashboard.get_services": _read(),
     "dashboard.dashboard_data": _read(),
-    "dashboard.demo_seed": _write(A, "demo.seed"),
+    "dashboard.demo_seed": _write(A, "demo.seed", session_only=True),
     "dashboard.llm_reports": _read(),
     "dashboard.llm_context": _read(),
     "dashboard.llm_feedback_get": _read(),
@@ -87,7 +91,8 @@ POLICY: dict[str, Rule] = {
     "dashboard.create_report": _write(E, "report.create"),
     "dashboard.job_status": _read(),
     "dashboard.list_jobs": _read(),
-    "dashboard.delete_run": _write(A, "run.delete"),
+    "dashboard.dismiss_jobs": _write(E, "jobs.dismiss"),  # hides finished jobs from the shared list
+    "dashboard.delete_run": _write(A, "run.delete", session_only=True),
     "dashboard.rename_run": _write(E, "run.rename"),
     "dashboard.project_areas": _read(),
     "dashboard.current_project_area": _read(),
@@ -116,28 +121,41 @@ POLICY: dict[str, Rule] = {
     "forecast.post_forecast_confluence": _write(E, "forecast.publish"),
     # ---- projects ----
     "projects.get_projects": _read(),
-    "projects.post_project": _write(A, "project.create"),
-    "projects.patch_project": _write(A, "project.update"),
-    "projects.remove_project": _write(A, "project.delete"),
-    "projects.post_move_service": _write(A, "project.move_service"),
-    "projects.delete_area_override": _write(A, "project.override_delete"),
-    "projects.delete_service_override": _write(A, "project.override_delete"),
+    "projects.post_project": _write(A, "project.create", session_only=True),
+    "projects.patch_project": _write(A, "project.update", session_only=True),
+    "projects.remove_project": _write(A, "project.delete", session_only=True),
+    "projects.post_move_service": _write(A, "project.move_service", session_only=True),
+    "projects.delete_area_override": _write(A, "project.override_delete", session_only=True),
+    "projects.delete_service_override": _write(A, "project.override_delete", session_only=True),
     # ---- settings: prompts and service metadata ----
-    "settings.settings_page": _page(A),
-    "settings.delete_service": _write(A, "service.delete"),
-    "settings.get_prompts": _read(A),
-    "settings.post_prompts": _write(A, "prompts.save"),
-    "settings.get_prompt_defaults": _read(A),
-    "settings.get_prompt_history": _read(A),
-    "settings.update_service_meta": _write(A, "service.meta_update"),
-    "settings.delete_service_meta": _write(A, "service.meta_delete"),
+    "settings.settings_page": _page(A, session_only=True),
+    "settings.delete_service": _write(A, "service.delete", session_only=True),
+    "settings.get_prompts": _read(A, session_only=True),
+    "settings.post_prompts": _write(A, "prompts.save", session_only=True),
+    "settings.get_prompt_defaults": _read(A, session_only=True),
+    "settings.get_prompt_history": _read(A, session_only=True),
+    "settings.update_service_meta": _write(A, "service.meta_update", session_only=True),
+    "settings.delete_service_meta": _write(A, "service.meta_delete", session_only=True),
     # ---- configuration and connection checks (these use stored secrets) ----
-    "config_api.get_config": _read(A),
-    "config_api.update_config": _write(A, "config.update"),
-    "config_api.test_connection": _write(A, "config.test_connection"),
-    "config_api.grafana_datasources": _read(A),
-    "config_api.llm_models": _write(A),
-    "config_api.query_preview": _write(A, "config.query_preview"),
+    "config_api.get_config": _read(A, session_only=True),
+    "config_api.update_config": _write(A, "config.update", session_only=True),
+    "config_api.test_connection": _write(A, "config.test_connection", session_only=True),
+    "config_api.grafana_datasources": _read(A, session_only=True),
+    "config_api.llm_models": _write(A, "config.llm_models", session_only=True),
+    "config_api.query_preview": _write(A, "config.query_preview", session_only=True),
+    # Sends a document to the LLM provider and returns a draft; nothing is saved.
+    "config_api.import_system_context": _write(A, "config.context_import", session_only=True),
+    # ---- recovery while the storage database is down (also open to administrators otherwise) ----
+    "recovery.recovery_page": _page(A, session_only=True, recovery_ok=True),
+    "recovery.recovery_status": _read(A, session_only=True, recovery_ok=True),
+    "recovery.storage_check": _write(A, "recovery.storage_check", session_only=True, recovery_ok=True),
+    "recovery.storage_save": _write(A, "config.update", session_only=True, recovery_ok=True),
+    # ---- query packs (render and check run against stored connections) ----
+    "query_packs.list_query_packs": _read(A, session_only=True),
+    "query_packs.preview_query_pack": _read(A, session_only=True),
+    "query_packs.check_query_pack": _write(A, "config.query_pack_check", session_only=True),
+    "query_packs.detect_query_packs": _write(A, "config.query_pack_detect", session_only=True),
+    "query_packs.apply_query_pack": _write(A, "config.query_pack_apply", session_only=True),
 }
 
 

@@ -19,7 +19,8 @@
 - Контекст тестируемой системы (справочный):
 {system_context_brief}
 - В JSON-контексте: load_steps, timeline (метрика × ступень по всем доменам), baseline, deterministic_sla,
-  designated_peak_performance и паки доменов.
+  designated_peak_performance, test_profile, паки доменов и данные типа теста (stability_under_load для soak,
+  spike_analysis для spike, saturation для stress).
 
 ФОКУС АНАЛИЗА:
 1. Ступень начала деградации: по timeline определи, на какой ступени впервые выросли latency/ошибки в lt_framework и
@@ -29,8 +30,13 @@
    только там, где все звенья подтверждены числами из timeline или доменных отчётов.
 3. SLA: deterministic_sla — источник истины. Итоговый verdict не должен противоречить deterministic_sla.verdict;
    если target_rps_check.passed=true, нельзя писать, что целевой RPS не достигнут, и наоборот. Не пересчитывай SLA сам.
-4. Максимальная производительность: только designated_peak_performance (stable_max, метод last_stable_step).
-   Не бери RPS из домена microservices и не используй кратковременные пики.
+4. Результат по типу теста (test_profile.normalized_test_type):
+   - step/stress — максимальная производительность только из designated_peak_performance (stable_max, метод
+     last_stable_step); для stress назови её точкой насыщения и опиши saturation.failure_mode и
+     saturation.limiting_resource. Не бери RPS из домена microservices и не используй кратковременные пики.
+   - soak — удержание нагрузки и тренды из stability_under_load (hold, trends, flagged_trends) вместо
+     peak_performance.
+   - spike — уровень всплеска, рост p95 и ошибок относительно фона и время восстановления из spike_analysis.
 5. Baseline: если он доступен — назови ключевые отличия от предыдущего прогона (key_deltas) и учти их в вердикте
    (регресс относительно успешного прогона — риск). Если baseline недоступен — не упоминай сравнение с прошлым.
 6. Доменные находки со статусом verification.status="unverified" не используй как обоснование вердикта — упоминай их
@@ -41,4 +47,5 @@
 - В каждой находке: ступень по label, числа из timeline/доменных отчётов, затронутые компоненты.
 - Рекомендации приоритизируй по системному влиянию и привязывай к находкам через for_finding_ids.
 - verdict_rationale обязателен и должен объяснять именно итоговый статус (в согласии с deterministic_sla.verdict).
-- Поле peak_performance заполняй из designated_peak_performance; если stable_max отсутствует — не добавляй его.
+- Поле peak_performance заполняй из designated_peak_performance; если stable_max отсутствует или
+  designated_peak_performance.not_applicable=true — не добавляй его.

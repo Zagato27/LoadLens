@@ -1,0 +1,28 @@
+# Known vulnerabilities in the pinned dependencies. Runs on dependency changes and weekly, because
+# new advisories appear without any change in this repository.
+name: Dependency audit
+
+on:
+  push:
+    paths: ["requirements*.txt", ".github/workflows/dependency-audit.yml"]
+  pull_request:
+    paths: ["requirements*.txt", ".github/workflows/dependency-audit.yml"]
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pip-audit
+        run: python -m pip install --upgrade pip pip-audit
+      - name: Audit requirements.txt
+        run: pip-audit --requirement requirements.txt --progress-spinner off --desc

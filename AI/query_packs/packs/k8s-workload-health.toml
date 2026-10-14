@@ -1,0 +1,91 @@
+schema_version = 1
+id = "k8s-workload-health"
+version = 1
+title = "Kubernetes: здоровье нагрузки (рестарты, троттлинг, реплики, OOM)"
+category = "infrastructure"
+stack = ["kubernetes"]
+domain = "hard_resources"
+language = "promql"
+description = """
+Сигналы, которые объясняют деградацию под нагрузкой в Kubernetes: перезапуски контейнеров, троттлинг \
+CPU по CFS-квоте, память относительно лимита, OOMKilled, доступные и желаемые реплики deployment и \
+реплики HPA. Источники — cAdvisor (kubelet) и kube-state-metrics 2.x. Ограничьте namespace стенда.
+"""
+requires_metrics = ["kube_pod_container_status_restarts_total", "container_cpu_cfs_throttled_periods_total", "kube_deployment_status_replicas_available"]
+prompt_addendum = """
+Метрики Kubernetes: троттлинг CPU выше 10–20 % означает упор в CPU-лимит контейнера (растут задержки при \
+невысоком CPU узла), память около 100 % лимита ведёт к OOMKilled и перезапуску, доступных реплик меньше \
+желаемых — поды не готовы (readiness) или не помещаются на ноды, рост реплик HPA во время ступени меняет \
+пропускную способность сервиса.
+"""
+
+[variables.namespace]
+title = "Namespace (регулярное выражение)"
+default = ".+"
+pattern = '^[^"\n\r{}]*$'
+
+[variables.ksm_matchers]
+title = "Матчеры kube-state-metrics"
+default = 'job=~".*kube-state-metrics.*"'
+
+[variables.window]
+title = "Окно rate()"
+default = "2m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[[queries]]
+label = "K8s workloads: container restarts (per 5m) by namespace & pod"
+role = "k8s.restarts"
+unit = "count"
+required = true
+query = 'sum by (namespace, pod) (increase(kube_pod_container_status_restarts_total{namespace=~"{{namespace}}", {{ksm_matchers}} }[5m])) > 0'
+keys = ["namespace", "pod"]
+description = "Перезапуски контейнеров за 5 минут (показываются только ненулевые)."
+
+[[queries]]
+label = "K8s workloads: CPU throttling (%) by namespace & pod (top 20)"
+role = "k8s.cpu_throttled_pct"
+unit = "percent"
+query = 'topk(20, 100 * sum by (namespace, pod) (rate(container_cpu_cfs_throttled_periods_total{namespace=~"{{namespace}}", container!="", container!="POD"}[{{window}}])) / sum by (namespace, pod) (rate(container_cpu_cfs_periods_total{namespace=~"{{namespace}}", container!="", container!="POD"}[{{window}}])))'
+keys = ["namespace", "pod"]
+description = "Доля CFS-периодов с троттлингом, %."
+
+[[queries]]
+label = "K8s workloads: memory working set (% of limit) by namespace & pod (top 20)"
+role = "k8s.memory_pct_of_limit"
+unit = "percent"
+query = 'topk(20, 100 * sum by (namespace, pod) (container_memory_working_set_bytes{namespace=~"{{namespace}}", container!="", container!="POD"}) / sum by (namespace, pod) (kube_pod_container_resource_limits{resource="memory", namespace=~"{{namespace}}", {{ksm_matchers}} }))'
+keys = ["namespace", "pod"]
+description = "Working set памяти пода от суммы лимитов контейнеров, %."
+
+[[queries]]
+label = "K8s workloads: OOMKilled containers by namespace & pod"
+role = "k8s.oom_killed"
+unit = "count"
+query = 'sum by (namespace, pod) (kube_pod_container_status_last_terminated_reason{reason="OOMKilled", namespace=~"{{namespace}}", {{ksm_matchers}} }) > 0'
+keys = ["namespace", "pod"]
+description = "Контейнеры, последний раз завершённые OOM killer."
+
+[[queries]]
+label = "K8s workloads: available replicas by namespace & deployment"
+role = "k8s.replicas_available"
+unit = "count"
+query = 'sum by (namespace, deployment) (kube_deployment_status_replicas_available{namespace=~"{{namespace}}", {{ksm_matchers}} })'
+keys = ["namespace", "deployment"]
+description = "Готовые реплики deployment."
+
+[[queries]]
+label = "K8s workloads: desired replicas by namespace & deployment"
+role = "k8s.replicas_desired"
+unit = "count"
+query = 'sum by (namespace, deployment) (kube_deployment_spec_replicas{namespace=~"{{namespace}}", {{ksm_matchers}} })'
+keys = ["namespace", "deployment"]
+description = "Желаемые реплики deployment."
+
+[[queries]]
+label = "K8s workloads: HPA current replicas by namespace & hpa"
+role = "k8s.hpa_replicas"
+unit = "count"
+query = 'sum by (namespace, horizontalpodautoscaler) (kube_horizontalpodautoscaler_status_current_replicas{namespace=~"{{namespace}}", {{ksm_matchers}} })'
+keys = ["namespace", "horizontalpodautoscaler"]
+description = "Текущие реплики по HPA."

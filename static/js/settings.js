@@ -27,6 +27,7 @@
     jsonSyncing: false,
     slaScope: '',
     queriesScope: '',
+    contextScope: '',
     metricsScope: '',
     promptService: '',
     promptDomain: 'overall',
@@ -1031,12 +1032,27 @@
 
   // ---- SLA -----------------------------------------------------------------
   const SLA_FIELDS = [
-    { key: 'target_rps', queryKey: 'max_performance_query', domain: 'lt_framework', label: 'Целевой RPS', unit: 'RPS', term: 'target_rps', desc: 'Главный критерий: достигнут на стабильной ступени выбранного запроса.' },
-    { key: 'max_error_rate_pct', queryKey: 'error_rate_query', domain: 'lt_framework', label: 'Доля ошибок', unit: '%', term: 'error_rate', desc: '95-й перцентиль участка stable_max, до просадки RPS. Хвост после плато не входит. Для soak — всё окно. Единицы запроса.' },
-    { key: 'max_p95_ms', queryKey: 'p95_query', domain: 'lt_framework', label: 'P95 задержки', unit: 'мс', term: 'p95', desc: '95-й перцентиль участка stable_max, до просадки RPS. Хвост после плато не входит. Для soak — всё окно. Единицы запроса.' },
-    { key: 'max_p99_ms', queryKey: 'p99_query', domain: 'lt_framework', label: 'P99 задержки', unit: 'мс', desc: '95-й перцентиль участка stable_max, до просадки RPS. Хвост после плато не входит. Для soak — всё окно. Единицы запроса.' },
-    { key: 'max_cpu_pct', queryKey: 'cpu_query', domain: 'hard_resources', label: 'CPU узлов', unit: '%', desc: '95-й перцентиль участка stable_max, до просадки RPS. Хвост после плато не входит. Для soak — всё окно. Единицы запроса.' },
-    { key: 'max_memory_pct', queryKey: 'memory_query', domain: 'hard_resources', label: 'Память узлов', unit: '%', desc: '95-й перцентиль участка stable_max, до просадки RPS. Хвост после плато не входит. Для soak — всё окно. Единицы запроса.' }
+    { key: 'target_rps', queryKey: 'max_performance_query', domain: 'lt_framework', label: 'Целевой RPS', unit: 'RPS', term: 'target_rps', desc: 'Главный критерий. Ступенчатый и стресс-тест: достигнут на стабильной ступени; soak: удерживается весь тест; spike: уровень всплеска.' },
+    { key: 'max_error_rate_pct', queryKey: 'error_rate_query', domain: 'lt_framework', label: 'Доля ошибок', unit: '%', term: 'error_rate' },
+    { key: 'max_p95_ms', queryKey: 'p95_query', domain: 'lt_framework', label: 'P95 задержки', unit: 'мс', term: 'p95' },
+    { key: 'max_p99_ms', queryKey: 'p99_query', domain: 'lt_framework', label: 'P99 задержки', unit: 'мс' },
+    { key: 'max_cpu_pct', queryKey: 'cpu_query', domain: 'hard_resources', label: 'CPU узлов', unit: '%' },
+    { key: 'max_memory_pct', queryKey: 'memory_query', domain: 'hard_resources', label: 'Память узлов', unit: '%' }
+  ];
+  // One explanation for every criterion except the target RPS (it used to repeat under each row).
+  const SLA_SHARED_DESC = 'Доля ошибок, задержки, CPU и память: 95-й перцентиль на участке stable_max, до просадки RPS; хвост после плато не входит. Для soak — окно удержания, для spike — худший всплеск. Пороги задаются в единицах запроса.';
+  const SLA_PEAK_FIELDS = [
+    { key: 'min_stable_minutes', label: 'Мин. длительность стабильной ступени, мин', type: 'number', step: '0.5' },
+    { key: 'step_detection_preset', label: 'Чувствительность детектора ступеней', type: 'select', options: null },
+    { key: 'step_detection_enabled', label: 'Использовать детектор ступеней (ступенчатые и стресс-тесты)', type: 'checkbox', term: 'step_profile' },
+    { key: 'target_rps_allow_peak_fallback', label: 'Если стабильной ступени нет — использовать пиковый RPS', type: 'checkbox', term: 'peak_max' },
+    { key: 'debug_peak_logging', label: 'Подробные логи расчёта RPS (для диагностики)', type: 'checkbox' }
+  ];
+  const SLA_FORECAST_FIELDS = [
+    { key: 'mean_latency_query', label: 'Запрос среднего времени отклика', type: 'query', domain: 'lt_framework' },
+    { key: 'vus_query', label: 'Запрос числа VU', type: 'query', domain: 'lt_framework' },
+    { key: 'load_model', label: 'Модель нагрузки', type: 'select', options: null, hint: 'Открытая: параллелизм = RPS × среднее время отклика. Закрытая: параллелизм = число VU.' },
+    { key: 'service_cpu_query', label: 'Запрос CPU экземпляров сервисов', type: 'query', domain: 'jvm', hint: 'Доля CPU одного экземпляра от 0 до 1 по (сервис, instance), например process_cpu_usage by (application, instance). По нему считается, сколько подов нужно для цели.' }
   ];
   const SLA_PRESETS = [{ v: 'strict', l: 'strict — строгий' }, { v: 'balanced', l: 'balanced — сбалансированный' }, { v: 'lenient', l: 'lenient — мягкий' }];
   const LATENCY_UNIT_OPTIONS = [{ v: 'ms', l: 'миллисекунды' }, { v: 's', l: 'секунды' }];
@@ -1050,19 +1066,41 @@
     const override = isPlainObject((state.config.service_sla || {})[scope]) ? state.config.service_sla[scope] : {};
     return clone(deepMerge(base, override));
   }
-  function domainLabels(domain, scope) {
+  function domainBlock(domain, scope) {
     const queries = isPlainObject(state.config.queries) ? state.config.queries : {};
     let block = isPlainObject(queries[domain]) ? queries[domain] : {};
     if (scope) {
       const svcQueries = (state.config.service_queries || {})[scope];
       if (isPlainObject(svcQueries) && isPlainObject(svcQueries[domain])) block = deepMerge(block, svcQueries[domain]);
     }
+    return block;
+  }
+  function domainLabels(domain, scope) {
+    const block = domainBlock(domain, scope);
     return Array.isArray(block.labels) ? block.labels.map(String).filter(Boolean) : [];
   }
-  function queryOptions(labels, current) {
-    const values = labels.slice();
-    if (current && !values.includes(current)) values.push(current);
-    return [{ v: '', l: 'не задано' }].concat(values.map((label) => ({ v: label, l: label })));
+  // Query the reports take for an empty SLA reference: the first row of the domain whose role fills it.
+  function roleRefLabel(slaField, domain, scope) {
+    const roles = (packUi.catalog && packUi.catalog.roles) || {};
+    const wanted = Object.keys(roles).filter((name) => roles[name].sla_field === slaField);
+    if (!wanted.length) return '';
+    const block = domainBlock(domain, scope);
+    const blockRoles = isPlainObject(block.roles) ? block.roles : {};
+    return (Array.isArray(block.labels) ? block.labels : []).find((label) => wanted.includes(blockRoles[label])) || '';
+  }
+  function queryOptions(labels, current, autoLabel) {
+    const options = labels.map((label) => ({ v: label, l: label }));
+    // A reference to a query that no longer exists stays visible, marked, until it is changed.
+    if (current && !labels.includes(current)) options.push({ v: current, l: `${current} — запроса нет` });
+    const empty = autoLabel ? `авто по роли: ${autoLabel}` : 'не задано';
+    return [{ v: '', l: empty }].concat(options);
+  }
+  // Warning under a query selector whose saved reference names a missing query; '' when it is fine.
+  function deadRefText(labels, current, autoLabel) {
+    if (!current || labels.includes(current)) return '';
+    return autoLabel
+      ? `Запроса «${current}» больше нет. Отчёт возьмёт «${autoLabel}» по роли; выберите запрос и сохраните.`
+      : `Запроса «${current}» больше нет: критерий не получит данных. Выберите другой запрос.`;
   }
   function renderSlaForm(options) {
     const skipJson = !!(options && options.skipJson);
@@ -1073,7 +1111,10 @@
       const value = model[field.key];
       const enabled = value !== null && value !== undefined && value !== '';
       const currentQuery = String(model[field.queryKey] || '');
-      const options = queryOptions(domainLabels(field.domain, state.slaScope), currentQuery);
+      const labels = domainLabels(field.domain, state.slaScope);
+      const autoLabel = roleRefLabel(field.queryKey, field.domain, state.slaScope);
+      const options = queryOptions(labels, currentQuery, autoLabel);
+      const dead = deadRefText(labels, currentQuery, autoLabel);
       const row = document.createElement('div');
       row.className = 'sla-row';
       row.innerHTML = `
@@ -1082,7 +1123,8 @@
         <input type="number" id="sla-val-${field.key}" value="${enabled ? esc(value) : ''}" ${enabled ? '' : 'disabled'} step="any" />
         <span class="dim">${esc(field.unit)}</span>
         <select id="sla-query-${field.key}" aria-label="Запрос для критерия: ${esc(field.label)}">${options.map((o) => `<option value="${esc(o.v)}" ${o.v === currentQuery ? 'selected' : ''}>${esc(o.l)}</option>`).join('')}</select>
-        <div class="sla-desc">${esc(field.desc)}</div>`;
+        ${field.desc ? `<div class="sla-desc">${esc(field.desc)}</div>` : ''}
+        ${dead ? `<div class="sla-desc sla-dead" role="status">${esc(dead)}</div>` : ''}`;
       const check = row.querySelector(`#sla-on-${field.key}`);
       const num = row.querySelector(`#sla-val-${field.key}`);
       const query = row.querySelector(`#sla-query-${field.key}`);
@@ -1100,51 +1142,75 @@
       query.addEventListener('change', () => {
         model[field.queryKey] = query.value;
         afterSlaChange();
+        renderSlaForm({ skipJson: true });
       });
       rows.appendChild(row);
+      if (field.key === 'target_rps') rows.appendChild(makeEl('p', 'sla-common-note', SLA_SHARED_DESC));
     });
-    const peak = $('slaPeakFields');
-    peak.innerHTML = '';
-    const fields = [
-      { key: 'min_stable_minutes', label: 'Мин. длительность стабильной ступени, мин', type: 'number', step: '0.5' },
-      { key: 'step_detection_preset', label: 'Чувствительность детектора ступеней', type: 'select', options: SLA_PRESETS },
-      { key: 'target_rps_allow_peak_fallback', label: 'Если стабильной ступени нет — использовать пиковый RPS', type: 'checkbox', term: 'peak_max' },
-      { key: 'step_detection_enabled', label: 'Использовать детектор ступеней (step-профиль)', type: 'checkbox', term: 'step_profile' },
-      { key: 'debug_peak_logging', label: 'Подробные логи расчёта RPS (для диагностики)', type: 'checkbox' },
-      { key: 'mean_latency_query', label: 'Запрос среднего времени отклика (прогноз мощностей)', type: 'query', domain: 'lt_framework' },
-      { key: 'vus_query', label: 'Запрос числа VU (прогноз мощностей)', type: 'query', domain: 'lt_framework' },
-      { key: 'latency_unit', label: 'Единицы времени отклика в запросах p95 и среднего', type: 'select', options: LATENCY_UNIT_OPTIONS },
-      { key: 'load_model', label: 'Модель нагрузки (прогноз мощностей)', type: 'select', options: LOAD_MODEL_OPTIONS, hint: 'Открытая: параллелизм = RPS × среднее время отклика. Закрытая: параллелизм = число VU.' },
-      { key: 'service_cpu_query', label: 'Запрос CPU экземпляров сервисов (прогноз мощностей)', type: 'query', domain: 'jvm', hint: 'Доля CPU одного экземпляра от 0 до 1 по (сервис, instance), например process_cpu_usage by (application, instance). По нему считается, сколько подов нужно для цели.' }
-    ];
-    fields.forEach((f) => {
-      const wrap = document.createElement('div');
-      const id = `sla-peak-${f.key}`;
-      const value = model[f.key];
-      const labelHtml = f.term ? ui.term(f.term, f.label) : esc(f.label);
-      if (f.type === 'checkbox') {
-        wrap.innerHTML = `<label class="checkbox-row"><input type="checkbox" id="${id}" ${value ? 'checked' : ''}/> <span>${labelHtml}</span></label>`;
-      } else if (f.type === 'select' || f.type === 'query') {
-        const current = value === undefined || value === null ? '' : String(value);
-        const options = f.type === 'query'
-          ? queryOptions(domainLabels(f.domain, state.slaScope), current)
-          : f.options;
-        wrap.innerHTML = `<label for="${id}">${labelHtml}</label><select id="${id}">${options.map((o) => `<option value="${esc(o.v)}" ${o.v === current ? 'selected' : ''}>${esc(o.l)}</option>`).join('')}</select>${f.hint ? `<div class="field-hint">${esc(f.hint)}</div>` : ''}`;
-      } else {
-        wrap.innerHTML = `<label for="${id}">${labelHtml}</label><input type="number" id="${id}" step="${f.step || 'any'}" value="${value === undefined || value === null ? '' : esc(value)}" />`;
-      }
-      const control = wrap.querySelector('input, select');
-      control.addEventListener('change', () => {
-        if (f.type === 'checkbox') model[f.key] = control.checked;
-        else if (f.type === 'number') { const n = Number(control.value); model[f.key] = control.value === '' || !Number.isFinite(n) ? null : n; }
-        else model[f.key] = control.value;
-        afterSlaChange();
-      });
-      peak.appendChild(wrap);
-    });
+    renderSlaUnitRow(model);
+    renderSlaFieldGroup($('slaPeakFields'), SLA_PEAK_FIELDS, model);
+    renderSlaFieldGroup($('slaForecastFields'), SLA_FORECAST_FIELDS, model);
     ui.applyTerms($('sec-sla'));
     if (!skipJson) setJson(state.editors.ed_sla, model);
     updateSlaDirty();
+  }
+  function slaFieldOptions(f) {
+    if (f.key === 'step_detection_preset') return SLA_PRESETS;
+    if (f.key === 'load_model') return LOAD_MODEL_OPTIONS;
+    if (f.key === 'latency_unit') return LATENCY_UNIT_OPTIONS;
+    return f.options || [];
+  }
+  // One settings control; selects and numbers go into the grid, checkboxes into the list below it.
+  function slaField(f, model) {
+    const wrap = document.createElement('div');
+    wrap.className = f.type === 'checkbox' ? 'sla-check' : 'sla-field';
+    const id = `sla-peak-${f.key}`;
+    const value = model[f.key];
+    const labelHtml = f.term ? ui.term(f.term, f.label) : esc(f.label);
+    let dead = '';
+    if (f.type === 'checkbox') {
+      wrap.innerHTML = `<label class="checkbox-row"><input type="checkbox" id="${id}" ${value ? 'checked' : ''}/> <span>${labelHtml}</span></label>`;
+    } else if (f.type === 'select' || f.type === 'query') {
+      const current = value === undefined || value === null ? '' : String(value);
+      let options = slaFieldOptions(f);
+      if (f.type === 'query') {
+        const labels = domainLabels(f.domain, state.slaScope);
+        const autoLabel = roleRefLabel(f.key, f.domain, state.slaScope);
+        options = queryOptions(labels, current, autoLabel);
+        dead = deadRefText(labels, current, autoLabel);
+      }
+      wrap.innerHTML = `<label for="${id}">${labelHtml}</label><select id="${id}">${options.map((o) => `<option value="${esc(o.v)}" ${o.v === current ? 'selected' : ''}>${esc(o.l)}</option>`).join('')}</select>`
+        + (dead ? `<div class="field-hint warn" role="status">${esc(dead)}</div>` : '')
+        + (f.hint ? `<div class="field-hint">${esc(f.hint)}</div>` : '');
+    } else {
+      wrap.innerHTML = `<label for="${id}">${labelHtml}</label><input type="number" id="${id}" step="${f.step || 'any'}" value="${value === undefined || value === null ? '' : esc(value)}" />`;
+    }
+    const control = wrap.querySelector('input, select');
+    control.addEventListener('change', () => {
+      if (f.type === 'checkbox') model[f.key] = control.checked;
+      else if (f.type === 'number') { const n = Number(control.value); model[f.key] = control.value === '' || !Number.isFinite(n) ? null : n; }
+      else model[f.key] = control.value;
+      afterSlaChange();
+      if (f.type === 'query') renderSlaForm({ skipJson: true });
+    });
+    return wrap;
+  }
+  function renderSlaFieldGroup(host, fields, model) {
+    host.replaceChildren();
+    const grid = makeEl('div', 'form-grid sla-grid');
+    const checks = makeEl('div', 'sla-checks');
+    fields.forEach((f) => (f.type === 'checkbox' ? checks : grid).appendChild(slaField(f, model)));
+    if (grid.childElementCount) host.appendChild(grid);
+    if (checks.childElementCount) host.appendChild(checks);
+  }
+  // Latency units belong to the P95/P99 rows above, so they sit right under the criteria.
+  function renderSlaUnitRow(model) {
+    const host = $('slaUnitRow');
+    host.replaceChildren();
+    const f = { key: 'latency_unit', label: 'Единицы времени отклика в запросах P95, P99 и среднего', type: 'select' };
+    const field = slaField(f, model);
+    field.className = 'sla-field sla-unit-field';
+    host.appendChild(field);
   }
   function afterSlaChange() {
     setJson(state.editors.ed_sla, slaModel());
@@ -1223,6 +1289,7 @@
     const dirty = stable(data) !== state.saved[cfgKey];
     if ($(saveBtn)) $(saveBtn).disabled = !dirty;
     markDirty(`${menu}:${cfgKey}`, label, dirty);
+    if (cfgKey === 'queries') updateWizardNav();
   }
 
   function slaLabelsUsing(name) {
@@ -1283,6 +1350,20 @@
     }
   ];
 
+  // A service with its own context replaces the area context as a whole (lists are not merged).
+  function serviceContext(scope) {
+    const map = isPlainObject(state.config.service_system_context) ? state.config.service_system_context : {};
+    return scope && isPlainObject(map[scope]) ? map[scope] : null;
+  }
+  function effectiveContext(scope) {
+    return clone(serviceContext(scope) || state.config.system_context || {});
+  }
+  function updateContextOverrideNote() {
+    const note = $('contextOverrideNote');
+    if (!note) return;
+    if (!state.contextScope) note.textContent = state.area ? 'Контекст области' : 'Общий контекст';
+    else note.textContent = serviceContext(state.contextScope) ? 'Свой контекст сервиса' : 'Сервис использует контекст области';
+  }
   function contextSnapshot() {
     return isPlainObject(state.models.system_context) ? state.models.system_context : {};
   }
@@ -1307,6 +1388,7 @@
     host.innerHTML = '';
     host.appendChild(contextEnabledToggle(ctx));
     CONTEXT_GROUPS.forEach((group) => host.appendChild(contextGroup(group, ctx)));
+    markContextImport(host);
   }
 
   function contextEnabledToggle(ctx) {
@@ -1331,7 +1413,9 @@
     const section = isPlainObject(ctx[group.key]) ? ctx[group.key] : {};
     if (group.key === 'system') body.appendChild(systemFields(section));
     if (group.key === 'architecture') {
-      body.appendChild(selectField('Стиль архитектуры', section.style, ARCH_STYLES, (v) => setContextPath('architecture', 'style', v)));
+      const style = selectField('Стиль архитектуры', section.style, ARCH_STYLES, (v) => setContextPath('architecture', 'style', v));
+      style.dataset.ctxPath = 'architecture.style';
+      body.appendChild(style);
     }
     (group.lists || []).forEach(([key, title, columns]) => body.appendChild(contextTable(group.key, key, title, columns, section[key])));
     (group.lines || []).forEach(([key, title]) => body.appendChild(contextLines(group.key, key, title, section[key])));
@@ -1351,15 +1435,13 @@
   function systemFields(section) {
     const box = makeEl('div');
     const grid = makeEl('div', 'form-grid two');
-    grid.append(
-      textField('Название', section.name, (v) => setContextPath('system', 'name', v)),
-      textField('Домен', section.domain, (v) => setContextPath('system', 'domain', v))
-    );
-    box.append(
-      grid,
-      textField('Описание', section.description, (v) => setContextPath('system', 'description', v), true),
-      textField('Цель теста', section.test_goal, (v) => setContextPath('system', 'test_goal', v), true)
-    );
+    const field = (label, key, multiline) => {
+      const wrap = textField(label, section[key], (v) => setContextPath('system', key, v), multiline);
+      wrap.dataset.ctxPath = `system.${key}`;
+      return wrap;
+    };
+    grid.append(field('Название', 'name'), field('Домен', 'domain'));
+    box.append(grid, field('Описание', 'description', true), field('Цель теста', 'test_goal', true));
     return box;
   }
 
@@ -1405,6 +1487,7 @@
   function contextTable(groupKey, key, title, columns, items) {
     const rows = Array.isArray(items) ? items : [];
     const box = makeEl('div', 'struct-block');
+    box.dataset.ctxPath = `${groupKey}.${key}`;
     const head = makeEl('div', 'struct-head');
     head.append(makeEl('h4', '', title), makeBtn('Добавить', () => {
       setContextPath(groupKey, key, currentContextList(groupKey, key).concat([{}]));
@@ -1466,6 +1549,7 @@
 
   function contextLines(groupKey, key, title, values) {
     const wrap = makeEl('div', 'ctx-field');
+    wrap.dataset.ctxPath = `${groupKey}.${key}`;
     const id = nextFieldId();
     const lab = makeEl('label', '', title);
     lab.htmlFor = id;
@@ -1477,6 +1561,185 @@
     area.addEventListener('change', () => setContextPath(groupKey, key, splitList(area.value, '\n')));
     wrap.append(lab, area);
     return wrap;
+  }
+
+  // ---- system context from a document ---------------------------------------
+  const CONTEXT_IMPORT_MAX_BYTES = 10 * 1024 * 1024;
+  const CONTEXT_IMPORT_ACTIONS = { filled: 'заполнено', added: 'добавлено', replaced: 'заменено', cleared: 'очищено' };
+
+  function contextScopeTitle() {
+    const areaMeta = (state.config.areas_meta || []).find((item) => item && item.id === state.area);
+    const areaTitle = state.area ? ((areaMeta && areaMeta.title) || state.area) : 'общий контекст';
+    if (!state.contextScope) return state.area ? `область «${areaTitle}»` : areaTitle;
+    const svc = state.servicesMeta[state.contextScope];
+    return `сервис «${(svc && svc.title) || state.contextScope}» в области «${areaTitle}»`;
+  }
+  function contextLlmTitle() {
+    const llm = isPlainObject(state.config.llm) ? state.config.llm : {};
+    const provider = String(llm.provider || '');
+    const model = provider && isPlainObject(llm[provider]) ? String(llm[provider].model || '') : '';
+    return provider ? (model ? `${provider} / ${model}` : provider) : '';
+  }
+  function clearContextImport() {
+    state.contextImport = null;
+    const banner = $('contextImportBanner');
+    if (banner) { banner.hidden = true; banner.replaceChildren(); }
+  }
+  function markContextImport(host) {
+    const paths = state.contextImport ? state.contextImport.paths : null;
+    host.querySelectorAll('[data-ctx-path]').forEach((el) => {
+      const hit = !!(paths && paths.has(el.dataset.ctxPath));
+      el.classList.toggle('is-imported', hit);
+      if (hit) { const group = el.closest('details'); if (group) group.open = true; }
+    });
+  }
+  function showContextImportBanner(result) {
+    const banner = $('contextImportBanner');
+    banner.replaceChildren();
+    const source = result.source || {};
+    let from = 'вставленного текста';
+    if (source.format === 'confluence') from = `страницы Confluence «${source.name}»`;
+    else if (source.name) from = `файла «${source.name}»`;
+    const changes = Array.isArray(result.changes) ? result.changes : [];
+    const head = makeEl('div', 'ctx-import-head');
+    head.appendChild(makeEl('strong', '', changes.length
+      ? `Контекст заполнен из ${from}. Проверьте подсвеченные поля и сохраните.`
+      : `Разбор ${from} не дал ничего нового для этого контекста.`));
+    const actions = makeEl('div', 'ctx-import-actions');
+    actions.append(
+      makeBtn('Отменить импорт', () => {
+        if (state.contextImport) commitStructured('system_context', state.contextImport.previous, 'ed_system_context', 'contextSaveBtn', 'context', 'Контекст системы');
+        clearContextImport();
+        renderContextForm();
+      }, 'btn btn-sm'),
+      makeBtn('Скрыть', () => { clearContextImport(); renderContextForm(); }, 'btn btn-sm btn-ghost')
+    );
+    head.appendChild(actions);
+    banner.appendChild(head);
+    if (changes.length) {
+      const list = makeEl('ul', 'ctx-import-changes');
+      changes.forEach((change) => {
+        const count = change.count ? `: ${change.count}` : '';
+        list.appendChild(makeEl('li', '', `${change.title} — ${CONTEXT_IMPORT_ACTIONS[change.action] || change.action}${count}`));
+      });
+      banner.appendChild(list);
+    }
+    (result.warnings || []).forEach((warning) => banner.appendChild(makeEl('p', 'field-hint warn', warning)));
+    banner.hidden = false;
+  }
+  function applyContextImport(result) {
+    const previous = clone(contextSnapshot());
+    commitStructured('system_context', result.context || {}, 'ed_system_context', 'contextSaveBtn', 'context', 'Контекст системы');
+    state.contextImport = { previous, paths: new Set((result.changes || []).map((change) => change.path)) };
+    renderContextForm();
+    showContextImportBanner(result);
+    $('contextImportBanner').scrollIntoView({ block: 'nearest' });
+  }
+  async function postContextImport(body, setStatus) {
+    const source = body.querySelector('[data-source][aria-pressed="true"]').dataset.source;
+    const mode = body.querySelector('input[name="ctxImportMode"]:checked').value;
+    const common = { area: state.area || '', service: state.contextScope || '', mode };
+    let init;
+    if (source === 'file') {
+      const file = body.querySelector('.ctx-import-file').files[0];
+      if (!file) { setStatus('Выберите файл', 'error'); return null; }
+      if (file.size > CONTEXT_IMPORT_MAX_BYTES) { setStatus('Файл больше 10 МБ', 'error'); return null; }
+      const form = new FormData();
+      form.append('file', file);
+      Object.entries(common).forEach(([key, value]) => form.append(key, value));
+      form.append('current', JSON.stringify(contextSnapshot()));
+      init = { method: 'POST', body: form };
+    } else if (source === 'confluence') {
+      const url = body.querySelector('.ctx-import-url').value.trim();
+      if (!/^https?:\/\//i.test(url)) { setStatus('Вставьте полную ссылку на страницу Confluence', 'error'); return null; }
+      init = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...common, confluence_url: url, current: contextSnapshot() }) };
+    } else {
+      const text = body.querySelector('.ctx-import-text').value;
+      if (text.trim().length < 40) { setStatus('Вставьте описание системы: хотя бы несколько предложений', 'error'); return null; }
+      init = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...common, text, current: contextSnapshot() }) };
+    }
+    const started = Date.now();
+    setStatus('Модель разбирает документ… обычно 20–60 с', '');
+    const timer = setInterval(() => setStatus(`Модель разбирает документ… прошло ${Math.round((Date.now() - started) / 1000)} с`, ''), 1000);
+    try {
+      const resp = await fetch('/config/system_context/import', init);
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) { setStatus(data.error || `Ошибка HTTP ${resp.status}`, 'error'); return null; }
+      return data;
+    } catch (e) {
+      setStatus('Сервер не отвечает, попробуйте ещё раз', 'error');
+      return null;
+    } finally {
+      clearInterval(timer);
+    }
+  }
+  async function openContextImport() {
+    const llm = contextLlmTitle();
+    const confluence = isPlainObject(state.config.confluence) ? state.config.confluence : {};
+    const confluenceBase = String(confluence.base_url || '').trim().replace(/\/+$/, '');
+    const warning = llm
+      ? `Текст документа или страницы будет отправлен модели ${esc(llm)} из настроек LLM. Ничего не сохранится, пока вы не нажмёте «Сохранить» в форме.`
+      : 'Провайдер LLM не настроен: сначала задайте его в карточке «LLM» раздела «Подключения».';
+    const bodyHtml = `
+      <p class="field-hint warn">${warning}</p>
+      <p class="dim">Куда: ${esc(contextScopeTitle())}</p>
+      <div class="seg-group ctx-import-source" role="group" aria-label="Источник">
+        <button type="button" class="seg-btn" data-source="file" aria-pressed="true">Файл</button>
+        <button type="button" class="seg-btn" data-source="text" aria-pressed="false">Текст</button>
+        <button type="button" class="seg-btn" data-source="confluence" aria-pressed="false">Confluence</button>
+      </div>
+      <div class="ctx-import-pane" data-pane="file">
+        <input type="file" class="ctx-import-file" accept=".pdf,.docx,.md,.markdown,.txt" aria-label="Документ" />
+        <div class="field-hint">PDF с текстовым слоем, Word (.docx), Markdown или текст, до 10 МБ. Сканы без текста не читаются.</div>
+      </div>
+      <div class="ctx-import-pane" data-pane="text" hidden>
+        <textarea class="ctx-import-text" rows="10" aria-label="Описание системы" placeholder="Вставьте описание системы: назначение, компоненты, зависимости, сценарии, риски…"></textarea>
+      </div>
+      <div class="ctx-import-pane" data-pane="confluence" hidden>
+        <input type="url" class="ctx-import-url" aria-label="Ссылка на страницу Confluence" placeholder="${esc(confluenceBase ? `${confluenceBase}/pages/viewpage.action?pageId=…` : 'https://confluence.example.ru/pages/viewpage.action?pageId=…')}" />
+        <div class="field-hint">${confluenceBase
+          ? `Страница из ${esc(confluenceBase)} читается учётной записью из подключения Confluence. Подойдёт адрес страницы из браузера или короткая ссылка.`
+          : 'Сначала настройте подключение Confluence в разделе «Подключения»: страница читается его учётной записью.'}</div>
+      </div>
+      <fieldset class="ctx-import-mode">
+        <legend>Как применить</legend>
+        <label class="checkbox-row"><input type="radio" name="ctxImportMode" value="fill" checked /> <span>Дополнить: заполнить пустые поля и добавить новые элементы</span></label>
+        <label class="checkbox-row"><input type="radio" name="ctxImportMode" value="replace" /> <span>Заменить: весь контекст из документа</span></label>
+      </fieldset>
+      <div class="ctx-import-status" role="status" aria-live="polite"></div>`;
+    let busy = false;
+    await ui.dialog({
+      title: 'Заполнить контекст из документа',
+      wide: true,
+      bodyHtml,
+      onOpen: (body) => {
+        body.querySelectorAll('[data-source]').forEach((btn) => btn.addEventListener('click', () => {
+          body.querySelectorAll('[data-source]').forEach((other) => other.setAttribute('aria-pressed', other === btn ? 'true' : 'false'));
+          body.querySelectorAll('[data-pane]').forEach((pane) => { pane.hidden = pane.dataset.pane !== btn.dataset.source; });
+        }));
+      },
+      actions: [
+        { label: 'Отмена' },
+        {
+          label: 'Разобрать',
+          primary: true,
+          onClick: async (close, body) => {
+            if (busy || !llm) return;
+            busy = true;
+            const status = body.querySelector('.ctx-import-status');
+            const setStatus = (text, tone) => { status.textContent = text; status.className = `ctx-import-status ${tone || ''}`.trim(); };
+            const buttons = Array.from(body.closest('dialog').querySelectorAll('.dialog-actions button'));
+            buttons.forEach((btn) => { btn.disabled = true; });
+            const result = await postContextImport(body, setStatus);
+            buttons.forEach((btn) => { btn.disabled = false; });
+            busy = false;
+            if (!result) return;
+            close(true);
+            applyContextImport(result);
+          }
+        }
+      ]
+    });
   }
 
   // ---- queries form ----------------------------------------------------------
@@ -1562,8 +1825,11 @@
     search.value = state.querySearch || '';
     search.addEventListener('input', () => { state.querySearch = search.value; renderQueryList(); });
     const toolbar = makeEl('div', 'struct-toolbar');
-    toolbar.append(search, makeBtn('Добавить запрос', addQueryRow));
+    toolbar.append(search, makeBtn('Добавить запрос', addQueryRow), makeBtn('Добавить из пакета', () => openPackDialog(state.wizard ? '' : domain), 'btn btn-primary'));
     host.appendChild(toolbar);
+    const installed = installedPacksLine(domain);
+    if (installed) host.appendChild(installed);
+    host.appendChild(domainTitleField(domain));
     const list = makeEl('div', 'q-list');
     list.id = 'queryList';
     host.appendChild(list);
@@ -1635,6 +1901,12 @@
     if (meta.length) main.appendChild(makeEl('div', 'q-item-meta', meta.join(' · ')));
     if (!open) main.appendChild(makeEl('div', 'q-item-code', (row.query.split('\n').find((line) => line.trim()) || '').trim() || '—'));
     head.appendChild(main);
+    const roles = isPlainObject(queryBlock(domain).roles) ? queryBlock(domain).roles : {};
+    if (roles[row.label]) {
+      const rolePill = makeEl('span', 'pill na', roleTitle(roles[row.label]));
+      rolePill.title = `Роль из пакета запросов: ${roles[row.label]}`;
+      head.appendChild(rolePill);
+    }
     const used = slaLabelsUsing(row.label);
     if (used.length) head.appendChild(makeEl('span', 'pill na', `SLA: ${slaUsageText(used)}`));
     head.appendChild(makeEl('span', 'q-item-caret', open ? '▾' : '▸'));
@@ -1712,7 +1984,14 @@
     const nameInput = name.querySelector('input');
     nameInput.addEventListener('change', () => {
       renameSlaLabel(row.label, nameInput.value);
-      editQueryBlock(domain, (block) => { block.labels[row.index] = nameInput.value; });
+      editQueryBlock(domain, (block) => {
+        block.labels[row.index] = nameInput.value;
+        // The role belongs to the row, so it follows the new name.
+        if (isPlainObject(block.roles) && Object.prototype.hasOwnProperty.call(block.roles, row.label)) {
+          block.roles[nameInput.value] = block.roles[row.label];
+          delete block.roles[row.label];
+        }
+      });
       renderQueriesForm();
     });
     const query = textField(`Запрос (${spec.label})`, row.query, () => {}, true);
@@ -1771,6 +2050,7 @@
     if (!window.confirm(`Удалить запрос «${label || 'без названия'}»?`)) return;
     editQueryBlock(domain, (block) => {
       QUERY_PARALLEL_KEYS.forEach((key) => { if (Array.isArray(block[key]) && index < block[key].length) block[key].splice(index, 1); });
+      if (isPlainObject(block.roles)) delete block.roles[label];
     });
     state.queryOpen = null;
     renderQueriesForm();
@@ -1790,6 +2070,589 @@
     });
     state.queryOpen = `${domain}:${target}`;
     renderQueryList();
+  }
+
+  // ---- query packs -----------------------------------------------------------
+  // Ready-made queries for common stacks. The dialog lists packs and bundles for the scope this
+  // section edits (area and service), checks a pack against the sources, previews the changes and
+  // applies them through /config/query_packs/*; the page then reloads queries and SLA from the server.
+  const PACK_COMPAT = {
+    ok: { cls: 'ok', text: 'Совместим' },
+    replace_only: { cls: 'warn', text: 'Только с заменой' },
+    incompatible: { cls: 'error', text: 'Несовместим' }
+  };
+  const packUi = { catalog: null, forms: {}, view: { name: 'list', domain: '' }, body: null };
+
+  function packScope() {
+    const scope = {};
+    if (state.area) scope.area = state.area;
+    if (state.area && state.queriesScope) scope.service = state.queriesScope;
+    return scope;
+  }
+  async function loadPackCatalog() {
+    const url = new URL('/config/query_packs', location.origin);
+    Object.entries(packScope()).forEach(([key, value]) => url.searchParams.set(key, value));
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    packUi.catalog = data;
+    return data;
+  }
+  function findPack(id) { return ((packUi.catalog && packUi.catalog.packs) || []).find((p) => p.id === id) || null; }
+  function findBundle(id) { return ((packUi.catalog && packUi.catalog.bundles) || []).find((b) => b.id === id) || null; }
+  function roleTitle(role) {
+    const roles = (packUi.catalog && packUi.catalog.roles) || {};
+    return (roles[role] && roles[role].title) || role;
+  }
+  function packForm(pack) {
+    if (!packUi.forms[pack.id]) {
+      const saved = (pack.installed && pack.installed.variables) || {};
+      // An installed pack keeps the user's selection: present rows plus queries added by newer versions.
+      const selected = pack.installed && Array.isArray(pack.installed.selected_indexes) ? new Set(pack.installed.selected_indexes) : null;
+      packUi.forms[pack.id] = {
+        variables: Object.fromEntries(pack.variables.map((v) => [v.name, saved[v.name] !== undefined ? saved[v.name] : v.default])),
+        include: pack.queries.map((_, index) => (selected ? selected.has(index) : true)),
+        mode: pack.compatibility.status === 'replace_only' ? 'replace' : 'merge',
+        fillSla: true,
+        overwriteSla: true,
+        check: null,
+        preview: null
+      };
+    }
+    return packUi.forms[pack.id];
+  }
+  function includedIndexes(form) {
+    return form.include.map((on, index) => (on ? index : -1)).filter((index) => index >= 0);
+  }
+  function packRequest(pack, form, extra) {
+    return Object.assign({ pack_id: pack.id, variables: form.variables, include_indexes: includedIndexes(form) }, packScope(), extra || {});
+  }
+  async function postPack(path, body) {
+    const resp = await fetch(`/config/query_packs/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    return data;
+  }
+  function scopeLine() {
+    const parts = [state.area ? `область «${state.area}»` : 'общие настройки (без области)'];
+    if (state.area && state.queriesScope) parts.push(`сервис «${state.queriesScope}»`);
+    return makeEl('p', 'help', `Применяется к: ${parts.join(', ')}. Обновятся запросы домена и ссылки SLA этой области видимости.`);
+  }
+  function packPills(pack) {
+    const wrap = makeEl('span', 'pack-pills');
+    wrap.appendChild(makeEl('span', 'pill na', pack.language_title));
+    const compat = PACK_COMPAT[pack.compatibility.status] || PACK_COMPAT.incompatible;
+    const pill = makeEl('span', `pill ${compat.cls}`, compat.text);
+    if (pack.compatibility.reason) pill.title = pack.compatibility.reason;
+    wrap.appendChild(pill);
+    if (pack.installed) {
+      const outdated = pack.installed.outdated;
+      wrap.appendChild(makeEl('span', `pill ${outdated ? 'warn' : 'ok'}`, outdated ? `Установлен v${pack.installed.version}, есть v${pack.version}` : `Установлен v${pack.installed.version}`));
+    }
+    if (pack.verified) {
+      const verified = makeEl('span', 'pill done', 'Проверен на стенде');
+      verified.title = 'Все запросы пакета вернули данные на стенде docker/dev-stack с живыми экспортерами';
+      wrap.appendChild(verified);
+    }
+    const detected = detectionPill(pack);
+    if (detected) wrap.appendChild(detected);
+    return wrap;
+  }
+
+  // ---- detection: which packs fit the metric names the bound sources hold ----
+  function packDetection(pack) {
+    const det = packUi.detection;
+    if (!det) return null;
+    const domainInfo = (det.domains || {})[pack.domain] || {};
+    const item = (det.packs || {})[pack.id];
+    if (domainInfo.error || !item || !(item.found.length + item.missing.length)) return null;
+    return item;
+  }
+  function packScore(pack) {
+    const item = packDetection(pack);
+    return item ? item.score : -1;
+  }
+  function detectionPill(pack) {
+    const item = packDetection(pack);
+    if (!item) return null;
+    const total = item.found.length + item.missing.length;
+    let pill;
+    if (item.score >= 1) pill = makeEl('span', 'pill ok', 'Метрики найдены');
+    else if (item.found.length) pill = makeEl('span', 'pill warn', `Найдено ${item.found.length} из ${total} метрик`);
+    else pill = makeEl('span', 'pill na', 'Метрик нет в источнике');
+    if (item.missing.length) pill.title = `Нет: ${item.missing.join(', ')}`;
+    return pill;
+  }
+  async function runPackDetection() {
+    packUi.detecting = true;
+    packUi.detectError = '';
+    renderPackDialog(false);
+    try {
+      packUi.detection = await postPack('detect', packScope());
+    } catch (e) {
+      packUi.detection = null;
+      packUi.detectError = e.message;
+    } finally {
+      packUi.detecting = false;
+      renderPackDialog(false);
+    }
+  }
+  function detectionBar() {
+    const wrap = makeEl('div');
+    const bar = makeEl('div', 'struct-toolbar');
+    const label = packUi.detecting ? 'Читаю метрики источников…' : (packUi.detection ? 'Определить заново' : 'Определить по источникам');
+    const btn = makeBtn(label, runPackDetection, packUi.detection ? 'btn btn-sm' : 'btn btn-sm btn-primary');
+    btn.disabled = !!packUi.detecting;
+    bar.append(btn, makeEl('span', 'dim', packUi.detection
+      ? 'Пакеты отсортированы по найденным у источников метрикам.'
+      : 'Прочитает имена метрик у источников доменов и подскажет подходящие пакеты и наборы.'));
+    wrap.appendChild(bar);
+    if (packUi.detectError) wrap.appendChild(makeEl('p', 'pack-note error', `Не удалось определить: ${packUi.detectError}`));
+    if (packUi.detection) {
+      Object.entries(packUi.detection.domains || {}).forEach(([domain, info]) => {
+        if (info.error) wrap.appendChild(makeEl('p', 'pack-note warn', `${LL.domainTitle(domain)}: ${info.error}`));
+      });
+    }
+    return wrap;
+  }
+  function bundlePill(bundle) {
+    const det = packUi.detection && (packUi.detection.bundles || {})[bundle.id];
+    if (!det) return null;
+    const tone = det.matched === det.total ? 'ok' : (det.score > 0 ? 'warn' : 'na');
+    return makeEl('span', `pill ${tone}`, `Подходят ${det.matched} из ${det.total} пакетов`);
+  }
+
+  async function openPackDialog(domain, packId) {
+    if (state.dirty.has('queries:queries') || state.dirty.has('sla:model')) {
+      ui.toast('Сначала сохраните или отмените изменения в разделах «Запросы» и «SLA»: пакет применяется к сохранённым настройкам.', { tone: 'warn', timeout: 8000 });
+      return;
+    }
+    packUi.forms = {};
+    packUi.detection = null;
+    packUi.detectError = '';
+    // The wizard starts from scratch, so it reads the sources right away to suggest a bundle.
+    packUi.autoDetect = !!state.wizard;
+    packUi.view = packId
+      ? { name: 'pack', packId, back: { name: 'list', domain: domain || '' } }
+      : { name: 'list', domain: domain || '' };
+    await ui.dialog({
+      title: 'Пакеты запросов',
+      wide: true,
+      actions: [{ label: 'Закрыть' }],
+      onOpen: (body) => { packUi.body = body; renderPackDialog(true); }
+    });
+    packUi.body = null;
+  }
+  async function renderPackDialog(reload) {
+    const body = packUi.body;
+    if (!body) return;
+    if (reload || !packUi.catalog) {
+      body.innerHTML = '';
+      body.appendChild(makeEl('p', 'dim', 'Загрузка каталога…'));
+      try {
+        await loadPackCatalog();
+      } catch (e) {
+        body.innerHTML = '';
+        body.appendChild(makeEl('p', 'binding-error', `Не удалось загрузить пакеты: ${e.message}`));
+        return;
+      }
+      if (packUi.autoDetect && !packUi.detection && !packUi.detecting) {
+        packUi.autoDetect = false;
+        runPackDetection();
+        return;
+      }
+    }
+    body.innerHTML = '';
+    const view = packUi.view;
+    const pack = view.name === 'pack' ? findPack(view.packId) : null;
+    const bundle = view.name === 'bundle' ? findBundle(view.bundleId) : null;
+    if (pack) body.appendChild(packCard(pack));
+    else if (bundle) body.appendChild(bundleCard(bundle));
+    else body.appendChild(packList(view.domain || ''));
+  }
+  function showPackView(view) {
+    packUi.view = view;
+    renderPackDialog(false);
+  }
+
+  function packList(domain) {
+    const host = makeEl('div', 'pack-browser');
+    host.appendChild(scopeLine());
+    const tabs = makeEl('div', 'struct-tabs');
+    [['', 'Все домены']].concat(QUERY_DOMAINS.map((d) => [d, LL.domainTitle(d)])).forEach(([key, title]) => {
+      tabs.appendChild(makeBtn(title, () => showPackView({ name: 'list', domain: key }), 'btn btn-sm' + (key === domain ? ' is-active' : '')));
+    });
+    host.appendChild(tabs);
+    host.appendChild(detectionBar());
+    const catalog = packUi.catalog || {};
+    if (!domain && (catalog.bundles || []).length) {
+      host.appendChild(makeEl('h4', 'pack-group', 'Наборы для типовых стеков'));
+      const bundleScore = (bundle) => ((packUi.detection && (packUi.detection.bundles || {})[bundle.id]) || { score: -1 }).score;
+      catalog.bundles.slice().sort((a, b) => bundleScore(b) - bundleScore(a)).forEach((bundle) => {
+        const row = makeEl('div', 'pack-row');
+        const main = makeEl('div', 'pack-row-main');
+        const head = makeEl('div', 'pack-row-title');
+        head.appendChild(makeEl('strong', '', bundle.title));
+        const pill = bundlePill(bundle);
+        if (pill) head.appendChild(pill);
+        main.append(head, makeEl('div', 'pack-row-desc', bundle.description), makeEl('div', 'dim', `Пакетов: ${bundle.packs.length}`));
+        row.append(main, makeBtn('Открыть', () => showPackView({ name: 'bundle', bundleId: bundle.id }), 'btn btn-sm'));
+        host.appendChild(row);
+      });
+    }
+    const packs = (catalog.packs || []).filter((p) => !domain || p.domain === domain);
+    Object.entries(catalog.categories || {}).forEach(([category, title]) => {
+      const items = packs.filter((p) => p.category === category).sort((a, b) => packScore(b) - packScore(a));
+      if (!items.length) return;
+      host.appendChild(makeEl('h4', 'pack-group', title));
+      items.forEach((pack) => host.appendChild(packRow(pack, { name: 'list', domain })));
+    });
+    if (!packs.length) host.appendChild(makeEl('p', 'dim', 'Для этого домена пакетов нет.'));
+    return host;
+  }
+  function packRow(pack, back) {
+    const row = makeEl('div', 'pack-row');
+    const main = makeEl('div', 'pack-row-main');
+    const head = makeEl('div', 'pack-row-title');
+    head.append(makeEl('strong', '', pack.title), packPills(pack));
+    main.append(head, makeEl('div', 'dim', `${LL.domainTitle(pack.domain)} · запросов: ${pack.queries.length}`), makeEl('div', 'pack-row-desc', pack.description));
+    row.append(main, makeBtn('Открыть', () => showPackView({ name: 'pack', packId: pack.id, back }), 'btn btn-sm'));
+    return row;
+  }
+  function bundleCard(bundle) {
+    const host = makeEl('div', 'pack-browser');
+    host.appendChild(makeBtn('← К списку', () => showPackView({ name: 'list', domain: '' }), 'btn btn-sm'));
+    host.appendChild(makeEl('h4', 'pack-group', bundle.title));
+    host.appendChild(makeEl('p', 'help', bundle.description));
+    host.appendChild(scopeLine());
+    host.appendChild(makeEl('p', 'help', 'Откройте пакеты по очереди: задайте переменные, проверьте запросы и примените. Начните с нагрузочного инструмента — по нему ищутся ступени нагрузки.'));
+    bundle.packs.map(findPack).filter(Boolean).forEach((pack) => host.appendChild(packRow(pack, { name: 'bundle', bundleId: bundle.id })));
+    return host;
+  }
+  function checkboxField(label, checked, onChange) {
+    const wrap = makeEl('label', 'pack-check');
+    const input = makeEl('input');
+    input.type = 'checkbox';
+    input.checked = !!checked;
+    input.addEventListener('change', () => onChange(input.checked));
+    wrap.append(input, document.createTextNode(` ${label}`));
+    return wrap;
+  }
+
+  function packCard(pack) {
+    const form = packForm(pack);
+    const host = makeEl('div', 'pack-browser');
+    const back = packUi.view.back || { name: 'list', domain: pack.domain };
+    host.appendChild(makeBtn(back.name === 'bundle' ? '← К набору' : '← К списку', () => showPackView(back), 'btn btn-sm'));
+    const title = makeEl('div', 'pack-row-title');
+    title.append(makeEl('h4', 'pack-group', pack.title), packPills(pack));
+    host.appendChild(title);
+    host.appendChild(makeEl('p', 'help', pack.description));
+    host.appendChild(makeEl('p', 'dim', `Домен: ${LL.domainTitle(pack.domain)}. Нужные метрики: ${pack.requires_metrics.join(', ') || '—'}.`));
+    const detected = packDetection(pack);
+    if (detected) {
+      const parts = [];
+      if (detected.found.length) parts.push(`найдены ${detected.found.join(', ')}`);
+      if (detected.missing.length) parts.push(`нет ${detected.missing.join(', ')}`);
+      host.appendChild(makeEl('p', `pack-note ${detected.score >= 1 ? '' : 'warn'}`, `У источника домена ${parts.join('; ')}.`));
+    }
+    if (pack.compatibility.reason) host.appendChild(makeEl('p', `pack-note ${pack.compatibility.status === 'incompatible' ? 'error' : 'warn'}`, pack.compatibility.reason));
+    if (pack.installed && pack.installed.outdated) {
+      host.appendChild(makeEl('p', 'pack-note warn', `Установлена v${pack.installed.version}, доступна v${pack.version}. Отмечены запросы, которые уже есть в домене, и новые запросы версии (${pack.installed.new_queries}). Переменные взяты из установленного пакета; «Показать изменения» покажет обновление.`));
+    } else if (pack.installed) {
+      host.appendChild(makeEl('p', 'help', 'Пакет установлен: отмечены запросы, которые есть в домене, переменные взяты из установки.'));
+    }
+    host.appendChild(scopeLine());
+    const incompatible = pack.compatibility.status === 'incompatible';
+
+    const invalidate = () => { form.check = null; form.preview = null; renderQueries(); renderPlan(); };
+    if (pack.variables.length) {
+      host.appendChild(makeEl('h4', 'pack-group', 'Переменные'));
+      const grid = makeEl('div', 'pack-vars');
+      pack.variables.forEach((v) => {
+        const onChange = (value) => { form.variables[v.name] = value; invalidate(); };
+        const field = v.choices.length
+          ? selectField(v.title, form.variables[v.name], v.choices.map((c) => [c, c]), onChange)
+          : textField(v.title, form.variables[v.name], onChange);
+        if (v.help) field.appendChild(makeEl('div', 'dim', v.help));
+        grid.appendChild(field);
+      });
+      host.appendChild(grid);
+    }
+
+    host.appendChild(makeEl('h4', 'pack-group', 'Запросы'));
+    host.appendChild(previewWindowBar());
+    const checkBar = makeEl('div', 'struct-toolbar');
+    const checkBtn = makeBtn('Проверить', async () => {
+      if (!includedIndexes(form).length) { ui.toast('Отметьте хотя бы один запрос', { tone: 'warn' }); return; }
+      checkBtn.disabled = true;
+      checkStatus.textContent = 'Проверка запросов…';
+      try {
+        const indexes = includedIndexes(form);
+        const data = await postPack('check', packRequest(pack, form, { start: state.previewStart, end: state.previewEnd }));
+        form.check = { byIndex: Object.fromEntries(indexes.map((index, k) => [index, data.results[k]])), data };
+        checkStatus.textContent = data.ok ? `Источник «${data.source}»: обязательные запросы вернули данные.` : `Без данных обязательные запросы: ${data.missing_required.join(', ')}`;
+      } catch (e) {
+        form.check = null;
+        checkStatus.textContent = `Ошибка проверки: ${e.message}`;
+      } finally {
+        checkBtn.disabled = incompatible;
+        renderQueries();
+      }
+    }, 'btn');
+    checkBtn.disabled = incompatible;
+    const keepBtn = makeBtn('Оставить только с данными', () => {
+      if (!form.check) return;
+      Object.entries(form.check.byIndex).forEach(([index, result]) => { if (result && !result.ok && !pack.queries[index].required) form.include[index] = false; });
+      form.preview = null;
+      renderQueries();
+      renderPlan();
+    }, 'btn');
+    const checkStatus = makeEl('span', 'dim', 'Проверка выполняет запросы на источнике домена за окно выше.');
+    checkBar.append(checkBtn, keepBtn, checkStatus);
+    host.appendChild(checkBar);
+    const tableWrap = makeEl('div');
+    host.appendChild(tableWrap);
+
+    function renderQueries() {
+      tableWrap.innerHTML = '';
+      keepBtn.style.display = form.check && Object.values(form.check.byIndex).some((r, i) => r && !r.ok) ? '' : 'none';
+      const table = makeEl('table', 'data-table pack-queries');
+      const head = makeEl('tr');
+      ['', 'Запрос', 'Смысл', 'Единица', 'Проверка'].forEach((text) => head.appendChild(makeEl('th', '', text)));
+      table.appendChild(head);
+      const renderedAll = form.preview && Array.isArray(form.preview.all_queries) ? form.preview.all_queries : null;
+      pack.queries.forEach((query, index) => {
+        const result = form.check ? form.check.byIndex[index] : null;
+        const shown = renderedAll ? renderedAll[index] : null;
+        const tr = makeEl('tr');
+        const pick = makeEl('td');
+        const box = makeEl('input');
+        box.type = 'checkbox';
+        box.checked = !!form.include[index];
+        box.setAttribute('aria-label', `Применить запрос ${query.label}`);
+        box.addEventListener('change', () => { form.include[index] = box.checked; form.preview = null; renderPlan(); });
+        pick.appendChild(box);
+        const main = makeEl('td');
+        main.appendChild(makeEl('div', 'q-item-title', (result && result.label) || (shown && shown.label) || query.label));
+        const badges = makeEl('div', 'pack-pills');
+        if (query.required) badges.appendChild(makeEl('span', 'pill warn', 'обязательный'));
+        if (query.sla_field) badges.appendChild(makeEl('span', 'pill na', `SLA: ${SLA_QUERY_TITLES[query.sla_field] || query.sla_field}`));
+        if (badges.childNodes.length) main.appendChild(badges);
+        if (query.description) main.appendChild(makeEl('div', 'dim', query.description));
+        const details = makeEl('details');
+        details.appendChild(makeEl('summary', 'dim', shown ? 'Текст запроса' : 'Текст запроса (значения по умолчанию)'));
+        details.appendChild(makeEl('pre', 'pack-code', shown ? shown.query : query.query));
+        main.appendChild(details);
+        const status = makeEl('td');
+        if (result) {
+          status.appendChild(makeEl('span', `pill ${result.ok ? 'ok' : (query.required ? 'error' : 'warn')}`, result.ok ? `${result.series_count} сер.` : 'нет данных'));
+          status.appendChild(makeEl('div', 'pack-check-msg', result.ok && result.series && result.series.length ? result.series.join(', ') : result.message));
+        } else {
+          status.appendChild(makeEl('span', 'dim', '—'));
+        }
+        tr.append(pick, main, makeEl('td', '', query.role_title || '—'), makeEl('td', '', query.unit_title), status);
+        table.appendChild(tr);
+      });
+      tableWrap.appendChild(table);
+    }
+
+    host.appendChild(makeEl('h4', 'pack-group', 'Применение'));
+    const options = makeEl('div', 'pack-vars');
+    options.appendChild(selectField('Как применить', form.mode, [
+      ['merge', 'Добавить и обновить запросы пакета'],
+      ['replace', 'Заменить все запросы домена']
+    ], (value) => { form.mode = value; form.preview = null; renderPlan(); }));
+    if (pack.sla_fields.length) {
+      const sla = makeEl('div', 'ctx-field');
+      sla.appendChild(checkboxField(`Заполнить ссылки SLA (${pack.sla_fields.map((f) => SLA_QUERY_TITLES[f] || f).join(', ')})`, form.fillSla, (on) => { form.fillSla = on; form.preview = null; renderPlan(); }));
+      sla.appendChild(checkboxField('Заменить уже заданные ссылки запросами пакета', form.overwriteSla, (on) => { form.overwriteSla = on; form.preview = null; renderPlan(); }));
+      sla.appendChild(makeEl('div', 'field-hint', 'Ссылки на запросы, которых больше нет, заменяются всегда.'));
+      options.appendChild(sla);
+    }
+    host.appendChild(options);
+    const planBox = makeEl('div', 'pack-plan');
+    host.appendChild(planBox);
+    const actions = makeEl('div', 'struct-toolbar');
+    const previewBtn = makeBtn('Показать изменения', async () => {
+      if (!includedIndexes(form).length) { ui.toast('Отметьте хотя бы один запрос', { tone: 'warn' }); return; }
+      previewBtn.disabled = true;
+      try {
+        form.preview = await postPack('preview', packRequest(pack, form, applyOptions()));
+        form.previewError = '';
+      } catch (e) {
+        form.preview = null;
+        form.previewError = e.message;
+      } finally {
+        previewBtn.disabled = incompatible;
+        renderQueries();
+        renderPlan();
+      }
+    }, 'btn');
+    previewBtn.disabled = incompatible;
+    const applyBtn = makeBtn('Применить', () => applyPack(pack, form, applyBtn), 'btn btn-primary');
+    actions.append(previewBtn, applyBtn);
+    host.appendChild(actions);
+
+    function applyOptions() {
+      return { mode: form.mode, fill_sla: !!form.fillSla, overwrite_sla: !!form.overwriteSla };
+    }
+    form.applyOptions = applyOptions;
+    function planList(title, items, tone) {
+      if (!items || !items.length) return null;
+      const block = makeEl('div', `pack-plan-group ${tone || ''}`);
+      block.appendChild(makeEl('strong', '', `${title} (${items.length})`));
+      const list = makeEl('ul');
+      items.forEach((item) => list.appendChild(makeEl('li', '', item)));
+      block.appendChild(list);
+      return block;
+    }
+    function renderPlan() {
+      planBox.innerHTML = '';
+      applyBtn.disabled = incompatible || !form.preview;
+      if (form.previewError) { planBox.appendChild(makeEl('p', 'binding-error', form.previewError)); return; }
+      if (!form.preview) {
+        planBox.appendChild(makeEl('p', 'dim', 'Нажмите «Показать изменения», чтобы увидеть, какие запросы и ссылки SLA изменятся.'));
+        return;
+      }
+      const plan = form.preview.plan;
+      [
+        planList('Добавятся', plan.added, 'ok'),
+        planList('Изменятся', plan.updated, 'warn'),
+        planList('Удалятся', plan.removed, 'error'),
+        planList('Без изменений', plan.unchanged, '')
+      ].filter(Boolean).forEach((node) => planBox.appendChild(node));
+      const sla = form.preview.sla || {};
+      const changes = Object.entries(sla.changes || {}).map(([fieldName, change]) => {
+        const from = change.reason === 'missing' ? `${change.from} (запроса больше нет)` : (change.from || 'не задано');
+        return `${SLA_QUERY_TITLES[fieldName] || fieldName}: «${from}» → «${change.to}»`;
+      });
+      const kept = Object.entries(sla.kept || {}).map(([fieldName, value]) => `${SLA_QUERY_TITLES[fieldName] || fieldName}: оставлено «${value}»`);
+      [planList('Ссылки SLA', changes, 'ok'), planList('Ссылки SLA без изменений', kept, '')].filter(Boolean).forEach((node) => planBox.appendChild(node));
+      (form.preview.warnings || []).forEach((warning) => planBox.appendChild(makeEl('p', 'pack-note warn', warning)));
+    }
+    renderQueries();
+    renderPlan();
+    return host;
+  }
+
+  async function applyPack(pack, form, button) {
+    if (!form.preview) return;
+    const removed = form.preview.plan.removed || [];
+    if (removed.length && !window.confirm(`Будут удалены запросы домена (${removed.length}): ${removed.join(', ')}. Ряды с этими названиями перестанут собираться. Продолжить?`)) return;
+    const scope = packScope();
+    button.disabled = true;
+    try {
+      const resp = await postPack('apply', packRequest(pack, form, form.applyOptions()));
+      await refreshQueriesAndSla();
+      offerPackUndo(resp, scope, pack.title);
+      form.preview = null;
+      await loadPackCatalog();
+      renderPackDialog(false);
+    } catch (e) {
+      ui.toast(`Не удалось применить пакет: ${e.message}`, { tone: 'error' });
+      button.disabled = false;
+    }
+  }
+  async function refreshQueriesAndSla() {
+    const cfgUrl = new URL('/config', location.origin);
+    if (state.area) cfgUrl.searchParams.set('area', state.area);
+    const resp = await fetch(cfgUrl);
+    const cfg = await resp.json();
+    if (!resp.ok) throw new Error(cfg.error || `HTTP ${resp.status}`);
+    state.config.queries = cfg.queries;
+    state.config.sla = cfg.sla;
+    const queriesMap = isPlainObject(cfg.queries_map) ? cfg.queries_map : {};
+    state.config.service_queries = Object.fromEntries(Object.entries(queriesMap).filter(([sid, value]) => sid && isPlainObject(value) && Object.keys(value).length));
+    state.config.service_sla = isPlainObject(cfg.service_sla) ? cfg.service_sla : {};
+    if (typeof state.reloadQueries === 'function') state.reloadQueries();
+    loadSlaScope(state.slaScope);
+    updateWizardNav();
+  }
+  function offerPackUndo(resp, scope, title) {
+    const plan = resp.plan || {};
+    const parts = [`добавлено ${(plan.added || []).length}`, `изменено ${(plan.updated || []).length}`];
+    if ((plan.removed || []).length) parts.push(`удалено ${plan.removed.length}`);
+    if (resp.sla_changed) parts.push('ссылки SLA обновлены');
+    const toast = ui.toast(`Пакет «${title}» применён: ${parts.join(', ')}.`, { tone: 'ok', timeout: 20000 });
+    (resp.warnings || []).forEach((warning) => ui.toast(warning, { tone: 'warn', timeout: 12000 }));
+    const undo = makeBtn('Отменить', async () => {
+      undo.disabled = true;
+      try {
+        await undoPackApply(resp, scope);
+        toast.remove();
+        ui.toast('Применение пакета отменено', { tone: 'ok' });
+        if (packUi.body) { await loadPackCatalog(); renderPackDialog(false); }
+      } catch (e) {
+        ui.toast(`Не удалось отменить: ${e.message}`, { tone: 'error' });
+        undo.disabled = false;
+      }
+    }, 'btn btn-sm');
+    toast.insertBefore(undo, toast.lastChild);
+  }
+  async function undoPackApply(resp, scope) {
+    const previous = resp.previous || {};
+    const restore = async (section, value, own) => {
+      if (!own && scope.area) {
+        const base = `/projects/${encodeURIComponent(scope.area)}`;
+        const url = scope.service ? `${base}/services/${encodeURIComponent(scope.service)}/overrides/${section}` : `${base}/overrides/${section}`;
+        const r = await fetch(url, { method: 'DELETE' });
+        if (!r.ok) {
+          let data = {};
+          try { data = await r.json(); } catch (e) { /* not JSON */ }
+          throw new Error(data.error || `HTTP ${r.status}`);
+        }
+        return;
+      }
+      await postConfig(Object.assign({ section, data: value }, scope));
+    };
+    await restore('queries', previous.queries, previous.own_queries);
+    if (resp.sla_changed) await restore('sla', previous.sla, previous.own_sla);
+    await refreshQueriesAndSla();
+  }
+  // Title the reports show for the domain: the block's own title, else titles of its packs (Go, Python…).
+  function autoDomainTitle(domain) {
+    const entries = Array.isArray(queryBlock(domain).packs) ? queryBlock(domain).packs : [];
+    const titles = [];
+    entries.forEach((entry) => {
+      const meta = findPack(entry.id);
+      const title = meta && meta.domain_title ? meta.domain_title : '';
+      if (title && !titles.includes(title)) titles.push(title);
+    });
+    return titles.length ? titles.join(' · ') : LL.domainTitle(domain);
+  }
+  function domainTitleField(domain) {
+    const own = typeof queryBlock(domain).title === 'string' ? queryBlock(domain).title : '';
+    const field = textField('Заголовок домена в отчётах', own, () => {});
+    field.classList.add('ctx-field-short');
+    const input = field.querySelector('input');
+    input.placeholder = autoDomainTitle(domain);
+    input.maxLength = 60;
+    input.addEventListener('change', () => {
+      editQueryBlock(domain, (block) => {
+        const value = input.value.trim();
+        if (value) block.title = value; else delete block.title;
+      });
+    });
+    field.appendChild(makeEl('div', 'dim', 'Пусто — заголовок по установленным пакетам или стандартный. Сохраняется с каждым новым отчётом.'));
+    return field;
+  }
+
+  function installedPacksLine(domain) {
+    const entries = Array.isArray(queryBlock(domain).packs) ? queryBlock(domain).packs : [];
+    if (!entries.length) return null;
+    const line = makeEl('div', 'pack-installed');
+    const titles = entries.map((entry) => {
+      const meta = findPack(entry.id);
+      return `${meta ? meta.title : entry.id} v${entry.version}`;
+    });
+    line.appendChild(makeEl('span', 'dim', `Установлены пакеты: ${titles.join('; ')}`));
+    entries.forEach((entry) => {
+      const meta = findPack(entry.id);
+      if (!meta || !(entry.version < meta.version)) return;
+      line.appendChild(makeBtn(`Обновить «${meta.title}» до v${meta.version}`, () => openPackDialog(domain, entry.id), 'btn btn-sm'));
+    });
+    return line;
   }
 
   // ---- JSON-only sections (system_context, queries, metrics_config) --------
@@ -2025,7 +2888,7 @@
   }
   function fillServiceSelects() {
     const options = allServiceIds().map((id) => `<option value="${esc(id)}">${esc((state.servicesMeta[id] && state.servicesMeta[id].title) || id)}</option>`).join('');
-    [['slaServiceSelect', state.slaScope, 'Область (по умолчанию)'], ['queriesServiceSelect', state.queriesScope, 'Область (по умолчанию)'], ['promptServiceSelect', state.promptService, 'Область (по умолчанию)'], ['metricsServiceSelect', state.metricsScope, 'Область целиком']].forEach(([id, current, placeholder]) => {
+    [['slaServiceSelect', state.slaScope, 'Область (по умолчанию)'], ['queriesServiceSelect', state.queriesScope, 'Область (по умолчанию)'], ['contextServiceSelect', state.contextScope, 'Область (по умолчанию)'], ['promptServiceSelect', state.promptService, 'Область (по умолчанию)'], ['metricsServiceSelect', state.metricsScope, 'Область целиком']].forEach(([id, current, placeholder]) => {
       const sel = $(id);
       sel.innerHTML = `<option value="">${esc(placeholder)}</option>${options}`;
       sel.value = allServiceIds().includes(current) ? current : '';
@@ -2130,6 +2993,7 @@
     { key: 'storage', label: 'Хранилище', section: 'connections', card: 'storage' },
     { key: 'data_sources', label: 'Источники данных', section: 'connections', card: 'data_sources' },
     { key: 'domain_sources', label: 'Привязка доменов', section: 'connections', card: 'domain_sources' },
+    { key: 'queries', label: 'Запросы', section: 'queries' },
     { key: 'llm', label: 'LLM', section: 'connections', card: 'llm' },
     { key: 'sla', label: 'SLA', section: 'sla' },
     { key: 'done', label: 'Готово', section: 'wizard-done' }
@@ -2154,6 +3018,12 @@
       const ok = !!state.checkOk[step.card];
       next.disabled = !ok;
       hint.textContent = ok ? 'Соединение проверено — можно продолжать.' : 'Проверьте соединение, чтобы перейти дальше, или пропустите шаг.';
+    } else if (step.key === 'queries') {
+      const ltLabels = Array.isArray(queryBlock('lt_framework').labels) ? queryBlock('lt_framework').labels.filter(Boolean) : [];
+      next.disabled = !ltLabels.length;
+      hint.textContent = ltLabels.length
+        ? 'Запросы нагрузочного инструмента заданы — можно продолжать.'
+        : 'Нажмите «Добавить из пакета» и выберите набор под ваш стек: нужны хотя бы запросы нагрузочного инструмента. Шаг можно пропустить.';
     } else {
       next.disabled = false;
       hint.textContent = 'Задайте пороги (можно позже) и нажмите «Далее».';
@@ -2166,6 +3036,7 @@
         const card = CONNECTION_CARDS.find((c) => c.id === step.card);
         if (state.dirty.has(`connections:${card.id}`) && !(await saveCard(card))) return;
       } else if (step.key === 'sla' && state.dirty.has('sla:model') && !(await saveSla())) return;
+      else if (step.key === 'queries' && state.dirty.has('queries:queries')) $('queriesSaveBtn').click();
     }
     state.wizardStep = Math.min(WIZARD_STEPS.length - 1, state.wizardStep + 1);
     renderWizard();
@@ -2401,11 +3272,33 @@
 
     const contextSection = bindJsonSection({
       key: 'system_context', menu: 'context', editorId: 'ed_system_context', saveBtn: 'contextSaveBtn', status: 'contextStatus', jsonStatus: 'contextJsonStatus',
-      label: () => 'Контекст системы',
-      getData: () => state.config.system_context || {},
-      save: async (data) => { const r = await postConfig(configBody('system_context', data)); state.config.system_context = clone(data); return r; },
+      label: () => (state.contextScope ? `Контекст системы (${state.contextScope})` : 'Контекст системы'),
+      getData: () => effectiveContext(state.contextScope),
+      save: async (data) => {
+        const r = await postConfig(configBody('system_context', data, state.contextScope));
+        clearContextImport();
+        renderContextForm();
+        if (state.contextScope) {
+          state.config.service_system_context = state.config.service_system_context || {};
+          // A context equal to the area's is not stored: the service follows the area again.
+          if (r && r.inherited) delete state.config.service_system_context[state.contextScope];
+          else state.config.service_system_context[state.contextScope] = clone(data);
+        } else {
+          state.config.system_context = clone(data);
+        }
+        updateContextOverrideNote();
+        return r;
+      },
       render: renderContextForm
     });
+    $('contextServiceSelect').addEventListener('change', (e) => {
+      state.contextScope = e.target.value;
+      clearContextImport();
+      contextSection.load();
+      updateContextOverrideNote();
+    });
+    state.reloadContext = () => contextSection.load();
+    $('contextImportBtn').addEventListener('click', () => openContextImport());
     const queriesSection = bindJsonSection({
       key: 'queries', menu: 'queries', editorId: 'ed_queries', saveBtn: 'queriesSaveBtn', status: 'queriesStatus', jsonStatus: 'queriesJsonStatus',
       label: () => (state.queriesScope ? `Запросы (${state.queriesScope})` : 'Запросы'),
@@ -2424,6 +3317,9 @@
       render: renderQueriesForm
     });
     $('queriesServiceSelect').addEventListener('change', (e) => { state.queriesScope = e.target.value; queriesSection.load(); });
+    state.reloadQueries = () => queriesSection.load();
+    // Role titles and installed pack names in the queries list; the dialog reloads the catalog itself.
+    loadPackCatalog().then(() => { renderQueriesForm(); renderSlaForm({ skipJson: true }); }).catch(() => { /* the list falls back to role ids */ });
 
     const metricsSection = bindJsonSection({
       key: 'metrics_config', menu: 'metrics', editorId: 'ed_metrics_config', saveBtn: 'metricsSaveBtn', status: 'metricsStatus', jsonStatus: 'metricsJsonStatus',
@@ -2448,6 +3344,7 @@
     renderServices();
     loadSlaScope('');
     contextSection.load();
+    updateContextOverrideNote();
     queriesSection.load();
     metricsSection.load();
     await loadPromptEditor();

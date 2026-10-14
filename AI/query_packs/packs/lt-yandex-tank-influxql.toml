@@ -1,0 +1,89 @@
+schema_version = 1
+id = "lt-yandex-tank-influxql"
+version = 1
+title = "Yandex.Tank → InfluxDB (InfluxQL)"
+category = "load_tool"
+stack = ["yandex-tank", "pandora", "phantom", "influxdb"]
+domain = "lt_framework"
+language = "influxql"
+description = """
+Плагин InfluxUploader Yandex.Tank: measurement overall_meta (поля RPS, active_threads) и \
+overall_quantiles (поля q50…q100 в мс), тег label (__OVERALL__ — сводка, остальные — метки запросов при \
+labeled: true), тег uuid — идентификатор теста. Среднего времени ответа загрузчик не пишет, поэтому \
+ссылка SLA для прогноза мощностей не заполняется. Сверьте имена полей кнопкой «Проверить».
+"""
+requires_metrics = ["overall_meta", "overall_quantiles"]
+prompt_addendum = """
+Метрики Yandex.Tank: RPS — ответы в секунду, active_threads — активные инстансы генератора, q95/q99 — \
+перцентили времени ответа за секунду в мс, label — метка запроса (__OVERALL__ — сводка по всем).
+"""
+
+[variables.prefix]
+title = "Префикс measurement"
+default = ""
+pattern = '^[A-Za-z0-9_.-]*$'
+help = "Параметр prefix_measurement плагина InfluxUploader; по умолчанию пустой."
+
+[variables.uuid]
+title = "UUID теста (регулярное выражение)"
+default = ".*"
+pattern = '^[^/\n\r]*$'
+
+[variables.load_model]
+title = "Модель нагрузки сценария"
+default = "open"
+choices = ["open", "closed"]
+help = "Расписание rps (line, const, step) — open; instances в pandora — closed."
+
+[sla]
+max_performance_query = "@lt.rps_total"
+p95_query = "@lt.p95_total"
+p99_query = "@lt.p99_total"
+vus_query = "@lt.vus"
+latency_unit = "ms"
+load_model = "{{load_model}}"
+
+[[queries]]
+label = "LT (Yandex.Tank): RPS total"
+role = "lt.rps_total"
+unit = "per_second"
+required = true
+query = '''SELECT sum("RPS") FROM "{{prefix}}overall_meta" WHERE "label" = '__OVERALL__' AND "uuid" =~ /^{{uuid}}$/ AND $timeFilter GROUP BY time(1s) fill(null)'''
+description = "Ответы в секунду по всему тесту."
+
+[[queries]]
+label = "LT (Yandex.Tank): RPS by label"
+role = "lt.rps_by_request"
+unit = "per_second"
+query = '''SELECT sum("RPS") FROM "{{prefix}}overall_meta" WHERE "label" <> '__OVERALL__' AND "uuid" =~ /^{{uuid}}$/ AND $timeFilter GROUP BY time(1s), "label" fill(null)'''
+keys = ["label"]
+description = "RPS по меткам запросов (нужен labeled: true)."
+
+[[queries]]
+label = "LT (Yandex.Tank): p95(ms) total"
+role = "lt.p95_total"
+unit = "ms"
+query = '''SELECT mean("q95") FROM "{{prefix}}overall_quantiles" WHERE "label" = '__OVERALL__' AND "uuid" =~ /^{{uuid}}$/ AND $timeFilter GROUP BY time($__interval) fill(null)'''
+description = "p95 времени ответа, мс (среднее посекундных значений)."
+
+[[queries]]
+label = "LT (Yandex.Tank): p99(ms) total"
+role = "lt.p99_total"
+unit = "ms"
+query = '''SELECT mean("q99") FROM "{{prefix}}overall_quantiles" WHERE "label" = '__OVERALL__' AND "uuid" =~ /^{{uuid}}$/ AND $timeFilter GROUP BY time($__interval) fill(null)'''
+description = "p99 времени ответа, мс."
+
+[[queries]]
+label = "LT (Yandex.Tank): p95(ms) by label"
+role = "lt.p95_by_request"
+unit = "ms"
+query = '''SELECT mean("q95") FROM "{{prefix}}overall_quantiles" WHERE "label" <> '__OVERALL__' AND "uuid" =~ /^{{uuid}}$/ AND $timeFilter GROUP BY time($__interval), "label" fill(null)'''
+keys = ["label"]
+description = "p95 по меткам запросов, мс."
+
+[[queries]]
+label = "LT (Yandex.Tank): active threads"
+role = "lt.vus"
+unit = "count"
+query = '''SELECT max("active_threads") FROM "{{prefix}}overall_meta" WHERE "label" = '__OVERALL__' AND "uuid" =~ /^{{uuid}}$/ AND $timeFilter GROUP BY time(1s) fill(null)'''
+description = "Активные инстансы генератора нагрузки."

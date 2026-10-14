@@ -39,6 +39,13 @@ def _make_celery() -> Celery:
         task_always_eager=always_eager,
         task_eager_propagates=True,
         result_expires=int(os.getenv("CELERY_RESULT_EXPIRES", "3600")),
+        # Only JSON on the wire: a message that reaches Redis can never become a pickle to execute.
+        task_serializer="json",
+        result_serializer="json",
+        accept_content=["json"],
+        # A stuck download or upload must not hold a worker for ever; the report waits CELERY_TASK_TIMEOUT.
+        task_soft_time_limit=int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", "600")),
+        task_time_limit=int(os.getenv("CELERY_TASK_TIME_LIMIT", "660")),
     )
     return app
 

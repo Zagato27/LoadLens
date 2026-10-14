@@ -10,6 +10,25 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _fresh_llm_budget(monkeypatch):
+    """Each test starts with an unused daily LLM budget."""
+    from loadlens_app import limits
+
+    monkeypatch.setattr(limits, "llm_budget", limits.DailyBudget())
+    monkeypatch.delenv("LOADLENS_RUN_MIGRATIONS", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _storage_breaker_closed():
+    """The storage breaker is process state: every test starts and ends with it closed."""
+    from AI import storage_state
+
+    storage_state.BREAKER.reset()
+    yield
+    storage_state.BREAKER.reset()
+
+
+@pytest.fixture(autouse=True)
 def _auth_off_by_default(monkeypatch):
     """The API tests call endpoints directly; tests/test_auth*.py switch authentication back on."""
     monkeypatch.setenv("LOADLENS_AUTH_ENABLED", "0")

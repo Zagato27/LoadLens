@@ -6,6 +6,8 @@ import copy
 import json
 import logging
 import os
+import tempfile
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Dict
@@ -14,6 +16,7 @@ import psycopg2
 from psycopg2 import sql
 from flask import request
 
+from AI import storage_state
 from AI.db_store import _ensure_engineer_reports_table, _ensure_llm_reports_table, _ensure_schema_and_table
 from metrics_config import METRICS_CONFIG
 from settings import CONFIG
@@ -201,43 +204,92 @@ def _active_project_area() -> str | None:
         return None
 
 
+# Serialises reads and writes of the runtime JSON files within the process.
+_RUNTIME_FILES_LOCK = threading.RLock()
+
+
+class RuntimeConfigError(ValueError):
+    """A runtime configuration file exists but cannot be read; it is left untouched."""
+
+
+def _read_json_file(path: Path) -> dict:
+    """Contents of a runtime JSON file, ``{}`` when it is missing or empty.
+
+    Raises:
+        RuntimeConfigError: the file cannot be parsed. Treating it as empty would let the next save
+            silently drop every stored setting, so callers fail instead.
+    """
+    with _RUNTIME_FILES_LOCK:
+        if not path.exists():
+            return {}
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+            data = json.loads(text) if text.strip() else {}
+        except (OSError, ValueError) as exc:
+            raise RuntimeConfigError(f"{path.name}: файл не читается или содержит некорректный JSON ({exc})") from exc
+    if not isinstance(data, dict):
+        raise RuntimeConfigError(f"{path.name}: ожидается JSON-объект")
+    return data
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    """Writes JSON so that readers never see a half-written file.
+
+    The text goes to a temporary file in the same directory, is flushed to disk and renamed over the
+    target. A single-file bind mount (docker-compose) cannot be replaced by rename; then the file is
+    rewritten in place, still under the process-wide lock.
+    """
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    with _RUNTIME_FILES_LOCK:
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.replace(tmp_name, path)
+                tmp_name = ""
+            except OSError:
+                with path.open("w", encoding="utf-8") as handle:
+                    handle.write(text)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+        finally:
+            if tmp_name:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
+
+
+def public_base_url() -> str:
+    """Address of LoadLens for links on Confluence pages.
+
+    ``confluence.app_url`` when set; otherwise the address of the current request, which follows the
+    Host header and should only be relied on behind a proxy that sets it.
+    """
+    configured = str(((CONFIG.get("confluence") or {}).get("app_url")) or "").strip().rstrip("/")
+    if configured.lower().startswith(("http://", "https://")):
+        return configured
+    return request.host_url.rstrip("/")
+
+
 def _load_settings_runtime_data() -> dict:
-    try:
-        if CONFIG_RUNTIME_PATH.exists():
-            with CONFIG_RUNTIME_PATH.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                return data
-    except Exception:
-        pass
-    return {}
+    return _read_json_file(CONFIG_RUNTIME_PATH)
 
 
 def _save_settings_runtime_data(payload: dict) -> None:
-    try:
-        with CONFIG_RUNTIME_PATH.open("w", encoding="utf-8") as f:
-            json.dump(payload or {}, f, ensure_ascii=False, indent=2)
-    except Exception:
-        logger.exception("Не удалось сохранить runtime-конфигурацию в %s", CONFIG_RUNTIME_PATH)
+    _write_json_atomic(CONFIG_RUNTIME_PATH, payload or {})
 
 
 def _load_metrics_runtime_data() -> dict:
     """Runtime metrics_config overrides; an unreadable file is an error, not an empty config."""
-    if not METRICS_RUNTIME_PATH.exists():
-        return {}
-    try:
-        with METRICS_RUNTIME_PATH.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"{METRICS_RUNTIME_PATH}: некорректный JSON ({exc})") from exc
-    if not isinstance(data, dict):
-        raise ValueError(f"{METRICS_RUNTIME_PATH}: ожидается JSON-объект")
-    return data
+    return _read_json_file(METRICS_RUNTIME_PATH)
 
 
 def _save_metrics_runtime_data(payload: dict) -> None:
-    with METRICS_RUNTIME_PATH.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    _write_json_atomic(METRICS_RUNTIME_PATH, payload or {})
 
 
 def _per_area_config() -> dict:
@@ -481,23 +533,14 @@ def _bootstrap_metrics_service_config(area_name: str | None, service_id: str | N
     if not area_name or not service_id:
         return
     base_metrics = _default_metrics_service_template()
-    current = {}
-    try:
-        if METRICS_RUNTIME_PATH.exists():
-            with METRICS_RUNTIME_PATH.open("r", encoding="utf-8") as f:
-                current = json.load(f)
-    except Exception:
-        current = {}
-    if not isinstance(current, dict):
-        current = {}
+    current = _load_metrics_runtime_data()
     if area_name not in current or not isinstance(current.get(area_name), dict):
         current[area_name] = {"services": {}}
     if "services" not in current[area_name] or not isinstance(current[area_name].get("services"), dict):
         current[area_name]["services"] = {}
     if service_id not in current[area_name]["services"]:
         current[area_name]["services"][service_id] = copy.deepcopy(base_metrics)
-        with METRICS_RUNTIME_PATH.open("w", encoding="utf-8") as f:
-            json.dump(current, f, ensure_ascii=False, indent=2)
+        _save_metrics_runtime_data(current)
 
 
 def _list_project_areas() -> list[dict]:
@@ -546,15 +589,17 @@ def _disabled_domains_payload(area: str | None, service: str | None) -> list[str
 
 
 def _ts_conn():
-    cfg = (CONFIG.get("storage", {}) or {}).get("timescale", {})
-    return psycopg2.connect(
-        host=cfg.get("host"),
-        port=cfg.get("port"),
-        dbname=cfg.get("dbname"),
-        user=cfg.get("user"),
-        password=cfg.get("password"),
-        sslmode=cfg.get("sslmode", "prefer"),
-    )
+    """Connection to storage.timescale through the breaker: a short timeout and fast failures while it is down."""
+    cfg = (CONFIG.get("storage", {}) or {}).get("timescale", {}) or {}
+    params = {
+        "host": cfg.get("host"),
+        "port": cfg.get("port"),
+        "dbname": cfg.get("dbname"),
+        "user": cfg.get("user"),
+        "password": cfg.get("password"),
+        "sslmode": cfg.get("sslmode", "prefer"),
+    }
+    return storage_state.connect(params, cfg)
 
 
 def _series_key_for(domain: str, query_label: str, default_key: str = "application") -> str:
@@ -718,19 +763,12 @@ def _delete_service_data(area_name: str, service_name: str) -> None:
     if changed:
         _save_settings_runtime_data(runtime)
 
-    metrics_rt = {}
-    try:
-        if METRICS_RUNTIME_PATH.exists():
-            with METRICS_RUNTIME_PATH.open("r", encoding="utf-8") as f:
-                metrics_rt = json.load(f)
-    except Exception:
-        metrics_rt = {}
+    metrics_rt = _load_metrics_runtime_data()
     if isinstance(metrics_rt.get(area_name), dict):
         services_entry = metrics_rt[area_name].get("services")
         if isinstance(services_entry, dict) and service_name in services_entry:
             del services_entry[service_name]
-            with METRICS_RUNTIME_PATH.open("w", encoding="utf-8") as f:
-                json.dump(metrics_rt, f, ensure_ascii=False, indent=2)
+            _save_metrics_runtime_data(metrics_rt)
 
     cfg = (CONFIG.get("storage", {}) or {}).get("timescale", {})
     schema = cfg.get("schema", "public")
@@ -788,6 +826,8 @@ __all__ = [
     "_per_area_config",
     "_prompt_templates_for_scope",
     "_rename_run_data",
+    "public_base_url",
+    "RuntimeConfigError",
     "RUN_NAME_MAX_LEN",
     "run_name_problem",
     "_resolve_services_filter",

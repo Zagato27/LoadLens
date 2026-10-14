@@ -77,6 +77,10 @@ class AuthSettings:
     secret_key: str = field(default="", repr=False)
     bootstrap_username: str = ""
     bootstrap_password: str = field(default="", repr=False)
+    # Recovery sign-in while the storage database is down (besides LOADLENS_ADMIN_USER/PASSWORD):
+    # a password hash from `python -m loadlens_app.auth hash-password`, so settings.py holds no password.
+    recovery_username: str = ""
+    recovery_password_hash: str = field(default="", repr=False)
 
 
 def load_auth_settings(config: Optional[Mapping[str, Any]] = None, env: Optional[Mapping[str, str]] = None) -> AuthSettings:
@@ -123,6 +127,8 @@ def load_auth_settings(config: Optional[Mapping[str, Any]] = None, env: Optional
         secret_key=str(env.get("LOADLENS_SECRET_KEY") or section.get("secret_key") or "").strip(),
         bootstrap_username=str(env.get("LOADLENS_ADMIN_USER") or "").strip(),
         bootstrap_password=str(env.get("LOADLENS_ADMIN_PASSWORD") or ""),
+        recovery_username=str(env.get("LOADLENS_RECOVERY_USER") or section.get("recovery_user") or "").strip(),
+        recovery_password_hash=str(env.get("LOADLENS_RECOVERY_PASSWORD_HASH") or section.get("recovery_password_hash") or "").strip(),
     )
 
 

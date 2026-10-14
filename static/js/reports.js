@@ -7,6 +7,8 @@
   const LL = window.LoadLens;
 
   let feedbackByKey = {};
+  // Domain titles stored with the report (query packs title «jvm» as «Go runtime» and the like).
+  let reportDomainTitles = {};
 
   function feedbackKey(domain, target, findingId) {
     return `${domain || ''}|${target || ''}|${findingId || ''}`;
@@ -513,14 +515,32 @@
     if (na.some((x) => v.includes(x))) return 'Недостаточно данных';
     return 'Недостаточно данных';
   }
+  // Model output and engineer notes are untrusted: only formatting survives. No images (they would
+  // load from any host and leak data), styles, forms or event handlers; links to http(s), mailto,
+  // this site or an anchor. Without DOMPurify the text is shown escaped, never as markup.
+  const SAFE_URI = new RegExp('^(?:https?:|mailto:|/(?!/)|#)', 'i');
+  const MARKDOWN_PURIFY = {
+    ALLOWED_TAGS: ['p', 'br', 'b', 'strong', 'i', 'em', 'u', 's', 'del', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+      'blockquote', 'pre', 'code', 'hr', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'a', 'span'],
+    ALLOWED_ATTR: ['href', 'title', 'align'],
+    ALLOWED_URI_REGEXP: SAFE_URI,
+  };
+  const NOTE_PURIFY = {
+    ALLOWED_TAGS: ['p', 'div', 'br', 'b', 'strong', 'i', 'em', 'u', 's', 'ul', 'ol', 'li', 'h3', 'h4', 'blockquote', 'pre', 'code', 'a'],
+    ALLOWED_ATTR: ['href', 'rel'],
+    ALLOWED_URI_REGEXP: SAFE_URI,
+  };
+  function sanitizeOrEscape(html, config, fallbackText) {
+    try {
+      if (window.DOMPurify && typeof window.DOMPurify.sanitize === 'function') return window.DOMPurify.sanitize(html, config);
+    } catch (e) {}
+    return escapeHtml(fallbackText);
+  }
   function markdownToSafeHtml(md) {
     const source = safeStr(md);
     if (!source) return '';
-    let html = (window.marked && typeof marked.parse === 'function')
-      ? window.marked.parse(source)
-      : escapeHtml(source).replace(/\n/g, '<br>');
-    try { if (window.DOMPurify) html = window.DOMPurify.sanitize(html); } catch (e) {}
-    return html;
+    if (!(window.marked && typeof marked.parse === 'function')) return escapeHtml(source).replace(/\n/g, '<br>');
+    return sanitizeOrEscape(window.marked.parse(source), MARKDOWN_PURIFY, source);
   }
   // A response that looks like JSON but does not parse: show a clear error instead of raw text.
   function looksLikeBrokenStructuredResponse(raw) {
@@ -896,6 +916,154 @@
     if (!peak || peak.not_applicable || peak.notApplicable) return false;
     return Boolean(safeStr(peak.max_rps) || safeStr(peak.max_time) || safeStr(peak.drop_time));
   }
+  // Test-type section of the final report; mirrors AI/report_sections.py.
+  function reportMode(report) {
+    const r = report || {};
+    if (r.spike_analysis && typeof r.spike_analysis === 'object') return 'spike';
+    if (r.saturation && typeof r.saturation === 'object') return 'stress';
+    if (r.stability_under_load && typeof r.stability_under_load === 'object') return 'stability';
+    const profile = (r.test_profile && typeof r.test_profile === 'object') ? r.test_profile : {};
+    const mode = safeStr(profile.mode).toLowerCase();
+    if (mode) return mode;
+    const peak = r.peak_performance || r.peak_perfomance || {};
+    return (peak.not_applicable || peak.notApplicable) ? 'stability' : 'capacity';
+  }
+  function normalizedTestType(report, fallback) {
+    const profile = ((report || {}).test_profile && typeof report.test_profile === 'object') ? report.test_profile : {};
+    const explicit = safeStr(profile.normalized_test_type).toLowerCase();
+    if (explicit) return explicit;
+    const mode = reportMode(report);
+    const byMode = { stability: 'soak', spike: 'spike', stress: 'stress' }[mode];
+    if (byMode) return byMode;
+    const raw = safeStr(fallback || profile.test_type).toLowerCase();
+    return LL.TEST_TYPE_LABELS && LL.TEST_TYPE_LABELS[raw] ? raw : 'step';
+  }
+  function hhmm(value) {
+    return hhmmFromIso(value) || '—';
+  }
+  function signed(value, unit) {
+    const n = Number(value);
+    if (value === null || value === undefined || value === '' || !Number.isFinite(n)) return '';
+    return (n > 0 ? '+' : '') + formatNumber(n) + unit;
+  }
+  const TREND_TITLES = { rps: 'RPS', p95: 'p95 latency', error_rate: 'доля ошибок', cpu: 'CPU', memory: 'память' };
+  const RESOURCE_TITLES = { cpu: 'CPU', memory: 'память' };
+  function stabilityRows(report) {
+    const st = report.stability_under_load || {};
+    const profile = report.test_profile || {};
+    const rows = [
+      { label: 'Тип теста', value: safeStr(profile.label_ru || profile.test_type) || 'stability/soak' },
+      { label: 'Фокус оценки', value: safeStr(st.focus || profile.focus) || 'Удержание нагрузки без накопления деградации' },
+      { label: 'Целевой RPS', value: formatNumber(st.target_rps) },
+      { label: 'Фактический RPS', value: formatNumber(st.actual_rps) }
+    ];
+    const hold = (st.hold && typeof st.hold === 'object') ? st.hold : null;
+    if (hold) {
+      rows.push({ label: 'Окно удержания', value: hhmm(hold.start_iso) + '–' + hhmm(hold.end_iso) + (hold.duration_min != null ? ` (${formatNumber(hold.duration_min)} мин)` : '') });
+      if (hold.min_bucket_rps != null) {
+        rows.push({ label: 'Минимальный интервал', value: `${safeStr(hold.min_bucket_label) || 'интервал'}: ${formatNumber(hold.min_bucket_rps)} RPS` + (hold.drop_pct ? ` (−${formatNumber(hold.drop_pct)} % от среднего)` : '') });
+      }
+      if (hold.early_drop_iso) rows.push({ label: 'Падение RPS до конца теста', value: hhmm(hold.early_drop_iso) });
+      if (safeStr(hold.note)) rows.push({ label: 'Примечание', value: safeStr(hold.note) });
+    }
+    rows.push({ label: 'Итог SLA', value: safeStr(st.sla_summary) || '—' });
+    return rows;
+  }
+  function spikeRows(report) {
+    const sa = report.spike_analysis || {};
+    const profile = report.test_profile || {};
+    const rows = [{ label: 'Тип теста', value: safeStr(profile.label_ru || profile.test_type) || 'spike' }];
+    if (sa.baseline_rps != null) rows.push({ label: 'Фоновая нагрузка', value: formatNumber(sa.baseline_rps) + ' RPS' });
+    if (!sa.detected) {
+      rows.push({ label: 'Всплеск', value: safeStr(sa.reason) || 'не обнаружен' });
+    } else {
+      if (sa.target_rps != null) {
+        const reached = sa.target_reached === true ? ' — достигнут' : (sa.target_reached === false ? ' — не достигнут' : '');
+        rows.push({ label: 'Целевой RPS всплеска', value: formatNumber(sa.target_rps) + reached });
+      }
+      (Array.isArray(sa.spikes) ? sa.spikes : []).forEach((spike) => {
+        const pre = spike.pre || {};
+        const during = spike.during || {};
+        const bits = [`${hhmm(spike.start_iso)}–${hhmm(spike.end_iso)} (${formatNumber(spike.duration_sec)} с)`];
+        if (pre.p95 != null && during.p95 != null) {
+          const over = signed(spike.overshoot_p95_pct, ' %');
+          bits.push(`p95 ${formatNumber(pre.p95)} → ${formatNumber(during.p95)}` + (over ? ` (${over})` : ''));
+        }
+        const errors = signed(spike.overshoot_error_rate_pp, ' п.п.');
+        if (errors) bits.push('ошибки ' + errors);
+        if (spike.recovered === true) bits.push(`восстановление за ${formatNumber(spike.recovery_time_sec)} с`);
+        else if (spike.recovered === false) bits.push('задержки не вернулись к фону');
+        if (safeStr(spike.note)) bits.push(safeStr(spike.note));
+        rows.push({ label: safeStr(spike.label) || 'всплеск', value: bits.join(', ') });
+      });
+    }
+    rows.push({ label: 'Итог SLA', value: safeStr(sa.sla_summary) || '—' });
+    return rows;
+  }
+  function resourceText(resource) {
+    const title = RESOURCE_TITLES[safeStr(resource.kind)] || safeStr(resource.kind);
+    if (resource.evidence === 'threshold') {
+      return `${title}: p95 ${formatNumber(resource.value)} > порог ${formatNumber(resource.threshold)}` + (safeStr(resource.series) ? `, серия «${safeStr(resource.series)}»` : '');
+    }
+    return `${title}: рост ${signed(resource.growth_pct, ' %')} от первой ступени (p95 ${formatNumber(resource.value)})`;
+  }
+  function saturationRows(report) {
+    const sat = report.saturation || {};
+    const peak = report.peak_performance || report.peak_perfomance || {};
+    const rows = [{ label: 'Точка насыщения', value: formatNumber(sat.saturation_rps != null ? sat.saturation_rps : peak.max_rps) + ' RPS' }];
+    if (safeStr(sat.saturation_step_label)) rows.push({ label: 'Ступень насыщения', value: safeStr(sat.saturation_step_label) });
+    if (safeStr(peak.max_time)) rows.push({ label: 'Время пиковой производительности', value: safeStr(peak.max_time) });
+    if (safeStr(sat.degraded_step_label) || sat.first_degraded_rps != null) {
+      rows.push({ label: 'Первая деградировавшая ступень', value: safeStr(sat.degraded_step_label) || `≈${formatNumber(sat.first_degraded_rps)} RPS` });
+    }
+    const checks = Array.isArray(sat.degraded_checks) ? sat.degraded_checks : [];
+    if (checks.length) rows.push({ label: 'Нарушенные критерии', value: checks.map((name) => SLA_CHECK_LABELS[name] || name).join(', ') });
+    rows.push({ label: 'Характер деградации', value: safeStr(sat.failure_mode_title || sat.failure_mode) || '—' });
+    rows.push({ label: 'Ограничивающий ресурс', value: (sat.limiting_resource && typeof sat.limiting_resource === 'object') ? resourceText(sat.limiting_resource) : 'не определён' });
+    if (safeStr(peak.drop_time || sat.rps_drop_iso)) rows.push({ label: 'Время деградации', value: safeStr(peak.drop_time || sat.rps_drop_iso) });
+    if (safeStr(sat.note)) rows.push({ label: 'Примечание', value: safeStr(sat.note) });
+    return rows;
+  }
+  function testTypeSection(report) {
+    const r = report || {};
+    const mode = reportMode(r);
+    if (mode === 'stability') return { title: 'Стабильность под нагрузкой', rows: stabilityRows(r) };
+    if (mode === 'spike') return { title: 'Всплески нагрузки', rows: spikeRows(r) };
+    if (mode === 'stress' && r.saturation && typeof r.saturation === 'object') return { title: 'Точка насыщения', rows: saturationRows(r) };
+    return null;
+  }
+  function renderTrendsTable(report) {
+    const st = (report || {}).stability_under_load || {};
+    const trends = Array.isArray(st.trends) ? st.trends : [];
+    if (!trends.length) return '';
+    const rows = trends.map((trend) => [
+      `<tr class="${trend.flagged ? 'is-unstable' : ''}">`,
+      `<td>${escapeHtml(safeStr(trend.title) || TREND_TITLES[safeStr(trend.metric_kind)] || safeStr(trend.metric_kind))}${trend.flagged ? '<span class="step-flag">риск</span>' : ''}<div class="sla-check-note">${escapeHtml(safeStr(trend.label))}</div></td>`,
+      `<td class="num">${escapeHtml(formatNumber(trend.first))}</td>`,
+      `<td class="num">${escapeHtml(formatNumber(trend.last))}</td>`,
+      `<td class="num">${escapeHtml(signed(trend.change_pct, ' %') || '—')}</td>`,
+      `<td class="num">${escapeHtml(formatNumber(trend.slope_per_hour))}</td>`,
+      '</tr>'
+    ].join('')).join('');
+    const threshold = st.trend_threshold_pct != null ? ` Риск — неблагоприятное изменение больше ${formatNumber(st.trend_threshold_pct)} %.` : '';
+    return [
+      '<section>',
+      `<div class="report-block-title">${LL.ui.term('trend_drift', 'Тренды за окно удержания')}</div>`,
+      '<div class="step-table-wrap"><table class="step-table">',
+      '<thead><tr><th>Метрика</th><th class="num">Начало</th><th class="num">Конец</th><th class="num">Изменение</th><th class="num">Наклон в час</th></tr></thead>',
+      `<tbody>${rows}</tbody></table></div>`,
+      `<p class="step-note">Среднее первой и последней четверти окна удержания.${escapeHtml(threshold)}</p>`,
+      '</section>'
+    ].join('');
+  }
+  function renderTestTypeSection(report, domain) {
+    if (domain !== 'final') return '';
+    const section = testTypeSection(report);
+    if (!section) return '';
+    const rows = section.rows.map((row) => ({ label: row.label, html: escapeHtml(safeStr(row.value) || '—') }));
+    rows._tableClass = 'report-aligned-value-table';
+    return renderKeyValueTable(section.title, rows) + (reportMode(report) === 'stability' ? renderTrendsTable(report) : '');
+  }
   function renderStructuredReportHtml(report, extraHtml, domain) {
     const analysisError = renderAnalysisError(report);
     if (analysisError) {
@@ -920,14 +1088,40 @@
       { label: 'Время деградации', html: escapeHtml(safeStr(peak.drop_time) || '—') }
     ];
     peakRows._tableClass = 'report-aligned-value-table';
+    const typeSection = renderTestTypeSection(report, domain);
     const sections = [
       renderKeyValueTable('', verdictRows),
       renderRationaleBox(verdictRationale),
-      peakTableApplies(domain, peak) ? renderKeyValueTable('Пиковая производительность', peakRows) : '',
+      typeSection || (peakTableApplies(domain, peak) ? renderKeyValueTable('Пиковая производительность', peakRows) : ''),
       renderProblemRecommendationRows(pairFindingsWithActions(findings, actions, domain)),
       extraHtml || ''
     ].filter(Boolean);
     return `<div class="report-stack">${sections.join('')}</div>`;
+  }
+  // Where the reliability level comes from: the judge, the data check alone (one answer), or the data
+  // check and confidence because the judge gave no usable scores. Reports saved before that case was
+  // handled counted a missing judge as 0; it is recognised here and the result is recomputed without it.
+  function answerScoreState(scores) {
+    const s = scores || {};
+    const j = (s.judge && typeof s.judge === 'object') ? s.judge : {};
+    const meta = (s.judge_meta && typeof s.judge_meta === 'object') ? s.judge_meta : {};
+    const num = (x) => { const v = Number(x); return x === null || x === undefined || !Number.isFinite(v) ? null : v; };
+    const skipped = Boolean(meta.skipped);
+    const allZero = Object.keys(j).length > 0 && ['overall', 'factual', 'completeness', 'specificity'].every((k) => !(num(j[k]) > 0));
+    const unavailable = !skipped && (Boolean(meta.unavailable) || Boolean(meta.error) || meta.scores_returned === 0 || allZero);
+    const data = num(s.data_score);
+    const conf = num(s.confidence);
+    let final = num(s.final_score);
+    // Same weights as AI/scoring.py: data 0.35 and confidence 0.05, renormalized without the judge.
+    if (unavailable && !meta.unavailable && data !== null) final = (0.35 * data + 0.05 * (conf || 0)) / 0.4;
+    if (skipped) final = data;
+    let reason = '';
+    if (unavailable) {
+      if (meta.reason === 'partial_scores') reason = 'он оценил не все варианты ответа';
+      else if (meta.reason === 'error' || meta.error) reason = 'вызов модели завершился ошибкой, подробности в журнале приложения';
+      else reason = 'его ответ не удалось разобрать';
+    }
+    return { skipped, unavailable, reason, final };
   }
   function judgeDetailsMarkdown(scores) {
     try {
@@ -938,7 +1132,13 @@
       const meta = (s.judge_meta && typeof s.judge_meta === 'object') ? s.judge_meta : {};
       const dataDetails = (s.data_score_details && typeof s.data_score_details === 'object') ? s.data_score_details : {};
       const overall = j.overall, factual = j.factual, completeness = j.completeness, specificity = j.specificity;
-      const dataScore = s.data_score, finalScore = s.final_score, conf = s.confidence;
+      const dataScore = s.data_score, conf = s.confidence;
+      const scoreState = answerScoreState(s);
+      // One answer from the model: there was nothing to choose from, so the judge did not run.
+      const judgeSkipped = scoreState.skipped;
+      // The judge ran but gave no usable scores: the result rests on the data check and confidence.
+      const judgeUnavailable = scoreState.unavailable;
+      const finalScore = judgeUnavailable ? scoreState.final : s.final_score;
       const level = (x) => {
         const v = Number(x);
         if (!Number.isFinite(v) || v <= 0) return 'нет данных';
@@ -955,6 +1155,16 @@
         const judge = num(overall);
         const data = num(dataScore);
         const final = num(finalScore);
+        if (judgeSkipped || judgeUnavailable) {
+          const intro = judgeSkipped
+            ? 'Модель дала один вариант ответа, поэтому судья не запускался: выбирать было не из чего.'
+            : `Судья не дал оценку: ${scoreState.reason}. Итог посчитан по проверке данных и уверенности модели.`;
+          if (data === null) return intro;
+          // Same thresholds as the level in the section title.
+          if (data >= 0.75) return `${intro} Проверка по данным хорошо подтверждает выводы.`;
+          if (data >= 0.55) return `${intro} Проверка по данным в целом подтверждает выводы.`;
+          return `${intro} Проверка по данным подтверждает выводы слабо: сверяйте их с графиками.`;
+        }
         const numericGrounding = num(dataDetails.numeric_grounding);
         const numericClaimsTotal = Number(dataDetails.numeric_claims_total || 0);
         const labelGrounding = num(dataDetails.label_grounding);
@@ -1001,16 +1211,27 @@
       if (summary) lines.push(summary);
       lines.push('');
       lines.push('#### Главное');
-      lines.push(`- Оценка текста судьей: ${pct(overall)} (${level(overall)})`);
-      lines.push(`- Эвристическая проверка по данным: ${pct(dataScore)} (${level(dataScore)})`);
-      lines.push(`- Итог для выбора кандидата: ${pct(finalScore)} (${level(finalScore)})`);
-      if (typeof conf === 'number') lines.push(`- Уверенность модели: ${pct(conf)} (${level(conf)})`);
-      lines.push('');
-      lines.push('#### За что поставлена оценка');
-      lines.push(`- Точность относительно данных: ${pct(factual)}`);
-      lines.push(`- Полнота покрытия важных наблюдений: ${pct(completeness)}`);
-      lines.push(`- Конкретика по метрикам и компонентам: ${pct(specificity)}`);
-      if (Object.keys(rubric).length) {
+      if (judgeSkipped) {
+        lines.push('- Судья: не запускался, модель дала один вариант ответа');
+        lines.push(`- Эвристическая проверка по данным: ${pct(dataScore)} (${level(dataScore)})`);
+        if (typeof conf === 'number') lines.push(`- Уверенность модели: ${pct(conf)} (${level(conf)})`);
+      } else if (judgeUnavailable) {
+        lines.push('- Судья: не дал оценку');
+        lines.push(`- Эвристическая проверка по данным: ${pct(dataScore)} (${level(dataScore)})`);
+        lines.push(`- Итог без судьи: ${pct(finalScore)} (${level(finalScore)})`);
+        if (typeof conf === 'number') lines.push(`- Уверенность модели: ${pct(conf)} (${level(conf)})`);
+      } else {
+        lines.push(`- Оценка текста судьей: ${pct(overall)} (${level(overall)})`);
+        lines.push(`- Эвристическая проверка по данным: ${pct(dataScore)} (${level(dataScore)})`);
+        lines.push(`- Итог для выбора кандидата: ${pct(finalScore)} (${level(finalScore)})`);
+        if (typeof conf === 'number') lines.push(`- Уверенность модели: ${pct(conf)} (${level(conf)})`);
+        lines.push('');
+        lines.push('#### За что поставлена оценка');
+        lines.push(`- Точность относительно данных: ${pct(factual)}`);
+        lines.push(`- Полнота покрытия важных наблюдений: ${pct(completeness)}`);
+        lines.push(`- Конкретика по метрикам и компонентам: ${pct(specificity)}`);
+      }
+      if (!judgeSkipped && !judgeUnavailable && Object.keys(rubric).length) {
         lines.push('');
         lines.push('#### Детальная проверка');
         lines.push(`- Опора на данные: ${pct(rubric.evidence_grounding)}`);
@@ -1050,12 +1271,19 @@
   function confidenceLevelLabel(scores) {
     const s = scores || {};
     const judge = s.judge || {};
-    const raw = Number.isFinite(Number(s.final_score)) ? Number(s.final_score) : Number(judge.overall);
+    const state = answerScoreState(s);
+    const raw = state.final !== null ? state.final : Number(judge.overall);
     if (!Number.isFinite(raw) || raw <= 0) return '';
     if (raw >= 0.9) return 'очень высокая';
     if (raw >= 0.75) return 'высокая';
     if (raw >= 0.55) return 'умеренная';
     return 'низкая';
+  }
+  function answerSubtitle(scores) {
+    const state = answerScoreState(scores);
+    if (state.skipped) return 'по проверке данных, без судьи';
+    if (state.unavailable) return 'по проверке данных: судья не дал оценку';
+    return 'как выбран и проверен ответ ИИ';
   }
   function judgeSectionHtml(scores) {
     const md = judgeDetailsMarkdown(scores);
@@ -1066,7 +1294,7 @@
       : LL.ui.term('confidence', 'Оценка ответа');
     return [
       '<details class="report-collapsible">',
-      `<summary><span>${titleHtml}</span><small class="report-collapsible-subtitle">как выбран и проверен ответ ИИ</small></summary>`,
+      `<summary><span>${titleHtml}</span><small class="report-collapsible-subtitle">${answerSubtitle(scores)}</small></summary>`,
       `<div class="report-collapsible-body report-markdown-block">${markdownToSafeHtml(md)}</div>`,
       '</details>'
     ].join('');
@@ -1078,7 +1306,8 @@
     p95_latency: 'P95 latency, мс',
     p99_latency: 'P99 latency, мс',
     cpu_usage: 'CPU, %',
-    memory_usage: 'Память, %'
+    memory_usage: 'Память, %',
+    recovery: 'Восстановление после всплеска, мин'
   };
   function formatNumber(value) {
     const n = Number(value);
@@ -1321,22 +1550,43 @@
     const levelText = Number.isFinite(level) ? formatNumber(level) : '';
     const stepRps = Number(chosen.rps);
     const differs = levelText && Number.isFinite(stepRps) && Math.abs(stepRps - level) > 1;
-    const bits = checks.map((check) => {
-      const label = SLA_CHECK_LABELS[safeStr(check && check.name)] || safeStr(check && check.name) || 'критерий';
-      const actual = formatNumber(check && check.actual);
-      return label + (actual === '—' ? '' : ' ' + actual) + ' — ' + slaStatusWord(check && check.passed);
-    });
     const head = 'SLA проверено на ступени ' + (chosen.index || '') + ' (' + stepInterval(chosen) + ')';
     const windowBit = windowText
       ? ', окно ' + windowText + (levelText ? ', RPS окна ' + levelText : '')
       : '';
     const meanBit = differs ? '. RPS в таблице — среднее всего интервала, пороги считаются по этому окну' : '';
-    return head + windowBit + meanBit + '. ' + bits.join('; ') + '.';
+    return head + windowBit + meanBit + '. ' + slaChecksText(checks) + '.';
+  }
+  function slaChecksText(checks) {
+    return checks.map((check) => {
+      const label = SLA_CHECK_LABELS[safeStr(check && check.name)] || safeStr(check && check.name) || 'критерий';
+      const actual = formatNumber(check && check.actual);
+      return label + (actual === '—' ? '' : ' ' + actual) + ' — ' + slaStatusWord(check && check.passed);
+    }).join('; ');
   }
   function linkSlaToSteps(table, finalRow) {
     const steps = (table.steps || []).map((step) => Object.assign({}, step));
     const checks = slaChecksOf(finalRow);
     const window = slaWindowOf(finalRow);
+    const kind = safeStr(window && window.kind);
+    if (kind === 'hold') {
+      steps.forEach((step) => { step.selected = false; });
+      const offset = reportOffsetHours(steps);
+      const startMs = momentMs(window.start || window.start_iso);
+      const endMs = momentMs(window.end || window.end_iso);
+      const span = startMs != null && endMs != null ? ' ' + clockAt(startMs, offset) + '–' + clockAt(endMs, offset) : '';
+      const level = Number(window.level);
+      const head = 'SLA проверено на окне удержания' + span + (Number.isFinite(level) ? ', средний RPS ' + formatNumber(level) : '');
+      return { steps: steps, slaNote: checks.length ? head + '. ' + slaChecksText(checks) + '.' : head + '.' };
+    }
+    if (kind === 'spike') {
+      const moment = momentMs(window.start || window.start_iso);
+      steps.forEach((step) => { step.selected = false; });
+      const covered = steps.find((step) => stepCovers(step, moment));
+      if (covered) covered.selected = true;
+      const head = 'SLA проверено в окнах всплесков: по каждому порогу — худший всплеск';
+      return { steps: steps, slaNote: checks.length ? head + '. ' + slaChecksText(checks) + '.' : head + '.' };
+    }
     if (!steps.some((step) => step.selected)) {
       const moment = momentMs(window && (window.start || window.start_iso));
       const covered = steps.find((step) => stepCovers(step, moment));
@@ -1459,6 +1709,47 @@
     } catch (e) {}
   }
 
+  function heroTypeEntries(parsed, peak, ctx) {
+    const mode = reportMode(parsed);
+    if (mode === 'stability') {
+      const st = parsed.stability_under_load || {};
+      const hold = (st.hold && typeof st.hold === 'object') ? st.hold : {};
+      return [
+        { label: 'Целевой RPS', labelHtml: LL.ui.term('target_rps', 'Целевой RPS'), value: formatNumber(st.target_rps) },
+        { label: 'Средний RPS', labelHtml: LL.ui.term('hold_window', 'Средний RPS (окно удержания)'), value: formatNumber(st.actual_rps), note: hold.start_iso ? `${hhmm(hold.start_iso)}–${hhmm(hold.end_iso)}` : '' },
+        { label: 'Мин. интервал RPS', value: hold.min_bucket_rps != null ? formatNumber(hold.min_bucket_rps) : '', note: hold.drop_pct ? `−${formatNumber(hold.drop_pct)} % от среднего` : '' }
+      ];
+    }
+    if (mode === 'spike') {
+      const sa = parsed.spike_analysis || {};
+      const spikes = Array.isArray(sa.spikes) ? sa.spikes : [];
+      const worst = spikes.find((item) => item.index === sa.worst_spike_index) || spikes[0] || {};
+      const notRecovered = spikes.filter((item) => item.recovered === false).length;
+      const times = spikes.map((item) => Number(item.recovery_time_sec)).filter((n) => Number.isFinite(n));
+      const recovery = notRecovered ? `не восстановилось: ${notRecovered} из ${spikes.length}` : (times.length ? `${formatNumber(Math.max.apply(null, times))} с` : '—');
+      return [
+        { label: 'Фоновая нагрузка', value: sa.baseline_rps != null ? formatNumber(sa.baseline_rps) + ' RPS' : '—' },
+        { label: 'Всплеск', labelHtml: LL.ui.term('spike_window', 'Всплеск'), value: sa.detected ? formatNumber(sa.max_spike_rps) + ' RPS' : 'не обнаружен', note: sa.detected ? `всплесков: ${spikes.length}` : '' },
+        { label: 'Рост p95', labelHtml: LL.ui.term('overshoot', 'Рост p95 (худший всплеск)'), value: signed(worst.overshoot_p95_pct, ' %') || '—' },
+        { label: 'Восстановление', labelHtml: LL.ui.term('recovery_time', 'Восстановление'), value: recovery }
+      ];
+    }
+    if (!peakTableApplies('final', peak)) return [];
+    if (mode === 'stress') {
+      const sat = parsed.saturation || {};
+      const resource = (sat.limiting_resource && typeof sat.limiting_resource === 'object') ? resourceText(sat.limiting_resource) : '';
+      return [
+        { label: 'Точка насыщения', labelHtml: LL.ui.term('saturation_point', 'Точка насыщения'), value: ctx.maxRps, note: safeStr(sat.saturation_step_label) },
+        { label: 'Характер деградации', value: safeStr(sat.failure_mode_title) || '—', note: safeStr(sat.degraded_step_label) ? 'с ' + safeStr(sat.degraded_step_label) : '' },
+        { label: 'Ограничивающий ресурс', labelHtml: LL.ui.term('limiting_resource', 'Ограничивающий ресурс'), value: resource || 'не определён' }
+      ];
+    }
+    return [
+      { label: 'Максимальный RPS', labelHtml: LL.ui.term(ctx.rpsTermKey, 'Максимальный RPS'), value: ctx.maxRps, note: ctx.peakMethod ? `метод: ${ctx.peakMethod}` : '' },
+      { label: 'Время пика', value: safeStr(peak.max_time) || '—' },
+      { label: 'Время деградации', value: safeStr(peak.drop_time) || '—' }
+    ];
+  }
   function renderHero(finalRow, allRows) {
     const hero = document.getElementById('reportHero');
     if (!hero) return;
@@ -1485,6 +1776,8 @@
     const peakMethod = safeStr(peak.method);
     const verdictTermKey = { 'Успешно': 'verdict_success', 'Есть риски': 'verdict_risk', 'Провал': 'verdict_fail' }[effective.text] || 'verdict_na';
     const rpsTermKey = /stable/i.test(peakMethod) ? 'stable_max' : 'peak_max';
+    const testType = normalizedTestType(parsed, finalRow.test_type);
+    const typeTermKey = LL.GLOSSARY['test_type_' + testType] ? 'test_type_' + testType : 'step_profile';
     hero.innerHTML = [
       '<div class="hero-card">',
       `<div class="hero-label">${LL.ui.term('sla_first', 'Вердикт по тесту')}</div>`,
@@ -1504,13 +1797,9 @@
       `<div class="hero-feedback">${renderVoteGroup('final', 'verdict', '', 'Согласен с вердиктом', 'Не согласен')}</div>`,
       renderHeroMeta([
         { label: 'Сервис', value: service || '—' },
-        { label: 'Тип теста', labelHtml: LL.ui.term('step_profile', 'Тип теста'), value: LL.testTypeLabel(finalRow.test_type) },
+        { label: 'Тип теста', labelHtml: LL.ui.term(typeTermKey, 'Тип теста'), value: LL.testTypeLabel(finalRow.test_type) },
         { label: 'Период', value: period || '—', note: period ? `${durationMin} мин · ${LL.timeZoneLabel()}` : '' },
-        ...(peakTableApplies('final', peak) ? [
-          { label: 'Максимальный RPS', labelHtml: LL.ui.term(rpsTermKey, 'Максимальный RPS'), value: maxRps, note: peakMethod ? `метод: ${peakMethod}` : '' },
-          { label: 'Время пика', value: safeStr(peak.max_time) || '—' },
-          { label: 'Время деградации', value: safeStr(peak.drop_time) || '—' }
-        ] : [])
+        ...heroTypeEntries(parsed, peak, { maxRps: maxRps, peakMethod: peakMethod, rpsTermKey: rpsTermKey })
       ]),
       '</div>',
       `<div class="hero-card">${renderSlaChecklist(finalRow)}</div>`
@@ -1546,6 +1835,7 @@
       seenDomains.add(x.domain);
       return true;
     });
+    reportDomainTitles = LL.reportDomainTitles(arr);
     try {
       setPageTitle(run);
       const parsedContexts = arr
@@ -1576,7 +1866,7 @@
       dot.setAttribute('aria-hidden', 'true');
       btn.title = `Вердикт: ${standardizeVerdict(verdictForTab)}`;
       btn.appendChild(dot);
-      btn.appendChild(document.createTextNode(LL.domainTitle(x.domain)));
+      btn.appendChild(document.createTextNode(LL.domainTitleFor(x.domain, reportDomainTitles)));
       btn.dataset.target = idBase + idx;
       tabsNav.appendChild(btn);
       const pane = document.createElement('div'); pane.id = idBase + idx; pane.className = 'tabpanel' + (idx === 0 ? ' active' : '');
@@ -1868,8 +2158,8 @@
       const j = await r.json();
       const ed = document.getElementById('engineerEditor');
       const updated = document.getElementById('engineerUpdated');
-      let html = String(j.content_html || '');
-      try { if (window.DOMPurify) html = window.DOMPurify.sanitize(html); } catch (e) {}
+      const raw = String(j.content_html || '');
+      const html = sanitizeOrEscape(raw, NOTE_PURIFY, raw);
       ed.innerHTML = html || '<p style=\"color:#888\">Добавьте итоговый комментарий…</p>';
       updated.textContent = j.created_at ? ('Обновлено: ' + j.created_at.replace('T', ' ').slice(0, 16)) : '';
     } catch (e) {}
@@ -1973,7 +2263,7 @@
     domains.forEach((domain, di) => {
       const list = (schema[domain] || []).map((x) => x.query_label);
       const btn = document.createElement('button'); btn.className = 'tab' + (di === 0 ? ' active' : '');
-      btn.textContent = `${LL.domainTitle(domain)} (${list.length})`; btn.dataset.target = idBase + di; tabsNav.appendChild(btn);
+      btn.textContent = `${LL.domainTitleFor(domain, reportDomainTitles)} (${list.length})`; btn.dataset.target = idBase + di; tabsNav.appendChild(btn);
       const pane = document.createElement('div'); pane.id = idBase + di; pane.className = 'tabpanel' + (di === 0 ? ' active' : '');
       pane.innerHTML = '<div class="chart-pending">Графики загрузятся при открытии вкладки…</div>';
       paneRenderers[pane.id] = () => renderDomainPane(run, domain, pane, list, di);

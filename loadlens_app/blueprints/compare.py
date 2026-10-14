@@ -7,6 +7,7 @@ from typing import Optional
 from flask import Blueprint, jsonify, render_template, request
 
 from settings import CONFIG
+from loadlens_app.errors import internal_error
 from loadlens_app.core import (
     _active_project_area,
     _resolve_services_filter,
@@ -103,7 +104,7 @@ def compare_summary():
             out.append({"query_label": ql, "value_a": a_f, "value_b": b_f, "trend_pct": _trend_pct(a_f, b_f), "agg": agg})
         return jsonify(out)
     except Exception as e:  # pragma: no cover
-        return jsonify({"error": str(e)}), 500
+        return internal_error(e)
 
 
 @compare_bp.route("/compare_metric_summary", methods=["GET"])
@@ -150,7 +151,7 @@ def compare_metric_summary():
             out.append({"series": s, "value_a": a_f, "value_b": b_f, "trend_pct": _trend_pct(a_f, b_f)})
         return jsonify({"query_label": ql, "series_key": series_key, "agg": agg, "rows": out})
     except Exception as e:  # pragma: no cover
-        return jsonify({"error": str(e)}), 500
+        return internal_error(e)
 
 
 @compare_bp.route("/compare_baseline", methods=["GET"])
@@ -191,7 +192,7 @@ def compare_baseline():
             row = cur.fetchone()
         conn.close()
     except Exception as e:  # pragma: no cover
-        return jsonify({"error": str(e)}), 500
+        return internal_error(e)
     if not row:
         label = "предыдущий успешный прогон" if mode == "previous_success" else "предыдущий прогон"
         return jsonify({"error": f"Для «{run_name}» не найден {label} того же сервиса", "mode": mode}), 404
@@ -242,7 +243,7 @@ def domains_schema():
             out.setdefault(d, []).append({"query_label": ql, "count": int(cnt)})
         return jsonify(out)
     except Exception as e:  # pragma: no cover
-        return jsonify({"error": str(e)}), 500
+        return internal_error(e)
 
 
 @compare_bp.route("/compare_series", methods=["GET"])
@@ -299,7 +300,7 @@ def compare_series():
         conn.close()
         return jsonify({"align": align, "points": data})
     except Exception as e:  # pragma: no cover
-        return jsonify({"error": str(e)}), 500
+        return internal_error(e)
 
 
 @compare_bp.route("/run_series", methods=["GET"])
@@ -355,4 +356,4 @@ def run_series():
         conn.close()
         return jsonify({"align": align, "points": data})
     except Exception as e:  # pragma: no cover
-        return jsonify({"error": str(e)}), 500
+        return internal_error(e)

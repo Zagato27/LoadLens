@@ -29,15 +29,34 @@
   function chip(ok, okText, badText) {
     return `<span class="pill ${ok ? 'ok' : 'warn'}">${esc(ok ? okText : badText)}</span>`;
   }
+  const SLA_FIELD_TITLES = {
+    max_performance_query: 'макс. RPS', mean_latency_query: 'среднее время',
+    service_cpu_query: 'CPU сервисов', cpu_query: 'CPU узлов'
+  };
+  function featureChip(missing, okText, title) {
+    const fields = Array.isArray(missing) ? missing : [];
+    return chip(!fields.length, okText, `${title}: не заданы ${fields.map((f) => SLA_FIELD_TITLES[f] || f).join(', ')}`);
+  }
+  function packsChip(packs) {
+    if (!Array.isArray(packs) || !packs.length) return '';
+    const outdated = packs.filter((p) => p.outdated).length;
+    const names = packs.map((p) => p.title).join(', ');
+    const text = outdated ? `Пакетов запросов: ${packs.length}, есть обновления: ${outdated}` : `Пакетов запросов: ${packs.length}`;
+    return `<span class="pill ${outdated ? 'warn' : 'na'}" title="${esc(names)}">${esc(text)}</span>`;
+  }
   function readinessChips(r) {
     const counts = r.query_counts || {};
     const total = Object.values(counts).reduce((sum, n) => sum + n, 0);
+    const missing = r.missing_sla || {};
     return [
       chip(r.target_rps !== null, `Целевой RPS: ${r.target_rps}`, 'Целевой RPS не задан'),
       chip(!!r.performance_query, 'Запрос производительности выбран', 'Запрос производительности не выбран'),
       chip(r.has_system_context, 'Контекст системы заполнен', 'Контекст системы пуст'),
-      chip(total > 0, `Запросов: ${total}, доменов: ${Object.keys(counts).length}`, 'Запросов нет')
-    ].join(' ');
+      chip(total > 0, `Запросов: ${total}, доменов: ${Object.keys(counts).length}`, 'Запросов нет'),
+      featureChip(missing.forecast, 'Прогноз: ссылки SLA заданы', 'Прогноз'),
+      featureChip(missing.resource_plan, 'План ресурсов: ссылки SLA заданы', 'План ресурсов'),
+      packsChip(r.query_packs)
+    ].filter(Boolean).join(' ');
   }
   function lastReport(p) {
     if (!p.last_report_at) return 'нет';

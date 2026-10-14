@@ -275,6 +275,10 @@ def test_post_config_restores_secret_and_reports_unknown_keys(client, monkeypatc
     monkeypatch.setitem(core.CONFIG, "confluence", copy.deepcopy(core.CONFIG["confluence"]))
     monkeypatch.setitem(core.CONFIG, "sla", copy.deepcopy(core.CONFIG["sla"]))
     monkeypatch.setitem(core.CONFIG["confluence"], "password", "cf-secret")
+    monkeypatch.setitem(core.CONFIG["confluence"], "base_url", "https://wiki.local")
+    moved = client.post("/config", json={"section": "confluence", "data": {"base_url": "https://evil.example", "password": "***"}})
+    assert moved.status_code == 400 and "заново" in moved.get_json()["error"]
+    assert core.CONFIG["confluence"]["base_url"] == "https://wiki.local"
     resp = client.post("/config", json={"section": "confluence", "data": {"base_url": "https://wiki.local", "password": "***", "spase_key": "LL"}})
     assert resp.status_code == 200
     body = resp.get_json()
@@ -295,11 +299,16 @@ def test_post_config_restores_secret_and_reports_unknown_keys(client, monkeypatc
 def test_post_config_confluence_template_updates_flat_keys(client, monkeypatch):
     monkeypatch.setitem(core.CONFIG, "url_basic", "https://old.local")
     monkeypatch.setitem(core.CONFIG, "password", "old-secret")
-    resp = client.post("/config", json={"section": "confluence_template", "data": {"url_basic": "https://new.local", "password": "***", "unknown_key": 1}})
+    moved = client.post("/config", json={"section": "confluence_template", "data": {"url_basic": "https://new.local", "password": "***"}})
+    assert moved.status_code == 400 and "заново" in moved.get_json()["error"]
+    assert core.CONFIG["url_basic"] == "https://old.local"
+    resp = client.post("/config", json={"section": "confluence_template", "data": {"url_basic": "https://old.local", "password": "***", "unknown_key": 1}})
     assert resp.status_code == 200
-    assert core.CONFIG["url_basic"] == "https://new.local"
     assert core.CONFIG["password"] == "old-secret"
     assert "unknown_key" not in core.CONFIG
+    resp = client.post("/config", json={"section": "confluence_template", "data": {"url_basic": "https://new.local", "password": "new-secret"}})
+    assert resp.status_code == 200
+    assert core.CONFIG["url_basic"] == "https://new.local" and core.CONFIG["password"] == "new-secret"
 
 
 def test_post_config_area_override_is_scoped(client):
@@ -324,6 +333,10 @@ def test_test_connection_endpoint(client, monkeypatch):
 
     monkeypatch.setattr(config_api, "run_check", fake_run_check)
     monkeypatch.setitem(core.CONFIG["storage"]["timescale"], "password", "db-secret")
+    monkeypatch.setitem(core.CONFIG["storage"]["timescale"], "host", "db.local")
+    moved = client.post("/config/test_connection", json={"section": "storage.timescale", "data": {"host": "attacker.example", "password": "***"}})
+    assert moved.status_code == 400 and "заново" in moved.get_json()["error"]
+    assert calls == {}  # the stored password was not sent anywhere
     resp = client.post("/config/test_connection", json={"section": "storage.timescale", "data": {"host": "db.local", "password": "***"}})
     assert resp.status_code == 200
     assert resp.get_json()["ok"] is True
@@ -332,6 +345,36 @@ def test_test_connection_endpoint(client, monkeypatch):
 
     resp = client.post("/config/test_connection", json={"section": "queries", "data": {}})
     assert resp.status_code == 400
+
+
+def test_env_llm_keys_never_go_to_an_address_typed_into_the_form(client, monkeypatch):
+    from AI import providers
+
+    sent = []
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "OK"}, "finish_reason": "stop"}]}
+
+    monkeypatch.setattr(providers.requests, "post", lambda url, **kwargs: sent.append((url, kwargs["headers"]["Authorization"])) or FakeResponse())
+    monkeypatch.setenv("OPENAI_API_KEY", "ENV-SECRET")
+    llm = copy.deepcopy(core.CONFIG.get("llm") or {})
+    llm["openai"] = {**(llm.get("openai") or {}), "api_base_url": "https://llm.corp/v1", "api_key": "", "model": "m"}
+    monkeypatch.setitem(core.CONFIG, "llm", llm)
+
+    moved = {**llm, "provider": "openai", "openai": {**llm["openai"], "api_base_url": "https://attacker.example/v1"}}
+    assert client.post("/config/test_connection", json={"section": "llm", "data": moved}).status_code == 200
+    assert sent[-1][0].startswith("https://attacker.example") and "ENV-SECRET" not in sent[-1][1]
+
+    same = {**llm, "provider": "openai"}
+    assert client.post("/config/test_connection", json={"section": "llm", "data": same}).status_code == 200
+    assert sent[-1][0].startswith("https://llm.corp") and "ENV-SECRET" in sent[-1][1]
 
 
 def test_catalog_save_rejects_source_still_in_use(client):
@@ -463,6 +506,40 @@ def test_queries_config_rejects_mismatched_arrays(client):
     assert "разной длины" in resp.get_json()["error"]
 
 
+def test_masked_secret_is_bound_to_its_destination():
+    from loadlens_app.config_secrets import MASK, SecretDestinationChangedError, mask_secrets, restore_secrets
+
+    stored = {
+        "api_base_url": "https://llm.corp/v1", "api_key": "k-1", "credentials": "c-1",
+        "proxies": {"https": "http://proxy-user:proxy-pw@proxy.corp:3128", "http": ""},
+    }
+    masked = mask_secrets(stored)
+    assert masked["credentials"] == MASK and masked["proxies"]["https"] == "http://proxy-user:***@proxy.corp:3128"
+    assert restore_secrets(masked, stored) == stored
+    for change in ({"api_base_url": "https://attacker.example/v1"}, {"proxies": {"https": "http://attacker:1"}}, {"verify": False}):
+        with pytest.raises(SecretDestinationChangedError):
+            restore_secrets({**masked, **change}, stored)
+    with pytest.raises(SecretDestinationChangedError):
+        restore_secrets({"proxies": {"https": "http://proxy-user:***@attacker.example:3128"}}, stored)
+    nested = {"grafana": {"base_url": "http://grafana:3000", "auth": {"password": "pw"}}}
+    with pytest.raises(SecretDestinationChangedError):
+        restore_secrets({"grafana": {"base_url": "http://attacker:3000", "auth": {"password": MASK}}}, nested)
+    flat = {"url_basic": "https://wiki", "password": "a", "grafana_base_url": "http://g", "grafana_pass": "b"}
+    other_grafana = restore_secrets({"url_basic": "https://wiki", "password": MASK, "grafana_base_url": "http://g2", "grafana_pass": "typed"}, flat)
+    assert other_grafana["password"] == "a"  # each flat secret follows only its own address
+
+
+def test_audit_targets_keep_hosts_only():
+    from loadlens_app.blueprints.config_api import _addresses
+
+    payload = {
+        "base_url": "https://user:pw@wiki.corp:8443/confluence", "password": "x",
+        "proxies": {"https": "http://u:p@proxy.corp:3128", "http": ""},
+        "storage": {"host": "db.corp", "port": 5432, "password": "y"},
+    }
+    assert _addresses(payload) == ["db.corp:5432", "proxy.corp:3128", "wiki.corp:8443"]
+
+
 def test_mask_and_restore_secrets():
     from loadlens_app.config_secrets import MASK, SecretPlaceholderError, mask_secrets, restore_secrets
 
@@ -589,7 +666,7 @@ def test_report_address_uses_run_id(client, monkeypatch):
     def lookup(run_id="", run_name="", service=""):
         if run_id == "abc123":
             return {"run_id": "abc123", "run_name": "ODP", "service": "НСИ"}
-        if run_name:
+        if run_name == "ODP":
             return {"run_id": "abc123", "run_name": run_name, "service": service or "НСИ"}
         return None
 
@@ -606,6 +683,125 @@ def test_report_address_uses_run_id(client, monkeypatch):
     assert ref.status_code == 200
     assert ref.get_json() == {"run_id": "abc123", "run_name": "ODP", "service": "НСИ"}
     assert client.get("/report_ref/missing").status_code == 404
+
+
+def test_report_pages_never_write_on_get(client, monkeypatch):
+    from loadlens_app.blueprints import dashboard
+
+    # A run saved before ids existed: found by name, no id yet.
+    conn = RecordingConnection(fetchone_results=[None, None, ("", "ODP", "НСИ")])
+    monkeypatch.setattr(dashboard, "_ts_conn", lambda: conn)
+    ref = client.get("/report_ref/ODP")
+    assert ref.status_code == 200
+    assert ref.get_json() == {"run_id": "", "run_name": "ODP", "service": "НСИ"}
+
+    conn_runs = RecordingConnection(fetchone_results=[(1,)], fetchall_results=[[
+        ("old-run", None, None, "svc", "Успешно", None, None, None, "", ""),
+    ]])
+    monkeypatch.setattr(dashboard, "_ts_conn", lambda: conn_runs)
+    runs = client.get("/runs").get_json()
+    assert runs[0]["run_id"] == ""
+    statements = [sql for sql, _params in conn.log + conn_runs.log]
+    assert not [sql for sql in statements if "UPDATE" in sql]
+
+
+def test_legacy_report_address_opens_by_name_until_the_migration_runs(client, monkeypatch):
+    from loadlens_app.blueprints import dashboard
+
+    def lookup(run_id="", run_name="", service=""):
+        return {"run_id": "", "run_name": "ODP", "service": "НСИ"} if run_name == "ODP" else None
+
+    monkeypatch.setattr(dashboard, "_lookup_report_ref", lookup)
+    legacy = client.get("/reports/НСИ/ODP")
+    assert legacy.status_code == 302 and legacy.headers["Location"].endswith("/reports/ODP")
+    assert client.get("/reports/ODP").status_code == 200
+
+
+def test_runs_paging_is_bounded_and_search_is_literal(client, monkeypatch):
+    from loadlens_app.blueprints import dashboard
+
+    conn = RecordingConnection(fetchone_results=[(0,)], fetchall_results=[[]])
+    monkeypatch.setattr(dashboard, "_ts_conn", lambda: conn)
+    assert client.get("/runs", query_string={"limit": 100000, "offset": -3, "q": "50%_x"}).status_code == 200
+    page_sql, page_params = conn.log[1]
+    assert page_params[-2:] == (0, 500)
+    bs = chr(92)
+    assert page_params[0] == f"%50{bs}%{bs}_x%"
+    assert "ESCAPE" in page_sql
+    assert client.get("/runs", query_string={"limit": "many"}).status_code == 400
+
+
+def test_create_report_enforces_window_points_jobs_and_llm_budget(client, monkeypatch):
+    from loadlens_app import jobs
+    from loadlens_app.blueprints import dashboard
+
+    base = {"start": "2024-11-01T00:00", "end": "2024-11-01T01:00", "service": "demo", "web_only": True}
+    too_long = client.post("/create_report", json={**base, "end": "2024-11-10T00:00"})
+    assert too_long.status_code == 400 and too_long.get_json()["code"] == "window_too_long"
+
+    monkeypatch.setattr(dashboard, "_report_step", lambda area, service: "1s")
+    dense = client.post("/create_report", json={**base, "end": "2024-11-01T04:00"})
+    assert dense.status_code == 400 and dense.get_json()["code"] == "too_many_points"
+    monkeypatch.setattr(dashboard, "_report_step", lambda area, service: "1m")
+
+    monkeypatch.setattr(jobs.job_store, "running_counts", lambda owner: (4, 0))
+    assert client.post("/create_report", json=base).status_code == 429
+    monkeypatch.setattr(jobs.job_store, "running_counts", lambda owner: (1, 2))
+    assert client.post("/create_report", json=base).status_code == 429
+    monkeypatch.setattr(jobs.job_store, "running_counts", lambda owner: (0, 0))
+
+    monkeypatch.setitem(core.CONFIG, "limits", {"llm_reports_per_user_per_day": 1})
+    assert client.post("/create_report", json={**base, "use_llm": True}).status_code == 200
+    spent = client.post("/create_report", json={**base, "use_llm": True})
+    assert spent.status_code == 429 and "лимит" in spent.get_json()["message"]
+    assert client.post("/create_report", json={**base, "use_llm": False}).status_code == 200
+
+
+def test_limits_parse_steps_and_reset_the_budget_daily():
+    from datetime import date
+
+    from loadlens_app.limits import DailyBudget, LimitError, step_seconds
+
+    assert [step_seconds(s) for s in ("30s", "1m", "10T", "2h", "1d", "5 min", "", "1w")] == [30, 60, 600, 7200, 86400, 300, None, None]
+    today = {"value": date(2026, 10, 8)}
+    budget = DailyBudget(today=lambda: today["value"])
+    budget.consume("eve", "report", 1)
+    with pytest.raises(LimitError):
+        budget.consume("eve", "report", 1)
+    budget.consume("bob", "report", 1)  # per user
+    budget.consume("eve", "report", None)  # None switches the limit off
+    today["value"] = date(2026, 10, 9)
+    budget.consume("eve", "report", 1)  # a new day, a new allowance
+
+
+def test_run_id_backfill_reuses_existing_ids_and_skips_when_locked():
+    from loadlens_app import migrations
+
+    conn = RecordingConnection(fetchone_results=[(True,)], fetchall_results=[[("old-run", "svc", None), ("half", "svc", "rid-9")]])
+    assert migrations.backfill_run_ids(lambda: conn) == 2
+    updates = [(sql, params) for sql, params in conn.log if "UPDATE" in sql]
+    assert len(updates) == 4
+    new_id = updates[0][1][0]
+    assert len(new_id) == 32 and updates[1][1][0] == new_id  # both tables share the new id
+    assert updates[2][1] == ("rid-9", "half", "svc") and updates[3][1] == ("rid-9", "half", "svc")
+    assert "pg_advisory_unlock" in conn.log[-1][0]
+
+    busy = RecordingConnection(fetchone_results=[(False,)])
+    assert migrations.backfill_run_ids(lambda: busy) == 0
+    assert not [sql for sql, _params in busy.log if "UPDATE" in sql]
+
+
+def test_migrations_start_with_the_app_only_when_asked(monkeypatch):
+    from app import create_app
+    from loadlens_app import migrations
+
+    started = []
+    monkeypatch.setattr(migrations, "start_background_migrations", lambda: started.append(True))
+    create_app()
+    assert started == []
+    monkeypatch.setenv("LOADLENS_RUN_MIGRATIONS", "1")
+    create_app()
+    assert started == [True]
 
 
 def test_runs_restricts_to_project_area_services(client, monkeypatch):
@@ -865,6 +1061,37 @@ def test_create_report_assigns_run_name_and_tracks_job(client):
     assert any(j["job_id"] == data["job_id"] for j in listed["jobs"])
 
 
+def test_unexpected_failures_do_not_leak_exception_text(client, monkeypatch):
+    from loadlens_app.blueprints import dashboard
+
+    def broken_conn():
+        raise RuntimeError("connection to db.internal:5432 failed for user app (password=SECRET)")
+
+    monkeypatch.setattr(dashboard, "_ts_conn", broken_conn)
+    resp = client.get("/runs")
+    body = resp.get_json()
+    assert resp.status_code == 500
+    assert "db.internal" not in body["error"] and "SECRET" not in body["error"]
+    assert body["error_id"] in body["error"]
+
+
+def test_runtime_config_is_written_atomically_and_never_reset(client):
+    core.CONFIG_RUNTIME_PATH.write_text("", encoding="utf-8")
+    assert core._load_settings_runtime_data() == {}  # an empty file counts as no overrides
+
+    core._save_settings_runtime_data({"per_area": {"demo": {"title": "Демо"}}})
+    assert json.loads(core.CONFIG_RUNTIME_PATH.read_text(encoding="utf-8"))["per_area"]["demo"]["title"] == "Демо"
+    assert not [p for p in core.CONFIG_RUNTIME_PATH.parent.iterdir() if p.name.endswith(".tmp")]
+
+    broken = '{"per_area": {"demo": '
+    core.CONFIG_RUNTIME_PATH.write_text(broken, encoding="utf-8")
+    with pytest.raises(core.RuntimeConfigError):
+        core._load_settings_runtime_data()
+    resp = client.post("/config", json={"section": "sla", "area": "demo", "data": {"target_rps": 5}})
+    assert resp.status_code == 500
+    assert core.CONFIG_RUNTIME_PATH.read_text(encoding="utf-8") == broken  # the stored settings were not overwritten
+
+
 def test_jobs_endpoint_validates_status(client):
     resp = client.get("/jobs", query_string={"status": "weird"})
     assert resp.status_code == 400
@@ -1065,9 +1292,13 @@ def test_seed_demo_run_writes_all_domains(monkeypatch):
     assert saved["bootstrap"] == (demo_data.DEMO_AREA, demo_data.DEMO_SERVICE)
     assert [d[0] for d in saved["domains"]] == ["lt_framework", "jvm", "microservices", "hard_resources"]
     assert all(d[2] == demo_data.DEMO_DURATION_MIN for d in saved["domains"])
-    assert "LT (InfluxQL): RPS sum by all groups" in saved["domains"][0][1]
-    assert "LT (InfluxQL): http_req_duration mean(seconds)" in saved["domains"][0][1]
-    assert "LT (InfluxQL): VUs" in saved["domains"][0][1]
+    # The demo stores the series the example SLA references point at (lt-k6-influxql pack labels).
+    from AI.query_packs.__main__ import EXAMPLE_BUNDLE, bundle_config
+
+    example_refs = bundle_config(EXAMPLE_BUNDLE)["sla_refs"]
+    lt_labels = saved["domains"][0][1]
+    for field in ("max_performance_query", "mean_latency_query", "vus_query", "p95_query", "error_rate_query"):
+        assert example_refs[field] in lt_labels, field
     results, run_meta = saved["llm"]
     assert run_meta["test_type"] == "step" and run_meta["service"] == demo_data.DEMO_SERVICE
     assert results["final_parsed"]["peak_performance"]["max_rps"] == pytest.approx(249.3)
@@ -1076,7 +1307,7 @@ def test_seed_demo_run_writes_all_domains(monkeypatch):
     assert results["system_context"]["system"]["name"].startswith("Checkout Platform")
     assert len(results["contexts"]["final"]["load_steps"]) == 5
     assert results["contexts"]["final"]["rps_drop_iso"]
-    assert "LT (InfluxQL): http_req_duration mean(seconds)" in results["contexts"]["final"]["lt_series_labels"]
+    assert "LT (InfluxQL): http_req_duration mean(ms)" in results["contexts"]["final"]["lt_series_labels"]
 
     monkeypatch.setattr(demo_data, "_run_exists", lambda run_name: True)
     with pytest.raises(demo_data.DemoAlreadyExistsError) as exc:
@@ -1727,6 +1958,68 @@ def test_confluence_placeholder_replacement_uses_block_container():
     assert "<table><tbody><tr><td>OK</td></tr></tbody></table>" in html
 
 
+def test_llm_text_cannot_escape_the_markdown_macro_of_the_legacy_template():
+    import re
+
+    from confluence_manager.update_confluence_template import _replace_placeholder_storage
+
+    bs = chr(92)
+    template = (
+        '<ac:structured-macro ac:name="markdown"><ac:plain-text-body><![CDATA[$$final_answer$$]]>'
+        "</ac:plain-text-body></ac:structured-macro><p>After</p>"
+    )
+    hostile = (
+        "Итог ]]></ac:plain-text-body></ac:structured-macro>"
+        '<ac:structured-macro ac:name="html"><ac:plain-text-body><![CDATA[<script>alert(1)</script>]]>'
+        f"</ac:plain-text-body></ac:structured-macro> {bs}1 {bs}g<0>"
+    )
+    page, replaced = _replace_placeholder_storage(template, "$$final_answer$$", hostile, as_text=True)
+    assert replaced
+    outside_cdata = re.sub(r"<!\[CDATA\[.*?\]\]>", "", page, flags=re.S)
+    assert 'ac:name="html"' not in outside_cdata and outside_cdata.count("<ac:structured-macro") == 1
+    assert "<script>" not in page and f"{bs}1 {bs}g&lt;0>" in page
+
+    plain, _ = _replace_placeholder_storage("<p>Before</p><p>$$final_answer$$</p>", "$$final_answer$$", "<b>x</b> & y\n\nnext", as_text=True)
+    assert plain == "<p>Before</p><p>&lt;b&gt;x&lt;/b&gt; &amp; y</p><p>next</p>"
+
+
+def test_confluence_export_drops_unsafe_links_and_ignores_the_requested_source_url(client, monkeypatch):
+    from loadlens_app.blueprints import dashboard
+    from loadlens_app.confluence_export import html_to_storage
+
+    storage = html_to_storage('<p><a href="javascript:alert(1)">x</a><a href="https://wiki.example/p">y</a></p>')
+    assert "javascript" not in storage and 'href="https://wiki.example/p"' in storage
+
+    published = {}
+    monkeypatch.setattr(dashboard, "publish_report", lambda **kwargs: published.update(kwargs) or {"page_id": "1", "page_url": "u"})
+    monkeypatch.setitem(core.CONFIG["confluence"], "app_url", "https://loadlens.corp/")
+    resp = client.post("/publish_confluence", json={"run_name": "test-run", "source_url": "https://phishing.example/login"})
+    assert resp.status_code == 200
+    assert published["source_url"] == "https://loadlens.corp/reports/test-run"
+
+
+def test_worker_tasks_take_credentials_from_config_and_refuse_foreign_hosts(monkeypatch, tmp_path):
+    import update_page
+    from data_collectors import temp_files
+
+    settings = {"grafana_base_url": "http://grafana.corp:3000", "grafana_login": "g", "grafana_pass": "p",
+                "url_basic": "https://wiki.corp", "user": "u", "password": "w", "loki_url": "http://loki.corp"}
+    monkeypatch.setattr(update_page, "_legacy_settings", lambda: settings)
+    downloads = []
+    monkeypatch.setattr(update_page, "_download_img_with_retry", lambda url, name, user, pw: downloads.append((url, user, pw)) or True)
+    assert update_page.download_grafana_image_task("http://grafana.corp.evil.example/render/x", "f") is False
+    assert downloads == []
+    assert update_page.download_grafana_image_task("http://grafana.corp:3000/render/d-solo/x?a=1", "f") is True
+    assert downloads == [("http://grafana.corp:3000/render/d-solo/x?a=1", "g", "p")]
+
+    monkeypatch.setattr(temp_files, "TEMP_DIR", tmp_path)
+    uploads = []
+    monkeypatch.setattr(update_page, "_attach_with_retry", lambda func, url, auth, page, path: uploads.append((url, auth.username, path)) or True)
+    assert update_page.upload_attachment_task("grafana", "42", str(tmp_path.parent / "settings.py")) is False
+    assert update_page.upload_attachment_task("grafana", "42", temp_files.temp_file_path("chart", ".jpg")) is True
+    assert uploads and uploads[0][:2] == ("https://wiki.corp", "u")
+
+
 def _write_project_runtime(per_area: dict, metrics: dict | None = None) -> None:
     core.CONFIG_RUNTIME_PATH.write_text(json.dumps({"per_area": per_area}, ensure_ascii=False), encoding="utf-8")
     core.METRICS_RUNTIME_PATH.write_text(json.dumps(metrics or {}, ensure_ascii=False), encoding="utf-8")
@@ -2134,6 +2427,57 @@ def test_appearance_accent_recolors_pages_and_logo(client):
         assert palette_css(accent_palette("#6200ee")) == ""
     finally:
         CONFIG["appearance"] = original
+
+
+def test_html_sanitizer_keeps_formatting_only():
+    from loadlens_app.html_sanitizer import sanitize_html
+
+    tab = chr(9)
+    hostile = (
+        '<p onclick="steal()">Hi<script>alert(1)</script><img src=x onerror=alert(2)>'
+        f'<a href="java{tab}script:alert(3)">x</a><a href="https://wiki.example/p?a=1&amp;b=2">ok</a>'
+        '<style>p{}</style><svg><text>hidden</text></svg><form><input value=1>kept</form><b>bold</b></p>'
+    )
+    assert sanitize_html(hostile) == (
+        '<p>Hi<a>x</a><a href="https://wiki.example/p?a=1&amp;b=2" rel="noopener noreferrer">ok</a>kept<b>bold</b></p>'
+    )
+    assert sanitize_html("<ul><li>one</li></ul><h3>T</h3>&lt;script&gt;") == "<ul><li>one</li></ul><h3>T</h3>&lt;script&gt;"
+    assert sanitize_html("<p><b>open") == "<p><b>open</b></p>"
+
+
+def test_engineer_note_is_sanitized_on_save_and_read(client, monkeypatch):
+    from loadlens_app.blueprints import dashboard
+
+    conn = RecordingConnection(fetchone_results=[("svc",)])
+    monkeypatch.setattr(dashboard, "_ts_conn", lambda: conn)
+    note = '<p>Итог<img src=x onerror=alert(1)><script>alert(2)</script></p>'
+    assert client.post("/engineer_summary", json={"run_name": "r1", "content_html": note}).status_code == 200
+    insert_params = next(params for sql, params in conn.log if "INSERT" in sql)
+    assert insert_params[3] == "<p>Итог</p>"
+
+    stored = RecordingConnection(fetchone_results=[('<b>old</b><script>alert(1)</script>', None)])
+    monkeypatch.setattr(dashboard, "_ts_conn", lambda: stored)
+    assert client.get("/engineer_summary", query_string={"run_name": "r1"}).get_json()["content_html"] == "<b>old</b>"
+
+    too_big = client.post("/engineer_summary", json={"run_name": "r1", "content_html": "x" * 200_001})
+    assert too_big.status_code == 400
+
+
+def test_pages_carry_a_content_security_policy_with_the_script_nonce(client, monkeypatch):
+    import re
+
+    page = client.get("/")
+    policy = page.headers["Content-Security-Policy"]
+    nonce = re.search(r"'nonce-([^']+)'", policy).group(1)
+    assert f'<script nonce="{nonce}">' in page.get_data(as_text=True)
+    assert "object-src 'none'" in policy and "img-src 'self' data: blob:" in policy and "frame-ancestors 'self'" in policy
+    assert "unsafe-eval" not in policy and "script-src 'self' 'nonce-" in policy
+    assert client.get("/").headers["Content-Security-Policy"] != policy  # a fresh nonce per response
+
+    monkeypatch.setenv("LOADLENS_CSP_REPORT_ONLY", "1")
+    report_only = client.get("/")
+    assert "Content-Security-Policy-Report-Only" in report_only.headers
+    assert "Content-Security-Policy" not in report_only.headers
 
 
 def test_logo_rejects_a_bad_color_without_reflecting_it(client):

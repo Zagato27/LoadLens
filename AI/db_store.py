@@ -9,6 +9,7 @@ import psycopg2
 from psycopg2 import sql
 from psycopg2.extras import Json, execute_batch
 
+from AI import storage_state
 from AI.scoring import parse_llm_analysis_strict
 
 
@@ -41,9 +42,10 @@ def _df_to_long(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _connect(storage_cfg: Dict[str, object]):
+    """Connection through the storage breaker (short timeout, fast failures while the database is down)."""
     dsn = storage_cfg.get("dsn")
     if isinstance(dsn, str) and dsn.strip():
-        return psycopg2.connect(dsn)
+        return storage_state.connect({"dsn": dsn}, storage_cfg)
 
     params = {
         "host": storage_cfg.get("host", "localhost"),
@@ -53,7 +55,7 @@ def _connect(storage_cfg: Dict[str, object]):
         "password": storage_cfg.get("password"),
         "sslmode": storage_cfg.get("sslmode", "prefer"),
     }
-    return psycopg2.connect(**params)
+    return storage_state.connect(params, storage_cfg)
 
 
 def _ensure_schema_and_table(conn, storage_cfg: Dict[str, object], schema: str, table: str) -> None:
@@ -472,6 +474,22 @@ class SeriesStats:
 RunMetricStats = Dict[str, Dict[str, Dict[str, SeriesStats]]]
 
 
+def _test_type_filter_values(test_type: Optional[str]) -> list[str]:
+    """Stored ``test_type`` values that belong to the same normalized type (lowercase)."""
+    from AI.test_profile import TEST_TYPE_ALIASES, normalize_test_type
+
+    normalized = normalize_test_type(test_type)
+    if not normalized:
+        return []
+    values = {normalized}
+    for alias in TEST_TYPE_ALIASES[normalized]:
+        values.add(alias)
+        values.add(alias.replace("_", " "))
+    if normalized == "step":
+        values.add("")
+    return sorted(values)
+
+
 def find_previous_run(
     conn,
     schema: str,
@@ -483,12 +501,15 @@ def find_previous_run(
     services: Optional[Sequence[str]] = None,
     project_area: Optional[str] = None,
     before: Optional[datetime] = None,
+    test_type: Optional[str] = None,
 ) -> Optional[BaselineRun]:
     """Latest earlier run of the same service (and project area, when set) to use as a baseline.
 
     ``mode=previous_success`` requires the effective verdict «Успешно»; ``mode=previous``
     takes any earlier run. ``services`` limits the lookup to the current project area.
     Rows saved before ``project_area`` existed stay eligible when their area is empty.
+    ``test_type`` (normalized step/soak/spike/stress) limits the lookup to runs of the same
+    type, matching any stored alias; step runs also accept rows saved without a type.
     """
     if mode not in BASELINE_MODES:
         raise ValueError(f"Unknown baseline mode '{mode}', expected one of {BASELINE_MODES}")
@@ -497,6 +518,9 @@ def find_previous_run(
     table_ref = sql.SQL("{}.{}").format(sql.Identifier(schema), sql.Identifier(llm_table))
     area = str(project_area or "").strip()
     area_sql = sql.SQL("AND (COALESCE(r.project_area, '') = '' OR r.project_area = %s)") if area else sql.SQL("")
+    type_values = _test_type_filter_values(test_type)
+    type_sql = sql.SQL("AND LOWER(TRIM(COALESCE(r.test_type, ''))) = ANY(%s)") if type_values else sql.SQL("")
+    tail: tuple = ((type_values,) if type_values else ()) + ((area,) if area else ())
     allowed = [str(item).strip() for item in (services or []) if str(item).strip()]
     if service and service not in allowed:
         allowed.append(service)
@@ -511,33 +535,33 @@ def find_previous_run(
             SELECT {columns}
             FROM {table} r, current c
             WHERE r.domain = 'final' AND r.service = c.service AND r.run_name <> %s AND r.created_at < c.created_at
-            {success_filter} {area_sql}
+            {success_filter} {type_sql} {area_sql}
             ORDER BY r.created_at DESC LIMIT 1
             """
-        ).format(table=table_ref, columns=columns, success_filter=success_filter, area_sql=area_sql)
-        params: tuple = (exclude_run_name, exclude_run_name) + ((area,) if area else ())
+        ).format(table=table_ref, columns=columns, success_filter=success_filter, type_sql=type_sql, area_sql=area_sql)
+        params: tuple = (exclude_run_name, exclude_run_name) + tail
     elif len(allowed) > 1:
         query = sql.SQL(
             """
             SELECT {columns}
             FROM {table} r
             WHERE r.domain = 'final' AND r.service = ANY(%s) AND r.run_name <> %s AND r.created_at < %s
-            {success_filter} {area_sql}
+            {success_filter} {type_sql} {area_sql}
             ORDER BY r.created_at DESC LIMIT 1
             """
-        ).format(table=table_ref, columns=columns, success_filter=success_filter, area_sql=area_sql)
-        params = (allowed, exclude_run_name, before) + ((area,) if area else ())
+        ).format(table=table_ref, columns=columns, success_filter=success_filter, type_sql=type_sql, area_sql=area_sql)
+        params = (allowed, exclude_run_name, before) + tail
     else:
         query = sql.SQL(
             """
             SELECT {columns}
             FROM {table} r
             WHERE r.domain = 'final' AND r.service = %s AND r.run_name <> %s AND r.created_at < %s
-            {success_filter} {area_sql}
+            {success_filter} {type_sql} {area_sql}
             ORDER BY r.created_at DESC LIMIT 1
             """
-        ).format(table=table_ref, columns=columns, success_filter=success_filter, area_sql=area_sql)
-        params = (service, exclude_run_name, before) + ((area,) if area else ())
+        ).format(table=table_ref, columns=columns, success_filter=success_filter, type_sql=type_sql, area_sql=area_sql)
+        params = (service, exclude_run_name, before) + tail
     with conn.cursor() as cur:
         cur.execute(query, params)
         row = cur.fetchone()

@@ -1,8 +1,10 @@
 Domain Focus: final
 
 Evaluation Criteria Addendum
-- Ищите синтез по доменам: итоговый verdict, главные bottlenecks, cross-domain связи, SLA-риски, peak_performance только для capacity/step тестов.
-- Для stability/soak тестов оценивайте стабильность под нагрузкой: удержание RPS, latency/errors/checks, ресурсные тренды и накопление деградации без требования peak_performance.
+- Ищите синтез по доменам: итоговый verdict, главные bottlenecks, cross-domain связи, SLA-риски, peak_performance только для step и stress тестов.
+- Для stability/soak тестов оценивайте стабильность под нагрузкой: удержание RPS (stability_under_load.hold), latency/errors/checks, ресурсные тренды (stability_under_load.trends) и накопление деградации без требования peak_performance.
+- Для spike тестов оценивайте реакцию на всплеск: рост задержек и ошибок в окне всплеска относительно фона (overshoot), время восстановления, просадки RPS (spike_analysis); peak_performance не требуется.
+- Для stress тестов оценивайте точку насыщения, характер деградации и ограничивающий ресурс (saturation).
 - Хороший кандидат не просто повторяет доменные блоки, а выстраивает приоритеты и объясняет итог теста.
 - Рекомендации должны быть ранжированы по влиянию на результат теста и привязаны к конкретным командам/компонентам.
 

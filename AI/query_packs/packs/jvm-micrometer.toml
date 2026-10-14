@@ -1,0 +1,122 @@
+schema_version = 1
+id = "jvm-micrometer"
+version = 1
+title = "JVM: Micrometer (Spring Boot Actuator, Quarkus)"
+category = "runtime"
+stack = ["java", "spring-boot", "quarkus", "micrometer"]
+domain = "jvm"
+language = "promql"
+domain_title = "JVM"
+verified = true
+description = """
+Метрики JVM из Micrometer: /actuator/prometheus в Spring Boot или /q/metrics в Quarkus. Имя сервиса \
+берётся из общего тега Micrometer (management.metrics.tags.application). process_cpu_usage — доля всех \
+доступных процессу CPU (в контейнере JDK 11+ учитывает лимит), поэтому годится для плана ресурсов.
+"""
+requires_metrics = ["jvm_memory_used_bytes", "process_cpu_usage", "jvm_gc_pause_seconds_count"]
+prompt_addendum = """
+Метрики Micrometer: jvm_memory_used_bytes{area="heap"} — занятая куча (сумма пулов), jvm_memory_max_bytes — \
+её максимум, jvm_gc_live_data_size_bytes — размер old gen после полной сборки (рост от ступени к ступени \
+указывает на утечку или кэш), jvm_gc_pause_seconds — паузы GC, process_cpu_usage — CPU процесса как доля \
+0..1, tomcat_threads_busy_threads — занятые потоки Tomcat.
+"""
+
+[variables.service_label]
+title = "Лейбл с именем сервиса"
+default = "application"
+pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
+
+[variables.matchers]
+title = "Дополнительные матчеры"
+default = ""
+help = 'Например namespace="shop". Пусто — все сервисы с лейблом сервиса.'
+
+[variables.window]
+title = "Окно rate()"
+default = "2m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[sla]
+service_cpu_query = "@runtime.cpu"
+
+[[queries]]
+label = "JVM: Heap used (bytes) by ({{service_label}}, instance)"
+role = "runtime.heap_used"
+unit = "bytes"
+required = true
+query = 'sum by ({{service_label}}, instance) (jvm_memory_used_bytes{area="heap", {{service_label}}!="", {{matchers}} })'
+keys = ["{{service_label}}", "instance"]
+description = "Занятая куча экземпляра, сумма пулов."
+
+[[queries]]
+label = "JVM: Heap max (bytes) by ({{service_label}}, instance)"
+role = "runtime.heap_max"
+unit = "bytes"
+query = 'sum by ({{service_label}}, instance) (jvm_memory_max_bytes{area="heap", {{service_label}}!="", {{matchers}} } > 0)'
+keys = ["{{service_label}}", "instance"]
+description = "Максимум кучи. Пулы без ограничения (-1) не учитываются."
+
+[[queries]]
+label = "JVM: Process CPU usage by ({{service_label}}, instance)"
+role = "runtime.cpu"
+unit = "fraction"
+required = true
+query = 'sum by ({{service_label}}, instance) (process_cpu_usage{ {{service_label}}!="", {{matchers}} })'
+keys = ["{{service_label}}", "instance"]
+description = "CPU процесса как доля 0..1. Источник для плана ресурсов в прогнозе."
+
+[[queries]]
+label = "JVM: Live data after GC (bytes) by ({{service_label}}, instance)"
+role = "runtime.live_data"
+unit = "bytes"
+query = 'sum by ({{service_label}}, instance) (jvm_gc_live_data_size_bytes{ {{service_label}}!="", {{matchers}} })'
+keys = ["{{service_label}}", "instance"]
+description = "Old gen после полной сборки: рост указывает на утечку или растущий кэш."
+
+[[queries]]
+label = "JVM: GC pause time (%) by ({{service_label}}, instance)"
+role = "runtime.gc_time_pct"
+unit = "percent"
+query = '100 * sum by ({{service_label}}, instance) (rate(jvm_gc_pause_seconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}", "instance"]
+description = "Доля времени, проведённого в паузах GC, %."
+
+[[queries]]
+label = "JVM: GC pause avg (s) by ({{service_label}}, instance)"
+role = "runtime.gc_pause_avg"
+unit = "seconds"
+query = 'sum by ({{service_label}}, instance) (rate(jvm_gc_pause_seconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}])) / sum by ({{service_label}}, instance) (rate(jvm_gc_pause_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}", "instance"]
+description = "Средняя длительность паузы GC, с."
+
+[[queries]]
+label = "JVM: GC pauses per second by ({{service_label}}, instance)"
+role = "runtime.gc_rate"
+unit = "per_second"
+query = 'sum by ({{service_label}}, instance) (rate(jvm_gc_pause_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}", "instance"]
+description = "Частота пауз GC."
+
+[[queries]]
+label = "JVM: Live threads by ({{service_label}}, instance)"
+role = "runtime.threads"
+unit = "count"
+query = 'sum by ({{service_label}}, instance) (jvm_threads_live_threads{ {{service_label}}!="", {{matchers}} })'
+keys = ["{{service_label}}", "instance"]
+description = "Живые потоки JVM."
+
+[[queries]]
+label = "JVM: Tomcat busy threads by ({{service_label}}, instance)"
+role = "runtime.threads_busy"
+unit = "count"
+query = 'sum by ({{service_label}}, instance) (tomcat_threads_busy_threads{ {{service_label}}!="", {{matchers}} })'
+keys = ["{{service_label}}", "instance"]
+description = "Занятые потоки Tomcat (server.tomcat.mbeanregistry.enabled=true). Сравните с server.tomcat.threads.max."
+
+[[queries]]
+label = "JVM: Direct buffers used (bytes) by ({{service_label}}, instance)"
+role = "runtime.direct_memory"
+unit = "bytes"
+query = 'sum by ({{service_label}}, instance) (jvm_buffer_memory_used_bytes{id="direct", {{service_label}}!="", {{matchers}} })'
+keys = ["{{service_label}}", "instance"]
+description = "Память direct-буферов (Netty, NIO)."

@@ -7,6 +7,7 @@
 - `Dockerfile` — актуализирован: добавлены переменные окружения, `curl` для healthcheck и `HEALTHCHECK` (проверяет публичный `/healthz`: остальные страницы требуют входа).
 - `docker-compose.yml` — поднимает сервисы: `app` (веб), `timescaledb` (TimescaleDB/PostgreSQL), `redis` (брокер) и `celery_worker` (фоновые задачи).
 - `initdb/01_timescaledb.sql` — автоматическое включение расширения TimescaleDB в базе при первом старте.
+- `initdb/03_app_role.sh` — непривилегированная роль приложения: владелец таблиц, без прав суперпользователя.
 - `initdb/02_schema.sql` — таблицы `metrics` (гипертаблица), `llm_reports`, `engineer_reports`, `confluence_publications`, `report_jobs`, `app_users`, `api_tokens`, `audit_log` и индексы; приложение создаёт их и само, скрипт лишь готовит схему заранее.
 - Redis + Celery worker — через `docker-compose` теперь поднимаются брокер `redis` и отдельный контейнер `celery_worker` для фоновых задач.
 - `env.example` (лежит в этой же папке) — пример файла окружения для Compose. Скопируйте его в `.env` и отредактируйте.
@@ -43,11 +44,14 @@
    - `APP_PORT` — порт приложения на хосте (по умолчанию 5000)
    - `TSDB_PORT` — порт БД на хосте (по умолчанию 5432)
    - `TSDB_BIND` — интерфейс, на котором публикуется порт БД (по умолчанию `127.0.0.1`: только с этого хоста; приложение ходит в БД по внутренней сети compose)
+   - `APP_DB_USER` / `APP_DB_PASSWORD` — непривилегированная роль БД для приложения (создаётся скриптом `initdb/03_app_role.sh`). Укажите те же значения в `settings.py` → `storage.timescale.user` / `password`. Пустые значения оставляют суперпользователя `POSTGRES_USER`
+   - `APP_CPUS`, `APP_MEMORY_LIMIT`, `WORKER_CPUS`, `WORKER_MEMORY_LIMIT`, `REDIS_MEMORY_LIMIT` — ограничения контейнеров
    - `REDIS_PASSWORD` — **обязательный** пароль Redis (`openssl rand -hex 32`; только символы, допустимые в URL). Без него `docker compose up` не запустится
    - `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` — по умолчанию собираются из `REDIS_PASSWORD` (`redis://:<пароль>@redis:6379/0`). Задавайте их только для внешнего Redis и с паролем в URL
    - `CELERY_TASK_ALWAYS_EAGER` — `0` для настоящих фоновых задач, `1` чтобы выполнять их синхронно (режим отладки)
    - `LOADLENS_SECRET_KEY` — ключ подписи сессий: длинная случайная строка (`openssl rand -hex 32`), одна и та же между пересозданиями контейнера. Без неё ключ создаётся внутри контейнера и сессии сбрасываются при его пересоздании.
    - `LOADLENS_ADMIN_USER` / `LOADLENS_ADMIN_PASSWORD` — первый администратор; создаётся при первом открытии страницы входа, пока в базе нет пользователей. После первого входа удалите пароль из `.env`.
+   - `LOADLENS_RECOVERY_USER` / `LOADLENS_RECOVERY_PASSWORD_HASH` — аварийный администратор: входит, только пока база недоступна, и может лишь исправить подключение к хранилищу на `/recovery`. Хеш выдаёт `docker compose exec app python -m loadlens_app.auth hash-password`; в `.env` заключите хеш в одинарные кавычки, иначе docker compose обрежет его на первом `$`. Подробнее — README, «Режим восстановления».
    - `LOADLENS_AUTH_ENABLED` — `1` (по умолчанию) вход обязателен; `0` отключает авторизацию (открытый доступ с правами администратора — только для отладки).
    - `LOADLENS_COOKIE_SECURE=1` и `LOADLENS_TRUSTED_PROXIES=1` — за HTTPS-прокси перед приложением (см. README, «Доступ и безопасность»).
 
@@ -173,7 +177,27 @@ git commit -m "chore: stop tracking local configs; add examples"
    docker run --rm --entrypoint sh <образ app> -c 'ls /app/settings.py /app/settings_runtime.json /app/metrics_config.py /app/docker 2>&1'
    ```
    Для каждого пути должно быть `No such file or directory`.
-5. Удалите старые образы и кэш сборки, в котором остались прежние слои: `docker image ls`, `docker image rm <id>`, `docker builder prune -a`. Если образы отправлялись в реестр, удалите там старые теги и дайджесты.
+5. Приложение в образе работает от пользователя `app` (UID 1000) под gunicorn. На Linux-хосте файлы, которые монтируются в контейнер (`settings_runtime.json`, `metrics_config_runtime.json`, `data_collectors/temporary_files`), должны быть доступны на запись UID 1000; другой UID задаётся аргументами сборки `APP_UID`/`APP_GID`.
+6. Для уже инициализированной базы создайте роль приложения вручную и переключите на неё `settings.py` (`storage.timescale.user` / `password`):
+   ```bash
+   cd docker
+   docker compose exec timescaledb sh /docker-entrypoint-initdb.d/03_app_role.sh
+   ```
+   Для базы на отдельном сервере скрипт запускается с любой машины, где есть `psql` и доступ к серверу:
+   ```bash
+   PGHOST=<адрес БД> PGPORT=5432 PGPASSWORD=<пароль администратора> \
+   POSTGRES_USER=<администратор> POSTGRES_DB=<база> \
+   APP_DB_USER=loadlens_app APP_DB_PASSWORD=<новый пароль> \
+   sh docker/initdb/03_app_role.sh
+   ```
+   Что делает скрипт:
+   - создаёт роль без прав суперпользователя, без CREATEDB, CREATEROLE и REPLICATION, а у существующей роли снимает эти права;
+   - передаёт ей только таблицы LoadLens из схемы `public`, остальные таблицы базы не трогает (другие схема и список таблиц задаются `APP_DB_SCHEMA` и `APP_DB_TABLES`);
+   - оставляет администратору и прежнему владельцу таблиц доступ через членство в роли, поэтому старая учётная запись в `settings.py` продолжает работать и к ней можно вернуться;
+   - выполняет всё одной транзакцией с ожиданием блокировок не дольше 5 секунд: при любой ошибке ничего не меняется, повторный запуск безопасен.
+
+   Если в таблице `metrics` уже есть данные, запускайте скрипт от суперпользователя: сменить владельца чанков TimescaleDB может только он, иначе скрипт остановится с понятной ошибкой. Пароль новой роли передаётся серверу в команде `CREATE ROLE`. При запуске от суперпользователя скрипт отключает журналирование запросов на время транзакции. При запуске от другой учётной записи и включённом `log_statement` пароль может попасть в журнал сервера.
+7. Удалите старые образы и кэш сборки, в котором остались прежние слои: `docker image ls`, `docker image rm <id>`, `docker builder prune -a`. Если образы отправлялись в реестр, удалите там старые теги и дайджесты.
 
 ### 7) Типичные сценарии
 

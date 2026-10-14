@@ -545,14 +545,11 @@ def _render_actions(actions: list) -> str:
     )
 
 
-def _is_stability_report(report: dict, peak: dict, test_profile: dict) -> bool:
-    test_type = _safe_text(test_profile.get("test_type")).lower()
-    return bool(
-        peak.get("not_applicable")
-        or peak.get("notApplicable")
-        or _safe_text(test_profile.get("mode")).lower() == "stability"
-        or test_type in {"soak", "stability", "endurance"}
-    )
+def _test_type_section(report: dict):
+    """(title, rows) for soak / spike / stress reports, None for step reports."""
+    from AI.report_sections import test_type_section
+
+    return test_type_section(report)
 
 
 def _render_problem_recommendation_table(report: dict) -> str:
@@ -592,10 +589,6 @@ def render_llm_markdown(report: dict, domain: str | None = None) -> str:
     report = report if isinstance(report, dict) else {}
     peak = report.get("peak_performance") or report.get("peak_perfomance") or {}
     peak = peak if isinstance(peak, dict) else {}
-    test_profile = report.get("test_profile") or {}
-    test_profile = test_profile if isinstance(test_profile, dict) else {}
-    stability = report.get("stability_under_load") or {}
-    stability = stability if isinstance(stability, dict) else {}
 
     lines: list[str] = [
         "| Параметр | Значение |",
@@ -612,20 +605,14 @@ def render_llm_markdown(report: dict, domain: str | None = None) -> str:
         "",
     ]
 
+    section = _test_type_section(report) if _peak_section_applies(domain) else None
     if not _peak_section_applies(domain):
         pass
-    elif _is_stability_report(report, peak, test_profile):
-        lines.extend([
-            "#### Стабильность под нагрузкой",
-            "| Параметр | Значение |",
-            "|---|---:|",
-            f"| Тип теста | {_md_cell(test_profile.get('test_type') or 'stability/soak')} |",
-            f"| Фокус оценки | {_md_cell(stability.get('focus') or test_profile.get('focus') or 'Удержание нагрузки без накопления деградации')} |",
-            f"| Целевой RPS | {_md_cell(stability.get('target_rps') or '—')} |",
-            f"| Фактический RPS | {_md_cell(stability.get('actual_rps') or '—')} |",
-            f"| Итог SLA | {_md_cell(stability.get('sla_summary') or '—')} |",
-            "",
-        ])
+    elif section is not None:
+        title, rows = section
+        lines.extend([f"#### {title}", "| Параметр | Значение |", "|---|---:|"])
+        lines.extend(f"| {_md_cell(label)} | {_md_cell(value)} |" for label, value in rows)
+        lines.append("")
     elif any(peak.get(key) not in (None, "") for key in ("max_rps", "max_time", "drop_time")):
         lines.extend([
             "#### Пиковая производительность",
@@ -702,10 +689,6 @@ def render_llm_html(report: dict, domain: str | None = None) -> str:
     report = report if isinstance(report, dict) else {}
     peak = report.get("peak_performance") or report.get("peak_perfomance") or {}
     peak = peak if isinstance(peak, dict) else {}
-    test_profile = report.get("test_profile") or {}
-    test_profile = test_profile if isinstance(test_profile, dict) else {}
-    stability = report.get("stability_under_load") or {}
-    stability = stability if isinstance(stability, dict) else {}
 
     parts: list[str] = [
         _render_key_value_table(
@@ -715,19 +698,12 @@ def render_llm_html(report: dict, domain: str | None = None) -> str:
         _render_rationale_box(report),
     ]
 
+    section = _test_type_section(report) if _peak_section_applies(domain) else None
     if not _peak_section_applies(domain):
         pass
-    elif _is_stability_report(report, peak, test_profile):
-        parts.append(_render_key_value_table(
-            "Стабильность под нагрузкой",
-            [
-                ("Тип теста", _html(test_profile.get("test_type") or "stability/soak")),
-                ("Фокус оценки", _html(stability.get("focus") or test_profile.get("focus") or "Удержание нагрузки без накопления деградации")),
-                ("Целевой RPS", _html(stability.get("target_rps") or "—")),
-                ("Фактический RPS", _html(stability.get("actual_rps") or "—")),
-                ("Итог SLA", _html(stability.get("sla_summary") or "—")),
-            ],
-        ))
+    elif section is not None:
+        title, rows = section
+        parts.append(_render_key_value_table(title, [(label, _html(value)) for label, value in rows]))
     elif any(peak.get(key) not in (None, "") for key in ("max_rps", "max_time", "drop_time")):
         parts.append(_render_key_value_table(
             "Пиковая производительность",
@@ -742,8 +718,29 @@ def render_llm_html(report: dict, domain: str | None = None) -> str:
     return "\n".join(parts)
 
 
-def _replace_placeholder_storage(storage_html: str, placeholder: str, value: str) -> tuple[str, bool]:
+def _in_cdata(storage_html: str, pos: int) -> bool:
+    """Whether ``pos`` lies inside a CDATA section (the body of a markdown or code macro)."""
+    return storage_html.rfind("<![CDATA[", 0, pos) > storage_html.rfind("]]>", 0, pos)
+
+
+def _text_for_storage(storage_html: str, pos: int, text: str) -> str:
+    """Model output as text at ``pos`` of the storage XHTML, never as markup.
+
+    Inside a CDATA body (the template's markdown macro) ``]]>`` cannot close the section and ``<``
+    becomes an entity, so the markdown renderer shows it as a character instead of parsing HTML.
+    Elsewhere the text is XML-escaped and kept in paragraphs.
+    """
+    if _in_cdata(storage_html, pos):
+        return text.replace("<", "&lt;").replace("]]>", "]]]]><![CDATA[>")
+    paragraphs = [escape(part.strip(), quote=False).replace("\n", "<br />") for part in text.split("\n\n")]
+    return "".join(f"<p>{part}</p>" for part in paragraphs if part)
+
+
+def _replace_placeholder_storage(storage_html: str, placeholder: str, value: str, as_text: bool = False) -> tuple[str, bool]:
     """Заменяет плейсхолдер в Confluence storage без вложения block HTML внутрь <p>.
+
+    ``as_text=True`` is for untrusted text such as LLM output: it is encoded for the place it lands
+    in (see :func:`_text_for_storage`). The value is spliced in literally, never as a regex template.
 
     Если плейсхолдер стоит отдельным абзацем (`<p>$$...$$</p>`), заменяем весь
     абзац. Иначе блочная таблица может оказаться внутри `<p>`, и Confluence
@@ -774,20 +771,24 @@ def _replace_placeholder_storage(storage_html: str, placeholder: str, value: str
             r"(?is)" + re.escape(ph),
         ])
     for pattern in patterns:
-        new_html, count = re.subn(pattern, replacement, html, count=1)
-        if count:
-            return new_html, True
+        match = re.search(pattern, html)
+        if match:
+            encoded = _text_for_storage(html, match.start(), replacement) if as_text else replacement
+            return html[:match.start()] + encoded + html[match.end():], True
     if ph in html:
-        return html.replace(ph, replacement, 1), True
+        pos = html.index(ph)
+        encoded = _text_for_storage(html, pos, replacement) if as_text else replacement
+        return html[:pos] + encoded + html[pos + len(ph):], True
     return html, False
 
 
-def update_confluence_page_multi(url, username, password, page_id, replacements: dict) -> str:
+def update_confluence_page_multi(url, username, password, page_id, replacements: dict, as_text: bool = False) -> str:
     """Один проход по странице: заменить несколько плейсхолдеров.
 
     Параметры:
         url/username/password/page_id: доступ к Confluence.
         replacements (dict): Карта `{placeholder: html}`.
+        as_text (bool): значения — недоверенный текст (вывод LLM), а не разметка storage.
 
     Возвращает:
         str: Текст статуса.
@@ -811,7 +812,7 @@ def update_confluence_page_multi(url, username, password, page_id, replacements:
         if not isinstance(value, str) or not value.strip():
             print(f"[warn] Пропускаю пустую замену для: {placeholder}")
             continue
-        new_html, did_replace = _replace_placeholder_storage(html, str(placeholder), str(value))
+        new_html, did_replace = _replace_placeholder_storage(html, str(placeholder), str(value), as_text=as_text)
         if did_replace:
             html = new_html
             replaced_any = True
@@ -823,8 +824,13 @@ def update_confluence_page_multi(url, username, password, page_id, replacements:
                 if ph.startswith("$$") and ph.endswith("$$"):
                     inner = ph[2:-2].strip()
                     if inner:
-                        pattern = r"\$\$\s*" + re.escape(inner) + r"\s*\$\$"
-                        new_html, num = re.subn(pattern, str(value), html)
+                        pattern = re.compile(r"\$\$\s*" + re.escape(inner) + r"\s*\$\$")
+                        pieces, last, num = [], 0, 0
+                        for found in pattern.finditer(html):
+                            pieces.append(html[last:found.start()])
+                            pieces.append(_text_for_storage(html, found.start(), str(value)) if as_text else str(value))
+                            last, num = found.end(), num + 1
+                        new_html = "".join(pieces) + html[last:]
                         if num > 0:
                             html = new_html
                             replaced_any = True

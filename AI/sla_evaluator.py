@@ -1,12 +1,19 @@
 """Программная оценка теста по SLA-критериям.
 
-Принцип:
-- target_rps — главный критерий. Если достигнут (stable_max >= target_rps),
-  тест считается успешным ДАЖЕ если система деградировала после этого.
-- Остальные пороги (error_rate, p95, p99, cpu, memory) — вторичные.
-  Их нарушение при достигнутом target_rps приводит к «Есть риски», не «Провал».
-- Для stability/soak тестов без target_rps ресурсные превышения (CPU/memory)
-  являются рисками, а не основанием для «Провал» без нарушений latency/errors.
+Окно проверки и правила вердикта зависят от режима профиля теста (AI/test_profile.py):
+
+- capacity / stress (step, stress): окно — последняя ступень, где пороги latency/errors
+  выполнены. target_rps — главный критерий: если достигнут (stable_max >= target_rps),
+  тест успешен ДАЖЕ если система деградировала после этого; нарушения остальных порогов
+  на этой ступени дают «Есть риски».
+- stability (soak): окно — окно удержания нагрузки без разгона (``lt_pack["hold_window"]``,
+  иначе весь тест). target_rps — уровень, который нужно удерживать: средний RPS окна не ниже
+  target на 5 %, ни один интервал не ниже на 15 %. Любое нарушение primary-порога → «Провал»,
+  CPU/memory → «Есть риски».
+- spike: окна — найденные всплески (``lt_pack["spike_profile"]``), по каждому порогу берётся
+  худший всплеск. target_rps сравнивается с уровнем всплеска; отдельный критерий recovery —
+  возврат задержек к фону. target/recovery нарушены → «Провал», latency/errors в окне
+  всплеска или CPU/memory → «Есть риски». Без всплеска → «Недостаточно данных».
 """
 
 from __future__ import annotations
@@ -16,6 +23,9 @@ from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
+
+from AI.stability import hold_check
+from AI.test_profile import MODES, mode_of
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +42,8 @@ SECONDARY_SPECS: tuple[tuple[str, str, str, str], ...] = (
 
 @dataclass(frozen=True)
 class StableWindow:
-    """RPS plateau the SLA is evaluated on; ``level`` is its stable_max."""
+    """Window the SLA is evaluated on: a load step (``kind="step"``), the soak hold window
+    (``"hold"``) or a spike (``"spike"``); ``level`` is its RPS."""
 
     start: str
     end: str
@@ -41,9 +52,11 @@ class StableWindow:
     label: str
     degraded_level: Optional[float] = None
     degraded_checks: tuple[str, ...] = ()
+    kind: str = "step"
+    title: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        out: Dict[str, Any] = {
             "start": self.start,
             "end": self.end,
             "level": round(self.level, 2),
@@ -52,6 +65,29 @@ class StableWindow:
             "degraded_level": round(self.degraded_level, 2) if self.degraded_level is not None else None,
             "degraded_checks": list(self.degraded_checks),
         }
+        if self.kind != "step":
+            out["kind"] = self.kind
+            out["title"] = self.title
+        return out
+
+
+def _scope_text(window: Optional[StableWindow]) -> str:
+    if window is None:
+        return "всего окна"
+    if window.kind == "hold":
+        return f"окна удержания ≈{window.level:.0f} RPS"
+    if window.kind == "spike":
+        name = f" «{window.title}»" if window.title else ""
+        return f"окна всплеска{name} ≈{window.level:.0f} RPS"
+    return f"стабильной ступени ≈{window.level:.0f} RPS"
+
+
+def _empty_scope_text(window: StableWindow) -> str:
+    if window.kind == "hold":
+        return "В окне удержания нет точек запроса"
+    if window.kind == "spike":
+        return "В окне всплеска нет точек запроса"
+    return "На стабильной ступени RPS нет точек запроса"
 
 SLA_CHECK_TITLES = {
     "target_rps": "целевой RPS",
@@ -60,6 +96,7 @@ SLA_CHECK_TITLES = {
     "p99_latency": "p99 latency",
     "cpu_usage": "CPU",
     "memory_usage": "память",
+    "recovery": "восстановление после всплеска",
 }
 
 
@@ -556,16 +593,15 @@ def _check_by_query_label(
         )
     start = _as_utc(window.start) if window else None
     end = _as_utc(window.end) if window else None
-    scope = "всего окна"
+    scope = _scope_text(window)
     actual, series = (None, None)
     if window is not None and start is not None and end is not None and end > start:
         actual, series = _worst_series_p95(frame, start, end)
-        scope = f"стабильной ступени ≈{window.level:.0f} RPS"
     elif window is None:
         actual, series = _worst_series_p95(frame)
     if actual is None:
         empty_message = (
-            f"На стабильной ступени RPS нет точек запроса «{query}»"
+            f"{_empty_scope_text(window)} «{query}»"
             if window is not None
             else f"В запросе «{query}» нет чисел"
         )
@@ -613,12 +649,296 @@ def _make_check(
 
 
 def _test_mode_from_profile(test_profile: Optional[Dict[str, Any]]) -> str:
+    """Profile mode: capacity | stability | spike | stress (old reports: capacity | stability)."""
     if not isinstance(test_profile, dict):
         return "capacity"
-    mode = str(test_profile.get("mode") or "").strip().lower()
-    if mode in {"stability", "soak", "endurance"}:
-        return "stability"
-    return "capacity"
+    mode = mode_of(test_profile)
+    return mode if mode in MODES else "capacity"
+
+
+def _capacity_target_check(
+    sla_config: Dict[str, Any],
+    target_rps: float,
+    window: Optional[StableWindow],
+    lt_pack: Dict[str, Any],
+    perf_query: Optional[str],
+) -> Dict[str, Any]:
+    """target_rps on the SLA step; without steps — stable_max or the peak of the designated query."""
+    if window is not None:
+        passed = window.level >= target_rps
+        degraded_note = ""
+        if window.degraded_level is not None:
+            degraded_note = (
+                f"; на ступени ≈{window.degraded_level:.0f} RPS нарушены: "
+                f"{', '.join(window.degraded_checks)}"
+            )
+        return _make_check(
+            name="target_rps",
+            threshold=target_rps,
+            actual=round(window.level, 2),
+            passed=passed,
+            severity="critical",
+            message=(
+                f"RPS {window.level:.1f} (stable_max (query: {window.label})) "
+                f"{'≥' if passed else '<'} целевой {target_rps:.0f}"
+                f"; label='{window.label}'; series='{window.series}'{degraded_note}"
+            ),
+        )
+    rps_pick = extract_target_rps_from_pack(
+        lt_pack,
+        target_label=perf_query,
+        allow_peak_fallback=_safe_bool(sla_config.get("target_rps_allow_peak_fallback"), default=True),
+        debug=_safe_bool(sla_config.get("debug_peak_logging"), default=False),
+    )
+    actual_rps = _safe_float(rps_pick.get("value"))
+    method = str(rps_pick.get("method") or "unknown")
+    if actual_rps is None:
+        reason = str(rps_pick.get("reason") or "")
+        return _make_check(
+            name="target_rps", threshold=target_rps, actual=None, passed=None, severity="critical",
+            message=f"Нет данных RPS из lt_framework (reason={reason or method})",
+        )
+    passed = actual_rps >= target_rps
+    source_label = rps_pick.get("source_label")
+    source_series = rps_pick.get("source_series")
+    return _make_check(
+        name="target_rps",
+        threshold=target_rps,
+        actual=round(actual_rps, 2),
+        passed=passed,
+        severity="critical",
+        message=(
+            f"RPS {actual_rps:.1f} ({method}) "
+            f"{'≥' if passed else '<'} целевой {target_rps:.0f}"
+            + (f"; label='{source_label}'" if source_label else "")
+            + (f"; series='{source_series}'" if source_series else "")
+        ),
+    )
+
+
+def _hold_window(lt_pack: Dict[str, Any]) -> tuple[Optional[Dict[str, Any]], Optional[StableWindow]]:
+    hold = lt_pack.get("hold_window") if isinstance(lt_pack, dict) else None
+    if not isinstance(hold, dict) or not hold.get("start_utc") or not hold.get("end_utc"):
+        return None, None
+    level = _safe_float(hold.get("actual_rps_mean"))
+    if level is None:
+        level = _safe_float(hold.get("level_rps")) or 0.0
+    window = StableWindow(
+        start=str(hold["start_utc"]), end=str(hold["end_utc"]), level=level,
+        series=str(hold.get("series") or ""), label=str(hold.get("source_label") or ""),
+        kind="hold", title="окно удержания",
+    )
+    return hold, window
+
+
+def _stability_checks(
+    sla_config: Dict[str, Any],
+    target_rps: Optional[float],
+    lt_pack: Dict[str, Any],
+    lt_labeled: Any,
+    hr_labeled: Any,
+) -> tuple[List[Dict[str, Any]], Optional[StableWindow]]:
+    hold, window = _hold_window(lt_pack)
+    checks: List[Dict[str, Any]] = []
+    if target_rps is not None:
+        if hold is None:
+            query = str(sla_config.get("max_performance_query") or "").strip()
+            checks.append(_make_check(
+                name="target_rps", threshold=target_rps, actual=None, passed=None, severity="critical",
+                message=f"Нет данных RPS для окна удержания (запрос «{query or 'не выбран'}»)",
+            ))
+        else:
+            result = hold_check(hold, target_rps)
+            checks.append(_make_check(
+                name="target_rps", threshold=target_rps, actual=result["actual"], passed=result["passed"],
+                severity="critical", message=result["message"],
+            ))
+    checks.extend(_checks_for_window(sla_config, PRIMARY_SPECS, lt_labeled, window, "primary"))
+    checks.extend(_checks_for_window(sla_config, SECONDARY_SPECS, hr_labeled, window, "secondary"))
+    return checks, window
+
+
+def _worst_check(candidates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The check of the worst window: a failed one with the highest value, else the highest value."""
+    if not candidates:
+        return None
+    failed = [c for c in candidates if c.get("passed") is False and c.get("actual") is not None]
+    if failed:
+        return max(failed, key=lambda c: float(c["actual"]))
+    measured = [c for c in candidates if c.get("actual") is not None]
+    if measured:
+        return max(measured, key=lambda c: float(c["actual"]))
+    return candidates[0]
+
+
+def _checks_over_windows(
+    sla_config: Dict[str, Any],
+    specs: tuple[tuple[str, str, str, str], ...],
+    labeled: Any,
+    windows: List[StableWindow],
+    category: str,
+) -> List[Dict[str, Any]]:
+    checks: List[Dict[str, Any]] = []
+    for spec in specs:
+        per_window: List[Dict[str, Any]] = []
+        for window in windows:
+            per_window.extend(_checks_for_window(sla_config, (spec,), labeled, window, category))
+        worst = _worst_check(per_window)
+        if worst is not None:
+            checks.append(worst)
+    return checks
+
+
+def _spike_windows(lt_pack: Dict[str, Any]) -> tuple[Dict[str, Any], List[Dict[str, Any]], List[StableWindow]]:
+    profile = lt_pack.get("spike_profile") if isinstance(lt_pack, dict) else None
+    profile = profile if isinstance(profile, dict) else {}
+    spikes = [
+        item for item in (profile.get("spikes") or [])
+        if isinstance(item, dict) and item.get("start_utc") and item.get("end_utc")
+    ]
+    windows = [
+        StableWindow(
+            start=str(item["start_utc"]), end=str(item["end_utc"]), level=float(item.get("level_rps") or 0.0),
+            series=str(profile.get("series") or ""), label=str(profile.get("source_label") or ""),
+            kind="spike", title=str(item.get("label") or f"всплеск {item.get('index')}"),
+        )
+        for item in spikes
+    ]
+    return profile, spikes, windows
+
+
+def _recovery_check(profile: Dict[str, Any], spikes: List[Dict[str, Any]], latency_configured: bool) -> Optional[Dict[str, Any]]:
+    limit = _safe_float(profile.get("recovery_max_window_min"))
+    if not profile.get("detected") or not spikes:
+        if not profile:
+            return None
+        return _make_check(
+            name="recovery", threshold=limit, actual=None, passed=None, severity="critical",
+            message="Всплеск нагрузки не обнаружен: восстановление не оценивалось",
+        )
+    states = [item.get("recovered") for item in spikes]
+    if all(state is None for state in states) and not latency_configured:
+        return None
+    times = [float(item["recovery_time_sec"]) for item in spikes if item.get("recovery_time_sec") is not None]
+    actual = round(max(times) / 60.0, 2) if times else None
+    tolerance = _safe_float(profile.get("recovery_tolerance_pct"))
+    not_recovered = [str(item.get("label")) for item in spikes if item.get("recovered") is False]
+    if not_recovered:
+        passed: Optional[bool] = False
+        message = (
+            f"Задержки не вернулись к фону (±{tolerance:g} %) за {limit:g} мин после: {', '.join(not_recovered)}"
+            if tolerance is not None and limit is not None
+            else f"Задержки не вернулись к фону после: {', '.join(not_recovered)}"
+        )
+    elif all(state is True for state in states):
+        passed = True
+        message = f"Задержки вернулись к фону за {actual:g} мин (худший всплеск), предел {limit:g} мин"
+    else:
+        passed = None
+        message = "Восстановление оценено не для всех всплесков: после всплеска нет точек задержки"
+    return _make_check(
+        name="recovery", threshold=limit, actual=actual, passed=passed, severity="critical", message=message,
+    )
+
+
+def _spike_checks(
+    sla_config: Dict[str, Any],
+    target_rps: Optional[float],
+    lt_pack: Dict[str, Any],
+    lt_labeled: Any,
+    hr_labeled: Any,
+) -> tuple[List[Dict[str, Any]], Optional[StableWindow], bool]:
+    profile, spikes, windows = _spike_windows(lt_pack)
+    detected = bool(profile.get("detected")) and bool(windows)
+    checks: List[Dict[str, Any]] = []
+    top = max(windows, key=lambda w: w.level) if windows else None
+    if target_rps is not None:
+        if top is None:
+            checks.append(_make_check(
+                name="target_rps", threshold=target_rps, actual=None, passed=None, severity="critical",
+                message=str(profile.get("reason") or "Всплеск нагрузки не обнаружен"),
+            ))
+        else:
+            passed = top.level >= target_rps
+            checks.append(_make_check(
+                name="target_rps", threshold=target_rps, actual=round(top.level, 2), passed=passed,
+                severity="critical",
+                message=(
+                    f"Уровень всплеска «{top.title}» {top.level:.1f} RPS "
+                    f"{'≥' if passed else '<'} целевой {target_rps:.0f}; label='{top.label}'"
+                ),
+            ))
+    if windows:
+        checks.extend(_checks_over_windows(sla_config, PRIMARY_SPECS, lt_labeled, windows, "primary"))
+        checks.extend(_checks_over_windows(sla_config, SECONDARY_SPECS, hr_labeled, windows, "secondary"))
+    else:
+        checks.extend(_checks_for_window(sla_config, PRIMARY_SPECS, lt_labeled, None, "primary"))
+        checks.extend(_checks_for_window(sla_config, SECONDARY_SPECS, hr_labeled, None, "secondary"))
+    latency_configured = bool(str(sla_config.get("p95_query") or sla_config.get("p99_query") or "").strip())
+    recovery = _recovery_check(profile, spikes, latency_configured)
+    if recovery is not None:
+        checks.append(recovery)
+    return checks, top, detected
+
+
+def _capacity_verdict(checks: List[Dict[str, Any]]) -> str:
+    rps_check = next((c for c in checks if c["name"] == "target_rps"), None)
+    others = [c for c in checks if c["name"] != "target_rps"]
+    evaluable = [c for c in checks if c["passed"] is not None]
+    rps_reached = rps_check["passed"] if rps_check else None
+    if rps_reached is True:
+        return "Есть риски" if any(c["passed"] is False for c in others) else "Успешно"
+    if rps_reached is False:
+        return "Провал"
+    if rps_check is not None:
+        if all(c["passed"] is True for c in evaluable):
+            return "Есть риски"
+        if any(c["passed"] is False for c in evaluable):
+            return "Провал"
+        return "Недостаточно данных"
+    if evaluable and all(c["passed"] is True for c in evaluable):
+        return "Успешно"
+    if any(c["passed"] is False for c in evaluable):
+        return "Провал"
+    return "Недостаточно данных"
+
+
+def _is_primary(check: Dict[str, Any]) -> bool:
+    return str(check.get("category") or "primary") == "primary"
+
+
+def _verdict_for_mode(mode: str, checks: List[Dict[str, Any]], detected: bool = True) -> str:
+    """Deterministic verdict by the policy of the test-profile mode (see module docstring)."""
+    if mode in {"capacity", "stress"}:
+        return _capacity_verdict(checks)
+    evaluable = [c for c in checks if c["passed"] is not None]
+    failed = [c for c in checks if c["passed"] is False]
+    all_passed = bool(evaluable) and all(c["passed"] is True for c in evaluable)
+    if mode == "spike":
+        if not detected:
+            return "Недостаточно данных"
+        if any(c["name"] in {"target_rps", "recovery"} for c in failed):
+            return "Провал"
+        if failed:
+            return "Есть риски"
+        return "Успешно" if all_passed else "Недостаточно данных"
+    if any(_is_primary(c) for c in failed):
+        return "Провал"
+    if failed:
+        return "Есть риски"
+    return "Успешно" if all_passed else "Недостаточно данных"
+
+
+MODE_SUMMARY_NOTES = {
+    "stability": (
+        "Режим stability: пороги проверены на окне удержания, target_rps — удержание среднего уровня; "
+        "CPU/memory трактуются как вторичные риски и сами по себе не переводят тест в «Провал»"
+    ),
+    "spike": (
+        "Режим spike: пороги проверены в окнах всплесков (худший всплеск), target_rps — уровень всплеска; "
+        "нарушение target_rps или recovery — «Провал», задержки и ошибки в окне всплеска — риски"
+    ),
+}
 
 
 def evaluate_sla(
@@ -626,7 +946,7 @@ def evaluate_sla(
     sla_config: Dict[str, Any],
     test_profile: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Оценивает результаты теста по SLA-критериям."""
+    """Оценивает результаты теста по SLA-критериям с учётом режима профиля теста."""
     sla_config = sla_config if isinstance(sla_config, dict) else {}
     test_mode = _test_mode_from_profile(test_profile or sla_config.get("test_profile"))
     if not sla_config or not any(
@@ -640,80 +960,26 @@ def evaluate_sla(
             "test_mode": test_mode,
         }
 
-    checks: List[Dict[str, Any]] = []
     lt_payload = domain_data.get("lt_framework") or {}
     hr_payload = domain_data.get("hard_resources") or {}
     lt_pack = lt_payload.get("pack") or {}
     lt_labeled = lt_payload.get("labeled")
+    hr_labeled = hr_payload.get("labeled")
     perf_query = str(sla_config.get("max_performance_query") or "").strip() or None
+    target_rps = _safe_float(sla_config.get("target_rps"))
+    detected = True
+
     if test_mode == "stability":
-        window, primary_checks = None, _checks_for_window(sla_config, PRIMARY_SPECS, lt_labeled, None, "primary")
+        checks, window = _stability_checks(sla_config, target_rps, lt_pack, lt_labeled, hr_labeled)
+    elif test_mode == "spike":
+        checks, window, detected = _spike_checks(sla_config, target_rps, lt_pack, lt_labeled, hr_labeled)
     else:
         window, primary_checks = _select_sla_window(sla_config, lt_pack, lt_labeled)
-
-    target_rps = _safe_float(sla_config.get("target_rps"))
-    if target_rps is not None and window is not None:
-        passed = window.level >= target_rps
-        degraded_note = ""
-        if window.degraded_level is not None:
-            degraded_note = (
-                f"; на ступени ≈{window.degraded_level:.0f} RPS нарушены: "
-                f"{', '.join(window.degraded_checks)}"
-            )
-        checks.append(_make_check(
-            name="target_rps",
-            threshold=target_rps,
-            actual=round(window.level, 2),
-            passed=passed,
-            severity="critical",
-            message=(
-                f"RPS {window.level:.1f} (stable_max (query: {window.label})) "
-                f"{'≥' if passed else '<'} целевой {target_rps:.0f}"
-                f"; label='{window.label}'; series='{window.series}'{degraded_note}"
-            ),
-        ))
-    elif target_rps is not None:
-        allow_peak_fallback = _safe_bool(sla_config.get("target_rps_allow_peak_fallback"), default=True)
-        debug_peak_logging = _safe_bool(sla_config.get("debug_peak_logging"), default=False)
-        rps_pick = extract_target_rps_from_pack(
-            lt_pack,
-            target_label=perf_query,
-            allow_peak_fallback=allow_peak_fallback,
-            debug=debug_peak_logging,
-        )
-        actual_rps = _safe_float(rps_pick.get("value"))
-        method = str(rps_pick.get("method") or "unknown")
-        source_label = rps_pick.get("source_label")
-        source_series = rps_pick.get("source_series")
-        reason = str(rps_pick.get("reason") or "")
-
-        if actual_rps is not None:
-            passed = actual_rps >= target_rps
-            checks.append(_make_check(
-                name="target_rps",
-                threshold=target_rps,
-                actual=round(actual_rps, 2),
-                passed=passed,
-                severity="critical",
-                message=(
-                    f"RPS {actual_rps:.1f} ({method}) "
-                    f"{'≥' if passed else '<'} целевой {target_rps:.0f}"
-                    + (f"; label='{source_label}'" if source_label else "")
-                    + (f"; series='{source_series}'" if source_series else "")
-                ),
-            ))
-        else:
-            checks.append(_make_check(
-                name="target_rps",
-                threshold=target_rps,
-                actual=None,
-                passed=None,
-                severity="critical",
-                message=f"Нет данных RPS из lt_framework (reason={reason or method})",
-            ))
-
-    checks.extend(primary_checks)
-    checks.extend(_checks_for_window(sla_config, SECONDARY_SPECS, hr_payload.get("labeled"), window, "secondary"))
+        checks = []
+        if target_rps is not None:
+            checks.append(_capacity_target_check(sla_config, target_rps, window, lt_pack, perf_query))
+        checks.extend(primary_checks)
+        checks.extend(_checks_for_window(sla_config, SECONDARY_SPECS, hr_labeled, window, "secondary"))
 
     if not checks:
         return {
@@ -723,51 +989,7 @@ def evaluate_sla(
             "test_mode": test_mode,
         }
 
-    rps_check = next((c for c in checks if c["name"] == "target_rps"), None)
-    secondary = [c for c in checks if c["name"] != "target_rps"]
-
-    rps_reached = rps_check["passed"] if rps_check else None
-    secondary_failures = [c for c in secondary if c["passed"] is False]
-    primary_failures = [
-        c for c in checks
-        if c["passed"] is False and str(c.get("category") or "primary") == "primary"
-    ]
-    evaluable = [c for c in checks if c["passed"] is not None]
-
-    if test_mode == "stability" and rps_check is None:
-        if primary_failures:
-            verdict = "Провал"
-        elif secondary_failures:
-            verdict = "Есть риски"
-        elif evaluable and all(c["passed"] is True for c in evaluable):
-            verdict = "Успешно"
-        else:
-            verdict = "Недостаточно данных"
-    elif rps_reached is True:
-        if secondary_failures:
-            verdict = "Есть риски"
-        else:
-            verdict = "Успешно"
-    elif rps_reached is False:
-        verdict = "Провал"
-    elif rps_reached is None and rps_check is not None:
-        if test_mode == "stability" and primary_failures:
-            verdict = "Провал"
-        elif test_mode == "stability" and secondary_failures:
-            verdict = "Есть риски"
-        elif all(c["passed"] is True for c in evaluable):
-            verdict = "Есть риски"
-        elif any(c["passed"] is False for c in evaluable):
-            verdict = "Провал"
-        else:
-            verdict = "Недостаточно данных"
-    else:
-        if all(c["passed"] is True for c in evaluable) and evaluable:
-            verdict = "Успешно"
-        elif any(c["passed"] is False for c in evaluable):
-            verdict = "Провал"
-        else:
-            verdict = "Недостаточно данных"
+    verdict = _verdict_for_mode(test_mode, checks, detected)
 
     passed_names = [c["name"] for c in checks if c["passed"] is True]
     failed_names = [c["name"] for c in checks if c["passed"] is False]
@@ -779,10 +1001,10 @@ def evaluate_sla(
         parts.append(f"Нарушено: {', '.join(failed_names)}")
     if unknown_names:
         parts.append(f"Нет данных: {', '.join(unknown_names)}")
-    if test_mode == "stability":
-        parts.append(
-            "Режим stability: CPU/memory трактуются как вторичные риски и сами по себе не переводят тест в «Провал»"
-        )
+    if test_mode in MODE_SUMMARY_NOTES:
+        parts.append(MODE_SUMMARY_NOTES[test_mode])
+    if test_mode == "spike" and not detected:
+        parts.append("всплеск нагрузки не обнаружен")
     summary = f"SLA verdict: {verdict}. " + "; ".join(parts)
 
     logger.info(

@@ -22,7 +22,7 @@ EXAMPLE_PATH = Path(__file__).resolve().parent.parent / "settings.example.py"
 # Sections with free-form structure are not validated.
 VALIDATED_SECTIONS = frozenset({
     "llm", "logs_source", "confluence",
-    "storage", "storage.timescale", "default_params", "sla", "appearance",
+    "storage", "storage.timescale", "default_params", "sla", "appearance", "limits",
 })
 
 
@@ -166,6 +166,30 @@ def validate_queries(payload: dict) -> None:
         tag_keys = block.get("label_tag_keys_list") or []
         if uses_tags and len(tag_keys) != len(labels):
             raise QueryConfigError(f"{domain}: label_tag_keys_list и labels разной длины")
+        _validate_pack_keys(domain, block)
+
+
+def _validate_pack_keys(domain: str, block: dict) -> None:
+    """Shape of the keys query packs add: ``roles`` {label: role} and ``packs`` [{id, version, variables}].
+
+    Roles of labels that no longer exist are allowed here and dropped on save.
+    """
+    title = block.get("title")
+    if title is not None and (not isinstance(title, str) or len(title) > 60):
+        raise QueryConfigError(f"{domain}: title — строка не длиннее 60 символов")
+    roles = block.get("roles")
+    if roles is not None:
+        if not isinstance(roles, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in roles.items()):
+            raise QueryConfigError(f"{domain}: roles должен быть объектом «название запроса → роль»")
+    packs = block.get("packs")
+    if packs is not None:
+        if not isinstance(packs, list):
+            raise QueryConfigError(f"{domain}: packs должен быть списком")
+        for entry in packs:
+            if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+                raise QueryConfigError(f"{domain}: каждый элемент packs должен содержать id")
+            if "variables" in entry and not isinstance(entry["variables"], dict):
+                raise QueryConfigError(f"{domain}: packs[{entry['id']}].variables должен быть объектом")
 
 
 def warnings_for(section: str, payload: dict) -> list[str]:

@@ -1,0 +1,94 @@
+schema_version = 1
+id = "db-redis-exporter"
+version = 1
+title = "Redis: redis_exporter"
+category = "database"
+stack = ["redis"]
+domain = "database"
+language = "promql"
+verified = true
+description = """
+Метрики oliver006/redis_exporter: команды в секунду и их среднее время, клиенты, память и её доля от \
+maxmemory, попадания в keyspace и вытеснения ключей.
+"""
+requires_metrics = ["redis_commands_processed_total", "redis_memory_used_bytes", "redis_connected_clients"]
+prompt_addendum = """
+Метрики Redis: Redis выполняет команды в одном потоке, поэтому рост среднего времени команды сразу \
+увеличивает задержки всех клиентов. Вытеснения при памяти около maxmemory означают, что кэш не вмещает \
+рабочий набор, и hit ratio падает.
+"""
+
+[variables.matchers]
+title = "Дополнительные матчеры"
+default = ""
+
+[variables.window]
+title = "Окно rate()"
+default = "2m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[[queries]]
+label = "DB (Redis): commands per second by server"
+role = "db.queries_rate"
+unit = "per_second"
+required = true
+query = 'label_replace(sum by (instance) (rate(redis_commands_processed_total{ {{matchers}} }[{{window}}])), "server", "$1", "instance", "(.*)")'
+keys = ["server"]
+description = "Выполненные команды в секунду."
+
+[[queries]]
+label = "DB (Redis): average command time (sec) by server"
+role = "db.query_avg"
+unit = "seconds"
+query = 'label_replace(sum by (instance) (rate(redis_commands_duration_seconds_total{ {{matchers}} }[{{window}}])) / sum by (instance) (rate(redis_commands_total{ {{matchers}} }[{{window}}])), "server", "$1", "instance", "(.*)")'
+keys = ["server"]
+description = "Среднее время выполнения команды, с."
+
+[[queries]]
+label = "DB (Redis): connected clients by server"
+role = "db.connections"
+unit = "count"
+query = 'label_replace(sum by (instance) (redis_connected_clients{ {{matchers}} }), "server", "$1", "instance", "(.*)")'
+keys = ["server"]
+description = "Подключённые клиенты."
+
+[[queries]]
+label = "DB (Redis): memory used (bytes) by server"
+role = "db.memory_used"
+unit = "bytes"
+required = true
+query = 'label_replace(sum by (instance) (redis_memory_used_bytes{ {{matchers}} }), "server", "$1", "instance", "(.*)")'
+keys = ["server"]
+description = "Память Redis."
+
+[[queries]]
+label = "DB (Redis): memory used (% of maxmemory) by server"
+role = "db.memory_pct"
+unit = "percent"
+query = 'label_replace(100 * max by (instance) (redis_memory_used_bytes{ {{matchers}} }) / max by (instance) (redis_memory_max_bytes{ {{matchers}} } > 0), "server", "$1", "instance", "(.*)")'
+keys = ["server"]
+description = "Доля памяти от maxmemory, % (без лимита ряда нет)."
+
+[[queries]]
+label = "DB (Redis): keyspace hit ratio (%) by server"
+role = "db.cache_hit_pct"
+unit = "percent"
+query = 'label_replace(100 * sum by (instance) (rate(redis_keyspace_hits_total{ {{matchers}} }[{{window}}])) / (sum by (instance) (rate(redis_keyspace_hits_total{ {{matchers}} }[{{window}}])) + sum by (instance) (rate(redis_keyspace_misses_total{ {{matchers}} }[{{window}}]))), "server", "$1", "instance", "(.*)")'
+keys = ["server"]
+description = "Попадания при чтении ключей, %."
+
+[[queries]]
+label = "DB (Redis): evicted keys per second by server"
+role = "db.evictions"
+unit = "per_second"
+query = 'label_replace(sum by (instance) (rate(redis_evicted_keys_total{ {{matchers}} }[{{window}}])), "server", "$1", "instance", "(.*)")'
+keys = ["server"]
+description = "Ключи, вытесненные из-за maxmemory."
+
+[[queries]]
+label = "DB (Redis): slowest commands average time (sec) by command (top 10)"
+role = "db.query_avg"
+unit = "seconds"
+query = 'topk(10, sum by (cmd) (rate(redis_commands_duration_seconds_total{ {{matchers}} }[{{window}}])) / sum by (cmd) (rate(redis_commands_total{ {{matchers}} }[{{window}}])))'
+keys = ["cmd"]
+description = "Команды с наибольшим средним временем."

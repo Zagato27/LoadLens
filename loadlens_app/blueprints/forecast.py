@@ -12,7 +12,8 @@ import psycopg2
 from flask import Blueprint, abort, jsonify, render_template, request
 
 from AI.limit_explanation import ExplanationParseError
-from loadlens_app.core import _active_project_area, _resolve_services_filter
+from loadlens_app.auth import current_auth
+from loadlens_app.core import _active_project_area, _resolve_services_filter, public_base_url
 from loadlens_app.forecast import (
     ForecastError,
     build_forecast,
@@ -23,6 +24,7 @@ from loadlens_app.forecast import (
 from loadlens_app.forecast_confluence import load_forecast_publication, publish_forecast
 from loadlens_app.forecast_explanation import ExplanationError, ExplanationView, explanation_view, generate_explanation
 from loadlens_app.jobs import JOB_KIND_FORECAST_CONFLUENCE, JOB_STATUS_DONE, JOB_STATUS_ERROR, job_store
+from loadlens_app.limits import LimitError, check_job_slot
 
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 MAX_TARGET_RPS = 10_000_000.0
@@ -75,6 +77,11 @@ def _forecast_inputs(source: Mapping[str, Any]) -> ForecastInputs:
     if ceiling is not None and not low <= ceiling <= high:
         raise InputError(ceiling_message)
     return ForecastInputs(target, headroom, ceiling)
+
+
+def _owner() -> str:
+    user = current_auth().user
+    return user.username if user is not None else "local"
 
 
 def _bad_id(run_id: str):
@@ -147,7 +154,7 @@ def get_forecast(run_id: str):
 def _explanation_response(build: Callable[[], ExplanationView]):
     try:
         view = build()
-    except (ForecastError, ExplanationError) as exc:
+    except (ForecastError, ExplanationError, LimitError) as exc:
         return jsonify({"error": str(exc), "code": exc.code}), exc.status_code
     except ExplanationParseError as exc:
         return jsonify({"error": str(exc), "code": "bad_answer"}), 502
@@ -174,7 +181,8 @@ def post_forecast_explanation(run_id: str):
         return rejected
     if not request.is_json:
         return jsonify({"error": "Нужен запрос с Content-Type: application/json", "code": "bad_request"}), 415
-    return _explanation_response(lambda: generate_explanation(run_id))
+    owner = _owner()
+    return _explanation_response(lambda: generate_explanation(run_id, budget_owner=owner))
 
 
 @forecast_bp.route("/forecast/<run_id>/confluence", methods=["GET"])
@@ -229,7 +237,12 @@ def post_forecast_confluence(run_id: str):
     except InputError as exc:
         return jsonify({"error": str(exc), "code": "bad_request"}), 400
     run_name = str(data.get("run_name") or run_id).strip()[:MAX_RUN_NAME]
-    job = job_store.create(JOB_KIND_FORECAST_CONFLUENCE, run_name=run_name, message="Публикация прогноза в Confluence…")
+    owner = _owner()
+    try:
+        check_job_slot(*job_store.running_counts(owner))
+    except LimitError as exc:
+        return jsonify({"error": str(exc), "code": exc.code}), exc.status_code
+    job = job_store.create(JOB_KIND_FORECAST_CONFLUENCE, run_name=run_name, message="Публикация прогноза в Confluence…", owner=owner)
     job_store.update(job.job_id, report_url=f"/forecasting/{run_id}")
-    _publish_in_background(job.job_id, run_id, inputs, f"{request.host_url.rstrip('/')}/forecasting/{run_id}")
+    _publish_in_background(job.job_id, run_id, inputs, f"{public_base_url()}/forecasting/{run_id}")
     return jsonify({"status": "accepted", "job_id": job.job_id, "message": "Публикация прогноза в Confluence началась."}), 200

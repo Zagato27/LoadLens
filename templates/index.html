@@ -46,7 +46,7 @@
   <p class="form-hint">Укажите окно теста, сервис и тип нагрузки. Сбор метрик и анализ ИИ занимают несколько минут: прогресс виден здесь и в архиве, вкладку можно закрыть.</p>
 
   <section id="activeJobs" class="jobs-panel" style="display:none" aria-live="polite">
-    <div class="jobs-title"><span>Активные и недавние задачи</span><small id="activeJobsNote"></small></div>
+    <div class="jobs-title"><span>Активные и недавние задачи</span><span class="jobs-actions"><small id="activeJobsNote"></small><button type="button" class="btn btn-sm btn-ghost" id="activeJobsClear" data-min-role="engineer" hidden>Очистить завершённые</button></span></div>
     <div id="activeJobsList"></div>
   </section>
 
@@ -104,7 +104,7 @@
           <span class="type-desc">Поведение за пределами проектной мощности: точка отказа и лимитирующий ресурс.</span>
         </label>
       </div>
-      <div class="field-hint" id="testTypeHint">Тип теста подбирает инструкции для анализа ИИ и метод расчёта максимальной производительности.</div>
+      <div class="field-hint" id="testTypeHint">Тип теста определяет программный анализ и инструкции для ИИ: поиск максимума, удержание нагрузки, реакцию на всплески или точку насыщения.</div>
     </fieldset>
 
     <fieldset class="form-section">

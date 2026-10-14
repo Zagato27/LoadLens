@@ -9,7 +9,7 @@ import json
 import logging
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from typing import Any, Callable, Iterable
 from xml.sax.saxutils import escape as xml_escape
@@ -17,7 +17,10 @@ from xml.sax.saxutils import escape as xml_escape
 import requests
 from psycopg2 import sql
 
+from AI.report_sections import test_type_section
+from AI.test_profile import profile_for
 from loadlens_app.core import _ts_conn
+from loadlens_app.html_sanitizer import safe_href
 from settings import CONFIG
 
 logger = logging.getLogger(__name__)
@@ -190,8 +193,9 @@ class _HtmlToStorage(HTMLParser):
             return
         attr_map = {k.lower(): v for k, v in attrs if v}
         rendered: list[str] = [name]
-        if name == "a" and attr_map.get("href"):
-            rendered.append(f'href="{xml_text(attr_map["href"])}"')
+        href = safe_href(attr_map.get("href") or "") if name == "a" else ""
+        if href:  # http(s), mailto or relative only: no javascript: links on the wiki page
+            rendered.append(f'href="{xml_text(href)}"')
         self.parts.append("<" + " ".join(rendered) + ">")
 
     def handle_endtag(self, tag: str) -> None:
@@ -294,6 +298,151 @@ def load_step_expand(table: dict[str, Any] | None) -> str:
     source = p("Источник: " + ", ".join(source_parts)) if source_parts else ""
     note = p("RPS — уровень ступени. Время отклика — p95 на плато, без хвоста после просадки.")
     return wrap_expand("Ступени теста", f"<table><thead>{head}</thead><tbody>{body}</tbody></table>{source}{note}")
+
+
+# ---- SLA criteria (same content as the block at the top of the report page) ----
+
+SLA_CHECK_LABELS = {
+    "target_rps": "Целевой RPS",
+    "error_rate": "Доля ошибок, %",
+    "p95_latency": "P95 latency, мс",
+    "p99_latency": "P99 latency, мс",
+    "cpu_usage": "CPU, %",
+    "memory_usage": "Память, %",
+    "recovery": "Восстановление после всплеска, мин",
+}
+# Confluence status lozenge per check result: passed, failed, no data.
+_SLA_STATUS = {True: ("Green", "Соблюдён"), False: ("Red", "Нарушен"), None: ("Grey", "Нет данных")}
+# Offset the report page assumes when the step times carry none (the page does the same).
+_DEFAULT_OFFSET_HOURS = 3.0
+
+
+def status_macro(title: str, colour: str) -> str:
+    return wrap_macro("status", "", {"colour": colour, "title": title})
+
+
+def _number_text(value: object) -> str:
+    """Number as the report page shows it: integers as is, otherwise up to two decimals."""
+    if value is None or value == "" or isinstance(value, bool):
+        return "—"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if number != number or number in (float("inf"), float("-inf")):
+        return "—"
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.2f}".rstrip("0").rstrip(".")
+
+
+def sla_checks_of(final_row: dict[str, Any]) -> list[dict[str, Any]]:
+    sla = _as_dict(final_row.get("sla_details"))
+    checks = sla.get("checks")
+    if not (isinstance(checks, list) and checks):
+        checks = _as_dict(_as_dict(final_row.get("parsed")).get("deterministic_sla")).get("checks")
+    return [check for check in checks if isinstance(check, dict)] if isinstance(checks, list) else []
+
+
+def sla_window_of(final_row: dict[str, Any]) -> dict[str, Any]:
+    window = _as_dict(final_row.get("sla_details")).get("stable_window")
+    if not isinstance(window, dict):
+        window = _as_dict(_as_dict(final_row.get("parsed")).get("deterministic_sla")).get("stable_window")
+    return window if isinstance(window, dict) else {}
+
+
+def _moment(value: object) -> datetime | None:
+    text = str(value or "").strip().replace(" ", "T")
+    if not text:
+        return None
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def _offset_hours(steps: list[dict[str, Any]]) -> float:
+    sample = next((str(step.get("end_iso") or step.get("start_iso")) for step in steps if step.get("end_iso") or step.get("start_iso")), "")
+    match = re.search(r"([+-])(\d{2}):(\d{2})$", sample)
+    if not match:
+        return _DEFAULT_OFFSET_HOURS
+    sign = -1 if match.group(1) == "-" else 1
+    return sign * (int(match.group(2)) + int(match.group(3)) / 60)
+
+
+def _clock(moment: datetime | None, offset_hours: float) -> str:
+    if moment is None:
+        return ""
+    return (moment.astimezone(timezone.utc) + timedelta(hours=offset_hours)).strftime("%H:%M")
+
+
+def _step_covering(steps: list[dict[str, Any]], moment: datetime | None) -> dict[str, Any] | None:
+    if moment is None:
+        return None
+    for step in steps:
+        start = _moment(step.get("plateau_start_iso") or step.get("start_iso"))
+        end = _moment(step.get("plateau_end_iso") or step.get("end_iso"))
+        if start and end and start <= moment <= end:
+            return step
+    return None
+
+
+def sla_window_note(window: dict[str, Any], step_table: dict[str, Any] | None) -> str:
+    """Where the thresholds were checked: the load step, the soak hold window or the spikes."""
+    if not window:
+        return ""
+    steps = [step for step in ((step_table or {}).get("steps") or []) if isinstance(step, dict)]
+    offset = _offset_hours(steps)
+    start, end = _moment(window.get("start") or window.get("start_iso")), _moment(window.get("end") or window.get("end_iso"))
+    span = f"{_clock(start, offset)}–{_clock(end, offset)}" if start and end else ""
+    level = _number_text(window.get("level"))
+    level = "" if level == "—" else level
+    kind = str(window.get("kind") or "step")
+    if kind == "spike":
+        return "SLA проверено в окнах всплесков: по каждому порогу — худший всплеск."
+    if kind == "hold":
+        return "SLA проверено на окне удержания" + (f" {span}" if span else "") + (f", средний RPS {level}" if level else "") + "."
+    chosen = next((step for step in steps if step.get("selected")), None) or _step_covering(steps, start)
+    window_bit = (f", окно {span}" if span else "") + (f", RPS окна {level}" if level else "")
+    if chosen is None:
+        return ("SLA проверено на стабильной ступени" + window_bit + ".") if window_bit else ""
+    note = f"SLA проверено на ступени {chosen.get('index') or ''} ({_step_interval(chosen)}){window_bit}."
+    try:
+        differs = level and abs(float(chosen.get("rps")) - float(window.get("level"))) > 1
+    except (TypeError, ValueError):
+        differs = False
+    if differs:
+        note += " RPS в таблице ступеней — среднее всего интервала, пороги считаются по этому окну."
+    return note
+
+
+def sla_criteria_block(final_row: dict[str, Any], step_table: dict[str, Any] | None = None) -> str:
+    """SLA criteria with status, threshold and actual value, the SLA summary and the checked window."""
+    checks = sla_checks_of(final_row)
+    if not checks:
+        return p("SLA-критерии для этого сервиса не заданы, поэтому вердикт определён оценкой ИИ.")
+    rows = []
+    for check in checks:
+        name = str(check.get("name") or "")
+        passed = check.get("passed") if isinstance(check.get("passed"), bool) else None
+        colour, title = _SLA_STATUS[passed]
+        note = str(check.get("message") or "").strip()
+        label = xml_text(SLA_CHECK_LABELS.get(name) or name or "—")
+        criterion = label + (f"<br />{xml_text(note)}" if note else "")
+        rows.append(
+            "<tr>"
+            f"<td>{status_macro(title, colour)}</td>"
+            f"<td>{criterion}</td>"
+            f"<td>{xml_text(_number_text(check.get('threshold')))}</td>"
+            f"<td>{xml_text(_number_text(check.get('actual')))}</td>"
+            "</tr>"
+        )
+    head = "<tr><th>Статус</th><th>Критерий</th><th>Порог</th><th>Факт</th></tr>"
+    table = f"<table><thead>{head}</thead><tbody>{''.join(rows)}</tbody></table>"
+    summary = str(_as_dict(final_row.get("sla_details")).get("summary") or "").strip()
+    note = sla_window_note(sla_window_of(final_row), step_table)
+    return table + (p(summary) if summary else "") + (p(note) if note else "")
 
 
 def two_col_table(left_title: str, right_title: str, rows: list[tuple[str, str]]) -> str:
@@ -602,7 +751,12 @@ def render_llm_domain_body(row: dict[str, Any]) -> str:
         parts.append(_html_paragraphs(rationale))
 
     peak = _as_dict(parsed.get("peak_performance") or parsed.get("peak_perfomance"))
-    if _peak_table_applies(str(row.get("domain") or ""), peak):
+    section = test_type_section(parsed) if row.get("domain") == "final" else None
+    if section is not None:
+        title, section_rows = section
+        parts.append(h3(title))
+        parts.append(kv_table(section_rows))
+    elif _peak_table_applies(str(row.get("domain") or ""), peak):
         parts.append(h3("Пиковая производительность"))
         parts.append(kv_table([
             ("Максимальный RPS", _cell_text(peak.get("max_rps"))),
@@ -824,6 +978,21 @@ def save_publication(run_name: str, service: str, page_id: str, page_url: str, s
         conn.close()
 
 
+def report_domain_titles(llm_rows: list[dict[str, Any]]) -> dict[str, str]:
+    """Titles the report stored for its domains (query packs title «jvm» as «Go runtime» and the like)."""
+    final = next((row for row in llm_rows if str(row.get("domain")) == "final"), {})
+    parsed = final.get("parsed")
+    if isinstance(parsed, str):
+        try:
+            parsed = json.loads(parsed)
+        except ValueError:
+            parsed = None
+    titles = parsed.get("domain_titles") if isinstance(parsed, dict) else None
+    if not isinstance(titles, dict):
+        return {}
+    return {str(key): str(value) for key, value in titles.items() if isinstance(value, str) and value.strip()}
+
+
 def load_llm_rows(run_name: str) -> list[dict[str, Any]]:
     cfg = _storage_cfg()
     schema = cfg.get("schema", "public")
@@ -835,7 +1004,7 @@ def load_llm_rows(run_name: str) -> list[dict[str, Any]]:
                 f"""
                     SELECT DISTINCT ON (domain)
                     run_name, service, start_ms, end_ms, domain, verdict, text, parsed,
-                    scores, sla_verdict, sla_details, system_context, created_at
+                    scores, sla_verdict, sla_details, system_context, created_at, test_type
                 FROM {schema}.{table}
                 WHERE run_name = %s AND domain <> 'engineer'
                 ORDER BY domain, created_at DESC
@@ -861,6 +1030,7 @@ def load_llm_rows(run_name: str) -> list[dict[str, Any]]:
             "sla_verdict": row[9],
             "sla_details": row[10],
             "system_context": row[11],
+            "test_type": row[13] if len(row) > 13 else None,
             "created_at": row[12],
         })
     return data
@@ -1166,6 +1336,8 @@ def build_page_body(
     charts: list[dict[str, str]],
 ) -> str:
     first = llm_rows[0] if llm_rows else {}
+    test_type = next((str(row.get("test_type")) for row in llm_rows if row.get("test_type")), "")
+    type_label = (profile_for(test_type).label_ru if profile_for(test_type).test_type else test_type) if test_type else ""
     start_text = _ms_to_text(first.get("start_ms"))
     end_text = _ms_to_text(first.get("end_ms"))
     system_context = {}
@@ -1181,27 +1353,33 @@ def build_page_body(
             ("Сервис", service or "—"),
             ("Запуск", run_name),
             ("Время теста", f"{start_text} — {end_text}"),
+            *([("Тип теста", type_label)] if type_label else []),
         ]),
     ]
     if source_url:
         parts.append(f'<p><a href="{xml_text(source_url)}">Открыть отчёт в LoadLens</a></p>')
+    step_table = resolve_load_step_table(run_name, llm_rows)
+    final_row = next((row for row in llm_rows if str(row.get("domain")) == "final"), {})
+    parts.append(h2("SLA-критерии"))
+    parts.append(sla_criteria_block(final_row if isinstance(final_row, dict) else {}, step_table))
     parts.append(h2("Итоги от инженера"))
     parts.append(html_to_storage(engineer_html))
     context_items = _system_context_items(system_context)
     if context_items:
         parts.append(wrap_expand("Контекст тестируемой системы", li_list(context_items)))
-    step_block = load_step_expand(resolve_load_step_table(run_name, llm_rows))
+    step_block = load_step_expand(step_table)
     if step_block:
         parts.append(step_block)
 
     by_domain = {str(row.get("domain")): row for row in llm_rows}
+    stored_titles = report_domain_titles(llm_rows)
     llm_panels: list[tuple[str, str]] = []
     for domain in LLM_DOMAIN_ORDER:
         if domain in by_domain:
-            llm_panels.append((LLM_DOMAIN_TITLES.get(domain, domain), render_llm_domain_body(by_domain[domain])))
+            llm_panels.append((stored_titles.get(domain) or LLM_DOMAIN_TITLES.get(domain, domain), render_llm_domain_body(by_domain[domain])))
     for domain, row in by_domain.items():
         if domain not in LLM_DOMAIN_TITLES:
-            llm_panels.append((domain, render_llm_domain_body(row)))
+            llm_panels.append((stored_titles.get(domain) or domain, render_llm_domain_body(row)))
     parts.append(h2("Анализ LLM"))
     parts.append(wrap_ui_tabs(llm_panels or [("Итог", p("Нет LLM-отчётов."))]))
 
@@ -1216,7 +1394,7 @@ def build_page_body(
         for chart in charts_by_domain[domain]:
             body += h3(chart["title"])
             body += attachment_image(chart["filename"])
-        metric_panels.append((domain, body or p("Нет графиков.")))
+        metric_panels.append((stored_titles.get(domain) or domain, body or p("Нет графиков.")))
     parts.append(h2("Графики метрик"))
     parts.append(wrap_ui_tabs(metric_panels or [("metrics", p("Нет графиков для этого запуска."))]))
     return "".join(parts)

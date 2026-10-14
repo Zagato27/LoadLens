@@ -6,8 +6,19 @@ Desktop.ini
 .vscode/
 __pycache__/
 *.py[cod]
+*.egg-info/
 .mypy_cache/
 .pytest_cache/
+.ruff_cache/
+# Test coverage reports
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+# deepeval cache (G-Eval experiments)
+.deepeval/
+# Personal Claude Code settings; shared ones in .claude/ stay in git
+.claude/settings.local.json
 
 # Виртуальные окружения
 venv/
@@ -28,9 +39,15 @@ dist/
 settings.py
 # Runtime settings and their backups (e.g. settings_runtime.before-data-sources.json) hold secrets
 settings_runtime*.json
+# Temporary files of atomic writes of the runtime configs (a crash mid-write can leave one behind)
+.*.json.*.tmp
 metrics_config.py
 metrics_config_runtime.json
 AI/config.py
+
+# Local overrides and secret files next to the configs (e.g. settings.local.py, smtp.secrets.json)
+*.local.*
+*.secrets.*
 
 # Примеры конфигов оставляем в гите
 !settings.example.py
@@ -51,5 +68,5 @@ AI/GigaChat/
 # Локальные копии/форки проекта
 loadlens_sber/
 
-
-
+# Wheels for the dev-stack FastAPI app, downloaded on the host (docker/dev-stack/README.md)
+docker/dev-stack/pyapp/wheels/

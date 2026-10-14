@@ -1,0 +1,150 @@
+schema_version = 1
+id = "lt-k6-influx2-flux"
+version = 1
+title = "k6 → InfluxDB 2.x (Flux)"
+category = "load_tool"
+stack = ["k6", "influxdb"]
+domain = "lt_framework"
+language = "flux"
+verified = true
+description = """
+Расширение xk6-output-influxdb (`--out xk6-influxdb`) пишет те же измерения, что встроенный вывод k6: \
+http_reqs, http_req_duration, http_req_failed, vus. Bucket задаётся в привязке домена lt_framework, \
+плейсхолдеры {bucket}, {start} и {end} подставляет LoadLens. Задержки в миллисекундах.
+"""
+requires_metrics = ["http_reqs", "http_req_duration", "http_req_failed", "vus"]
+prompt_addendum = """
+Метрики k6: http_reqs — запросы, http_req_duration — время ответа в мс (включая неуспешные запросы), \
+http_req_failed — доля запросов с неожидаемым статусом, vus — активные виртуальные пользователи. \
+Серии name — имя запроса.
+"""
+
+[variables.window]
+title = "Окно перцентилей и среднего"
+default = "1m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[variables.load_model]
+title = "Модель нагрузки сценария"
+default = "open"
+choices = ["open", "closed"]
+help = "open — executors constant/ramping-arrival-rate, closed — ramping-vus, constant-vus, per-vu-iterations."
+
+[sla]
+max_performance_query = "@lt.rps_total"
+p95_query = "@lt.p95_total"
+p99_query = "@lt.p99_total"
+mean_latency_query = "@lt.mean_latency_total"
+error_rate_query = "@lt.error_rate_pct"
+vus_query = "@lt.vus"
+latency_unit = "ms"
+load_model = "{{load_model}}"
+
+[[queries]]
+label = "LT (Flux): RPS total"
+role = "lt.rps_total"
+unit = "per_second"
+required = true
+query = '''
+from(bucket: "{bucket}")
+  |> range(start: {start}, stop: {end})
+  |> filter(fn: (r) => r._measurement == "http_reqs" and r._field == "value")
+  |> group()
+  |> aggregateWindow(every: 1s, fn: sum, createEmpty: false)
+'''
+description = "Общий RPS теста."
+
+[[queries]]
+label = "LT (Flux): RPS by name"
+role = "lt.rps_by_request"
+unit = "per_second"
+query = '''
+from(bucket: "{bucket}")
+  |> range(start: {start}, stop: {end})
+  |> filter(fn: (r) => r._measurement == "http_reqs" and r._field == "value")
+  |> group(columns: ["name"])
+  |> aggregateWindow(every: 1s, fn: sum, createEmpty: false)
+'''
+keys = ["name"]
+description = "RPS по имени запроса."
+
+[[queries]]
+label = "LT (Flux): http_req_duration p95(ms) total"
+role = "lt.p95_total"
+unit = "ms"
+query = '''
+from(bucket: "{bucket}")
+  |> range(start: {start}, stop: {end})
+  |> filter(fn: (r) => r._measurement == "http_req_duration" and r._field == "value")
+  |> group()
+  |> aggregateWindow(every: {{window}}, fn: (column, tables=<-) => tables |> quantile(q: 0.95, column: column, method: "estimate_tdigest"), createEmpty: false)
+'''
+description = "p95 времени ответа всех запросов, мс."
+
+[[queries]]
+label = "LT (Flux): http_req_duration p99(ms) total"
+role = "lt.p99_total"
+unit = "ms"
+query = '''
+from(bucket: "{bucket}")
+  |> range(start: {start}, stop: {end})
+  |> filter(fn: (r) => r._measurement == "http_req_duration" and r._field == "value")
+  |> group()
+  |> aggregateWindow(every: {{window}}, fn: (column, tables=<-) => tables |> quantile(q: 0.99, column: column, method: "estimate_tdigest"), createEmpty: false)
+'''
+description = "p99 времени ответа всех запросов, мс."
+
+[[queries]]
+label = "LT (Flux): http_req_duration p95(ms) by name"
+role = "lt.p95_by_request"
+unit = "ms"
+query = '''
+from(bucket: "{bucket}")
+  |> range(start: {start}, stop: {end})
+  |> filter(fn: (r) => r._measurement == "http_req_duration" and r._field == "value")
+  |> group(columns: ["name"])
+  |> aggregateWindow(every: {{window}}, fn: (column, tables=<-) => tables |> quantile(q: 0.95, column: column, method: "estimate_tdigest"), createEmpty: false)
+'''
+keys = ["name"]
+description = "p95 по имени запроса, мс."
+
+[[queries]]
+label = "LT (Flux): http_req_duration mean(ms)"
+role = "lt.mean_latency_total"
+unit = "ms"
+required = true
+query = '''
+from(bucket: "{bucket}")
+  |> range(start: {start}, stop: {end})
+  |> filter(fn: (r) => r._measurement == "http_req_duration" and r._field == "value")
+  |> group()
+  |> aggregateWindow(every: {{window}}, fn: mean, createEmpty: false)
+'''
+description = "Среднее время ответа, мс."
+
+[[queries]]
+label = "LT (Flux): error rate (%)"
+role = "lt.error_rate_pct"
+unit = "percent"
+query = '''
+from(bucket: "{bucket}")
+  |> range(start: {start}, stop: {end})
+  |> filter(fn: (r) => r._measurement == "http_req_failed" and r._field == "value")
+  |> group()
+  |> aggregateWindow(every: {{window}}, fn: mean, createEmpty: false)
+  |> map(fn: (r) => ({ r with _value: r._value * 100.0 }))
+'''
+description = "Доля неуспешных запросов, %."
+
+[[queries]]
+label = "LT (Flux): VUs"
+role = "lt.vus"
+unit = "count"
+query = '''
+from(bucket: "{bucket}")
+  |> range(start: {start}, stop: {end})
+  |> filter(fn: (r) => r._measurement == "vus" and r._field == "value")
+  |> group()
+  |> aggregateWindow(every: 1s, fn: max, createEmpty: false)
+'''
+description = "Активные виртуальные пользователи."

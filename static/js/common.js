@@ -23,7 +23,41 @@ window.LoadLens = window.LoadLens || {};
   let navigating = false;
   let staleShown = false;
 
+  // One banner per page when a data call reports that the storage database is down.
+  let outageShown = false;
+  function showStorageOutage() {
+    const main = document.getElementById('main');
+    if (outageShown || !main || document.getElementById('storageDownBanner')) return;
+    outageShown = true;
+    const box = document.createElement('div');
+    box.className = 'banner banner-fail';
+    box.id = 'storageDownBanner';
+    box.setAttribute('role', 'status');
+    const inner = document.createElement('div');
+    const title = document.createElement('div');
+    title.className = 'banner-title';
+    title.textContent = 'Хранилище недоступно';
+    inner.appendChild(title);
+    inner.appendChild(document.createTextNode('Отчёты и архив сейчас не загружаются. '));
+    if (LL.can('admin')) {
+      const link = document.createElement('a');
+      link.href = '/recovery';
+      link.textContent = 'Проверить и исправить подключение';
+      inner.appendChild(link);
+    } else {
+      inner.appendChild(document.createTextNode('Сообщите администратору LoadLens.'));
+    }
+    box.appendChild(inner);
+    main.prepend(box);
+  }
+
   function onAuthFailure(response, url) {
+    if (response.status === 503) {
+      response.clone().json().then((data) => {
+        if (data && data.code === 'storage_unavailable') showStorageOutage();
+      }).catch(() => { /* not JSON */ });
+      return;
+    }
     if (response.status === 401 && !navigating && url.pathname !== '/login' && url.pathname !== '/auth/me') {
       navigating = true;
       window.location.assign(`/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
@@ -59,6 +93,56 @@ window.LoadLens = window.LoadLens || {};
     return response;
   };
 })();
+
+// Hides finished background jobs from the shared job list (they stay reachable by link).
+// Resolves to the server answer, or null after an error that was already shown to the user.
+window.LoadLens.dismissJobs = async function dismissJobs(jobIds) {
+  const LL = window.LoadLens;
+  const toast = (text, tone) => { if (LL.ui && LL.ui.toast) LL.ui.toast(text, { tone }); };
+  const ids = Array.from(new Set((jobIds || []).filter(Boolean)));
+  if (!ids.length) return null;
+  try {
+    const resp = await fetch('/jobs/dismiss', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_ids: ids }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      toast(data.error || `Не удалось очистить список задач (HTTP ${resp.status})`, 'error');
+      return null;
+    }
+    const hidden = Array.isArray(data.dismissed) ? data.dismissed.length : 0;
+    const running = Array.isArray(data.skipped_running) ? data.skipped_running.length : 0;
+    const parts = [];
+    if (hidden) parts.push(`Скрыто задач: ${hidden}`);
+    if (running) parts.push(`ещё выполняются и остались в списке: ${running}`);
+    toast(parts.length ? parts.join(', ') : 'Эти задачи уже скрыты', running ? 'warn' : 'ok');
+    return data;
+  } catch (e) {
+    toast('Сервер не отвечает, список задач не очищен', 'error');
+    return null;
+  }
+};
+
+// Builds the "Скрыть" button of a finished job row; ``onDone`` reloads the list.
+window.LoadLens.jobDismissButton = function jobDismissButton(job, onDone) {
+  const LL = window.LoadLens;
+  if (job.status === 'running' || !LL.can('engineer')) return null;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn btn-sm btn-ghost job-dismiss';
+  btn.textContent = 'Скрыть';
+  btn.title = 'Убрать задачу из списка. Она останется доступна по ссылке.';
+  btn.setAttribute('aria-label', `Скрыть задачу ${job.run_name || ''}`.trim());
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    const result = await LL.dismissJobs([job.job_id]);
+    if (result) onDone();
+    else btn.disabled = false;
+  });
+  return btn;
+};
 
 // Project area selector in the header. The chosen area is stored in a cookie that
 // every data endpoint reads, so a change reloads the page. Idempotent: the same
@@ -150,6 +234,19 @@ window.LoadLens.DOMAIN_TITLES = {
 };
 window.LoadLens.domainTitle = function domainTitle(key) {
   return window.LoadLens.DOMAIN_TITLES[key] || String(key || '');
+};
+// Title a report stored for the domain (e.g. «Go runtime» in jvm), else the default one.
+window.LoadLens.domainTitleFor = function domainTitleFor(key, titles) {
+  const own = titles && typeof titles === 'object' ? titles[key] : '';
+  return typeof own === 'string' && own.trim() ? own.trim() : window.LoadLens.domainTitle(key);
+};
+// domain_titles of the final row of /llm_reports (parsed may arrive as an object or a JSON string).
+window.LoadLens.reportDomainTitles = function reportDomainTitles(rows) {
+  const final = (Array.isArray(rows) ? rows : []).find((row) => row && row.domain === 'final');
+  let parsed = final ? final.parsed : null;
+  if (typeof parsed === 'string') { try { parsed = JSON.parse(parsed); } catch (e) { parsed = null; } }
+  const titles = parsed && typeof parsed === 'object' ? parsed.domain_titles : null;
+  return titles && typeof titles === 'object' ? titles : {};
 };
 
 window.LoadLens.TEST_TYPE_LABELS = {

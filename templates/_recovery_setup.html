@@ -1,0 +1,9 @@
+<div class="auth-info recovery-setup">
+  <strong>Аварийный администратор не настроен.</strong>
+  Без него подключение к хранилищу исправляется только на сервере. Задайте одно из двух и перезапустите приложение:
+  <ol>
+    <li>В <code>settings.py</code>, раздел <code>auth</code>: ключи <code>recovery_user</code> и <code>recovery_password_hash</code>. Хэш пароля выдаёт команда <code>python -m loadlens_app.auth hash-password</code>.</li>
+    <li>Переменные окружения <code>LOADLENS_RECOVERY_USER</code> и <code>LOADLENS_RECOVERY_PASSWORD_HASH</code>, либо <code>LOADLENS_ADMIN_USER</code> и <code>LOADLENS_ADMIN_PASSWORD</code>.</li>
+  </ol>
+  Либо исправьте раздел <code>storage.timescale</code> в <code>settings.py</code> или <code>settings_runtime.json</code> и перезапустите приложение.
+</div>

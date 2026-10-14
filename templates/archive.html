@@ -13,11 +13,11 @@
   <div id="archiveBreadcrumbs" class="breadcrumbs" style="display:none"></div>
 
   <section id="jobsStrip" class="jobs-strip" style="display:none" aria-live="polite">
-    <div class="jobs-title"><span>Задачи в работе и с ошибками</span><small id="jobsStripNote"></small></div>
+    <div class="jobs-title"><span>Задачи в работе и с ошибками</span><span class="jobs-actions"><small id="jobsStripNote"></small><button type="button" class="btn btn-sm btn-ghost" id="jobsStripClear" data-min-role="engineer" hidden>Очистить завершённые</button></span></div>
     <div id="jobsStripList"></div>
   </section>
 
-  <form class="toolbar" id="filtersForm" onsubmit="return false;">
+  <form class="toolbar" id="filtersForm">
     <input type="search" id="searchInput" placeholder="Поиск по названию запуска или сервису…" aria-label="Поиск" />
     <label>Сервис
       <select id="serviceFilter"><option value="">Все</option></select>

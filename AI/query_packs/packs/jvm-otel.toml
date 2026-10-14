@@ -1,0 +1,96 @@
+schema_version = 1
+id = "jvm-otel"
+version = 1
+title = "JVM: OpenTelemetry Java agent 2.x"
+category = "runtime"
+stack = ["java", "opentelemetry"]
+domain = "jvm"
+language = "promql"
+domain_title = "JVM"
+description = """
+Runtime-метрики OpenTelemetry Java agent 2.x (стабильные семантические соглашения JVM) после экспорта \
+в Prometheus (OTLP receiver Prometheus или prometheus exporter OTel Collector). Сервис обычно в лейбле \
+job (service.namespace/service.name), экземпляр — в instance (service.instance.id). Для агента 1.x \
+используйте пакет «OpenTelemetry Java agent 1.x».
+"""
+requires_metrics = ["jvm_memory_used_bytes", "jvm_cpu_recent_utilization_ratio", "jvm_gc_duration_seconds_count"]
+prompt_addendum = """
+Метрики OpenTelemetry JVM: jvm_memory_used_bytes{jvm_memory_type="heap"} — занятая куча, \
+jvm_memory_limit_bytes — её предел, jvm_gc_duration_seconds — длительность сборок по jvm_gc_name и \
+jvm_gc_action, jvm_thread_count — потоки, jvm_cpu_recent_utilization_ratio — CPU процесса как доля 0..1.
+"""
+
+[variables.service_label]
+title = "Лейбл с именем сервиса"
+default = "job"
+pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
+
+[variables.matchers]
+title = "Дополнительные матчеры"
+default = ""
+
+[variables.window]
+title = "Окно rate()"
+default = "2m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[sla]
+service_cpu_query = "@runtime.cpu"
+
+[[queries]]
+label = "JVM (OTel): Heap used (bytes) by ({{service_label}}, instance)"
+role = "runtime.heap_used"
+unit = "bytes"
+required = true
+query = 'sum by ({{service_label}}, instance) (jvm_memory_used_bytes{jvm_memory_type="heap", {{service_label}}!="", {{matchers}} })'
+keys = ["{{service_label}}", "instance"]
+description = "Занятая куча экземпляра."
+
+[[queries]]
+label = "JVM (OTel): Heap limit (bytes) by ({{service_label}}, instance)"
+role = "runtime.heap_max"
+unit = "bytes"
+query = 'sum by ({{service_label}}, instance) (jvm_memory_limit_bytes{jvm_memory_type="heap", {{service_label}}!="", {{matchers}} })'
+keys = ["{{service_label}}", "instance"]
+description = "Предел кучи."
+
+[[queries]]
+label = "JVM (OTel): CPU utilization by ({{service_label}}, instance)"
+role = "runtime.cpu"
+unit = "fraction"
+required = true
+query = 'max by ({{service_label}}, instance) (jvm_cpu_recent_utilization_ratio{ {{service_label}}!="", {{matchers}} })'
+keys = ["{{service_label}}", "instance"]
+description = "CPU процесса как доля 0..1."
+
+[[queries]]
+label = "JVM (OTel): GC time (%) by ({{service_label}}, instance)"
+role = "runtime.gc_time_pct"
+unit = "percent"
+query = '100 * sum by ({{service_label}}, instance) (rate(jvm_gc_duration_seconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}", "instance"]
+description = "Доля времени в сборках мусора, %."
+
+[[queries]]
+label = "JVM (OTel): GC avg (s) by ({{service_label}}, instance)"
+role = "runtime.gc_pause_avg"
+unit = "seconds"
+query = 'sum by ({{service_label}}, instance) (rate(jvm_gc_duration_seconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}])) / sum by ({{service_label}}, instance) (rate(jvm_gc_duration_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}", "instance"]
+description = "Средняя длительность сборки, с."
+
+[[queries]]
+label = "JVM (OTel): GC per second by ({{service_label}}, instance)"
+role = "runtime.gc_rate"
+unit = "per_second"
+query = 'sum by ({{service_label}}, instance) (rate(jvm_gc_duration_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}", "instance"]
+description = "Частота сборок мусора."
+
+[[queries]]
+label = "JVM (OTel): Threads by ({{service_label}}, instance)"
+role = "runtime.threads"
+unit = "count"
+query = 'sum by ({{service_label}}, instance) (jvm_thread_count{ {{service_label}}!="", {{matchers}} })'
+keys = ["{{service_label}}", "instance"]
+description = "Потоки JVM."

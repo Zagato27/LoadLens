@@ -1,0 +1,100 @@
+schema_version = 1
+id = "http-micrometer"
+version = 2
+title = "HTTP: Micrometer (Spring MVC/WebFlux, Quarkus)"
+category = "http"
+stack = ["java", "spring-boot", "quarkus", "micrometer"]
+domain = "microservices"
+language = "promql"
+verified = true
+description = """
+Таймеры http_server_requests_seconds Micrometer. Для p95 нужны гистограммы: \
+management.metrics.distribution.percentiles-histogram.http.server.requests=true; без них p95 пуст, \
+а среднее время работает. Запросы к /actuator исключены.
+"""
+requires_metrics = ["http_server_requests_seconds_count", "http_server_requests_seconds_sum"]
+prompt_addendum = """
+Метрики Micrometer HTTP: http_server_requests_seconds — входящие запросы по uri, status и outcome; \
+http_client_requests_seconds — исходящие вызовы по client_name. Времена в секундах. Рост среднего \
+времени исходящих вызовов на той же ступени, что и входящих, указывает на зависимость.
+"""
+
+[variables.service_label]
+title = "Лейбл с именем сервиса"
+default = "application"
+pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
+
+[variables.matchers]
+title = "Дополнительные матчеры"
+default = ""
+
+[variables.window]
+title = "Окно rate()"
+default = "1m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[[queries]]
+label = "Microservices: request count rate (RPS)"
+role = "http.rps"
+unit = "per_second"
+required = true
+query = 'sum by ({{service_label}}) (rate(http_server_requests_seconds_count{uri!~"/actuator.*", {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}"]
+description = "Входящие запросы в секунду по сервисам."
+
+[[queries]]
+label = "Microservices: average request time (sec)"
+role = "http.avg_latency"
+unit = "seconds"
+query = 'sum by ({{service_label}}) (rate(http_server_requests_seconds_sum{uri!~"/actuator.*", {{service_label}}!="", {{matchers}} }[{{window}}])) / sum by ({{service_label}}) (rate(http_server_requests_seconds_count{uri!~"/actuator.*", {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}"]
+description = "Среднее время обработки входящего запроса, с."
+
+[[queries]]
+label = "Microservices: p95 request time (sec)"
+role = "http.p95"
+unit = "seconds"
+query = 'histogram_quantile(0.95, sum by (le, {{service_label}}) (rate(http_server_requests_seconds_bucket{uri!~"/actuator.*", {{service_label}}!="", {{matchers}} }[{{window}}])))'
+keys = ["{{service_label}}"]
+description = "p95 времени обработки, с. Нужен percentiles-histogram."
+
+[[queries]]
+label = "Microservices: 5xx error rate (%)"
+role = "http.error_rate_pct"
+unit = "percent"
+query = '100 * (sum by ({{service_label}}) (rate(http_server_requests_seconds_count{status=~"5..", uri!~"/actuator.*", {{service_label}}!="", {{matchers}} }[{{window}}])) or 0 * sum by ({{service_label}}) (rate(http_server_requests_seconds_count{uri!~"/actuator.*", {{service_label}}!="", {{matchers}} }[{{window}}]))) / sum by ({{service_label}}) (rate(http_server_requests_seconds_count{uri!~"/actuator.*", {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}"]
+description = "Доля ответов 5xx, %."
+
+[[queries]]
+label = "Microservices: RPS by uri (top 20)"
+role = "http.rps_by_route"
+unit = "per_second"
+query = 'topk(20, sum by ({{service_label}}, uri) (rate(http_server_requests_seconds_count{uri!~"/actuator.*", {{service_label}}!="", {{matchers}} }[{{window}}])))'
+keys = ["{{service_label}}", "uri"]
+description = "Самые нагруженные маршруты."
+
+[[queries]]
+label = "Microservices: average request time (sec) by uri (top 20)"
+role = "http.avg_latency_by_route"
+unit = "seconds"
+query = 'topk(20, sum by ({{service_label}}, uri) (rate(http_server_requests_seconds_sum{uri!~"/actuator.*", {{service_label}}!="", {{matchers}} }[{{window}}])) / sum by ({{service_label}}, uri) (rate(http_server_requests_seconds_count{uri!~"/actuator.*", {{service_label}}!="", {{matchers}} }[{{window}}])))'
+keys = ["{{service_label}}", "uri"]
+description = "Самые медленные маршруты по среднему времени."
+
+[[queries]]
+label = "Microservices: p95 request time (sec) by uri (top 20)"
+role = "http.p95_by_route"
+unit = "seconds"
+since = 2
+query = 'topk(20, histogram_quantile(0.95, sum by (le, {{service_label}}, uri) (rate(http_server_requests_seconds_bucket{uri!~"/actuator.*", {{service_label}}!="", {{matchers}} }[{{window}}]))))'
+keys = ["{{service_label}}", "uri"]
+description = "Самые медленные маршруты по p95. Нужен percentiles-histogram."
+
+[[queries]]
+label = "Microservices: outgoing HTTP average time (sec) by client"
+role = "http.client_avg_latency"
+unit = "seconds"
+query = 'sum by ({{service_label}}, client_name) (rate(http_client_requests_seconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}])) / sum by ({{service_label}}, client_name) (rate(http_client_requests_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
+keys = ["{{service_label}}", "client_name"]
+description = "Среднее время исходящих HTTP-вызовов (RestTemplate, WebClient, RestClient) по хосту."

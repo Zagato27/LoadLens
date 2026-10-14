@@ -67,11 +67,17 @@
         <td><a href="/reports?service=${encodeURIComponent(svc.service)}"><strong>${esc(svc.service)}</strong></a></td>
         <td class="run-name" title="${esc(svc.last_run)}"><a href="${reportUrl({ run_name: svc.last_run })}">${esc(svc.last_run)}</a><div class="dim">${esc(LL.testTypeLabel(svc.test_type))} · ${esc(svc.created_at ? LL.formatDateTime(svc.created_at) : '—')}</div></td>
         <td>${pill(svc.verdict)}</td>
-        <td class="num">${svc.max_rps !== null && svc.max_rps !== undefined ? esc(Number(svc.max_rps).toFixed(1)) : '—'}</td>
+        <td class="num">${svc.max_rps !== null && svc.max_rps !== undefined ? esc(Number(svc.max_rps).toFixed(1)) : '—'}${rpsCaption(svc)}</td>
         <td><span class="verdict-dots" title="Слева направо: от старых к новым">${dots}</span></td>
         <td class="nowrap"><a class="btn btn-sm" href="/compare?run_a=${encodeURIComponent(svc.last_run)}">Сравнить с предыдущим</a></td>`;
       body.appendChild(tr);
     });
+  }
+
+  const RPS_CAPTIONS = { soak: 'удержано (среднее)', spike: 'уровень всплеска', stress: 'точка насыщения' };
+  function rpsCaption(svc) {
+    const caption = RPS_CAPTIONS[String(svc.test_type || '').trim().toLowerCase()];
+    return caption && svc.max_rps !== null && svc.max_rps !== undefined ? `<div class="dim">${esc(caption)}</div>` : '';
   }
 
   function renderRecent(runs) {

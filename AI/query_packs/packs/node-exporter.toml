@@ -1,0 +1,92 @@
+schema_version = 1
+id = "node-exporter"
+version = 1
+title = "Узлы: node_exporter (VM и Kubernetes)"
+category = "infrastructure"
+stack = ["linux", "kubernetes", "vm"]
+domain = "hard_resources"
+language = "promql"
+verified = true
+description = """
+Ресурсы узлов из node_exporter: CPU и память в процентах (источник SLA по CPU и памяти и плана \
+ресурсов), load на ядро, загрузка диска, сеть, заполнение файловых систем. Узел называется по hostname \
+из node_uname_info — в Kubernetes это имя ноды, на VM — имя хоста.
+"""
+requires_metrics = ["node_cpu_seconds_total", "node_memory_MemAvailable_bytes", "node_uname_info"]
+prompt_addendum = """
+Метрики узлов node_exporter: CPU % — доля не-idle времени всех ядер, память % — 1 − MemAvailable/MemTotal \
+(кэш страниц не считается занятым), load1 на ядро выше 1 — очередь на CPU, загрузка диска — доля времени \
+с активным I/O самого занятого устройства (близко к 100 % — диск насыщен).
+"""
+
+[variables.matchers]
+title = "Матчеры node_exporter"
+default = 'job=~".*node.*"'
+help = "Ограничьте узлами стенда, например job=\"node-exporter\", instance=~\"10.0.1.*\"."
+
+[variables.window]
+title = "Окно rate()"
+default = "2m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[sla]
+cpu_query = "@node.cpu_pct"
+memory_query = "@node.mem_pct"
+
+[[queries]]
+label = "Nodes: CPU usage (%) by node"
+role = "node.cpu_pct"
+unit = "percent"
+required = true
+query = 'label_replace(100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle", {{matchers}} }[{{window}}]))) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
+keys = ["node"]
+description = "CPU узла, %. Источник SLA «CPU» и плана ресурсов."
+
+[[queries]]
+label = "Nodes: Memory usage (%) by node"
+role = "node.mem_pct"
+unit = "percent"
+required = true
+query = 'label_replace(100 * (1 - max by (instance) (node_memory_MemAvailable_bytes{ {{matchers}} }) / max by (instance) (node_memory_MemTotal_bytes{ {{matchers}} })) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
+keys = ["node"]
+description = "Память узла без учёта кэша страниц, %. Источник SLA «память»."
+
+[[queries]]
+label = "Nodes: load1 per core by node"
+role = "node.load_per_core"
+unit = "ratio"
+query = 'label_replace(max by (instance) (node_load1{ {{matchers}} }) / count by (instance) (node_cpu_seconds_total{mode="idle", {{matchers}} }) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
+keys = ["node"]
+description = "Средняя длина очереди на CPU за минуту, на одно ядро."
+
+[[queries]]
+label = "Nodes: Disk utilization of the busiest device (%) by node"
+role = "node.disk_util_pct"
+unit = "percent"
+query = 'label_replace(100 * max by (instance) (rate(node_disk_io_time_seconds_total{device!~"(loop|ram|fd|sr|dm-).*", {{matchers}} }[{{window}}])) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
+keys = ["node"]
+description = "Доля времени с активным I/O самого занятого диска узла, %."
+
+[[queries]]
+label = "Nodes: Network receive (bytes/s) by node"
+role = "node.net_rx"
+unit = "bytes_per_second"
+query = 'label_replace(sum by (instance) (rate(node_network_receive_bytes_total{device!~"lo|veth.*|docker.*|cali.*|flannel.*|cni.*|virbr.*|br-.*|vxlan.*|tunl.*", {{matchers}} }[{{window}}])) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
+keys = ["node"]
+description = "Входящий трафик физических интерфейсов."
+
+[[queries]]
+label = "Nodes: Network transmit (bytes/s) by node"
+role = "node.net_tx"
+unit = "bytes_per_second"
+query = 'label_replace(sum by (instance) (rate(node_network_transmit_bytes_total{device!~"lo|veth.*|docker.*|cali.*|flannel.*|cni.*|virbr.*|br-.*|vxlan.*|tunl.*", {{matchers}} }[{{window}}])) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
+keys = ["node"]
+description = "Исходящий трафик физических интерфейсов."
+
+[[queries]]
+label = "Nodes: Filesystem used (%) by node"
+role = "node.fs_used_pct"
+unit = "percent"
+query = 'label_replace(100 * max by (instance) (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|ramfs|fuse.*", {{matchers}} } / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|ramfs|fuse.*", {{matchers}} }) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
+keys = ["node"]
+description = "Заполнение самой занятой файловой системы узла, %."

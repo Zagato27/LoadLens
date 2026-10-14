@@ -13,6 +13,8 @@ from psycopg2 import sql
 
 from AI.db_store import _ensure_llm_reports_table
 from AI.pipeline import _has_meaningful_system_context
+from AI.query_packs import READINESS_SLA_FIELDS, installed_packs, load_catalog, missing_sla_references, resolve_sla_refs
+from loadlens_app.errors import log_failure
 from loadlens_app.core import (
     _active_metrics_config,
     _deep_merge_dicts,
@@ -37,7 +39,7 @@ AREA_SECTIONS: tuple[str, ...] = (
     "llm", "domain_sources", "logs_source",
     "default_params", "queries", "sla", "system_context", "prompts",
 )
-SERVICE_SECTIONS: tuple[str, ...] = ("queries", "sla", "prompts")
+SERVICE_SECTIONS: tuple[str, ...] = ("queries", "sla", "system_context", "prompts")
 AREA_META_KEYS = frozenset({"title", "description", "services"})
 STATUS_INHERITED = "inherited"
 STATUS_SAME = "same"
@@ -72,6 +74,10 @@ class Readiness:
     performance_query: str
     has_system_context: bool
     query_counts: dict[str, int]
+    # Feature (report, forecast, resource_plan) -> SLA fields that are empty or name a missing query.
+    missing_sla: dict[str, list[str]] = field(default_factory=dict)
+    # Installed query packs: {domain, id, version, title, outdated}.
+    query_packs: list[dict] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -187,14 +193,34 @@ def _query_count(domain_cfg: object) -> int:
     return len(labels) if isinstance(labels, list) else 0
 
 
+def _installed_query_packs(queries: dict) -> list[dict]:
+    catalog = load_catalog()
+    out = []
+    for domain, block in queries.items():
+        for entry in installed_packs(block):
+            pack = catalog.pack(entry["id"])
+            out.append({
+                "domain": domain,
+                "id": entry["id"],
+                "version": entry["version"],
+                "title": pack.title if pack else entry["id"],
+                "outdated": bool(pack and entry["version"] < pack.version),
+            })
+    return out
+
+
 def _readiness(area_entry: dict) -> Readiness:
-    sla = _merged_section(area_entry, "sla")
+    queries = _merged_section(area_entry, "queries")
+    # Reports take empty SLA references from query roles, so readiness does the same.
+    sla = resolve_sla_refs(_merged_section(area_entry, "sla"), queries)[0]
     target = sla.get("target_rps")
     return Readiness(
         target_rps=float(target) if isinstance(target, (int, float)) and not isinstance(target, bool) else None,
         performance_query=str(sla.get("max_performance_query") or "").strip(),
         has_system_context=_has_meaningful_system_context(_merged_section(area_entry, "system_context")),
-        query_counts={domain: _query_count(cfg) for domain, cfg in _merged_section(area_entry, "queries").items()},
+        query_counts={domain: _query_count(cfg) for domain, cfg in queries.items()},
+        missing_sla={feature: missing_sla_references(sla, queries, fields) for feature, fields in READINESS_SLA_FIELDS.items()},
+        query_packs=_installed_query_packs(queries),
     )
 
 
@@ -263,7 +289,7 @@ def list_projects(active_project: str) -> ProjectsOverview:
         stats: Optional[dict[str, ReportStats]] = _report_stats(sorted({sid for titles in services.values() for sid in titles}))
         reports_error: Optional[str] = None
     except psycopg2.Error as exc:
-        stats, reports_error = None, f"Отчёты недоступны: {exc}"
+        stats, reports_error = None, f"Отчёты недоступны: база данных не отвечает. Код ошибки: {log_failure(exc, 'Отчёты недоступны')}"
     projects = [
         _project_summary(pid, entries.get(pid) if isinstance(entries.get(pid), dict) else {}, titles, stats)
         for pid, titles in services.items()
