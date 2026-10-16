@@ -62,7 +62,9 @@ from loadlens_app.core import (
     _list_project_areas,
     _load_metrics_runtime_data,
     _load_settings_runtime_data,
+    _metrics_runtime_view,
     _normalize_system_context,
+    _per_area_config,
     _save_metrics_runtime_data,
     _save_settings_runtime_data,
     _services_map_for_area,
@@ -156,9 +158,7 @@ def _save_metrics_runtime(payload: dict) -> None:
 
 def _area_section(area: str, section_name: str) -> dict:
     """Effective value of a section for the area: runtime per_area override, else the global value."""
-    runtime_per_area = _load_settings_runtime_data().get("per_area")
-    if not isinstance(runtime_per_area, dict):
-        runtime_per_area = {}
+    runtime_per_area = _per_area_config()  # shared cache: the value is deep-copied below
     per_area_entry = ((runtime_per_area.get(area, {}) or {}).get(section_name) if area else None)
     if not isinstance(per_area_entry, dict):
         per_area_entry = (((CONFIG.get("per_area", {}) or {}).get(area, {}) or {}).get(section_name) if area else None)
@@ -197,13 +197,14 @@ def get_config():
                 area = cookie_area
         active_area = area if area in areas else ""
 
+        # Both are shared caches: the parts used below are deep-copied before anything is changed.
         active_metrics = _active_metrics_config() or {}
-        runtime_metrics = _load_metrics_runtime()
+        runtime_metrics = _metrics_runtime_view()
         area_runtime_entry = {}
         if area and isinstance(runtime_metrics.get(area), dict):
             area_runtime_entry = copy.deepcopy(runtime_metrics.get(area) or {})
             area_runtime_entry.pop("__replace__", None)
-        area_metrics_cfg = area_runtime_entry if area_runtime_entry else (active_metrics.get(area, {}) if area else {})
+        area_metrics_cfg = area_runtime_entry if area_runtime_entry else (copy.deepcopy(active_metrics.get(area, {})) if area else {})
         if not isinstance(area_metrics_cfg, dict):
             area_metrics_cfg = {}
         if "services" not in area_metrics_cfg or not isinstance(area_metrics_cfg.get("services"), dict):
@@ -482,7 +483,7 @@ def has_own_section(section: str, area: str, service: str) -> bool:
     if area and service:
         return isinstance(_service_entry(area, service).get(section), dict)
     if area:
-        runtime_area = ((_load_settings_runtime_data().get("per_area") or {}).get(area) or {})
+        runtime_area = (_per_area_config().get(area) or {})
         config_area = ((CONFIG.get("per_area") or {}).get(area) or {}) if isinstance(CONFIG.get("per_area"), dict) else {}
         return isinstance(runtime_area.get(section), dict) or isinstance(config_area.get(section), dict)
     return True

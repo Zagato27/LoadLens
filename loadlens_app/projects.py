@@ -25,6 +25,7 @@ from loadlens_app.core import (
     _load_settings_runtime_data,
     _metrics_services_for_area,
     _normalize_system_context,
+    _per_area_config,
     _save_metrics_runtime_data,
     _save_settings_runtime_data,
     _ts_conn,
@@ -120,8 +121,8 @@ class ReportStats:
 
 
 def _area_entries() -> dict:
-    per_area = _load_settings_runtime_data().get("per_area")
-    return per_area if isinstance(per_area, dict) else {}
+    """Runtime per_area for reading. Shared cache (see core._cached_json): deep-copy before changing."""
+    return _per_area_config()
 
 
 def _area_entry(project_id: str) -> dict:
@@ -375,7 +376,8 @@ def _move_service_metrics(project_id: str, service_id: str, target_id: str) -> N
     metrics = _load_metrics_runtime_data()
     source = metrics.get(project_id) if isinstance(metrics.get(project_id), dict) else {}
     source_services = source.get("services") if isinstance(source.get("services"), dict) else {}
-    entry = source_services.pop(service_id, None) or _metrics_services_for_area(project_id).get(service_id)
+    # The fallback comes from the shared _active_metrics_config() cache, so it is copied into the file.
+    entry = source_services.pop(service_id, None) or copy.deepcopy(_metrics_services_for_area(project_id).get(service_id))
     if entry is None:
         return
     metrics.setdefault(target_id, {}).setdefault("services", {})[service_id] = entry

@@ -21,6 +21,20 @@ def _fresh_llm_budget(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _runtime_config_cache_cleared():
+    """The parsed runtime config files are cached per process: every test starts and ends without them."""
+    import sys
+
+    core = sys.modules.get("loadlens_app.core")
+    if core is not None:
+        core._clear_runtime_cache()
+    yield
+    core = sys.modules.get("loadlens_app.core")
+    if core is not None:
+        core._clear_runtime_cache()
+
+
+@pytest.fixture(autouse=True)
 def _storage_breaker_closed():
     """The storage breaker is process state: every test starts and ends with it closed."""
     from AI import storage_state
