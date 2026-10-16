@@ -25,7 +25,7 @@
     })();
   </script>
   <link rel="icon" href="/assets/logo.png?c={{ appearance.key }}" type="image/png" />
-  <link rel="stylesheet" href="/static/css/app.css" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}" />
   <style id="accentVars">{{ appearance.css }}</style>
 </head>
 <body>

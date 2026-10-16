@@ -140,6 +140,6 @@
   </section>
 {% endblock %}
 {% block scripts %}
-<script defer src="/static/js/service_picker.js"></script>
-<script defer src="/static/js/launch.js"></script>
+<script defer src="{{ url_for('static', filename='js/service_picker.js') }}"></script>
+<script defer src="{{ url_for('static', filename='js/launch.js') }}"></script>
 {% endblock %}

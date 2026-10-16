@@ -26,5 +26,5 @@
   </div>
 {% endblock %}
 {% block scripts %}
-<script defer src="/static/js/forecasting.js"></script>
+<script defer src="{{ url_for('static', filename='js/forecasting.js') }}"></script>
 {% endblock %}

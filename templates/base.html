@@ -23,7 +23,7 @@
     })();
   </script>
   <link rel="icon" id="tabIcon" href="/assets/logo.png?c={{ appearance.key }}" type="image/png" />
-  <link rel="stylesheet" href="/static/css/app.css" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}" />
   <style id="accentVars">{{ appearance.css }}</style>
   {% block head %}{% endblock %}
 </head>
@@ -115,9 +115,9 @@
       </main>
     </div>
   </div>
-  <script defer src="/static/js/common.js"></script>
-  <script defer src="/static/js/ui.js"></script>
-  <script defer src="/static/js/palette.js"></script>
+  <script defer src="{{ url_for('static', filename='js/common.js') }}"></script>
+  <script defer src="{{ url_for('static', filename='js/ui.js') }}"></script>
+  <script defer src="{{ url_for('static', filename='js/palette.js') }}"></script>
   {% block scripts %}{% endblock %}
 </body>
 </html>

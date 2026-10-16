@@ -2,7 +2,7 @@
 {% set active_nav = 'settings' %}
 {% block title %}Настройки{% endblock %}
 {% block head %}
-<script src="/static/vendor/ace/ace.js"></script>
+<script src="{{ url_for('static', filename='vendor/ace/ace.js') }}"></script>
 <style>
   .settings-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
   .help { color: var(--text-muted); font-size: 13px; line-height: 1.5; margin: 6px 0 12px; }
@@ -312,7 +312,7 @@
   </div>
 {% endblock %}
 {% block scripts %}
-<script defer src="/static/js/settings.js"></script>
-<script defer src="/static/js/projects.js"></script>
-<script defer src="/static/js/users.js"></script>
+<script defer src="{{ url_for('static', filename='js/settings.js') }}"></script>
+<script defer src="{{ url_for('static', filename='js/projects.js') }}"></script>
+<script defer src="{{ url_for('static', filename='js/users.js') }}"></script>
 {% endblock %}

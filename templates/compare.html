@@ -2,7 +2,7 @@
 {% set active_nav = 'compare' %}
 {% block title %}Сравнение тестов{% endblock %}
 {% block head %}
-<script src="/static/vendor/chart.umd.js"></script>
+<script defer src="{{ url_for('static', filename='vendor/chart.umd.js') }}"></script>
 <style>
   .section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 20px; }
   .section-head h3 { margin: 0; }
@@ -94,6 +94,6 @@
   </section>
 {% endblock %}
 {% block scripts %}
-<script defer src="/static/js/charts.js"></script>
-<script defer src="/static/js/compare.js"></script>
+<script defer src="{{ url_for('static', filename='js/charts.js') }}"></script>
+<script defer src="{{ url_for('static', filename='js/compare.js') }}"></script>
 {% endblock %}

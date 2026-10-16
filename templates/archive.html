@@ -78,5 +78,5 @@
   </div>
 {% endblock %}
 {% block scripts %}
-<script defer src="/static/js/archive.js"></script>
+<script defer src="{{ url_for('static', filename='js/archive.js') }}"></script>
 {% endblock %}
