@@ -2,7 +2,7 @@
 {% set active_nav = 'launch' %}
 {% block title %}Прогон теста{% endblock %}
 {% block head %}
-<script src="/static/vendor/chart.umd.js"></script>
+<script defer src="{{ url_for('static', filename='vendor/chart.umd.js') }}"></script>
 <style>
   .run-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
   .run-head h2 { margin: 0 0 6px; }
@@ -110,5 +110,5 @@
   </section>
 {% endblock %}
 {% block scripts %}
-<script defer src="/static/js/launch_run.js"></script>
+<script defer src="{{ url_for('static', filename='js/launch_run.js') }}"></script>
 {% endblock %}

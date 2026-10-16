@@ -2,7 +2,7 @@
 {% set active_nav = 'dashboard' %}
 {% block title %}Дэшборд{% endblock %}
 {% block head %}
-<script src="/static/vendor/chart.umd.js"></script>
+<script defer src="{{ url_for('static', filename='vendor/chart.umd.js') }}"></script>
 {% endblock %}
 {% block content %}
 <div class="dash-page">
@@ -123,6 +123,6 @@
 </div>
 {% endblock %}
 {% block scripts %}
-<script defer src="/static/js/charts.js"></script>
-<script defer src="/static/js/dashboard.js"></script>
+<script defer src="{{ url_for('static', filename='js/charts.js') }}"></script>
+<script defer src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
 {% endblock %}

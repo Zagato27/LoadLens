@@ -2,9 +2,9 @@
 {% set active_nav = 'archive' %}
 {% block title %}Отчёт{% endblock %}
 {% block head %}
-<script src="/static/vendor/chart.umd.js"></script>
-<script src="/static/vendor/purify.min.js"></script>
-<script src="/static/vendor/marked.min.js"></script>
+<script defer src="{{ url_for('static', filename='vendor/chart.umd.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/purify.min.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script>
 <style>
   .report-title-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .report-title-row h1 { margin: 0; }
@@ -77,6 +77,6 @@
   <div id="systemContextBox" class="editor-card" style="display:none;"></div>
 {% endblock %}
 {% block scripts %}
-<script defer src="/static/js/charts.js"></script>
-<script defer src="/static/js/reports.js"></script>
+<script defer src="{{ url_for('static', filename='js/charts.js') }}"></script>
+<script defer src="{{ url_for('static', filename='js/reports.js') }}"></script>
 {% endblock %}

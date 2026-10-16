@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from flask import Blueprint, g, jsonify, render_template, request
 
+from loadlens_app import response_cache
 from loadlens_app.auth import Role, current_auth
 from loadlens_app.core import _active_project_area, _find_area_for_service, _resolve_services_filter
 from loadlens_app.errors import internal_error
@@ -90,6 +91,7 @@ def create():
         planned = service.create_run(data or {}, _owner())
     except service.LaunchError as exc:
         return _error(exc)
+    response_cache.invalidate(response_cache.ACTIVE)
     run = planned.run
     g.audit_extra = {
         "run_id": run.run_id,
@@ -125,7 +127,23 @@ def list_runs():
     return jsonify({"runs": [service.run_view(run, catalog, with_report=False) for run in runs]}), 200
 
 
+def _active_cache_key() -> tuple | None:
+    """Area services, the query and the user: ``can_stop`` depends on who asks."""
+    try:
+        limit = int(request.args.get("limit", "5") or 0)
+    except ValueError:
+        return None
+    return (
+        tuple(_resolve_services_filter(_active_project_area()) or ()),
+        limit,
+        request.args.get("live") == "1",
+        _owner(),
+        current_auth().role >= Role.ADMIN,
+    )
+
+
 @load_tests_bp.route("/load_tests/active", methods=["GET"])
+@response_cache.cached_json(response_cache.ACTIVE, response_cache.ACTIVE_TTL_SEC, _active_cache_key)
 def active():
     """Идущие прогоны активной области для дэшборда и счётчика в меню.
 
@@ -169,6 +187,7 @@ def stop(run_id: str):
         run = service.request_stop(run_id, index)
     except service.LaunchError as exc:
         return _error(exc)
+    response_cache.invalidate(response_cache.ACTIVE)
     g.audit_extra = {"run_id": run_id, "run_name": run.run_name, "instance": "all" if index is None else str(index)}
     return jsonify(service.run_view(run, with_report=False)), 200
 
@@ -258,6 +277,7 @@ def ci_events(run_id: str, index: int):
         event = service.record_ci_event(run, inst, request.get_json(silent=True))
     except service.LaunchError as exc:
         return _error(exc)
+    response_cache.invalidate(response_cache.ACTIVE)
     return jsonify({"status": "ok", "event": event["event"]}), 200
 
 

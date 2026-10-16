@@ -35,6 +35,20 @@ def _runtime_config_cache_cleared():
 
 
 @pytest.fixture(autouse=True)
+def _response_cache_off_by_default(monkeypatch):
+    """Polled answers are cached per process; tests swap the fakes behind an endpoint between two calls.
+
+    The cache starts empty and switched off; tests/test_perf_polling.py switches it on for its own checks.
+    """
+    from loadlens_app.response_cache import response_cache
+
+    monkeypatch.setenv("LOADLENS_RESPONSE_CACHE", "0")
+    response_cache.clear()
+    yield
+    response_cache.clear()
+
+
+@pytest.fixture(autouse=True)
 def _storage_breaker_closed():
     """The storage breaker is process state: every test starts and ends with it closed."""
     from AI import storage_state

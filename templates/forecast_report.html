@@ -2,7 +2,7 @@
 {% set active_nav = 'forecasting' %}
 {% block title %}Прогноз мощностей{% endblock %}
 {% block head %}
-<script src="/static/vendor/chart.umd.js"></script>
+<script defer src="{{ url_for('static', filename='vendor/chart.umd.js') }}"></script>
 {% endblock %}
 {% block content %}
   <nav id="forecastBreadcrumbs" class="breadcrumbs" aria-label="Навигация по разделу">
@@ -23,5 +23,5 @@
   <section id="forecastPanel" class="report-forecast" aria-live="polite"></section>
 {% endblock %}
 {% block scripts %}
-<script defer src="/static/js/forecast_report.js"></script>
+<script defer src="{{ url_for('static', filename='js/forecast_report.js') }}"></script>
 {% endblock %}

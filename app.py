@@ -6,6 +6,7 @@ from loadlens_app import register_blueprints
 from loadlens_app.auth import UserRepository, init_auth
 from AI.query_packs import load_catalog
 from loadlens_app.data_sources_migration import migrate_legacy_data_sources
+from loadlens_app.static_assets import add_static_version, static_max_age, static_url
 
 
 def create_app(auth_repository: UserRepository | None = None) -> Flask:
@@ -17,6 +18,10 @@ def create_app(auth_repository: UserRepository | None = None) -> Flask:
     # A broken pack file fails start-up with its name instead of surfacing in the settings page.
     load_catalog()
     flask_app = Flask(__name__)
+    # Static URLs carry the content hash (?v=), so browsers keep the files for a year without asking again.
+    flask_app.config["SEND_FILE_MAX_AGE_DEFAULT"] = static_max_age()
+    flask_app.url_defaults(add_static_version)
+    flask_app.add_template_global(static_url)
     register_blueprints(flask_app)
     init_auth(flask_app, repository=auth_repository)
     if os.getenv("LOADLENS_RUN_MIGRATIONS", "").strip() == "1":
