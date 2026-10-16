@@ -379,7 +379,8 @@ class _TransferPool:
             try:
                 value = self._attempt(index)
             except BaseException as exc:  # recorded for result(); the thread itself must not die here
-                error = exc
+                # SystemExit and the like stay in this thread: the report only skips the item.
+                error = exc if isinstance(exc, Exception) else RuntimeError(f"{type(exc).__name__}: {exc}")
             with self._cond:
                 abandoned = index in self._abandoned
                 if not abandoned:
@@ -388,6 +389,10 @@ class _TransferPool:
             if abandoned:
                 return  # a new thread already took this one's place
 
+    def _given_up(self, index: int) -> bool:
+        with self._cond:
+            return index in self._abandoned
+
     def _attempt(self, index: int) -> object:
         call = self._calls[index]
         attempt = 1
@@ -395,9 +400,7 @@ class _TransferPool:
             try:
                 return call()
             except Exception as exc:
-                with self._cond:
-                    given_up = index in self._abandoned
-                if attempt >= self._attempts or given_up:
+                if attempt >= self._attempts or self._given_up(index):
                     raise
                 logger.warning(
                     "%s: попытка %s/%s не удалась: %s. Повтор через %s сек.",
@@ -408,6 +411,8 @@ class _TransferPool:
                     self._pause,
                 )
                 time.sleep(self._pause)
+                if self._given_up(index):
+                    raise
                 attempt += 1
 
 

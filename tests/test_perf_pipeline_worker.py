@@ -189,6 +189,29 @@ def test_pool_abandons_a_hung_item_and_the_queue_keeps_moving():
     assert calls == [1]  # no new attempt for an abandoned item
 
 
+def test_pool_stops_retrying_an_item_abandoned_during_the_pause():
+    calls = []
+
+    def failing():
+        calls.append(1)
+        raise ConnectionError("down")
+
+    with Pool([failing], workers=1, timeout=0.2, pause=0.5, name="pause-test") as pool:
+        with pytest.raises(TimeoutError):
+            pool.result(0)  # gives up while the item sleeps before its second attempt
+    time.sleep(0.6)
+    assert calls == [1]
+
+
+def test_pool_keeps_a_system_exit_inside_the_item():
+    def exits():
+        raise SystemExit(3)  # some collectors call sys.exit()
+
+    with Pool([exits], workers=1, timeout=5, pause=0) as pool:
+        with pytest.raises(RuntimeError, match="SystemExit"):
+            pool.result(0)
+
+
 def test_pool_close_drops_items_that_have_not_started():
     entered = threading.Event()
     release = threading.Event()
