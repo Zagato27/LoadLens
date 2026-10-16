@@ -11,7 +11,7 @@ Finished jobs can be dismissed: ``dismissed_at`` hides them from ``list`` while 
 Jobs that stopped without finishing:
 
 - a thread job dies with its process, so a ``thread`` row still ``running`` from before this process started
-  is marked interrupted on the first access to the table;
+  is marked interrupted on the first access of the web process (the Celery worker never does it);
 - a Celery job waits in the broker queue first (``started_at`` is empty), then the worker calls
   :meth:`JobStore.mark_started` and refreshes ``updated_at`` every 30 s (:meth:`JobStore.heartbeat`).
   :meth:`JobStore.sweep_stale` turns a started ``celery`` row silent for longer than ``LOADLENS_JOB_STALE_MIN``
@@ -241,18 +241,17 @@ class JobStoreError(RuntimeError):
 class JobStore:
     """Job registry backed by the ``report_jobs`` table; thread jobs of this process are also kept in memory.
 
-    Every method may be called from any process (web or Celery worker) and any thread. Only ``dismiss``
-    raises when the table is unreachable; the other methods log the failure and fall back to memory.
-
-    A Celery worker process runs the start-up recovery of thread rows too. It can only meet thread rows that
-    went silent before the worker started: orphans of a stopped web process, or (rarely) a live thread job
-    between two writes, whose next update() writes its in-memory state back.
+    Every method may be called from any thread. A Celery worker calls update(), mark_started(), heartbeat()
+    and get(); the rest serve the web process, and only they run the restart recovery of thread rows. Only
+    ``dismiss`` raises when the table is unreachable; the other methods log the failure and fall back to memory.
     """
 
     def __init__(self) -> None:
         self._jobs: Dict[str, JobRecord] = {}
         self._lock = threading.Lock()
         self._table_ensured = False
+        # Whether the restart recovery of thread rows ran in this process (see _ensure_table).
+        self._recovered = False
         # Thread rows still "running" that were last updated before this moment belong to a stopped process.
         self._started_at = _utcnow()
         # False when the table has no dismissed_at column and this role cannot add it.
@@ -341,7 +340,7 @@ class JobStore:
         if current is not None and current.runner == JOB_RUNNER_THREAD:
             return current
         if current is None:
-            current = self._load_one(job_id)
+            current = self._load_one(job_id, recover=True)
             if current is None:
                 return None
         now = _utcnow()
@@ -454,16 +453,21 @@ class JobStore:
     def get(self, job_id: str) -> Optional[JobRecord]:
         """The job from memory (thread jobs of this process) or from the table.
 
-        A Celery job silent for longer than stale_after() triggers the sweep (at most every 30 s), so a page
-        that polls only this job also sees the job of a dead worker end.
+        A page may poll only this job, so the row is checked like ``list`` would: a running thread job that is
+        not in memory runs the restart recovery (once per process), and a Celery job past its limits triggers
+        the sweep (at most every 30 s).
         """
         with self._lock:
             cached = self._jobs.get(job_id)
         if cached is not None:
             return cached
         record = self._load_one(job_id)
-        if record is not None and _abandoned(record) and job_id in self._maybe_sweep():
-            record = self._load_one(job_id) or record
+        if record is None or record.status != JOB_STATUS_RUNNING:
+            return record
+        if record.runner == JOB_RUNNER_THREAD and not self._recovered:
+            return self._load_one(job_id, recover=True) or record
+        if _abandoned(record) and job_id in self._maybe_sweep():
+            return self._load_one(job_id) or record
         return record
 
     def list(self, statuses: Optional[List[str]] = None, limit: int = 20) -> List[JobRecord]:
@@ -551,54 +555,80 @@ class JobStore:
     def _columns_sql(self) -> sql.Composable:
         return sql.SQL(", ").join(sql.Identifier(c) for c in self._columns())
 
-    def _ensure_table(self, conn) -> None:
-        if self._table_ensured:
+    def _ensure_table(self, conn, *, recover: bool = False) -> None:
+        """Creates or upgrades the table once per process; with ``recover`` also runs the restart recovery once.
+
+        Only the paths of a process that runs thread jobs pass ``recover`` (writes of in-memory records, the
+        job list, the limits, dismissing, adopting): a Celery worker, which only updates rows, never marks the
+        thread jobs of a live web process interrupted.
+        """
+        if self._table_ensured and (self._recovered or not recover):
             return
         schema, table = _jobs_table_ref()
         prev_autocommit = getattr(conn, "autocommit", False)
         conn.autocommit = True
         try:
             with conn.cursor() as cur:
-                cur.execute(
-                    sql.SQL(
-                        """
-                        CREATE TABLE IF NOT EXISTS {}.{} (
-                            job_id       TEXT PRIMARY KEY,
-                            kind         TEXT NOT NULL,
-                            run_name     TEXT,
-                            service      TEXT,
-                            status       TEXT NOT NULL,
-                            progress     INTEGER NOT NULL DEFAULT 0,
-                            message      TEXT,
-                            error        TEXT,
-                            report_url   TEXT,
-                            page_url     TEXT,
-                            page_id      TEXT,
-                            created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-                            updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-                            dismissed_at TIMESTAMPTZ,
-                            owner        TEXT NOT NULL DEFAULT '',
-                            runner       TEXT NOT NULL DEFAULT 'thread',
-                            started_at   TIMESTAMPTZ
-                        );
-                        """
-                    ).format(sql.Identifier(schema), sql.Identifier(table))
-                )
-                # Serves the lists by status, the running-job count and the sweep (status, then updated_at).
-                cur.execute(
-                    sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {}.{} (status, updated_at DESC);").format(
-                        sql.Identifier(f"idx_{table}_status_updated"),
-                        sql.Identifier(schema),
-                        sql.Identifier(table),
-                    )
-                )
-                present = self._present_columns(cur, schema, table)
-                self._ensure_dismissed_column(cur, schema, table, present)
-                self._ensure_tracking_columns(cur, schema, table, present)
-                self._mark_interrupted(cur, schema, table)
+                if not self._table_ensured:
+                    self._create_table(cur, schema, table)
+                    present = self._present_columns(cur, schema, table)
+                    self._ensure_dismissed_column(cur, schema, table, present)
+                    self._ensure_tracking_columns(cur, schema, table, present)
+                    self._table_ensured = True
+                if recover and not self._recovered:
+                    self._mark_interrupted(cur, schema, table)
+                    self._recovered = True
         finally:
             conn.autocommit = prev_autocommit
-        self._table_ensured = True
+
+    @staticmethod
+    def _create_table(cur, schema: str, table: str) -> None:
+        try:
+            cur.execute(
+                sql.SQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS {}.{} (
+                        job_id       TEXT PRIMARY KEY,
+                        kind         TEXT NOT NULL,
+                        run_name     TEXT,
+                        service      TEXT,
+                        status       TEXT NOT NULL,
+                        progress     INTEGER NOT NULL DEFAULT 0,
+                        message      TEXT,
+                        error        TEXT,
+                        report_url   TEXT,
+                        page_url     TEXT,
+                        page_id      TEXT,
+                        created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        dismissed_at TIMESTAMPTZ,
+                        owner        TEXT NOT NULL DEFAULT '',
+                        runner       TEXT NOT NULL DEFAULT 'thread',
+                        started_at   TIMESTAMPTZ
+                    );
+                    """
+                ).format(sql.Identifier(schema), sql.Identifier(table))
+            )
+            # Serves the lists by status, the running-job count and the sweep (status, then updated_at).
+            cur.execute(
+                sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {}.{} (status, updated_at DESC);").format(
+                    sql.Identifier(f"idx_{table}_status_updated"),
+                    sql.Identifier(schema),
+                    sql.Identifier(table),
+                )
+            )
+        except psycopg2.Error:
+            # PostgreSQL checks privileges before IF NOT EXISTS: a role without CREATE on the schema, or not owning
+            # the table, fails here even when the owner made both already. Use the table as it is, if it is there.
+            cur.execute(
+                "SELECT 1 FROM information_schema.tables WHERE table_schema = %s AND table_name = %s", (schema, table)
+            )
+            if not cur.fetchall():
+                raise
+            logger.warning(
+                "Cannot create %s.%s or its index (missing privileges?): using the existing table",
+                schema, table, exc_info=True,
+            )
 
     @staticmethod
     def _present_columns(cur, schema: str, table: str) -> Set[str]:
@@ -687,7 +717,7 @@ class JobStore:
             raise JobStoreError(_DISMISS_UNSUPPORTED)
         conn = _ts_conn()
         try:
-            self._ensure_table(conn)
+            self._ensure_table(conn, recover=True)
             if not self._dismiss_supported:
                 raise JobStoreError(_DISMISS_UNSUPPORTED)
             with conn, conn.cursor() as cur:
@@ -711,11 +741,12 @@ class JobStore:
         return hidden, running
 
     def _persist(self, record: JobRecord) -> None:
+        """Writes an in-memory record through to its row (only the process running thread jobs has them)."""
         schema, table = _jobs_table_ref()
         try:
             conn = _ts_conn()
             try:
-                self._ensure_table(conn)
+                self._ensure_table(conn, recover=True)
                 columns = self._columns()
                 overwritten = [c for c in columns if c not in _INSERT_ONLY_COLUMNS]
                 with conn, conn.cursor() as cur:
@@ -814,7 +845,7 @@ class JobStore:
         try:
             conn = _ts_conn()
             try:
-                self._ensure_table(conn)
+                self._ensure_table(conn, recover=True)
                 if not self._columns_supported:
                     return {}
                 with conn, conn.cursor() as cur:
@@ -834,12 +865,12 @@ class JobStore:
             return {}
         return {str(row[0]): str(row[1] or "") for row in rows}
 
-    def _load_one(self, job_id: str) -> Optional[JobRecord]:
+    def _load_one(self, job_id: str, *, recover: bool = False) -> Optional[JobRecord]:
         schema, table = _jobs_table_ref()
         try:
             conn = _ts_conn()
             try:
-                self._ensure_table(conn)
+                self._ensure_table(conn, recover=recover)
                 with conn, conn.cursor() as cur:
                     cur.execute(
                         sql.SQL("SELECT {} FROM {}.{} WHERE job_id = %s").format(
@@ -862,7 +893,7 @@ class JobStore:
         try:
             conn = _ts_conn()
             try:
-                self._ensure_table(conn)
+                self._ensure_table(conn, recover=True)
                 # Without the dismissed_at column nothing can be hidden, and the filter would fail.
                 visible = sql.SQL(" AND dismissed_at IS NULL") if self._dismiss_supported else sql.SQL("")
                 with conn, conn.cursor() as cur:

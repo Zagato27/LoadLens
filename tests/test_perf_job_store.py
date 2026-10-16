@@ -69,10 +69,13 @@ _COMPARE = {
 class JobsTable:
     """report_jobs in memory; ``statements`` keeps (text, params) of every executed statement."""
 
-    def __init__(self, columns=ALL_COLUMNS, *, alter_fails=False):
+    def __init__(self, columns=ALL_COLUMNS, *, alter_fails=False, create_fails=False):
         self.columns = list(columns)
         self.rows = {}
         self.alter_fails = alter_fails
+        # A role without CREATE on the schema: even CREATE ... IF NOT EXISTS fails, whether or not the table exists.
+        self.create_fails = create_fails
+        self.exists = True
         self.down = False
         self.statements = []
 
@@ -168,9 +171,16 @@ class JobsTable:
         params = list(params or [])
         self.statements.append((text, tuple(params)))
         if text.startswith("CREATE"):
+            if self.create_fails:
+                raise psycopg2.ProgrammingError("permission denied for schema public")
+            self.exists = True
             return []
+        if "information_schema.tables" in text:
+            return [(1,)] if self.exists else []
         if "information_schema.columns" in text:
-            return [(name,) for name in params[2] if name in self.columns]
+            return [(name,) for name in params[2] if self.exists and name in self.columns]
+        if not self.exists:
+            raise psycopg2.ProgrammingError('relation "report_jobs" does not exist')
         if text.startswith("ALTER TABLE"):
             if self.alter_fails:
                 raise psycopg2.ProgrammingError("must be owner of table report_jobs")
@@ -507,6 +517,23 @@ def test_restart_recovery_marks_only_thread_rows(table):
     assert len(table.texts("AND runner = %s AND updated_at < %s")) == 1
 
 
+def test_the_worker_never_marks_thread_jobs_of_the_web_process_interrupted(table):
+    web = jobs.JobStore()
+    thread = web.create(jobs.JOB_KIND_REPORT, run_name="t", service="demo")
+    celery = web.create(jobs.JOB_KIND_REPORT, run_name="c", service="demo", runner="celery")
+    table.rows[thread.job_id]["updated_at"] = utc(5)  # a long step: silent since before the worker started
+    worker = jobs.JobStore()
+
+    worker.mark_started(celery.job_id)
+    worker.heartbeat(celery.job_id)
+    worker.update(celery.job_id, progress=50, message="Анализ ИИ")
+    worker.get(celery.job_id)
+    worker.update(celery.job_id, status=jobs.JOB_STATUS_DONE)
+
+    assert table.rows[thread.job_id]["status"] == "running"
+    assert len(table.texts("AND runner = %s AND updated_at < %s")) == 1  # the web process's own recovery
+
+
 # ---- adopt_thread, mark_started, heartbeat --------------------------------------------------------------
 
 
@@ -607,7 +634,7 @@ def test_an_older_table_gets_the_new_columns(monkeypatch):
 
 
 def test_without_alter_rights_the_store_works_as_before(monkeypatch, caplog):
-    limited = JobsTable(columns=OLD_COLUMNS + ("dismissed_at",), alter_fails=True)
+    limited = JobsTable(columns=OLD_COLUMNS + ("dismissed_at",), alter_fails=True, create_fails=True)
     limited.add("orphan", "running", created_min_ago=30)
     limited.add("other", "running", created_min_ago=-1)
     monkeypatch.setattr(jobs, "_ts_conn", limited.connect)
@@ -617,7 +644,7 @@ def test_without_alter_rights_the_store_works_as_before(monkeypatch, caplog):
     job = store.create(jobs.JOB_KIND_REPORT, run_name="r", service="demo", owner="ann")
 
     assert store._columns_supported is False and store._dismiss_supported is True
-    assert "Cannot add owner/runner/started_at" in caplog.text
+    assert "Cannot create" in caplog.text and "Cannot add owner/runner/started_at" in caplog.text
     assert limited.rows["orphan"]["status"] == "error"  # recovery without the runner filter, as before
     assert limited.rows[job.job_id]["status"] == "running" and "runner" not in limited.rows[job.job_id]
     assert {r.job_id for r in store.list(statuses=["running"])} == {job.job_id, "other"}
@@ -633,6 +660,19 @@ def test_without_alter_rights_the_store_works_as_before(monkeypatch, caplog):
     store.create(jobs.JOB_KIND_REPORT, run_name="c1", service="demo", runner="celery")
     store.create(jobs.JOB_KIND_REPORT, run_name="c2", service="demo", runner="celery")
     assert caplog.text.count("has no owner/runner/started_at columns") == 1
+
+
+def test_a_missing_table_the_role_cannot_create_is_tried_again(monkeypatch):
+    missing = JobsTable(create_fails=True)
+    missing.exists = False
+    monkeypatch.setattr(jobs, "_ts_conn", missing.connect)
+    store = jobs.JobStore()
+
+    assert store.list(statuses=["running"]) == [] and store._table_ensured is False
+
+    missing.create_fails = False  # the owner granted the rights, or created the table
+    job = store.create(jobs.JOB_KIND_REPORT, run_name="r", service="demo", owner="ann", runner="celery")
+    assert store._table_ensured and store._columns_supported and missing.rows[job.job_id]["runner"] == "celery"
 
 
 # ---- configuration -----------------------------------------------------------------------------------------
