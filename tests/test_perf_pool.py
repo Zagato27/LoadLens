@@ -5,6 +5,7 @@ who is using them; the breaker, the pool and the call sites above them are real.
 """
 
 import gc
+import socket
 import sys
 import threading
 from pathlib import Path
@@ -402,6 +403,39 @@ def test_failed_ping_discards_the_session_and_opens_a_new_one(pg, clock):
     assert conn._raw not in (a_session, b_session)
     assert a_session.closed and b_session.closed  # the rest of the pool is flushed with it
     conn.close()
+
+
+def test_session_the_server_ended_is_dropped_without_a_round_trip(pg):
+    """pg_terminate_backend / a server restart leave a FATAL message and EOF on the idle socket."""
+    conn = _connect()
+    session = conn._raw
+    ours, server = socket.socketpair()
+    try:
+        session.fileno = ours.fileno
+        conn.close()
+        again = _connect()
+        assert again._raw is session  # nothing to read: still trusted
+        again.close()
+
+        server.sendall(b"E")  # the server wrote to an idle session
+        fresh = _connect()
+        assert fresh._raw is not session and session.closed
+        assert session.executed == []  # no SELECT 1 was needed
+        fresh.close()
+    finally:
+        ours.close()
+        server.close()
+
+
+def test_keyword_configs_get_tcp_keepalives_while_the_pool_is_on(monkeypatch):
+    calls = []
+    monkeypatch.setattr(psycopg2, "connect", lambda *a, **k: calls.append(k) or FakeSession(len(calls)))
+    _connect().close()
+    assert calls[-1]["keepalives"] == 1 and calls[-1]["keepalives_idle"] == 30
+    storage_state.connect({**PARAMS, "keepalives_idle": 5}, {"pool_max": 2}).close()
+    assert calls[-1]["keepalives_idle"] == 5  # an explicit value wins
+    _connect({"pool_max": 0}).close()
+    assert "keepalives" not in calls[-1]  # pool off: exactly the old connect
 
 
 def test_sessions_of_old_settings_are_closed_by_the_sweep(pg, clock):

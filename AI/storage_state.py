@@ -21,6 +21,7 @@ import collections
 import logging
 import os
 import re
+import select
 import threading
 import time
 from dataclasses import dataclass
@@ -243,6 +244,7 @@ def connect(params: Mapping[str, Any], cfg: Optional[Mapping[str, Any]] = None) 
     cfg = cfg or {}
     timeout = int(_number(cfg.get("connect_timeout_sec"), DEFAULT_CONNECT_TIMEOUT_SEC, 2, 60))
     retry = _number(cfg.get("retry_seconds"), DEFAULT_RETRY_SECONDS, 1, 300)
+    pool_max = int(_number(cfg.get("pool_max"), DEFAULT_POOL_MAX, 0, 100))
     dsn = params.get("dsn")
     if isinstance(dsn, str) and dsn.strip():
         address = "dsn"
@@ -254,6 +256,12 @@ def connect(params: Mapping[str, Any], cfg: Optional[Mapping[str, Any]] = None) 
         address = f"{keywords.get('host') or 'localhost'}:{keywords.get('port') or 5432}/{keywords.get('dbname') or ''}"
         # Port 5432 and "5432" name the same server; None is the same as a missing keyword.
         pool_key = tuple(sorted((name, str(value)) for name, value in keywords.items() if value is not None))
+        if pool_max > 0:
+            # A pooled session lives for minutes: TCP keepalives let the OS notice a peer that vanished
+            # without closing the connection (firewall, load balancer idle timeout) within about a minute,
+            # so the checkout drops the session instead of a query waiting for TCP retransmissions.
+            for name, value in _POOL_KEEPALIVES.items():
+                keywords.setdefault(name, value)
         def opener():
             return psycopg2.connect(connect_timeout=timeout, **keywords)
 
@@ -263,7 +271,6 @@ def connect(params: Mapping[str, Any], cfg: Optional[Mapping[str, Any]] = None) 
             _STATS["opened"] += 1
         return conn
 
-    pool_max = int(_number(cfg.get("pool_max"), DEFAULT_POOL_MAX, 0, 100))
     if pool_max <= 0:
         return open_new()
     idle_sec = _number(cfg.get("pool_idle_sec"), DEFAULT_POOL_IDLE_SEC, 5, 3600)
@@ -292,6 +299,8 @@ _STATS = {"opened": 0, "reused": 0, "overflow": 0, "discarded": 0}
 _SWEEP_EVERY_SEC = 60.0
 _REUSABLE_STATUSES = (_pg_ext.TRANSACTION_STATUS_IDLE, _pg_ext.TRANSACTION_STATUS_INTRANS)
 _SESSION_CHARACTERISTICS = ("isolation_level", "readonly", "deferrable")
+# libpq keywords (since libpq 9.0) added to keyword configurations while the pool is on; a DSN keeps its own.
+_POOL_KEEPALIVES = {"keepalives": 1, "keepalives_idle": 30, "keepalives_interval": 10, "keepalives_count": 3}
 # Monotonic clock of the pool (tests replace it).
 _clock = time.monotonic
 
@@ -441,6 +450,25 @@ def _flush(pool: _Pool) -> list:
     return stale
 
 
+def _input_pending(raw: Any) -> bool:
+    """True when an idle session has something to read: the server ended it (restart, pg_terminate_backend,
+    idle_session_timeout: a FATAL message and EOF) or keepalives found the peer gone. A zero-timeout poll
+    (select on Windows), no round trip. Objects without fileno() are trusted."""
+    fileno = getattr(raw, "fileno", None)
+    if not callable(fileno):
+        return False
+    try:
+        fd = fileno()
+        if hasattr(select, "poll"):  # no FD_SETSIZE limit
+            poller = select.poll()
+            poller.register(fd, select.POLLIN | select.POLLPRI | select.POLLERR | select.POLLHUP)
+            return bool(poller.poll(0))
+        readable, _, failed = select.select([fd], [], [fd], 0)
+    except (OSError, ValueError, TypeError, psycopg2.Error):
+        return True
+    return bool(readable or failed)
+
+
 def _alive(raw: Any) -> bool:
     """One round trip; used only for a session idle for longer than half of ``pool_idle_sec``."""
     try:
@@ -484,7 +512,7 @@ def _checkout(key: tuple, max_size: int, idle_sec: float, open_new: Callable[[],
         _close_quietly(stale)
 
         if raw is not None:
-            if age > idle_sec / 2 and not _alive(raw):
+            if _input_pending(raw) or (age > idle_sec / 2 and not _alive(raw)):
                 # The server dropped this session (restart, idle timeout): the others are suspect too.
                 with _POOL_LOCK:
                     pool.in_use -= 1
