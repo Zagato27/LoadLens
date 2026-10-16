@@ -60,6 +60,9 @@ from .tools import MASK, ToolConfigError, ToolInputError, ToolTemplate
 logger = logging.getLogger(__name__)
 
 TICK_SEC = 3.0
+# A pass that found no run to handle is followed by this longer pause, so an idle watcher does not query the
+# storage every few seconds; a new run, a stop request or a page that sees an active run wakes it (wake()).
+IDLE_TICK_SEC = 15.0
 # A run whose watcher has not renewed its claim for this long is taken over: well above the longest pass,
 # which slow generators (SSH commands time out after 30 s) can stretch to minutes.
 STALE_AFTER_SEC = 120
@@ -218,6 +221,7 @@ class Watcher:
         report_starter: Optional[Callable[..., object]] = None,
         clock: Callable[[], float] = time.time,
         interval: float = TICK_SEC,
+        idle_interval: Optional[float] = None,
     ) -> None:
         self.id = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:6]}"
         self._store_getter = store_getter
@@ -226,8 +230,11 @@ class Watcher:
         self._report_starter = report_starter
         self._clock = clock
         self._interval = interval
+        self._idle_interval = max(interval, IDLE_TICK_SEC) if idle_interval is None else idle_interval
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        # Set by wake() and stop(): ends the idle pause early.
+        self._wake = threading.Event()
         self._lock = threading.Lock()
         self._tick_lock = threading.Lock()
         self._last_error_log = 0.0
@@ -239,12 +246,18 @@ class Watcher:
             if self._thread is not None and self._thread.is_alive():
                 return False
             self._stop.clear()
+            self._wake.clear()
             self._thread = threading.Thread(target=self._loop, name="load-test-watcher", daemon=True)
             self._thread.start()
             return True
 
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()
+
+    def wake(self) -> None:
+        """Ends the idle pause now (a run was created or seen); the pause between busy passes is kept."""
+        self._wake.set()
 
     @property
     def running(self) -> bool:
@@ -252,14 +265,27 @@ class Watcher:
 
     def _loop(self) -> None:
         while not self._stop.is_set():
+            handled: Optional[int] = None
             try:
-                self.tick()
+                handled = self.tick()
             except Exception as exc:
                 now = time.monotonic()
                 if now - self._last_error_log > ERROR_LOG_INTERVAL_SEC:
                     self._last_error_log = now
                     logger.warning("Load test watcher tick failed: %s", exc, exc_info=not _is_storage_error(exc))
+            self._pause(handled)
+
+    def _pause(self, handled: Optional[int]) -> None:
+        """``interval`` after a pass that handled runs (or failed), ``idle_interval`` after an empty one.
+
+        Only the idle pause listens to wake(): while runs are handled the passes keep their pace however
+        often the pages poll.
+        """
+        if handled == 0:
+            self._wake.wait(self._idle_interval)
+        else:
             self._stop.wait(self._interval)
+        self._wake.clear()
 
     # ---- one pass -----------------------------------------------------------------------------
 
@@ -806,10 +832,17 @@ def get_watcher() -> Watcher:
 
 
 def ensure_watcher() -> bool:
-    """Starts the loop of this process if it is enabled and not running yet."""
+    """Starts the loop of this process if it is enabled and not running yet, else wakes it from the idle pause.
+
+    Returns True when this call started the loop.
+    """
     if not watcher_enabled():
         return False
-    return get_watcher().start()
+    watcher = get_watcher()
+    if watcher.start():
+        return True
+    watcher.wake()
+    return False
 
 
 __all__ = ["Watcher", "ensure_watcher", "get_watcher", "watcher_enabled"]
