@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 
 # Arbitrary constant shared by every process of this app.
 RUN_ID_BACKFILL_LOCK = 727_101
+# Advisory lock of backfill_max_rps (any value not used by another migration).
+MAX_RPS_BACKFILL_LOCK = 727_104
+# Final rows per UPDATE of backfill_max_rps; each batch is its own transaction.
+MAX_RPS_BACKFILL_BATCH = 5000
 METRICS_TABLE = ("public", "metrics")
 
 _started = False
@@ -83,8 +87,69 @@ def backfill_run_ids(connect: Optional[Callable[[], Any]] = None) -> int:
         conn.close()
 
 
+def backfill_max_rps(connect: Optional[Callable[[], Any]] = None, batch_size: int = MAX_RPS_BACKFILL_BATCH) -> int:
+    """Fills ``max_rps`` of final rows saved before the column existed; returns how many rows got a value.
+
+    The value comes from ``parsed`` by the rule of ``save_llm_results`` (``AI.db_store.max_rps_sql``). Rows
+    whose analysis has no plain number keep NULL; the read queries parse those on the fly. The rows are
+    walked by ``id`` in batches of ``batch_size``, one transaction per batch, so the table is never locked
+    for the whole pass. A table that has not got the column yet is brought up to date first.
+    """
+    from AI import db_store
+
+    if connect is None:
+        from loadlens_app import core
+
+        connect = core._ts_conn
+    schema, llm_table = _storage_names()
+    reports = sql.Identifier(schema, llm_table)
+    rule = sql.SQL(db_store.max_rps_sql("parsed"))
+    statement = sql.SQL(
+        "WITH batch AS ("
+        " SELECT id FROM {reports} WHERE domain = 'final' AND max_rps IS NULL AND id > %s ORDER BY id LIMIT %s"
+        "), filled AS ("
+        " UPDATE {reports} AS r SET max_rps = {rule} FROM batch WHERE r.id = batch.id AND {rule} IS NOT NULL"
+        " RETURNING r.id"
+        ") SELECT (SELECT MAX(id) FROM batch), (SELECT COUNT(*) FROM filled)"
+    ).format(reports=reports, rule=rule)
+    conn = connect()
+    filled = 0
+    try:
+        # Adds the column (and the indexes) when no request of the new code has touched the table yet.
+        db_store._ensure_llm_reports_table(conn, {"schema": schema, "llm_table": llm_table})
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (MAX_RPS_BACKFILL_LOCK,))
+            locked = cur.fetchone()[0]
+            conn.commit()
+            if not locked:
+                logger.info("max_rps backfill is already running in another process")
+                return 0
+            try:
+                last_id = 0  # BIGSERIAL ids start at 1; a bigint bound keeps the primary key usable
+                while True:
+                    cur.execute(statement, (last_id, int(batch_size)))
+                    batch_last, batch_filled = cur.fetchone()
+                    conn.commit()
+                    if batch_last is None:
+                        break
+                    last_id = batch_last
+                    filled += int(batch_filled or 0)
+            finally:
+                conn.rollback()  # a failed batch leaves an aborted transaction; the unlock needs a fresh one
+                cur.execute("SELECT pg_advisory_unlock(%s)", (MAX_RPS_BACKFILL_LOCK,))
+                conn.commit()
+        if filled:
+            logger.info("max_rps backfill: %d final row(s) got a value", filled)
+        return filled
+    finally:
+        conn.close()
+
+
 def run_all() -> dict[str, int]:
-    return {"backfill_run_ids": backfill_run_ids()}
+    return {
+        "backfill_run_ids": backfill_run_ids(),
+        "backfill_max_rps": backfill_max_rps(),
+    }
 
 
 def start_background_migrations() -> None:

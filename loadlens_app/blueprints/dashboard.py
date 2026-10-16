@@ -16,9 +16,11 @@ from flask import (
 )
 
 from AI.db_store import (
+    MAX_RPS_FIELDS,
     _ensure_engineer_reports_table,
     _ensure_llm_reports_table,
     list_llm_feedback,
+    max_rps_select_sql,
     upsert_llm_feedback,
 )
 from AI.scoring import parse_llm_analysis_strict
@@ -324,11 +326,8 @@ def _group_service_rows(rows: list) -> list[dict]:
 
 
 # Peak RPS of a final row: the step/stress peak, the held RPS of a soak run or the spike level.
-DASHBOARD_MAX_RPS_SQL = (
-    "COALESCE(parsed->'peak_performance'->>'max_rps', "
-    "parsed->'stability_under_load'->>'actual_rps', "
-    "parsed->'spike_analysis'->>'max_spike_rps')"
-)
+# The stored column, else the same rule over ``parsed`` (AI.db_store.max_rps_from_parsed / max_rps_sql).
+DASHBOARD_MAX_RPS_SQL = max_rps_select_sql("parsed")
 
 
 def _dashboard_number(value) -> float | None:
@@ -849,11 +848,8 @@ RUNS_SORT_COLUMNS = {
 RUNS_NULLS_LAST_SORTS = frozenset({"report_created_at", "max_rps"})
 # Final-analysis fields with the run's load level, in priority order (as on the dashboard):
 # the peak for step/stress runs, the held RPS for soak runs, the spike level for spike runs.
-RUNS_MAX_RPS_FIELDS = (
-    ("peak_performance", "max_rps"),
-    ("stability_under_load", "actual_rps"),
-    ("spike_analysis", "max_spike_rps"),
-)
+# Re-export: the rule lives in AI.db_store (MAX_RPS_FIELDS), shared with save_llm_results.
+RUNS_MAX_RPS_FIELDS = MAX_RPS_FIELDS
 
 
 def _runs_sql_literal(value: str) -> str:
@@ -888,18 +884,14 @@ def _runs_test_type_filter(raw: str) -> str:
 
 
 def _runs_max_rps_sql(parsed_column: str) -> str:
-    """First numeric value of ``RUNS_MAX_RPS_FIELDS`` in the parsed final analysis, else NULL.
+    """Load level of a final row: the stored ``max_rps`` column, else the first numeric value of
+    ``RUNS_MAX_RPS_FIELDS`` in the parsed final analysis, else NULL.
 
-    Text that is not a plain number (the LLM sometimes writes «~1200») is skipped instead of
-    failing the cast; the exponent is bounded so the numeric cast cannot overflow.
+    The column is filled on save and by ``loadlens_app.migrations.backfill_max_rps``; the parse stays
+    for rows without it. Text that is not a plain number (the LLM sometimes writes «~1200») is skipped
+    instead of failing the cast; the exponent is bounded so the numeric cast cannot overflow.
     """
-    parts = []
-    for section, field in RUNS_MAX_RPS_FIELDS:
-        text = f"TRIM({parsed_column}->{_runs_sql_literal(section)}->>{_runs_sql_literal(field)})"
-        parts.append(
-            f"CASE WHEN {text} ~ '^[-+]?[0-9]+([.][0-9]+)?([eE][-+]?[0-9]{{1,3}})?$' THEN ({text})::numeric END"
-        )
-    return f"COALESCE({', '.join(parts)})"
+    return max_rps_select_sql(parsed_column)
 
 
 def _runs_float(value) -> float | None:
