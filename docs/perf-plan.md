@@ -39,7 +39,7 @@
 | B2 | celery-infra: конфигурация Celery, воркер в compose, env | сдано, влито (a9e36b6, d2c2ff5) | — | — | `celery_mode_enabled()`, `job_runner_setting()`, `report_task_time_limits()`; очередь `reports` для `loadlens.*`. Воркер на Windows (`--pool=solo`) взял задачи из обеих очередей. Сверх плана: `broker_transport_options` с таймаутами сокета — без них `apply_async` к молчащему брокеру висел бесконечно. Healthcheck с `--timeout 10`. Оркестратор добавил воркеру монтирование сертификатов GigaChat и `stop_grace_period: 2m`. Замечание о задачах, ждущих в очереди без heartbeat, передано B3 (`started_at`, `LOADLENS_JOB_QUEUE_MAX_MIN`) |
 | B3 | job-store: таблица задач как источник правды, владелец, sweeper | не начато | | | |
 | B4 | tasks-runner: задачи Celery и выбор режима thread/celery | не начато | | | |
-| B5 | pipeline-worker: отчёт без вложенных подзадач, безопасен в воркере | не начато | | | |
+| B5 | pipeline-worker: отчёт без вложенных подзадач, безопасен в воркере | сдано, влито (0307906) | — | в воркере `--pool=solo` против заглушек Grafana/Loki/Confluence отчёт за 4.1 с, панель, зависшая на 60 с, пропущена через 4 с | Свой пул на daemon-потоках вместо `ThreadPoolExecutor`: зависший поток не держит слот и выход процесса. Главная находка: воркер живёт со снимком `CONFIG` на момент старта, поэтому добавлена `update_page.refresh_runtime_config()`, её вызывают задачи B4. Циклический импорт `update_page` остался: он идёт через `loadlens_app/__init__` и blueprints. Оркестратор добавил HTTP-таймауты в запрос Loki и загрузку вложений (3700c75) |
 | B6 | e2e-docs: сквозная проверка с воркером, документация | не начато | | | |
 
 Для волны B «до/после» — это p95 эндпоинтов во время построения отчёта (`--during-job`) в режиме `thread`
