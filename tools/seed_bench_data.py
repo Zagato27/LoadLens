@@ -496,7 +496,11 @@ def prepare_tables(conn, schema_sql: Path | None) -> None:
 
 def reset_bench_rows(conn) -> None:
     with conn.cursor() as cur:
-        for table in ("metrics", "llm_reports"):
+        # run_index exists once the app or its migration has created it; a stale one would list old runs.
+        for table in ("metrics", "llm_reports", "run_index"):
+            cur.execute("SELECT to_regclass(%s) IS NOT NULL", (f"public.{table}",))
+            if not cur.fetchone()[0]:
+                continue
             if _table_has_foreign_rows(cur, table):
                 cur.execute(f"DELETE FROM public.{table} WHERE run_name LIKE %s", (RUN_PREFIX + "%",))
             else:

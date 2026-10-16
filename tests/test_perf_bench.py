@@ -334,3 +334,54 @@ def test_bench_arguments():
     args = bench.parse_args(["--only", "runs"])
     assert bench.selected_endpoints(args) == [p for p in bench.ENDPOINTS if "runs" in p]
     assert len(bench.ENDPOINTS) == 12
+
+
+class _ResetCursor:
+    """Answers to_regclass by a set of existing tables and 'no foreign rows' to everything else."""
+
+    def __init__(self, existing):
+        self.existing = existing
+        self.statements = []
+        self._answer = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, statement, params=None):
+        self.statements.append(statement)
+        if statement.startswith("SELECT to_regclass"):
+            self._answer = (params[0].split(".", 1)[1] in self.existing,)
+        else:
+            self._answer = (False,)
+
+    def fetchone(self):
+        return self._answer
+
+
+class _ResetConn:
+    def __init__(self, cursor):
+        self._cursor = cursor
+        self.committed = False
+
+    def cursor(self):
+        return self._cursor
+
+    def commit(self):
+        self.committed = True
+
+
+def test_reset_clears_run_index_when_it_exists():
+    cur = _ResetCursor({"metrics", "llm_reports", "run_index"})
+    conn = _ResetConn(cur)
+    seed.reset_bench_rows(conn)
+    assert "TRUNCATE public.run_index" in cur.statements and conn.committed
+
+
+def test_reset_skips_run_index_before_the_app_created_it():
+    cur = _ResetCursor({"metrics", "llm_reports"})
+    seed.reset_bench_rows(_ResetConn(cur))
+    assert "TRUNCATE public.metrics" in cur.statements
+    assert not any("run_index" in s and not s.startswith("SELECT to_regclass") for s in cur.statements)
