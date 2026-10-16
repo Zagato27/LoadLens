@@ -816,7 +816,14 @@ def convert_to_timestamp(date_str: str) -> int:
 
 
 def _run_tables(cfg: dict) -> tuple[str, tuple[str, ...]]:
-    """Schema and every table that stores rows keyed by run_name."""
+    """Schema and every table that stores rows keyed by run_name.
+
+    Deleting and renaming a run walk this tuple, which keeps ``run_index`` (the run list) in step with
+    ``metrics``; a rename to a name that any of these tables already has is refused before the UPDATEs,
+    so the run_index primary key cannot collide.
+    """
+    from AI.db_store import RUN_INDEX_TABLE
+
     schema = cfg.get("schema", "public")
     tables = (
         cfg.get("table", "metrics"),
@@ -824,6 +831,7 @@ def _run_tables(cfg: dict) -> tuple[str, tuple[str, ...]]:
         cfg.get("engineer_table", "engineer_reports"),
         cfg.get("confluence_table", "confluence_publications"),
         cfg.get("llm_feedback_table", "llm_feedback"),
+        RUN_INDEX_TABLE,
     )
     return schema, tables
 
@@ -944,6 +952,8 @@ def _delete_service_data(area_name: str, service_name: str) -> None:
             del services_entry[service_name]
             _save_metrics_runtime_data(metrics_rt)
 
+    from AI.db_store import RUN_INDEX_TABLE
+
     cfg = (CONFIG.get("storage", {}) or {}).get("timescale", {})
     schema = cfg.get("schema", "public")
     metrics_table = cfg.get("table", "metrics")
@@ -951,16 +961,16 @@ def _delete_service_data(area_name: str, service_name: str) -> None:
     engineer_table = cfg.get("engineer_table", "engineer_reports")
     conn = _ts_conn()
     with conn, conn.cursor() as cur:
-        for table in (metrics_table,):
+        # run_index goes with metrics, or the run list keeps showing the deleted runs. Each table has its
+        # own savepoint: a missing table must not abort the transaction and silently undo the other deletes.
+        for table in (metrics_table, llm_table, engineer_table, RUN_INDEX_TABLE):
             try:
+                cur.execute("SAVEPOINT service_delete")
                 cur.execute(f"DELETE FROM {schema}.{table} WHERE service = %s", (service_name,))
-            except Exception:
-                pass
-        for table in (llm_table, engineer_table):
-            try:
-                cur.execute(f"DELETE FROM {schema}.{table} WHERE service = %s", (service_name,))
-            except Exception:
-                pass
+                cur.execute("RELEASE SAVEPOINT service_delete")
+            except Exception as exc:
+                cur.execute("ROLLBACK TO SAVEPOINT service_delete")
+                logger.warning("Не удалось удалить данные сервиса '%s' из %s.%s: %s", service_name, schema, table, exc)
     conn.close()
 
 

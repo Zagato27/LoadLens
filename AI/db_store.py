@@ -150,6 +150,120 @@ def _ensure_schema_and_table(conn, storage_cfg: Dict[str, object], schema: str, 
     _ENSURED_TABLES.add(key)
 
 
+# One row per run with rows in the metrics table: the run list and the run counter read it instead of
+# aggregating the metrics hypertable. save_domain_labeled keeps it current in the transaction of the insert;
+# loadlens_app.migrations.backfill_run_index fills it for older data and catches up on every start.
+RUN_INDEX_TABLE = "run_index"
+
+# Merges a new observation of a run into its row: the time span only grows, and an empty service or run id
+# never overwrites a known one.
+_RUN_INDEX_ON_CONFLICT = """
+    ON CONFLICT (run_name) DO UPDATE SET
+        start_time = LEAST(ri.start_time, EXCLUDED.start_time),
+        end_time = GREATEST(ri.end_time, EXCLUDED.end_time),
+        service = COALESCE(NULLIF(EXCLUDED.service, ''), ri.service),
+        run_id = COALESCE(NULLIF(EXCLUDED.run_id, ''), ri.run_id),
+        updated_at = now()
+"""
+
+
+def _run_index_ref(storage_cfg: Dict[str, object]) -> sql.Identifier:
+    return sql.Identifier(str(storage_cfg.get("schema") or "public"), RUN_INDEX_TABLE)
+
+
+def _ensure_run_index_table(conn, storage_cfg: Dict[str, object]) -> None:
+    """Creates ``<schema>.run_index`` and its (service, end_time) index once per process.
+
+    The table is small (one row per run), so this is cheap enough for the request path.
+    """
+    schema = str(storage_cfg.get("schema") or "public")
+    key = (schema, RUN_INDEX_TABLE)
+    if key in _ENSURED_TABLES:
+        return
+    prev_autocommit = getattr(conn, "autocommit", False)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            try:
+                cur.execute(
+                    sql.SQL(
+                        """
+                        CREATE TABLE IF NOT EXISTS {} (
+                            run_name    TEXT        PRIMARY KEY,
+                            service     TEXT        NOT NULL DEFAULT '',
+                            run_id      TEXT        NOT NULL DEFAULT '',
+                            start_time  TIMESTAMPTZ NOT NULL,
+                            end_time    TIMESTAMPTZ NOT NULL,
+                            updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+                        );
+                        """
+                    ).format(_run_index_ref(storage_cfg))
+                )
+            except Exception as e:
+                logger.warning("Не удалось создать таблицу %s.%s: %s", schema, RUN_INDEX_TABLE, e)
+            try:
+                cur.execute(
+                    sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {} (service, end_time DESC);").format(
+                        sql.Identifier(f"idx_{RUN_INDEX_TABLE}_service_end"), _run_index_ref(storage_cfg)
+                    )
+                )
+            except Exception as e:
+                logger.debug("create index skipped: %s", e)
+    finally:
+        try:
+            conn.autocommit = prev_autocommit
+        except Exception:
+            pass
+    _ENSURED_TABLES.add(key)
+
+
+def upsert_run_index(
+    conn,
+    storage_cfg: Dict[str, object],
+    run_name: Optional[str],
+    service: Optional[str],
+    run_id: Optional[str],
+    start_time: datetime,
+    end_time: datetime,
+) -> bool:
+    """Adds the run to ``run_index`` or widens its time span; returns False for a run without a name.
+
+    Runs in the caller's transaction and does not commit.
+    """
+    name = str(run_name or "")
+    if not name:
+        return False
+    statement = sql.SQL(
+        "INSERT INTO {} AS ri (run_name, service, run_id, start_time, end_time) VALUES (%s, %s, %s, %s, %s)"
+    ).format(_run_index_ref(storage_cfg)) + sql.SQL(_RUN_INDEX_ON_CONFLICT)
+    with conn.cursor() as cur:
+        cur.execute(statement, (name, str(service or ""), str(run_id or ""), start_time, end_time))
+    return True
+
+
+def refresh_run_index(conn, storage_cfg: Dict[str, object], since: Optional[datetime] = None) -> int:
+    """Merges the runs of the metrics table into ``run_index``; returns the number of rows written.
+
+    ``since`` limits the pass to metric rows newer than it (TimescaleDB then skips the older chunks);
+    None aggregates the whole table. Runs in the caller's transaction and does not commit.
+    """
+    schema = str(storage_cfg.get("schema") or "public")
+    metrics = sql.Identifier(schema, str(storage_cfg.get("table") or "metrics"))
+    where = sql.SQL("WHERE run_name IS NOT NULL AND run_name <> ''")
+    params: tuple = ()
+    if since is not None:
+        where = where + sql.SQL(' AND "time" > %s')
+        params = (since,)
+    statement = sql.SQL(
+        "INSERT INTO {index} AS ri (run_name, service, run_id, start_time, end_time)"
+        " SELECT run_name, COALESCE(MAX(service), ''), COALESCE(MAX(NULLIF(run_id, '')), ''),"
+        ' MIN("time"), MAX("time") FROM {metrics} {where} GROUP BY run_name'
+    ).format(index=_run_index_ref(storage_cfg), metrics=metrics, where=where) + sql.SQL(_RUN_INDEX_ON_CONFLICT)
+    with conn.cursor() as cur:
+        cur.execute(statement, params)
+        return int(cur.rowcount or 0)
+
+
 def _iter_records(
     long_df: pd.DataFrame,
     domain_key: str,
@@ -223,6 +337,7 @@ def save_domain_labeled(
     conn = _connect(storage_cfg)
     try:
         _ensure_schema_and_table(conn, storage_cfg, schema, table)
+        _ensure_run_index_table(conn, storage_cfg)
 
         insert_sql = sql.SQL(
             """
@@ -237,6 +352,7 @@ def save_domain_labeled(
         ).format(sql.Identifier(schema), sql.Identifier(table))
 
         total_rows = 0
+        first_time = last_time = None
         with conn.cursor() as cur:
             for idx, item in enumerate(labeled_dfs):
                 df = item.get("df")
@@ -259,9 +375,29 @@ def save_domain_labeled(
                 )
                 batch_count = len(rows)
                 total_rows += batch_count
+                span_start, span_end = long_df["time"].min(), long_df["time"].max()
+                first_time = span_start if first_time is None else min(first_time, span_start)
+                last_time = span_end if last_time is None else max(last_time, span_end)
                 logger.info(
                     "Timescale insert: domain=%s label=%s rows=%d", domain_key, query_label, batch_count
                 )
+
+            run_name = str(rm.get("run_name") or "")
+            if total_rows and run_name:
+                # The run list reads run_index; a failed update there must not lose the metrics themselves.
+                cur.execute("SAVEPOINT run_index_upsert")
+                try:
+                    upsert_run_index(
+                        conn, storage_cfg, run_name, rm.get("service"), rm.get("run_id"),
+                        first_time.to_pydatetime(), last_time.to_pydatetime(),
+                    )
+                    cur.execute("RELEASE SAVEPOINT run_index_upsert")
+                except Exception as e:
+                    cur.execute("ROLLBACK TO SAVEPOINT run_index_upsert")
+                    logger.warning(
+                        "run_index не обновлён для запуска %s: %s (пересборка: tools/check_run_index.py --rebuild)",
+                        run_name, e,
+                    )
 
         conn.commit()
         logger.info("Timescale insert total: domain=%s rows=%d", domain_key, total_rows)

@@ -28,6 +28,22 @@ CREATE INDEX IF NOT EXISTS idx_metrics_run_time ON public.metrics (run_id, time)
 CREATE INDEX IF NOT EXISTS idx_metrics_run_name ON public.metrics (run_name, time);
 
 -- ============================================================
+-- Список прогонов: одна строка на run_name из metrics
+-- (mirrors AI/db_store.py::_ensure_run_index_table; kept current by save_domain_labeled,
+-- filled for older data by loadlens_app/migrations.py::backfill_run_index)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS public.run_index (
+    run_name    TEXT        PRIMARY KEY,
+    service     TEXT        NOT NULL DEFAULT '',
+    run_id      TEXT        NOT NULL DEFAULT '',
+    start_time  TIMESTAMPTZ NOT NULL,
+    end_time    TIMESTAMPTZ NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_index_service_end ON public.run_index (service, end_time DESC);
+
+-- ============================================================
 -- LLM-отчёты
 -- ============================================================
 CREATE TABLE IF NOT EXISTS public.llm_reports (

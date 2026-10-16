@@ -135,6 +135,7 @@ def client(monkeypatch):
         monkeypatch.setattr(module, "_ts_conn", lambda: FakeConnection())
     monkeypatch.setattr(dashboard, "_ensure_llm_reports_table", lambda conn, cfg: None)
     monkeypatch.setattr(dashboard, "_ensure_engineer_reports_table", lambda conn, cfg: None)
+    monkeypatch.setattr(dashboard, "_ensure_run_index_table", lambda conn, cfg: None)
     monkeypatch.setattr(dashboard, "_metrics_service_entry", lambda service: ("demo", {"page_sample_id": "1", "page_parent_id": "1", "metrics": [], "logs": []}))
     monkeypatch.setattr(dashboard, "_find_area_for_service", lambda service: "demo")
     monkeypatch.setattr(dashboard, "_bootstrap_service_configs", lambda area, service: None)
@@ -622,7 +623,8 @@ def test_runs_applies_filters_and_reports_total(client, monkeypatch):
 
     end_time = datetime(2024, 11, 1, 11, 0, tzinfo=timezone.utc)
     start_time = datetime(2024, 11, 1, 10, 0, tzinfo=timezone.utc)
-    page_rows = [("nightly-1", start_time, end_time, "demo", "Провал", "Есть риски", "Провал", end_time, "step", "rid-1")]
+    # The page row ends with the COUNT(*) OVER () total of the single /runs statement.
+    page_rows = [("nightly-1", start_time, end_time, "demo", "Провал", "Есть риски", "Провал", end_time, "step", "rid-1", "", None, 37)]
     conn = RecordingConnection(fetchone_results=[(37,)], fetchall_results=[page_rows])
     monkeypatch.setattr(dashboard, "_ts_conn", lambda: conn)
 
@@ -638,11 +640,10 @@ def test_runs_applies_filters_and_reports_total(client, monkeypatch):
     assert body[0]["test_type"] == "step"
     assert body[0]["run_id"] == "rid-1"
 
-    count_sql, count_params = conn.log[0]
-    assert "COUNT(*)" in count_sql
-    assert "service = %s AND verdict = %s AND test_type = %s" in count_sql
-    assert count_params == ("%night%", "%night%", "demo", "Провал", "step")
-    page_sql, page_params = conn.log[1]
+    assert len(conn.log) == 1  # the page and the total come from one statement
+    page_sql, page_params = conn.log[0]
+    assert "COUNT(*) OVER ()" in page_sql
+    assert "service = %s AND verdict = %s AND test_type = %s" in page_sql
     assert "OFFSET %s LIMIT %s" in page_sql
     assert page_params == ("%night%", "%night%", "demo", "Провал", "step", 20, 20)
 
@@ -656,7 +657,7 @@ def test_runs_sorts_by_report_created_at(client, monkeypatch):
     resp = client.get("/runs", query_string={"sort": "report_created_at", "dir": "desc"})
 
     assert resp.status_code == 200
-    page_sql, _params = conn.log[1]
+    page_sql, _params = conn.log[0]
     assert "ORDER BY report_created_at DESC NULLS LAST" in page_sql
 
 
@@ -696,7 +697,7 @@ def test_report_pages_never_write_on_get(client, monkeypatch):
     assert ref.get_json() == {"run_id": "", "run_name": "ODP", "service": "НСИ"}
 
     conn_runs = RecordingConnection(fetchone_results=[(1,)], fetchall_results=[[
-        ("old-run", None, None, "svc", "Успешно", None, None, None, "", ""),
+        ("old-run", None, None, "svc", "Успешно", None, None, None, "", "", "", None, 1),
     ]])
     monkeypatch.setattr(dashboard, "_ts_conn", lambda: conn_runs)
     runs = client.get("/runs").get_json()
@@ -723,7 +724,7 @@ def test_runs_paging_is_bounded_and_search_is_literal(client, monkeypatch):
     conn = RecordingConnection(fetchone_results=[(0,)], fetchall_results=[[]])
     monkeypatch.setattr(dashboard, "_ts_conn", lambda: conn)
     assert client.get("/runs", query_string={"limit": 100000, "offset": -3, "q": "50%_x"}).status_code == 200
-    page_sql, page_params = conn.log[1]
+    page_sql, page_params = conn.log[0]
     assert page_params[-2:] == (0, 500)
     bs = chr(92)
     assert page_params[0] == f"%50{bs}%{bs}_x%"
@@ -813,9 +814,9 @@ def test_runs_restricts_to_project_area_services(client, monkeypatch):
 
     resp = client.get("/runs")
     assert resp.status_code == 200
-    count_sql, count_params = conn.log[0]
-    assert count_sql.count("service = ANY(%s)") == 2
-    assert count_params == (["svc-a", "svc-b"], ["svc-a", "svc-b"])
+    page_sql, page_params = conn.log[0]
+    assert page_sql.count("service = ANY(%s)") == 2
+    assert page_params == (["svc-a", "svc-b"], ["svc-a", "svc-b"], 0, 20)
 
 
 def test_rename_run_endpoint_updates_report_name(client, monkeypatch):
@@ -884,8 +885,8 @@ def test_rename_run_data_updates_tables(monkeypatch):
     result = core._rename_run_data("old-run", "new-run")
     assert result["run_name"] == "new-run"
     assert store["names"] == {"new-run"}
-    # metrics, llm_reports, engineer_reports, confluence_publications and llm_feedback.
-    assert store["updates"] == [("old-run", "new-run")] * 5
+    # metrics, llm_reports, engineer_reports, confluence_publications, llm_feedback and run_index.
+    assert store["updates"] == [("old-run", "new-run")] * 6
 
 
 def test_rename_run_data_conflict(monkeypatch):

@@ -428,12 +428,18 @@ def test_backfill_failure_rolls_back_and_releases_the_lock(backfill_env):
     assert conn.closed
 
 
-def test_backfill_lock_differs_from_the_run_id_backfill():
-    assert migrations.MAX_RPS_BACKFILL_LOCK != migrations.RUN_ID_BACKFILL_LOCK
+def test_backfill_lock_differs_from_the_other_migrations():
+    locks = [name for name in dir(migrations) if name.endswith("_LOCK") and isinstance(getattr(migrations, name), int)]
+    values = [getattr(migrations, name) for name in locks]
+    assert "MAX_RPS_BACKFILL_LOCK" in locks and len(values) == len(set(values))
     assert migrations.MAX_RPS_BACKFILL_BATCH == 5000
 
 
 def test_run_all_includes_the_max_rps_backfill(monkeypatch):
+    # Every migration is replaced: a real one would connect to the configured storage database.
+    real = [name for name in dir(migrations) if name.startswith(("backfill_", "ensure_")) and callable(getattr(migrations, name))]
+    for name in real:
+        monkeypatch.setattr(migrations, name, lambda: 0)
     monkeypatch.setattr(migrations, "backfill_run_ids", lambda: 2)
     monkeypatch.setattr(migrations, "backfill_max_rps", lambda: 7)
     result = migrations.run_all()
