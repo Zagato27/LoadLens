@@ -78,9 +78,9 @@ def run_bench(sb: Sandbox, mode: str, out: Path, args: argparse.Namespace) -> in
         return subprocess.run(cmd, cwd=str(REPO), stdout=handle, stderr=subprocess.STDOUT).returncode
 
 
-def _median(values) -> Optional[float]:
+def _median(values, digits: int = 1) -> Optional[float]:
     values = [v for v in values if v is not None]
-    return round(statistics.median(values), 1) if values else None
+    return round(statistics.median(values), digits) if values else None
 
 
 def _ratio(a: Optional[float], b: Optional[float]) -> Optional[float]:
@@ -121,7 +121,7 @@ def summarize(out_dir: Path) -> tuple[str, bool]:
             if mode == "celery" and path in CRITERIA_PATHS:
                 # Each run compares the job with the idle rounds of the same server minutes later or earlier;
                 # the median over the runs keeps one noisy idle round from deciding.
-                ratio = _median(run_ratios)
+                ratio = _median(run_ratios, 2)
                 verdicts.append((path, ratio, ratio is not None and ratio <= P95_LIMIT))
     lines.append("")
     durations = {}
