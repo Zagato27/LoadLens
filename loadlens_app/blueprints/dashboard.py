@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 from urllib.parse import quote
 
 from flask import (
@@ -27,9 +26,11 @@ from AI.db_store import (
 )
 from AI.scoring import parse_llm_analysis_strict
 from settings import CONFIG
-from update_page import _effective_config_for_scope, default_run_name, update_report
+# update_report and publish_report run in loadlens_app.tasks, which looks them up here (tests replace them here).
+from update_page import _effective_config_for_scope, default_run_name, update_report  # noqa: F401
 
-from loadlens_app.confluence_export import load_publication, publish_report
+from loadlens_app import job_runner, tasks
+from loadlens_app.confluence_export import load_publication, publish_report  # noqa: F401
 from loadlens_app.core import (
     _active_metrics_config,
     _active_project_area,
@@ -56,8 +57,6 @@ from loadlens_app.limits import LimitError, check_job_slot, check_report_window,
 from loadlens_app.jobs import (
     JOB_KIND_CONFLUENCE,
     JOB_KIND_REPORT,
-    JOB_STATUS_DONE,
-    JOB_STATUS_ERROR,
     JOB_STATUSES,
     JobStoreError,
     job_store,
@@ -1212,7 +1211,10 @@ def start_report_job(
     run_tag: str | None = None,
     run_filter_packs: list[str] | None = None,
 ):
-    """Checks the limits, creates a report job and runs it in a thread; raises :class:`LimitError`.
+    """Checks the limits, creates a report job and starts it; raises :class:`LimitError`.
+
+    The job runs in the Celery worker or in a thread of this process (:mod:`loadlens_app.job_runner`); the
+    task is :func:`loadlens_app.tasks.report_task`, which calls ``update_report`` of this module.
 
     Shared by POST /create_report and the load test watcher, which passes ``run_tag`` and the packs its
     tools tagged, so the load tool queries read only the metrics of its run.
@@ -1224,42 +1226,21 @@ def start_report_job(
 
     # Name the run up front so the job is identifiable in the archive while it runs.
     run_name = run_name or default_run_name()
-    job = job_store.create(JOB_KIND_REPORT, run_name=run_name, service=service, message="Инициализация…", owner=owner)
-    job_id = job.job_id
-
-    def _progress_cb(msg: str, pct: int | None = None):
-        job_store.update(job_id, message=str(msg), progress=pct if isinstance(pct, int) else None)
-
-    def _runner():
-        try:
-            res = update_report(
-                start, end, service,
-                use_llm=use_llm,
-                save_to_db=save_to_db,
-                web_only=web_only,
-                run_name=run_name,
-                test_type=test_type,
-                project_area=project_area,
-                progress_callback=_progress_cb,
-                run_tag=run_tag,
-                run_filter_packs=run_filter_packs,
-            )
-            result = res if isinstance(res, dict) else {}
-            run_id = str(result.get("run_id") or "")
-            job_store.update(
-                job_id,
-                status=JOB_STATUS_DONE,
-                progress=100,
-                message="Готово",
-                report_url=result.get("page_url"),
-                page_url=f"/reports/{run_id}" if run_id else None,
-                page_id=str(result["page_id"]) if result.get("page_id") is not None else None,
-                run_name=str(result.get("run_name") or run_name),
-            )
-        except Exception as e:  # pragma: no cover
-            job_store.update(job_id, status=JOB_STATUS_ERROR, message=_job_failure_message(job_id), error=str(e))
-
-    threading.Thread(target=_runner, daemon=True).start()
+    job = job_runner.create_job(JOB_KIND_REPORT, run_name=run_name, service=service, message="Инициализация…", owner=owner)
+    job_runner.submit(
+        tasks.report_task, job,
+        start=start,
+        end=end,
+        service=service,
+        project_area=project_area,
+        use_llm=use_llm,
+        save_to_db=save_to_db,
+        web_only=web_only,
+        run_name=run_name,
+        test_type=test_type,
+        run_tag=run_tag,
+        run_filter_packs=list(run_filter_packs) if run_filter_packs is not None else None,
+    )
     return job
 
 
@@ -1517,25 +1498,7 @@ def publish_confluence():
     ref = _lookup_report_ref(run_name=run_name, service=service) or {}
     source_url = f"{public_base_url()}/reports/{quote(ref.get('run_id') or run_name, safe='')}"
 
-    job = job_store.create(JOB_KIND_CONFLUENCE, run_name=run_name, service=service, message="Публикация в Confluence…", owner=owner)
-    job_id = job.job_id
-
-    def _progress_cb(msg: str, pct: int | None = None):
-        job_store.update(job_id, message=str(msg), progress=pct if isinstance(pct, int) else None)
-
-    def _runner():
-        try:
-            result = publish_report(run_name=run_name, service=service, source_url=source_url, progress_callback=_progress_cb)
-            job_store.update(
-                job_id,
-                status=JOB_STATUS_DONE,
-                progress=100,
-                message="Готово",
-                page_url=result.get("page_url"),
-                page_id=str(result["page_id"]) if result.get("page_id") is not None else None,
-            )
-        except Exception as e:
-            job_store.update(job_id, status=JOB_STATUS_ERROR, message=_job_failure_message(job_id), error=str(e))
-
-    threading.Thread(target=_runner, daemon=True).start()
-    return jsonify({"status": "accepted", "job_id": job_id, "message": "Публикация в Confluence началась."}), 200
+    job = job_runner.create_job(JOB_KIND_CONFLUENCE, run_name=run_name, service=service, message="Публикация в Confluence…", owner=owner)
+    # In the worker or in a thread (loadlens_app.tasks.publish_confluence_task calls publish_report of this module).
+    job_runner.submit(tasks.publish_confluence_task, job, run_name=run_name, service=service, source_url=source_url)
+    return jsonify({"status": "accepted", "job_id": job.job_id, "message": "Публикация в Confluence началась."}), 200
