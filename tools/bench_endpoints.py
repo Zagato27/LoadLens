@@ -631,7 +631,7 @@ def cycle_clients(
     client_factory=KeepAliveClient,
 ) -> list[tuple[str, float, tuple]]:
     """``concurrency`` keep-alive clients go round the ``paths`` (each from another offset) until ``stop`` is
-    set or each made ``cycles`` rounds; returns ``(path, monotonic start, sample)`` for every request."""
+    set or each made ``cycles`` rounds; returns ``(path, perf_counter start, sample)`` for every request."""
     samples: list[tuple[str, float, tuple]] = []
     lock = threading.Lock()
 
@@ -644,7 +644,7 @@ def cycle_clients(
                     if stop.is_set():
                         break
                     path = paths[(k + number) % len(paths)]
-                    began = time.monotonic()
+                    began = time.perf_counter()
                     sample = http_client.get(path)
                     with lock:
                         samples.append((path, began, sample))
@@ -844,7 +844,7 @@ class JobWatcher(threading.Thread):
         client = KeepAliveClient(self.target)
         try:
             while True:
-                began = time.monotonic()
+                began = time.perf_counter()
                 status, elapsed, app, payload = client.request("GET", self.path)
                 self.samples.append((JOB_STATUS_ROW, began, (status, elapsed, app, len(payload))))
                 if status == 200:
@@ -852,16 +852,16 @@ class JobWatcher(threading.Thread):
                         job = json.loads(payload)
                     except ValueError:
                         job = {}
-                    entry = (round(time.monotonic() - self.started, 2), str(job.get("status") or ""), int(job.get("progress") or 0), str(job.get("message") or ""))
+                    entry = (round(time.perf_counter() - self.started, 2), str(job.get("status") or ""), int(job.get("progress") or 0), str(job.get("message") or ""))
                     if not self.timeline or self.timeline[-1][1:] != entry[1:]:
                         self.timeline.append(entry)
                     if entry[1] in ("done", "error"):
-                        self.final, self.finished = job, time.monotonic()
+                        self.final, self.finished = job, time.perf_counter()
                         return
                 elif status == 404:
-                    self.final, self.finished = {"status": "not_found"}, time.monotonic()
+                    self.final, self.finished = {"status": "not_found"}, time.perf_counter()
                     return
-                if time.monotonic() > self.deadline:
+                if time.perf_counter() > self.deadline:
                     self.timed_out = True
                     return
                 time.sleep(self.poll_sec)
@@ -978,7 +978,7 @@ def during_job(args: argparse.Namespace) -> int:
     if status != 200 or not accepted.get("job_id"):
         session.close()
         raise SystemExit(f"POST /create_report -> {status} (page /new -> {page_status}): {body[:300].decode('utf-8', 'replace')}")
-    job_started = time.monotonic()
+    job_started = time.perf_counter()
     job_id = str(accepted["job_id"])
     print(f"job {job_id} accepted: {args.service} {start_iso}..{end_iso}, run {run_name}", file=sys.stderr)
 
@@ -991,7 +991,7 @@ def during_job(args: argparse.Namespace) -> int:
     watcher.join()
     stop.set()
     runner.join()
-    finished = watcher.finished if watcher.finished is not None else time.monotonic()
+    finished = watcher.finished if watcher.finished is not None else time.perf_counter()
     all_samples = [*load, *watcher.samples]
     during = phase_stats(all_samples, since=job_started, until=finished)
     windows = job_phase_windows(watcher.timeline, finished - job_started if watcher.finished is not None else None)
