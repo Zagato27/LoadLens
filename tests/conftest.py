@@ -40,8 +40,10 @@ def _storage_breaker_closed():
     from AI import storage_state
 
     storage_state.BREAKER.reset()
+    storage_state.reset_pools()  # no pooled (possibly fake) session crosses a test boundary
     yield
     storage_state.BREAKER.reset()
+    storage_state.reset_pools()
 
 
 @pytest.fixture(autouse=True)
