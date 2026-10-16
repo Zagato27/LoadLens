@@ -48,10 +48,20 @@ CREATE TABLE IF NOT EXISTS public.llm_reports (
     sla_details    JSONB,
     system_context JSONB,
     context        JSONB,
-    project_area   TEXT
+    project_area   TEXT,
+    max_rps        NUMERIC
 );
 
+-- Нагрузка финального анализа (AI.db_store.max_rps_from_parsed); для баз старше колонки её добавляет
+-- приложение, старые строки заполняет миграция backfill_max_rps (python -m loadlens_app.migrations).
+ALTER TABLE public.llm_reports ADD COLUMN IF NOT EXISTS max_rps NUMERIC;
+
 CREATE INDEX IF NOT EXISTS idx_llm_reports_run_created ON public.llm_reports (run_name, created_at DESC);
+-- Финальные строки, новые первыми: «последний прогон» дашборда и поиск предыдущего прогона сервиса.
+CREATE INDEX IF NOT EXISTS idx_llm_reports_final_created
+    ON public.llm_reports (created_at DESC) WHERE domain = 'final';
+CREATE INDEX IF NOT EXISTS idx_llm_reports_final_service_created
+    ON public.llm_reports (service, created_at DESC) WHERE domain = 'final';
 
 CREATE TABLE IF NOT EXISTS public.llm_feedback (
     id          BIGSERIAL   PRIMARY KEY,
