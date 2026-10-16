@@ -228,6 +228,12 @@ def test_report_job_passes_the_run_filter_to_update_report(monkeypatch):
     monkeypatch.setattr(dashboard, "update_report", lambda *args, **kwargs: calls.append(kwargs) or {"run_id": "x"})
     monkeypatch.setattr(dashboard, "_report_step", lambda area, service_id: "30s")
     monkeypatch.setattr(jobs.job_store, "_persist", lambda record: None)
+
+    def no_db():
+        raise RuntimeError("the job stays in memory; the job table is not reachable in this test")
+
+    # running_counts also reads the job table: it must fall back to memory, not reach the configured database.
+    monkeypatch.setattr(jobs, "_ts_conn", no_db)
     monkeypatch.setattr(threading, "Thread", lambda target, daemon=True: types.SimpleNamespace(start=target))
     job = dashboard.start_report_job(
         0, 600_000, "checkout", "shop", use_llm=False, save_to_db=False, web_only=True, run_name="nightly",
