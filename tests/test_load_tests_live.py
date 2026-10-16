@@ -194,3 +194,39 @@ def test_far_thresholds_do_not_flatten_the_curve():
     assert "suggestedMax" not in run_js(RUN_PAGE, f"{INTERNALS}.axisRange({{beginAtZero: true}}, [{{value: 14}}], 0)")
     kept = run_js(RUN_PAGE, f"{INTERNALS}.axisRange({{suggestedMax: 5}}, [{{value: 1}}], 5)")
     assert kept["suggestedMax"] == 5
+
+
+def test_empty_results_are_explained(monkeypatch):
+    from loadlens_app import query_preview
+
+    monkeypatch.setattr(live, "_scope_config", lambda run: _cfg("lt-k6-influxql"))
+    monkeypatch.setattr(query_preview, "fetch_points", lambda cfg_, **kwargs: {})
+    run = _run([_inst(0, launched_at=T0, started_at=T0)])
+    snapshot = live.live_snapshot(run, effective_tools({}), now=T0.timestamp() + 120)
+    assert snapshot["ok"] and snapshot["series"]["lt.rps_total"]["points"] == []
+    assert snapshot["message"].startswith("Запрос «LT (InfluxQL): RPS sum by all groups» не вернул точек за ")
+    assert "ни с тегом прогона nightly, ни без него" in snapshot["message"]
+    assert snapshot["rps_query"]["label"] == "LT (InfluxQL): RPS sum by all groups" and '"testid" =~ /^.*$/' in snapshot["rps_query"]["query"]
+    # Too early to worry, and reads of new points stay quiet.
+    assert live.live_snapshot(run, effective_tools({}), now=T0.timestamp() + 20)["message"] == ""
+    assert live.live_snapshot(run, effective_tools({}), now=T0.timestamp() + 120, since=T0.timestamp() + 100, mode="filtered")["message"] == ""
+
+
+def test_dashboard_brief_reads_two_rows_and_caches_them(monkeypatch, source):
+    monkeypatch.setattr(live, "_scope_config", lambda run: _cfg())
+    live.clear_brief_cache()
+    run = _run([_inst(0, launched_at=T0, started_at=T0)])
+    now = T0.timestamp() + 3600
+    try:
+        brief = live.live_brief(run, effective_tools({}), now=now)
+        assert brief["ok"] and brief["rps"] == 5.0 and brief["errors"] == 5.0 and len(brief["points"]) > 2
+        assert brief["start"] == now - live.BRIEF_WINDOW_MIN * 60 and brief["end"] == now
+        reads = len(source)
+        # RPS and errors only: no latency, no VUs, no RPS of each instance.
+        assert reads == 2 and not any("lt_instance" in (call["keys"] or []) for call in source)
+        assert live.live_brief(run, effective_tools({}), now=now + 5) is brief and len(source) == reads
+        live.clear_brief_cache()
+        live.live_brief(run, effective_tools({}), now=now + 5)
+        assert len(source) == 2 * reads
+    finally:
+        live.clear_brief_cache()

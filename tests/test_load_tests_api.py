@@ -291,3 +291,64 @@ def test_pack_run_filter_is_validated():
             QueryPack(**{**base, "run_filter": bad})
     with pytest.raises(ValueError, match="load tool packs only"):
         QueryPack(**{**base, "category": "runtime", "domain": "jvm", "queries": [{"label": "x up", "query": "up{ {{m}} }", "unit": "count"}], "run_filter": {"variable": "m", "value": "{{run_tag}}"}})
+
+
+# ---- dashboard ------------------------------------------------------------------------------------
+
+
+def test_active_runs_for_the_dashboard(env, monkeypatch):
+    briefs = []
+
+    def brief(run, tools, now=None):
+        briefs.append(run.run_id)
+        return {"ok": True, "message": "", "rps": 12.5, "errors": 0.4, "points": [[1, 2.0], [2, 3.0]]}
+
+    monkeypatch.setattr(live, "live_brief", brief)
+    assert env.client.get("/load_tests/active").get_json() == {"total": 0, "runs": []}
+    first = env.client.post("/load_tests", json=FORM).get_json()["run_id"]
+    second = env.client.post("/load_tests", json={**FORM, "run_name": "second"}).get_json()["run_id"]
+    assert env.client.get("/load_tests/active", query_string={"limit": 0}).get_json() == {"total": 2, "runs": []}
+
+    one = env.client.get("/load_tests/active", query_string={"limit": 1, "live": 1}).get_json()
+    assert one["total"] == 2 and len(one["runs"]) == 1
+    view = one["runs"][0]
+    assert view["status"] == "starting" and view["status_title"] and view["loading"] and view["url"] == f"/launch/{view['run_id']}"
+    assert view["instances_total"] == 1 and view["instances_running"] == 0 and view["max_seconds"] > 0
+    assert view["live"] is None and not briefs  # nothing generates load yet
+
+    run = env.store._runs[first]
+    run.status = "running"
+    run.instances[0].status = "running"
+    run.instances[0].started_at = run.created_at
+    runs = {item["run_id"]: item for item in env.client.get("/load_tests/active", query_string={"live": "1"}).get_json()["runs"]}
+    assert runs[first]["live"]["rps"] == 12.5 and runs[first]["instances_running"] == 1 and runs[first]["can_stop"]
+    assert runs[second]["live"] is None and briefs == [first]
+    assert env.client.get("/load_tests/active").get_json()["runs"][0]["live"] is None and briefs == [first]  # live only on request
+
+    env.client.post(f"/load_tests/runs/{first}/stop", json={})
+    runs = {item["run_id"]: item for item in env.client.get("/load_tests/active").get_json()["runs"]}
+    assert not runs[first]["can_stop"] and runs[second]["can_stop"]  # the stop is already requested
+
+    assert env.client.get("/load_tests/active", query_string={"limit": "many"}).status_code == 400
+    assert len(env.client.get("/load_tests/active", query_string={"limit": 500}).get_json()["runs"]) == 2
+
+
+def test_active_runs_follow_the_project_area(env, monkeypatch):
+    from loadlens_app.blueprints import load_tests as blueprint
+
+    env.client.post("/load_tests", json=FORM)
+    monkeypatch.setattr(blueprint, "_resolve_services_filter", lambda area: ["payments"])
+    assert env.client.get("/load_tests/active").get_json() == {"total": 0, "runs": []}
+
+
+def test_dashboard_offers_the_stop_to_the_owner_and_admins(env):
+    run_id = env.client.post("/load_tests", json=FORM).get_json()["run_id"]
+    env.store._runs[run_id].owner = "alice"
+
+    def can_stop(user, admin):
+        return service.active_runs(None, 5, user, admin, False)["runs"][0]["can_stop"]
+
+    assert can_stop("alice", False) and can_stop("bob", True)
+    assert not can_stop("bob", False) and not can_stop("", False)
+    env.store._runs[run_id].status = "reporting"
+    assert not can_stop("alice", False)  # the load is over, the report is being built

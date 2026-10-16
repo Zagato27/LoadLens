@@ -27,6 +27,8 @@
   .live-fresh { font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
   .live-fresh.stale { color: var(--warn-fg); }
   .live-note { font-size: 12px; color: var(--text-dim); margin-top: 6px; min-height: 16px; }
+  .live-query { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+  .live-query pre { white-space: pre-wrap; word-break: break-all; background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px; padding: 8px; margin: 6px 0 0; }
   .inst-table td { vertical-align: top; }
   .inst-table .msg { font-size: 12px; color: var(--text-muted); max-width: 360px; }
   .inst-table details pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px; padding: 8px; margin: 6px 0 0; }
@@ -84,6 +86,7 @@
       </div>
     </div>
     <div class="live-note" id="liveNote"></div>
+    <details class="live-query" id="liveQuery" hidden><summary>Запрос RPS</summary><pre id="liveQueryText"></pre></details>
 
     <h3 style="margin-top:20px">Инстансы</h3>
     <div class="report-table-shell">

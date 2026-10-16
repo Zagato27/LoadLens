@@ -1,4 +1,4 @@
-"""Stage 5 of docs/ui-plan.md in ui.js: theme modes with "system", density, empty states, card labels.
+"""Stage 5 of docs/ui-plan.md in ui.js: theme modes with "system", empty states, card labels.
 
 Runs under Node through tests/js_harness.py (skipped when node is absent). A setup file replaces
 ``window.matchMedia`` before ui.js loads, so the OS color scheme can be switched from a test.
@@ -149,31 +149,18 @@ def test_theme_works_without_match_media():
     assert result == ["system", "dark"]
 
 
-# ---- density ----------------------------------------------------------------------------------
+# ---- removed density setting ------------------------------------------------------------------
 
-def test_density_set_applies_attribute_and_persists():
-    result = run_js(UI, """
-        const start = LL.ui.density.current();
-        LL.ui.density.set('compact');
-        const compact = [LL.ui.density.current(), document.documentElement.getAttribute('data-density'), __harness.storage.get('loadlens.density')];
-        LL.ui.density.set('weird');
-        ({ start, compact, normal: [LL.ui.density.current(), document.documentElement.hasAttribute('data-density'), __harness.storage.get('loadlens.density')] })
-    """)
-    assert result["start"] == "normal"
-    # The JSON-encoded value is what the pre-paint scripts compare with ('"compact"').
-    assert result["compact"] == ["compact", "compact", json.dumps("compact")]
-    assert result["normal"] == ["normal", False, json.dumps("normal")]
-
-
-def test_density_from_another_tab_and_without_storage():
-    result = run_js(UI, """
-        __harness.fireWindow('storage', { key: 'loadlens.density', newValue: '"compact"' });
-        const a = LL.ui.density.current();
-        __harness.fireWindow('storage', { key: 'loadlens.density', newValue: null });
-        [a, LL.ui.density.current()]
-    """)
-    assert result == ["compact", "normal"]
-    assert run_js(UI, "LL.ui.density.set('compact'); LL.ui.density.current()", storage_throws=True) == "compact"
+def test_density_setting_is_gone_and_its_leftover_value_is_dropped():
+    result = run_js(UI, """[
+        typeof LL.ui.density,
+        __harness.storage.has('loadlens.density'),
+        document.documentElement.hasAttribute('data-density'),
+        __harness.storage.get('loadlens.theme')
+    ]""", local_storage={"loadlens.density": json.dumps("compact"), "loadlens.theme": "light"})
+    assert result == ["undefined", False, False, "light"]
+    # Blocked storage: the cleanup must not throw.
+    assert run_js(UI, "typeof LL.ui.theme.current()", storage_throws=True) == "string"
 
 
 # ---- empty states -----------------------------------------------------------------------------

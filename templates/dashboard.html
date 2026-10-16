@@ -13,6 +13,13 @@
     </div>
   </div>
 
+  {# Load tests going on now; dashboard.js fills it for engineers and admins and hides it when nothing runs. #}
+  <section class="card dash-active" id="activeRuns" aria-labelledby="activeTitle" hidden>
+    <div class="dash-card-head"><h3 id="activeTitle">Идут сейчас</h3><a class="btn btn-sm" href="/launch#runsPanel">Все прогоны</a></div>
+    <div id="activeList" class="dash-active-list"></div>
+    <div class="dim dash-jobs-more" id="activeMore" hidden></div>
+  </section>
+
   <section id="setupBanner" class="banner" data-min-role="admin" hidden>
     <div>
       <div class="banner-title">Похоже, LoadLens ещё не настроен</div>
@@ -34,7 +41,7 @@
     </div>
   </section>
 
-  <section class="dash-tiles" id="dashTiles" aria-label="Сводка">
+  <section class="dash-tiles{% if role_rank >= 2 %} dash-tiles-5{% endif %}" id="dashTiles" aria-label="Сводка">
     <div class="dash-tile">
       <div class="dash-tile-label">Запусков за 7 дней</div>
       <div class="dash-tile-value" id="kpiRunsValue">—</div>
@@ -46,6 +53,13 @@
       <div class="dash-meter" aria-hidden="true"><span id="kpiRiskyMeter"></span></div>
       <div class="dash-tile-note" id="kpiRiskyNote">&nbsp;</div>
     </div>
+    {% if role_rank >= 2 %}
+    <div class="dash-tile" id="activeTile">
+      <div class="dash-tile-label">Идут тесты</div>
+      <div class="dash-tile-value" id="kpiActiveValue">—</div>
+      <div class="dash-tile-note" id="kpiActiveNote">&nbsp;</div>
+    </div>
+    {% endif %}
     <div class="dash-tile">
       <div class="dash-tile-label">Задачи в работе</div>
       <div class="dash-tile-value" id="kpiJobsValue">—</div>

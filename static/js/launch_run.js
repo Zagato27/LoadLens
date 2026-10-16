@@ -8,6 +8,8 @@
   const LIVE_ROLES = ['lt.rps_total', 'lt.error_rate_pct', 'lt.p95_total', 'lt.vus'];
   // A minute without new points: the metrics do not reach the storage (or the tool stopped writing).
   const STALE_AFTER_SEC = 60;
+  // While the page shows metrics without the run tag, every this many polls a full read checks the tag again.
+  const RECHECK_PLAIN_EVERY = 12;
   const LOG_POLL_MS = 5000;
 
   const STATUS_TONE = {
@@ -191,7 +193,7 @@
   const INSTANCE_COLORS = ['#4dabf7', '#f783ac', '#ffd43b', '#63e6be', '#b197fc', '#ffa94d', '#74c0fc', '#e599f7'];
 
   function freshLive(windowMin) {
-    return { window: windowMin, step: null, mode: '', series: {}, labels: {}, instances: {}, events: [], sla: {}, start: null, end: null, lastMs: null };
+    return { window: windowMin, step: null, mode: '', series: {}, labels: {}, instances: {}, events: [], sla: {}, start: null, end: null, lastMs: null, polls: 0, rpsQuery: null };
   }
 
   function lastValue(points) {
@@ -348,6 +350,13 @@
     if (message) notes.push(message);
     if (live.step) notes.push(`шаг ${live.step} с${live.mode === 'filtered' ? ', только метрики с тегом прогона' : ''}`);
     $('liveNote').textContent = notes.join(' · ');
+    const query = $('liveQuery');
+    const empty = !(live.series['lt.rps_total'] || []).length;
+    query.hidden = !(empty && live.rpsQuery && live.rpsQuery.query);
+    if (!query.hidden) {
+      query.querySelector('summary').textContent = `Запрос RPS: ${live.rpsQuery.label}`;
+      $('liveQueryText').textContent = live.rpsQuery.query;
+    }
     if (!window.Chart) return;
     const colors = ui.chartColors();
     const toXY = (points) => (points || []).map((p) => ({ x: p[0], y: p[1] }));
@@ -403,13 +412,17 @@
     live.end = data.end || null;
     const rps = live.series['lt.rps_total'] || [];
     live.lastMs = rps.length ? rps[rps.length - 1][0] : null;
+    if (data.rps_query || !incremental) live.rpsQuery = data.rps_query || null;
   }
 
   async function loadLive(full) {
     clearTimeout(state.liveTimer);
     const live = state.live;
     const running = !!(state.run && state.run.loading);
-    const incremental = !full && running && !!live.step && !!live.lastMs;
+    live.polls += 1;
+    // Metrics without the run tag may have been someone else's at the start: look for the tag again now and then.
+    const recheck = live.mode === 'plain' && live.polls % RECHECK_PLAIN_EVERY === 0;
+    const incremental = !full && !recheck && running && !!live.step && !!live.lastMs;
     const params = new URLSearchParams({ window: String(live.window) });
     if (incremental) {
       params.set('since', String(live.lastMs));

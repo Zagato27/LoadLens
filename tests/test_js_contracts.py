@@ -328,20 +328,20 @@ def test_skeleton_rows():
 def test_prefs_round_trip_json_values():
     result = run_js(UI, """
         LL.prefs.set('recentServices', ['svc-a', 'svc-b']);
-        LL.prefs.set('density', 'compact');
+        LL.prefs.set('sample', 'compact');
         LL.prefs.set('custom', { n: 1, ok: true });
-        ({ recent: LL.prefs.get('recentServices'), density: LL.prefs.get('density'), custom: LL.prefs.get('custom'),
+        ({ recent: LL.prefs.get('recentServices'), sample: LL.prefs.get('sample'), custom: LL.prefs.get('custom'),
            missing: LL.prefs.get('nope', 'fallback'), noFallback: LL.prefs.get('nope') === undefined,
            raw: Object.fromEntries(__harness.storage) })
     """)
     assert result["recent"] == ["svc-a", "svc-b"]
-    assert result["density"] == "compact"
+    assert result["sample"] == "compact"
     assert result["custom"] == {"n": 1, "ok": True}
     assert result["missing"] == "fallback"
     assert result["noFallback"] is True
     assert result["raw"] == {
         "loadlens.recentServices": '["svc-a","svc-b"]',
-        "loadlens.density": '"compact"',
+        "loadlens.sample": '"compact"',
         "loadlens.custom": '{"n":1,"ok":true}',
     }
 
@@ -359,18 +359,18 @@ def test_prefs_theme_stays_a_raw_string():
 
 def test_prefs_null_removes_and_bad_json_falls_back():
     result = run_js(UI, """
-        LL.prefs.set('density', 'compact');
-        LL.prefs.set('density', null);
-        [__harness.storage.has('loadlens.density'), LL.prefs.get('density', 'normal'), LL.prefs.get('broken', 'fb')]
+        LL.prefs.set('sample', 'compact');
+        LL.prefs.set('sample', null);
+        [__harness.storage.has('loadlens.sample'), LL.prefs.get('sample', 'normal'), LL.prefs.get('broken', 'fb')]
     """, local_storage={"loadlens.broken": "{not json"})
     assert result == [False, "normal", "fb"]
 
 
 def test_prefs_swallow_storage_errors():
     result = run_js(UI, """
-        LL.prefs.set('density', 'compact');
+        LL.prefs.set('sample', 'compact');
         LL.ui.theme.set('light');
-        [LL.prefs.get('density', 'normal'), LL.prefs.get('theme', 'dark'), LL.ui.theme.current()]
+        [LL.prefs.get('sample', 'normal'), LL.prefs.get('theme', 'dark'), LL.ui.theme.current()]
     """, storage_throws=True)
     assert result == ["normal", "dark", "light"]
 
@@ -378,16 +378,16 @@ def test_prefs_swallow_storage_errors():
 def test_prefs_on_change_and_unsubscribe():
     result = run_js(UI, """
         const seen = [];
-        const off = LL.prefs.onChange('density', (value, key) => seen.push([key, value]));
-        LL.prefs.set('density', 'compact');
+        const off = LL.prefs.onChange('sample', (value, key) => seen.push([key, value]));
+        LL.prefs.set('sample', 'compact');
         LL.prefs.set('theme', 'light');
-        __harness.fireWindow('storage', { key: 'loadlens.density', newValue: '"normal"' });
-        __harness.fireWindow('storage', { key: 'other.density', newValue: '"x"' });
+        __harness.fireWindow('storage', { key: 'loadlens.sample', newValue: '"normal"' });
+        __harness.fireWindow('storage', { key: 'other.sample', newValue: '"x"' });
         off();
-        LL.prefs.set('density', 'compact');
+        LL.prefs.set('sample', 'compact');
         seen
     """)
-    assert result == [["density", "compact"], ["density", "normal"]]
+    assert result == [["sample", "compact"], ["sample", "normal"]]
 
 
 def test_theme_on_change_returns_unsubscribe():

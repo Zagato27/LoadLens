@@ -220,3 +220,72 @@ def test_service_history_falls_back_to_verdicts():
     assert history[0]["run_name"] == "r2" and history[0]["max_rps"] == 10
     assert history[1] == {"verdict": "Успешно", "max_rps": None}
     assert call(f"{I}.serviceHistory({js(dict(svc, history=HISTORY))}).length") == 5
+
+
+# ---- load tests going on now -----------------------------------------------------------------------
+
+NOW = "Date.parse('2026-10-16T10:30:00Z')"
+ACTIVE = {
+    "run_id": "abc", "run_name": "nightly", "service": "checkout", "owner": "alice", "status": "running",
+    "status_title": "Идёт нагрузка", "loading": True, "started_at": "2026-10-16T10:18:00Z", "max_seconds": 1800,
+    "instances_total": 3, "instances_running": 2, "can_stop": True, "url": "/launch/abc",
+    "live": {"ok": True, "message": "", "rps": 123.45, "errors": 0.4, "points": [[1, 1], [2, 2]]},
+}
+
+
+def test_elapsed_and_errors_text():
+    assert call(f"{I}.elapsedText('2026-10-16T10:18:00Z', 1800, {NOW})") == "12 мин из 30 мин"
+    assert call(f"{I}.elapsedText('2026-10-16T10:29:20Z', 0, {NOW})") == "40 с"
+    assert call(f"{I}.elapsedText(null, 3600, {NOW})") == "лимит 1 ч 00 мин"
+    assert call(f"{I}.elapsedText(null, null, {NOW})") == ""
+    assert call(f"[0, 0.4, 3.456, null].map({I}.errorsText)") == ["0.0%", "0.40%", "3.5%", ""]
+
+
+def test_active_run_summary():
+    s = call(f"{I}.activeRunSummary({js(ACTIVE)}, {NOW})")
+    assert s["name"] == "nightly" and s["url"] == "/launch/abc" and s["tone"] == "running" and s["canStop"]
+    assert s["meta"] == "checkout · alice" and s["progress"] == "инстансы: 2 из 3 · 12 мин из 30 мин"
+    assert s["liveText"] == "123.5 RPS · ошибки 0.40%" and s["liveNote"] == "" and len(s["points"]) == 2
+
+    failed = call(f"{I}.activeRunSummary({js(dict(ACTIVE, live={'ok': False, 'message': 'нет данных', 'rps': None}))}, {NOW})")
+    assert failed["liveText"] == "" and failed["liveNote"] == "нет данных"
+    waiting = call(f"{I}.activeRunSummary({js(dict(ACTIVE, live=None, status='starting', instances_total=1))}, {NOW})")
+    assert waiting["liveNote"] == "Метрики появятся после старта нагрузки" and waiting["progress"] == "12 мин из 30 мин"
+    reporting = call(f"{I}.activeRunSummary({js(dict(ACTIVE, live=None, loading=False, status='reporting', message='Строится отчёт'))}, {NOW})")
+    assert reporting["liveNote"] == "Строится отчёт" and reporting["progress"] == "инстансы: 2 из 3"
+    assert call(f"{I}.activeRunSummary({js(dict(ACTIVE, status='stopping'))}, {NOW}).tone") == "warn"
+    assert call(f"{I}.activeRunSummary({{}}, {NOW}).name") == "(без названия)"
+
+
+def test_active_tile():
+    assert call(f"{I}.activeTile(null)")["value"] == "—"
+    assert call(f"{I}.activeTile({{ total: 0, runs: [] }})") == {"value": "0", "note": "нет идущих прогонов"}
+    assert call(f"{I}.activeTile({js({'total': 3, 'runs': [ACTIVE]})}, {NOW})") == {"value": "3", "note": "nightly · 12 мин из 30 мин"}
+    assert call(f"{I}.activeTile({{ total: 2, runs: [] }})") == {"value": "2", "note": ""}
+
+
+def test_live_spark():
+    assert call(f"{I}.liveSpark([[0, 1]])") == "" and call(f"{I}.liveSpark([[0, null], [1, 2]])") == ""
+    svg = call(f"{I}.liveSpark([[0, 0], [10, 10]])")
+    assert 'width="120" height="32"' in svg and 'class="line" points="3.0,29.0 117.0,3.0"' in svg
+    assert 'class="area" points="3.0,29.0 117.0,3.0 117.0,29.0 3.0,29.0"' in svg
+    flat = call(f"{I}.liveSpark([[0, 5], [10, 5]], 60, 20)")
+    assert 'points="3.0,3.0 57.0,3.0"' in flat  # from zero: a steady load is a line at the top
+
+
+def test_active_row_markup():
+    row = call(f"{I}.activeRowHtml({js(dict(ACTIVE, run_name='<b>x</b>'))}, {NOW})")
+    assert "&lt;b&gt;x&lt;/b&gt;" in row and "<b>" not in row
+    assert 'data-stop-run="abc"' in row and 'href="/launch/abc"' in row and "dash-live-spark" in row
+    quiet = call(f"{I}.activeRowHtml({js(dict(ACTIVE, can_stop=False, live=None))}, {NOW})")
+    assert "data-stop-run" not in quiet and "Метрики появятся" in quiet
+
+
+def test_menu_badge_counts_running_tests():
+    shown = call(
+        "(() => { const badge = { hidden: true, textContent: '', title: '' };"
+        " document.getElementById = (id) => (id === 'navLaunchBadge' ? badge : null);"
+        " const seen = []; [3, 0, 150, 'x'].forEach((n) => { LL.activeRuns.show(n); seen.push({ ...badge }); }); return seen; })()"
+    )
+    assert shown[0] == {"hidden": False, "textContent": "3", "title": "Идут прогоны: 3"}
+    assert shown[1]["hidden"] and shown[2]["textContent"] == "99+" and shown[3]["hidden"]

@@ -854,13 +854,18 @@ def test_pages_and_navigation_follow_the_role(logged_in):
 
     viewer_links, html = nav_links(logged_in("viewer"))
     assert viewer_links == {"/", "/reports", "/compare", "/forecasting"}
+    # Running load tests (dashboard block, tile, menu badge) are for engineers and admins.
+    assert 'id="navLaunchBadge"' not in html and 'id="activeTile"' not in html and "dash-tiles-5" not in html
+    assert logged_in("viewer").get("/load_tests/active").status_code == 403
     assert 'data-role="viewer"' in html and 'name="loadlens-role" content="viewer"' in html
     assert re.search(r'name="csrf-token" content="[\w-]{20,}"', html)
 
     assert logged_in("viewer").get("/launch").status_code == 403
 
     engineer = logged_in("engineer")
-    assert nav_links(engineer)[0] == {"/", "/new", "/launch", "/reports", "/compare", "/forecasting"}
+    links, html = nav_links(engineer)
+    assert links == {"/", "/new", "/launch", "/reports", "/compare", "/forecasting"}
+    assert 'id="navLaunchBadge"' in html and 'id="activeTile"' in html and "dash-tiles dash-tiles-5" in html
     assert engineer.get("/new").status_code == 200 and engineer.get("/settings").status_code == 403
 
     admin = logged_in("admin")

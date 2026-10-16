@@ -1,5 +1,6 @@
-"""Stage 5 of docs/ui-plan.md outside ui.js: pre-paint scripts, the «Вид» menu markup, sprite icons,
-stylesheet rules for density, reduced motion and mobile cards, and the light --text-dim contrast.
+"""Stage 5 of docs/ui-plan.md outside ui.js: pre-paint scripts, the theme menu markup, sprite icons,
+stylesheet rules for reduced motion and mobile cards, and the light --text-dim contrast. The density
+setting was removed on 2026-10-16; the tests check that nothing of it is left.
 
 The pre-paint scripts are cut out of the templates and run under Node (tests/js_harness.py); those
 checks are skipped when node is absent.
@@ -75,10 +76,10 @@ def test_pre_paint_explicit_and_missing_theme(page):
 
 
 @pytest.mark.parametrize("page", PRE_PAINT_PAGES)
-def test_pre_paint_density(page):
-    assert run_pre_paint(page, density=json.dumps("compact"))["density"] == "compact"
-    assert run_pre_paint(page, density=json.dumps("normal"))["density"] is None
-    assert run_pre_paint(page)["density"] is None
+def test_pre_paint_ignores_a_leftover_density_value(page):
+    # Browsers of people who picked the removed compact density still hold the value.
+    assert run_pre_paint(page, density=json.dumps("compact"))["density"] is None
+    assert "density" not in pre_paint_script(page)
 
 
 @pytest.mark.parametrize("page", PRE_PAINT_PAGES)
@@ -112,14 +113,17 @@ def test_templates_compile():
 def test_view_menu_markup():
     html = (TEMPLATES / "base.html").read_text(encoding="utf-8")
     menu = re.search(r'<details class="menu view-menu" id="viewMenu">(.*?)</details>', html, re.S)
-    assert menu, "the «Вид» menu is missing in the sidebar foot"
+    assert menu, "the theme menu is missing in the sidebar foot"
     body = menu.group(1)
     assert 'id="viewMenuValue"' in body
     assert 'role="menu"' in body
+    assert '<span class="nav-label">Тема</span>' in body
     items = re.findall(r'role="menuitemradio" aria-checked="false" data-view-pref="(\w+)" data-value="(\w+)"', body)
-    assert items == [("theme", "system"), ("theme", "light"), ("theme", "dark"), ("density", "normal"), ("density", "compact")]
-    for label in ("Как в системе", "Светлая", "Тёмная", "Обычная", "Компактная", "Плотность"):
+    assert items == [("theme", "system"), ("theme", "light"), ("theme", "dark")]
+    for label in ("Как в системе", "Светлая", "Тёмная"):
         assert label in body
+    for removed in ("density", "Плотность", "Компактная", "i-rows"):
+        assert removed not in html
     # The palette trigger (stage 3) stays above the menu; the old toggle button is gone.
     assert html.index('id="paletteOpen"') < html.index('id="viewMenu"')
     assert 'id="themeToggle"' not in html
@@ -164,10 +168,7 @@ def test_text_dim_meets_aa_on_backgrounds(theme):
 
 def test_stage5_css_rules():
     css = stage5_css()
-    compact = css[css.index('[data-density="compact"]'):]
-    assert re.search(r':root\[data-density="compact"\]\s*\{\s*--radius-sm:\s*6px;', css)
-    assert re.search(r'\.data-table td\s*\{\s*padding:\s*6px', compact)
-    assert "height: 32px" in compact
+    assert "data-density" not in APP_CSS.read_text(encoding="utf-8")
     motion = re.search(r"@media \(prefers-reduced-motion: reduce\)\s*\{(.*?)\n\}", css, re.S)
     assert motion, "no prefers-reduced-motion block"
     for selector in (".skeleton::after", ".toast", ".app-sidebar"):

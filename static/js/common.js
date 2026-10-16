@@ -144,6 +144,44 @@ window.LoadLens.jobDismissButton = function jobDismissButton(job, onDone) {
   return btn;
 };
 
+// Badge with the number of load tests going on now at «Запуск теста» in the menu, for engineers and
+// admins: polled every 30 s. The dashboard reads the runs itself, claims the badge and passes the number.
+(function installActiveRunsBadge() {
+  const LL = window.LoadLens;
+  const POLL_MS = 30000;
+  let timer = 0;
+  let claimed = false;
+  function show(total) {
+    const badge = document.getElementById('navLaunchBadge');
+    if (!badge) return;
+    const n = Math.max(0, Math.floor(Number(total) || 0));
+    badge.hidden = n === 0;
+    badge.textContent = n > 99 ? '99+' : String(n);
+    badge.title = n ? `Идут прогоны: ${n}` : '';
+  }
+  async function poll() {
+    clearTimeout(timer);
+    if (claimed) return;
+    try {
+      const resp = await fetch('/load_tests/active?limit=0');
+      if (resp.ok) show((await resp.json()).total);
+    } catch (e) {
+      /* the badge is auxiliary */
+    }
+    if (!claimed) timer = setTimeout(poll, POLL_MS);
+  }
+  function claim() {
+    claimed = true;
+    clearTimeout(timer);
+  }
+  LL.activeRuns = { show, claim };
+  document.addEventListener('DOMContentLoaded', () => {
+    if (!document.getElementById('navLaunchBadge') || !LL.can('engineer')) return;
+    // After the other DOMContentLoaded listeners: the dashboard claims the badge before the first poll.
+    timer = setTimeout(poll, 0);
+  });
+})();
+
 // Project area selector in the header. The chosen area is stored in a cookie that
 // every data endpoint reads, so a change reloads the page. Idempotent: the same
 // promise is returned to every caller, and it resolves to the active area id.

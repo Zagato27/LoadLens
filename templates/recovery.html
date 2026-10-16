@@ -6,7 +6,7 @@
   <meta name="csrf-token" content="{{ csrf_token }}" />
   <title>Восстановление подключения — LoadLens</title>
   <script nonce="{{ csp_nonce }}">
-    // Apply the saved theme and density before first paint to avoid a flash (same logic as base.html).
+    // Apply the saved theme before first paint to avoid a flash (same logic as base.html).
     // ui.js is not loaded here, so "system" keeps following the OS setting from this script.
     (function () {
       try {
@@ -20,7 +20,6 @@
         } else if (saved === 'light' || saved === 'dark') {
           root.setAttribute('data-theme', saved);
         }
-        if (localStorage.getItem('loadlens.density') === '"compact"') root.setAttribute('data-density', 'compact');
       } catch (e) {}
     })();
   </script>

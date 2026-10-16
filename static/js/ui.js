@@ -12,7 +12,7 @@
 
   // ---- preferences -------------------------------------------------------
   // localStorage under "loadlens.<key>", JSON-encoded. "theme" stays a plain string because the
-  // pre-paint script in base.html reads it raw. Known keys: theme, density, recentServices.
+  // pre-paint script in base.html reads it raw. Known keys: theme, recentServices.
   const PREFS_PREFIX = 'loadlens.';
   const RAW_PREFS = new Set(['theme']);
   const prefListeners = new Map();
@@ -57,6 +57,8 @@
       notifyPref(key, decodePref(key, event.newValue, null));
     });
   } catch (e) { /* no window events */ }
+  // The interface density setting was removed; drop the value it may have left behind.
+  try { localStorage.removeItem(`${PREFS_PREFIX}density`); } catch (e) { /* storage unavailable */ }
 
   // ---- theme -------------------------------------------------------------
   // The stored preference (mode) is 'system', 'light' or 'dark'; <html data-theme> always carries the
@@ -126,31 +128,12 @@
   }
   if (themeMode === 'system') applyTheme(false);
 
-  // ---- density -----------------------------------------------------------
-  // 'normal' or 'compact'; <html data-density="compact"> switches the compact CSS tokens.
-  function applyDensity(value) {
-    if (value === 'compact') document.documentElement.setAttribute('data-density', 'compact');
-    else document.documentElement.removeAttribute('data-density');
-    syncViewMenu();
-  }
-  ui.density = {
-    current() { return document.documentElement.getAttribute('data-density') === 'compact' ? 'compact' : 'normal'; },
-    set(value) {
-      const next = value === 'compact' ? 'compact' : 'normal';
-      LL.prefs.set('density', next);
-      applyDensity(next);
-    }
-  };
-  LL.prefs.onChange('density', (value) => applyDensity(value === 'compact' ? 'compact' : 'normal'));
-
-  // ---- view menu (sidebar foot) ---------------------------------------------
+  // ---- theme menu (sidebar foot) --------------------------------------------
   function syncViewMenu() {
     const menu = document.getElementById('viewMenu');
     if (!menu) return;
-    const density = ui.density ? ui.density.current() : 'normal';
-    menu.querySelectorAll('[data-view-pref]').forEach((item) => {
-      const current = item.dataset.viewPref === 'theme' ? themeMode : density;
-      item.setAttribute('aria-checked', item.dataset.value === current ? 'true' : 'false');
+    menu.querySelectorAll('[data-view-pref="theme"]').forEach((item) => {
+      item.setAttribute('aria-checked', item.dataset.value === themeMode ? 'true' : 'false');
     });
     const value = document.getElementById('viewMenuValue');
     if (value) value.textContent = THEME_LABELS[themeMode] || '';
@@ -167,12 +150,13 @@
       const checked = items().find((item) => item.getAttribute('aria-checked') === 'true') || items()[0];
       if (checked) checked.focus();
     });
-    // The menu stays open after a choice so both groups can be adjusted while watching the page.
+    // A choice applies the theme and closes the menu, returning focus to its button.
     menu.addEventListener('click', (event) => {
-      const item = event.target.closest('[data-view-pref]');
+      const item = event.target.closest('[data-view-pref="theme"]');
       if (!item || !menu.contains(item)) return;
-      if (item.dataset.viewPref === 'theme') ui.theme.set(item.dataset.value);
-      else ui.density.set(item.dataset.value);
+      ui.theme.set(item.dataset.value);
+      menu.open = false;
+      if (summary) summary.focus();
     });
     menu.addEventListener('keydown', (event) => {
       if (!menu.open) return;

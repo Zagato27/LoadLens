@@ -26,6 +26,8 @@ LIVE_WINDOWS = (0, 15, 30, 60)
 # Points re-read before ``since``: the newest bucket may still have been filling at the previous read.
 OVERLAP_STEPS = 2
 SLA_LINES = ("target_rps", "max_error_rate_pct", "max_p95_ms")
+# A test that runs this long without a single RPS point is worth an explanation, not just empty charts.
+NO_DATA_AFTER_SEC = 45
 MAX_POINTS = 600
 NICE_STEPS = (5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600)
 UNFILTERED_NOTE = "Метрики инструмента без тега прогона: показаны все метрики за окно прогона"
@@ -212,6 +214,10 @@ def sla_lines(cfg: dict) -> dict[str, float]:
     return out
 
 
+def _clock(ts: float) -> str:
+    return time.strftime("%H:%M:%S", time.localtime(ts))
+
+
 def _points(points: list[tuple[float, float]]) -> list[list[float]]:
     return [[int(ts * 1000), round(value, 4)] for ts, value in points]
 
@@ -234,7 +240,8 @@ def _instance_series(run: RunRecord, cfg: dict, lang: str, row: tuple[str, str, 
 
 
 def live_snapshot(run: RunRecord, tools: dict[str, ToolTemplate], now: Optional[float] = None, *, window_min: int = 0,
-                  since: Optional[float] = None, mode: str = "") -> dict[str, Any]:
+                  since: Optional[float] = None, mode: str = "", roles: tuple[str, ...] = LIVE_ROLES,
+                  with_instances: bool = True) -> dict[str, Any]:
     """Points of the live roles of a run.
 
     ``window_min``: the last minutes of the run (0 — from the first start to the last finish or now).
@@ -259,15 +266,16 @@ def live_snapshot(run: RunRecord, tools: dict[str, ToolTemplate], now: Optional[
     base["sla"] = sla_lines(cfg)
     packs = run_filter_packs(run, tools, cfg)
     filtered = bool(packs) and mode != "plain"
-    roles = LIVE_ROLES + (INSTANCE_ROLE,)
+    wanted = tuple(role for role in roles if role in LIVE_ROLES) or LIVE_ROLES
+    roles = wanted + ((INSTANCE_ROLE,) if with_instances else ())
     lang, rows = _block_rows(_filtered(cfg, run, packs) if filtered else (cfg.get("queries") or {}), roles)
-    if not any(role in rows for role in LIVE_ROLES):
+    if not any(role in rows for role in wanted):
         return {**base, "message": "В домене «Нагрузка» сервиса нет запросов RPS, ошибок, p95 и пользователей: установите пакет запросов инструмента"}
 
     def read(rows_: dict, lang_: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
         series: dict[str, Any] = {}
         errors: list[str] = []
-        for role in LIVE_ROLES:
+        for role in wanted:
             row = rows_.get(role)
             if row is None:
                 continue
@@ -289,7 +297,9 @@ def live_snapshot(run: RunRecord, tools: dict[str, ToolTemplate], now: Optional[
     out: dict[str, Any] = {**base, "ok": True, "series": series, "instances": instances, "filtered": filtered,
                            "mode": "filtered" if filtered else "plain"}
     rps = series.get("lt.rps_total")
-    # The first full read decides whether the tool tagged this run; later reads keep that choice.
+    used_rows = rows
+    both_empty = False
+    # A full read decides whether the tool tagged this run; reads of new points keep that choice.
     if filtered and not since and not mode and rps is not None and not rps["points"]:
         plain_lang, plain_rows = _block_rows(cfg.get("queries") or {}, roles)
         plain = plain_rows.get("lt.rps_total")
@@ -299,15 +309,78 @@ def live_snapshot(run: RunRecord, tools: dict[str, ToolTemplate], now: Optional[
             plain_points = []
         if plain_points:
             series, instances, errors = read(plain_rows, plain_lang)
+            used_rows = plain_rows
             out.update(series=series, instances=instances, filtered=False, mode="plain", message=UNFILTERED_NOTE)
+        else:
+            # Nothing either way: show the query as the service has it, the one to compare with Grafana.
+            both_empty = True
+            used_rows = plain_rows if plain else rows
+    rps_row = used_rows.get("lt.rps_total")
+    # The query actually read, to compare with the panel in Grafana when the charts stay empty.
+    out["rps_query"] = {"label": rps_row[0], "query": rps_row[1]} if rps_row else None
     last = (out["series"].get("lt.rps_total") or {}).get("points") or []
     out["fresh_at"] = last[-1][0] / 1000 if last else None
+    started = any(inst.started_at for inst in run.instances)
+    if rps_row and not since and not last and not errors and started and current - run_start > NO_DATA_AFTER_SEC:
+        if both_empty:
+            tag = f" ни с тегом прогона {run.run_tag}, ни без него"
+        elif out["mode"] == "filtered":
+            tag = f" с тегом прогона {run.run_tag}"
+        else:
+            tag = ""
+        out["message"] = (
+            f"Запрос «{rps_row[0]}» не вернул точек за {_clock(fetch_start)}–{_clock(end)}{tag}: проверьте источник "
+            "домена «Нагрузка» (датасорс, база или bucket) и переменные пакета, например testid; текст запроса — ниже"
+        )
     if errors and not out["series"]:
         out["ok"] = False
         out["message"] = "; ".join(errors)[:600]
     elif errors:
         out["message"] = (out["message"] + "; " if out["message"] else "") + "; ".join(errors)[:400]
     return out
+
+
+BRIEF_ROLES = ("lt.rps_total", "lt.error_rate_pct")
+BRIEF_WINDOW_MIN = 15
+BRIEF_CACHE_SEC = 10.0
+_brief_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_brief_lock = threading.Lock()
+
+
+def live_brief(run: RunRecord, tools: dict[str, ToolTemplate], now: Optional[float] = None) -> dict[str, Any]:
+    """RPS and errors of the last 15 minutes for the dashboard, cached for a few seconds per run.
+
+    Several open dashboards ask every 15 s; one read of the metrics storage serves them all.
+    """
+    current = time.monotonic()
+    with _brief_lock:
+        hit = _brief_cache.get(run.run_id)
+        if hit is not None and current - hit[0] < BRIEF_CACHE_SEC:
+            return hit[1]
+    snapshot = live_snapshot(run, tools, now, window_min=BRIEF_WINDOW_MIN, roles=BRIEF_ROLES, with_instances=False)
+    series = snapshot.get("series") or {}
+    rps = (series.get("lt.rps_total") or {}).get("points") or []
+    errors = (series.get("lt.error_rate_pct") or {}).get("points") or []
+    brief = {
+        "ok": bool(snapshot.get("ok")),
+        "message": snapshot.get("message") or "",
+        "rps": rps[-1][1] if rps else None,
+        "errors": errors[-1][1] if errors else None,
+        "points": rps,
+        "fresh_at": snapshot.get("fresh_at"),
+        "start": snapshot.get("start"),
+        "end": snapshot.get("end"),
+    }
+    with _brief_lock:
+        if len(_brief_cache) >= 256:
+            _brief_cache.clear()
+        _brief_cache[run.run_id] = (current, brief)
+    return brief
+
+
+def clear_brief_cache() -> None:
+    with _brief_lock:
+        _brief_cache.clear()
 
 
 def report_filter(run: RunRecord, tools: dict[str, ToolTemplate], start: float, end: float) -> tuple[list[str], str]:
@@ -528,6 +601,7 @@ __all__ = [
     "clamp_hours",
     "clear_windows_cache",
     "finished_runs",
+    "live_brief",
     "live_snapshot",
     "run_events",
     "sla_lines",

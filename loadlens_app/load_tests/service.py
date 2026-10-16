@@ -796,6 +796,50 @@ def run_view(run: RunRecord, cat: Optional[Catalog] = None, with_report: bool = 
     }
 
 
+ACTIVE_MAX_LIMIT = 20
+
+
+def active_runs(services: Optional[list[str]], limit: int, user: str, is_admin: bool, with_live: bool) -> dict[str, Any]:
+    """Runs going on now for the dashboard: the newest ``limit`` of them in brief and how many there are.
+
+    ``with_live`` adds RPS and errors of the last 15 minutes of the runs that generate load. A user may
+    stop his own runs from the dashboard (an admin any run); the run page keeps the usual rule.
+    """
+    from .live import live_brief
+
+    runs = get_store().list(limit=200, statuses=RUN_ACTIVE, services=services or None)
+    limit = max(0, min(int(limit), ACTIVE_MAX_LIMIT))
+    tools = load_catalog().tools if runs and limit and with_live else {}
+    out: list[dict[str, Any]] = []
+    for run in runs[:limit]:
+        loading = run.status in RUN_LOADING
+        view: dict[str, Any] = {
+            "run_id": run.run_id,
+            "run_name": run.run_name,
+            "service": run.service,
+            "status": run.status,
+            "status_title": RUN_STATUS_TITLES.get(run.status, run.status),
+            "message": run.message,
+            "owner": run.owner,
+            "loading": loading,
+            "created_at": _iso(run.created_at),
+            "started_at": _iso(run.started_at),
+            "max_seconds": int(run.options.get("max_seconds") or 0),
+            "instances_total": len(run.instances),
+            "instances_running": sum(1 for inst in run.instances if inst.status == "running"),
+            "can_stop": loading and run.stop_all_at is None and (is_admin or (bool(user) and run.owner == user)),
+            "url": f"/launch/{run.run_id}",
+            "live": None,
+        }
+        if with_live and loading and any(inst.started_at for inst in run.instances):
+            try:
+                view["live"] = live_brief(run, tools)
+            except Exception as exc:  # the dashboard shows the run without numbers
+                view["live"] = {"ok": False, "message": str(exc)[:200], "rps": None, "errors": None, "points": []}
+        out.append(view)
+    return {"total": len(runs), "runs": out}
+
+
 def launch_options() -> dict[str, Any]:
     cat = load_catalog()
     try:
@@ -855,6 +899,7 @@ __all__ = [
     "instance_plan",
     "instance_ref",
     "instance_logs",
+    "active_runs",
     "launch_options",
     "list_scripts",
     "load_catalog",

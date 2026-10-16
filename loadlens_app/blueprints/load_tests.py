@@ -125,6 +125,29 @@ def list_runs():
     return jsonify({"runs": [service.run_view(run, catalog, with_report=False) for run in runs]}), 200
 
 
+@load_tests_bp.route("/load_tests/active", methods=["GET"])
+def active():
+    """Идущие прогоны активной области для дэшборда и счётчика в меню.
+
+    ``limit`` — сколько прогонов отдать подробно (0 — только число), ``live=1`` — RPS и ошибки за 15 минут.
+    """
+    try:
+        limit = int(request.args.get("limit", "5") or 0)
+    except ValueError:
+        return jsonify({"error": "limit должен быть целым числом"}), 400
+    auth = current_auth()
+    data = service.active_runs(
+        _resolve_services_filter(_active_project_area()) or None,
+        limit,
+        _owner(),
+        auth.role >= Role.ADMIN,
+        request.args.get("live") == "1",
+    )
+    if data["total"]:
+        ensure_watcher()
+    return jsonify(data), 200
+
+
 @load_tests_bp.route("/load_tests/runs/<run_id>", methods=["GET"])
 def get_run(run_id: str):
     run, missing = _run_or_404(run_id)

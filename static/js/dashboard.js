@@ -8,6 +8,12 @@
   const JOBS_LIMIT = 20;
   const JOBS_SHOWN = 5;
   const CLOCK_MS = 60000;
+  const ACTIVE_POLL_MS = 15000;
+  const ACTIVE_IDLE_MS = 60000;
+  const ACTIVE_SHOWN = 5;
+  const ACTIVE_SPARK = { width: 120, height: 32, pad: 3 };
+  // Pill tone of a load test run going on now (the same as on the run page).
+  const RUN_TONE = { starting: 'running', running: 'running', stopping: 'warn', draining: 'running', reporting: 'running' };
   const NA_VERDICT = 'Недостаточно данных';
   // Verdicts of the weekly chart, bottom to top, with the status tone of each.
   const WEEK_SERIES = [
@@ -26,6 +32,9 @@
   let lastData = null;
   let jobsTimer = 0;
   let runningJobs = null;
+  let activeTimer = 0;
+  let activeState = null;
+  let lastActive = null;
 
   // ---- pure helpers (LL.dashboard._internals) ----------------------------------------------
   function finite(value) {
@@ -252,6 +261,87 @@
       value: jobs.length >= JOBS_LIMIT ? `${JOBS_LIMIT}+` : String(jobs.length),
       note: `${first.run_name || '(без названия)'} · ${Math.round(finite(first.progress) || 0)}%`
     };
+  }
+
+  // «12 мин из 30 мин»: how long the load goes against the run's limit; before the start only the limit.
+  function elapsedText(startedAt, maxSeconds, now) {
+    const max = finite(maxSeconds);
+    const limit = max && max > 0 ? LL.formatDuration(max * 1000) : '';
+    const started = startedAt ? Date.parse(startedAt) : NaN;
+    if (!Number.isFinite(started)) return limit ? `лимит ${limit}` : '';
+    const gone = LL.formatDuration(Math.max(0, (now === undefined ? Date.now() : now) - started));
+    return limit ? `${gone} из ${limit}` : gone;
+  }
+  function errorsText(value) {
+    const n = finite(value);
+    if (n === null) return '';
+    return `${n.toFixed(n > 0 && n < 1 ? 2 : 1)}%`;
+  }
+  // One run of /load_tests/active as the dashboard shows it.
+  function activeRunSummary(run, now) {
+    const r = run || {};
+    const total = finite(r.instances_total) || 0;
+    const going = finite(r.instances_running) || 0;
+    const live = r.live && typeof r.live === 'object' ? r.live : null;
+    let liveText = '';
+    let liveNote = '';
+    if (live && live.ok && finite(live.rps) !== null) {
+      liveText = `${formatRps(live.rps)} RPS`;
+      if (finite(live.errors) !== null) liveText += ` · ошибки ${errorsText(live.errors)}`;
+    } else if (live && live.message) {
+      liveNote = String(live.message);
+    } else if (r.loading) {
+      liveNote = 'Метрики появятся после старта нагрузки';
+    } else {
+      liveNote = String(r.message || '');
+    }
+    return {
+      name: r.run_name || '(без названия)',
+      url: r.url || `/launch/${encodeURIComponent(r.run_id || '')}`,
+      status: r.status_title || r.status || '',
+      tone: RUN_TONE[r.status] || 'na',
+      meta: [r.service, r.owner].filter(Boolean).join(' · '),
+      progress: [
+        total > 1 ? `инстансы: ${going} из ${total}` : '',
+        r.loading ? elapsedText(r.started_at, r.max_seconds, now) : ''
+      ].filter(Boolean).join(' · '),
+      liveText,
+      liveNote,
+      points: live && Array.isArray(live.points) ? live.points : [],
+      canStop: !!r.can_stop
+    };
+  }
+  function activeTile(data, now) {
+    if (!data || !Array.isArray(data.runs)) return { value: '—', note: 'список прогонов недоступен' };
+    const total = finite(data.total) || 0;
+    if (!total) return { value: '0', note: 'нет идущих прогонов' };
+    const first = data.runs[0];
+    if (!first) return { value: String(total), note: '' };
+    const elapsed = first.loading ? elapsedText(first.started_at, first.max_seconds, now) : (first.status_title || '');
+    return { value: String(total), note: [first.run_name || '(без названия)', elapsed].filter(Boolean).join(' · ') };
+  }
+  // RPS of the last minutes as an inline SVG: a line over a filled area from zero; '' below two points.
+  function liveSpark(points, width, height) {
+    const pts = (Array.isArray(points) ? points : [])
+      .filter((p) => Array.isArray(p) && finite(p[0]) !== null && finite(p[1]) !== null)
+      .map((p) => [Number(p[0]), Number(p[1])]);
+    if (pts.length < 2) return '';
+    const w = width || ACTIVE_SPARK.width;
+    const h = height || ACTIVE_SPARK.height;
+    const pad = ACTIVE_SPARK.pad;
+    const x0 = pts[0][0];
+    const spanX = pts[pts.length - 1][0] - x0 || 1;
+    const low = Math.min(0, ...pts.map((p) => p[1]));
+    const spanY = Math.max(...pts.map((p) => p[1])) - low || 1;
+    const coords = pts.map(([x, y]) => [
+      (pad + ((x - x0) / spanX) * (w - 2 * pad)).toFixed(1),
+      (h - pad - ((y - low) / spanY) * (h - 2 * pad)).toFixed(1)
+    ]);
+    const line = coords.map((c) => c.join(',')).join(' ');
+    const base = (h - pad).toFixed(1);
+    const area = `${line} ${coords[coords.length - 1][0]},${base} ${coords[0][0]},${base}`;
+    return `<svg class="dash-live-spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true">`
+      + `<polygon class="area" points="${area}"/><polyline class="line" points="${line}"/></svg>`;
   }
 
   // ---- rendering ----------------------------------------------------------------------------
@@ -484,6 +574,77 @@
     if (jobs.length) jobsTimer = setTimeout(loadJobs, JOBS_POLL_MS);
   }
 
+  function activeRowHtml(run, now) {
+    const s = activeRunSummary(run, now);
+    const live = s.liveText
+      ? `<div class="dash-active-live" title="RPS и доля ошибок за последние 15 минут">${liveSpark(s.points)}<span class="dash-active-value">${esc(s.liveText)}</span></div>`
+      : `<div class="dash-active-live dim">${esc(s.liveNote)}</div>`;
+    const stop = s.canStop
+      ? `<button type="button" class="btn btn-sm btn-danger" data-stop-run="${esc(run.run_id || '')}" data-run-name="${esc(s.name)}">Остановить</button>`
+      : '';
+    return `<div class="dash-active-row"><span class="pill ${s.tone}">${esc(s.status)}</span>`
+      + `<div class="dash-active-main"><a class="name" href="${esc(s.url)}">${esc(s.name)}</a>`
+      + `${s.meta ? `<div class="meta">${esc(s.meta)}</div>` : ''}${s.progress ? `<div class="meta">${esc(s.progress)}</div>` : ''}</div>`
+      + `${live}<div class="dash-active-actions"><a class="btn btn-sm" href="${esc(s.url)}">Открыть</a>${stop}</div></div>`;
+  }
+  function renderActive(data) {
+    const tile = activeTile(data);
+    setText('kpiActiveValue', tile.value);
+    setText('kpiActiveNote', tile.note);
+    const section = $('activeRuns');
+    if (!section) return;
+    const runs = data && Array.isArray(data.runs) ? data.runs : [];
+    section.hidden = !runs.length;
+    $('activeList').innerHTML = runs.slice(0, ACTIVE_SHOWN).map((r) => activeRowHtml(r)).join('');
+    const rest = (data ? finite(data.total) || 0 : 0) - Math.min(runs.length, ACTIVE_SHOWN);
+    $('activeMore').hidden = rest <= 0;
+    $('activeMore').innerHTML = rest > 0 ? `и ещё ${rest} — <a href="/launch#runsPanel">все прогоны</a>` : '';
+  }
+  // Polls every 15 s while runs go on, every minute otherwise. A run that changes its status or ends
+  // may have started or saved a report, so report jobs and the summary reload too.
+  async function loadActive() {
+    clearTimeout(activeTimer);
+    let data = null;
+    try {
+      const resp = await fetch(`/load_tests/active?limit=${ACTIVE_SHOWN}&live=1`);
+      if (resp.ok) data = await resp.json();
+    } catch (e) {
+      data = null; // auxiliary block
+    }
+    lastActive = data;
+    renderActive(data);
+    if (data) {
+      if (LL.activeRuns) LL.activeRuns.show(data.total);
+      const state = (Array.isArray(data.runs) ? data.runs : []).map((r) => `${r.run_id}:${r.status}`).join(' ');
+      if (activeState !== null && state !== activeState) {
+        loadJobs();
+        loadDashboard({ quiet: true });
+      }
+      activeState = state;
+    }
+    activeTimer = setTimeout(loadActive, data && data.total ? ACTIVE_POLL_MS : ACTIVE_IDLE_MS);
+  }
+  async function stopActiveRun(runId, name) {
+    const ok = await ui.confirm({
+      title: `Остановить прогон «${name}»`,
+      message: 'Всем инстансам уйдёт сигнал остановки (CI-пайплайнам — отмена); не завершившиеся за отведённое время будут убиты. Отчёт построится по уже собранным метрикам.',
+      confirmText: 'Остановить',
+      danger: true
+    });
+    if (!ok) return;
+    try {
+      const resp = await fetch(`/load_tests/runs/${encodeURIComponent(runId)}/stop`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+      });
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(body.error || `HTTP ${resp.status}`);
+      ui.toast('Остановка запрошена', { tone: 'ok' });
+    } catch (e) {
+      ui.toast(`Не удалось остановить: ${e.message}`, { tone: 'error' });
+    }
+    loadActive();
+  }
+
   async function seedDemo(button) {
     button.disabled = true;
     ui.toast('Создаём демонстрационный прогон…', { tone: 'info', timeout: 3000 });
@@ -557,7 +718,13 @@
       heroKpis,
       kpiTiles,
       jobsTile,
-      serviceHistory
+      serviceHistory,
+      elapsedText,
+      errorsText,
+      activeRunSummary,
+      activeTile,
+      liveSpark,
+      activeRowHtml
     }
   };
 
@@ -567,11 +734,22 @@
     ui.theme.onChange(() => { recolorWeeks(); ui.restyleCharts(); });
     loadDashboard();
     loadJobs();
+    if (LL.can('engineer') && $('activeRuns')) {
+      // The dashboard reads the running load tests itself and passes their number to the menu badge.
+      if (LL.activeRuns) LL.activeRuns.claim();
+      $('activeList').addEventListener('click', (ev) => {
+        const btn = ev.target && ev.target.closest ? ev.target.closest('[data-stop-run]') : null;
+        if (btn) stopActiveRun(btn.dataset.stopRun, btn.dataset.runName || '');
+      });
+      loadActive();
+    }
     // Relative times («5 мин назад») age while the page stays open.
     setInterval(() => {
       if (!lastData) return;
       renderTiles(lastData);
       renderHero(lastData.last_run, lastData.kpi);
     }, CLOCK_MS);
+    // Elapsed times of the running tests age between the polls too.
+    setInterval(() => { if (lastActive) renderActive(lastActive); }, CLOCK_MS);
   });
 })();

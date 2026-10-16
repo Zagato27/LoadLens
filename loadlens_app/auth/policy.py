@@ -168,6 +168,7 @@ POLICY: dict[str, Rule] = {
     "load_tests.preview": _write(E),  # validates the form and renders commands, starts nothing
     "load_tests.create": _write(E, "load_test.start"),
     "load_tests.list_runs": _read(E),
+    "load_tests.active": _read(E),
     "load_tests.get_run": _read(E),
     "load_tests.stop": _write(E, "load_test.stop"),
     "load_tests.logs": _read(E),
