@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 import re
-import threading
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Mapping, Optional
 
@@ -21,9 +20,11 @@ from loadlens_app.forecast import (
     forecast_status,
     list_forecast_reports,
 )
-from loadlens_app.forecast_confluence import load_forecast_publication, publish_forecast
+# publish_forecast runs in loadlens_app.tasks, which looks it up here (tests replace it here).
+from loadlens_app.forecast_confluence import load_forecast_publication, publish_forecast  # noqa: F401
 from loadlens_app.forecast_explanation import ExplanationError, ExplanationView, explanation_view, generate_explanation
-from loadlens_app.jobs import JOB_KIND_FORECAST_CONFLUENCE, JOB_STATUS_DONE, JOB_STATUS_ERROR, job_store
+from loadlens_app import job_runner, tasks
+from loadlens_app.jobs import JOB_KIND_FORECAST_CONFLUENCE, job_store
 from loadlens_app.limits import LimitError, check_job_slot
 
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -208,17 +209,19 @@ def _failure_message(job_id: str) -> str:
 
 
 def _publish_in_background(job_id: str, run_id: str, inputs: ForecastInputs, source_url: str) -> None:
-    def _progress(message: str, pct: Optional[int] = None) -> None:
-        job_store.update(job_id, message=str(message), progress=pct if isinstance(pct, int) else None)
+    """Starts loadlens_app.tasks.publish_forecast_task, which calls publish_forecast of this module.
 
-    def _runner() -> None:
-        try:
-            result = publish_forecast(run_id, inputs.target_rps, inputs.headroom_pct, inputs.cpu_ceiling_pct, source_url, _progress)
-            job_store.update(job_id, status=JOB_STATUS_DONE, progress=100, message="Готово", page_url=result["page_url"], page_id=result["page_id"])
-        except Exception as exc:
-            job_store.update(job_id, status=JOB_STATUS_ERROR, message=_failure_message(job_id), error=str(exc))
-
-    threading.Thread(target=_runner, daemon=True).start()
+    The job's runner decides where it runs: a job created with ``job_runner.create_job`` may go to the
+    Celery worker, one created with ``job_store.create`` (a thread job) runs in a thread of this process.
+    """
+    job_runner.submit(
+        tasks.publish_forecast_task, job_store.get(job_id) or job_id,
+        run_id=run_id,
+        target_rps=inputs.target_rps,
+        headroom_pct=inputs.headroom_pct,
+        cpu_ceiling_pct=inputs.cpu_ceiling_pct,
+        source_url=source_url,
+    )
 
 
 @forecast_bp.route("/forecast/<run_id>/confluence", methods=["POST"])
