@@ -159,6 +159,10 @@ services:
         source: ../metrics_config_runtime.json
         target: /app/metrics_config_runtime.json
         read_only: true
+      # Reports with the GigaChat provider are built here and need the same mTLS certificate and key as the app.
+      - ../AI/GigaChat:/app/AI/GigaChat:ro
+    # SIGTERM starts a warm shutdown: running reports may finish before the container is killed.
+    stop_grace_period: 2m
     deploy:
       resources:
         limits:
