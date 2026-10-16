@@ -117,7 +117,7 @@
         <button type="button" class="seg-btn active" data-target="web" aria-pressed="true">Веб-отчёт</button>
         <button type="button" class="seg-btn" data-target="confluence" aria-pressed="false">Веб-отчёт + Confluence (по шаблону)</button>
       </div>
-      <div class="field-hint" id="targetHint">Веб-отчёт доступен всегда. Вариант с Confluence дополнительно копирует страницу-шаблон из настроек сервиса и показывает те же этапы сбора и анализа. Для графиков Grafana и логов Loki нужен запущенный Celery-воркер.</div>
+      <div class="field-hint" id="targetHint">Веб-отчёт доступен всегда. Вариант с Confluence дополнительно копирует страницу-шаблон из настроек сервиса и показывает те же этапы сбора и анализа. Графики Grafana и логи Loki для неё скачивает сама задача отчёта.</div>
     </fieldset>
 
     <fieldset class="form-section">
