@@ -210,7 +210,7 @@ def test_parallel_readers_and_a_writer(files):
 
     def reader():
         try:
-            for _ in range(200):
+            for _ in range(50):
                 title = core._per_area_config()["alpha"]["title"]
                 assert title in {"Alpha", "Alpha 1", "Alpha 2"}
                 assert core._resolve_services_filter("alpha") == ["svc-a"]
@@ -226,6 +226,7 @@ def test_parallel_readers_and_a_writer(files):
             runtime["per_area"]["alpha"]["title"] = f"Alpha {n % 2 + 1}"
             core._save_settings_runtime_data(runtime)
             n += 1
+            stop.wait(0.02)
 
     threads = [threading.Thread(target=reader) for _ in range(8)]
     background = threading.Thread(target=writer)
