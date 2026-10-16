@@ -76,6 +76,16 @@ def _storage_breaker_closed():
 
 
 @pytest.fixture(autouse=True)
+def _jobs_run_in_threads_by_default(monkeypatch):
+    """A shell with CELERY_BROKER_URL and eager mode off must not send test jobs to a real broker.
+
+    Tests of the Celery path set LOADLENS_JOB_RUNNER (and the CELERY_* variables) themselves.
+    """
+    monkeypatch.setenv("LOADLENS_JOB_RUNNER", "thread")
+    monkeypatch.setenv("CELERY_TASK_ALWAYS_EAGER", "1")
+
+
+@pytest.fixture(autouse=True)
 def _auth_off_by_default(monkeypatch):
     """The API tests call endpoints directly; tests/test_auth*.py switch authentication back on."""
     monkeypatch.setenv("LOADLENS_AUTH_ENABLED", "0")

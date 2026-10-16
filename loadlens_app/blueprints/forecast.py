@@ -245,7 +245,8 @@ def post_forecast_confluence(run_id: str):
         check_job_slot(*job_store.running_counts(owner))
     except LimitError as exc:
         return jsonify({"error": str(exc), "code": exc.code}), exc.status_code
-    job = job_store.create(JOB_KIND_FORECAST_CONFLUENCE, run_name=run_name, message="Публикация прогноза в Confluence…", owner=owner)
+    # The runner the job is registered for (Celery worker or a thread here) decides where it is published.
+    job = job_runner.create_job(JOB_KIND_FORECAST_CONFLUENCE, run_name=run_name, message="Публикация прогноза в Confluence…", owner=owner)
     job_store.update(job.job_id, report_url=f"/forecasting/{run_id}")
     _publish_in_background(job.job_id, run_id, inputs, f"{public_base_url()}/forecasting/{run_id}")
     return jsonify({"status": "accepted", "job_id": job.job_id, "message": "Публикация прогноза в Confluence началась."}), 200

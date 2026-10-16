@@ -648,8 +648,26 @@ def forecast_pages(monkeypatch):
     return published
 
 
+def test_forecast_publication_route_sends_the_job_to_the_worker(client, web, worker, broker, celery_mode, forecast_pages, monkeypatch, refreshes, table):
+    response = client.post("/forecast/abc/confluence", json={"run_name": "nightly", "target_rps": 200, "cpu_ceiling_pct": 70})
+
+    assert response.status_code == 200
+    body = response.get_json()
+    [sent] = broker.sent
+    assert sent.name == "loadlens.publish_forecast" and sent.options["queue"] == "reports"
+    assert sent.kwargs["job_id"] == body["job_id"] and sent.kwargs["source_url"] == "http://localhost/forecasting/abc"
+    assert table.rows[body["job_id"]]["runner"] == jobs.JOB_RUNNER_CELERY
+    assert forecast_pages == []
+
+    deliver(monkeypatch, worker, sent.name, sent.kwargs)
+
+    row = table.rows[body["job_id"]]
+    assert (row["status"], row["page_url"]) == ("done", "http://wiki/7")
+    assert row["report_url"] == "/forecasting/abc"
+
+
 def test_a_forecast_thread_job_is_published_in_a_thread_even_in_celery_mode(web, broker, threads, celery_mode, forecast_pages):
-    # post_forecast_confluence creates its job with job_store.create, i.e. as a thread job of this process.
+    # A job registered with job_store.create is a thread job of this process, whatever the mode says.
     job = web.create(jobs.JOB_KIND_FORECAST_CONFLUENCE, run_name="nightly", owner="eng")
     inputs = forecast_api.ForecastInputs(target_rps=200.0, headroom_pct=20.0, cpu_ceiling_pct=None)
     forecast_api._publish_in_background(job.job_id, "abc", inputs, "http://localhost/forecasting/abc")
