@@ -529,6 +529,11 @@ DURING_JOB_ENDPOINTS = (
     "/static/css/app.css",
 )
 JOB_STATUS_ROW = "/job_status/<id>"
+# Per client and request; scaled by --concurrency so that 1 and 4 clients send about the same number of
+# requests per second. The Werkzeug dev server closes every connection: at 60 connections/s a job of two
+# minutes leaves more sockets in TIME_WAIT than a busy Windows host has ephemeral ports.
+DEFAULT_PAUSE_MS = 50.0
+NO_ANSWER_WARN_SHARE = 0.01
 # Progress marks of AI/pipeline.py: collection runs 10-45 %, domain analyses 47-80 %, the final analysis from 83 %.
 JOB_PHASES = (("сбор метрик и подготовка", 47), ("анализ ИИ по доменам", 83), ("итоговый анализ и сохранение", None))
 DURING_COLUMNS = (
@@ -916,6 +921,13 @@ def render_job_summary(job: dict) -> str:
         )
     if job.get("error"):
         lines.append(f"- Ошибка: {job['error']}")
+    requests_total, no_answer = int(job.get("requests") or 0), int(job.get("no_answer") or 0)
+    if requests_total and no_answer > NO_ANSWER_WARN_SHARE * requests_total:
+        lines.append(
+            f"- Без ответа (статус 0) {no_answer} из {requests_total} запросов: скорее всего, исчерпаны временные порты "
+            "(`netstat -ano | grep -c TIME_WAIT`). Числа не годятся для сравнения: подождите пару минут, увеличьте "
+            "`--pause-ms` или уменьшите `--concurrency` и повторите"
+        )
     few = [row["path"] for row in job.get("rows") or [] if 0 < int(row.get("job_count") or 0) < 10]
     if few:
         lines.append("- Мало замеров во время задачи (меньше 10): " + ", ".join(f"`{p}`" for p in few))
@@ -1018,6 +1030,8 @@ def during_job(args: argparse.Namespace) -> int:
         "run_name": run_name,
         "message": final.get("message"),
         "error": final.get("error") if final.get("status") == "error" else None,
+        "requests": sum(int(item.get("count") or 0) for item in (*idle.values(), *during.values())),
+        "no_answer": sum(int((item.get("statuses") or {}).get("0", 0)) for item in (*idle.values(), *during.values())),
     }
     if final.get("status") == "done":
         job["report"] = _check_report(session, final, run_name, csrf, args.keep_report)
@@ -1094,7 +1108,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     job.add_argument("--run-name", default="", help="run name of the report (default bench-job-<time>)")
     job.add_argument("--no-llm", action="store_true", help="use_llm false: collection and saving only")
     job.add_argument("--keep-report", action="store_true", help="keep the report run (default: DELETE /runs/<name> after the check)")
-    job.add_argument("--pause-ms", type=float, default=50.0, help="pause of every client after each request, ms")
+    job.add_argument("--pause-ms", type=float, default=None,
+                     help="pause of every client after each request, ms (default 50 x --concurrency: the same request rate for any number of clients)")
     job.add_argument("--poll-sec", type=float, default=1.0, help="interval of the /job_status polls")
     job.add_argument("--job-timeout", type=float, default=900.0, help="give up waiting for the job after this many seconds")
     job.add_argument("--llm-stub", default=f"http://{STUB_HOST}:{STUB_PORTS['llm']}", help="LLM stub to count calls on ('' to skip)")
@@ -1105,6 +1120,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         args.base = f"http://127.0.0.1:{5070 + args.sandbox}"
     if args.rounds < 1 or args.concurrency < 1 or args.warmup < 0:
         parser.error("--rounds and --concurrency must be positive, --warmup not negative")
+    if args.pause_ms is None:
+        args.pause_ms = DEFAULT_PAUSE_MS * args.concurrency
     if args.window_min < 1 or args.job_timeout <= 0 or args.poll_sec <= 0 or args.pause_ms < 0:
         parser.error("--window-min, --job-timeout and --poll-sec must be positive, --pause-ms not negative")
     if sum(map(bool, (args.explain, args.setup_stubs, args.during_job))) > 1:

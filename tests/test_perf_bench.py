@@ -781,6 +781,8 @@ def test_csrf_token_window_and_arguments():
     assert convert_to_timestamp(end) - convert_to_timestamp(start) == 3_600_000
     args = bench.parse_args(["--sandbox", "1", "--during-job"])
     assert (args.service, args.window_min, args.test_type, args.keep_report, args.pause_ms) == ("svc01", 60, "step", False, 50.0)
+    assert bench.parse_args(["--during-job", "--concurrency", "4"]).pause_ms == 200.0  # same request rate as one client
+    assert bench.parse_args(["--during-job", "--concurrency", "4", "--pause-ms", "0"]).pause_ms == 0.0
     assert bench.selected_endpoints(args, bench.DURING_JOB_ENDPOINTS) == list(bench.DURING_JOB_ENDPOINTS)
     assert bench.selected_endpoints(bench.parse_args(["--during-job", "--only", "runs"]), bench.DURING_JOB_ENDPOINTS) == ["/runs?limit=20", "/runs?limit=20&sort=max_rps"]
     for clash in (["--during-job", "--explain"], ["--setup-stubs", "--during-job"], ["--during-job", "--window-min", "0"]):
@@ -955,7 +957,13 @@ def test_job_summary_lists_duration_phases_stubs_and_report():
         "prometheus_stub": {"requests": {"query_range": 69}, "points": 99774},
         "report": {"run_name": "bench-job-1", "page_url": "/reports/r1", "page_status": 200, "llm_status": 200, "domains": 7, "final_verdict": "Успешно", "deleted": 200},
         "rows": [{"path": "/x", "job_count": 3}, {"path": "/y", "job_count": 50}],
+        "requests": 1000, "no_answer": 10,
     }
+    assert "Без ответа" not in bench.render_job_summary(job)  # 1 %: within the noise
+    job["no_answer"] = 11
+    warned = [line for line in bench.render_job_summary(job).splitlines() if line.startswith("- Без ответа")]
+    assert warned and warned[0].startswith("- Без ответа (статус 0) 11 из 1000 запросов: скорее всего, исчерпаны временные порты")
+    job["no_answer"] = 0
     lines = bench.render_job_summary(job).splitlines()
     assert lines[0] == "- Задача `abc` (thread): done, 47.6 с по опросу `/job_status`, 47.0 с по `created_at`/`updated_at` задачи"
     assert lines[1] == "- Фазы: сбор метрик и подготовка 16.3 с · анализ ИИ по доменам 24.2 с"
