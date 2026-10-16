@@ -40,7 +40,9 @@ command with ``MSYS_NO_PATHCONV=1`` or use ``--only``.
 
 First an idle round: ``--concurrency`` clients (each keeps its connection where the server allows it, as a
 browser tab; the Werkzeug dev server closes every one) go ``--rounds`` times round DURING_JOB_ENDPOINTS
-with ``--pause-ms`` after each request. Then
+with ``--pause-ms`` after each request (default 50 ms per client, so 1 and 4 clients send about as many
+requests per second). Another idle round follows the job (``--no-idle-after`` skips it); the idle columns
+pool both, and the ratio of their p50 shows whether the machine got busier or quieter meanwhile. Then
 ``POST /create_report`` (``web_only``, ``use_llm``, service ``--service`` of the area, a ``--window-min``
 window ending now, run name ``bench-job-<time>``) and the same clients keep going until ``/job_status`` (polled
 every ``--poll-sec``, a row of its own) says done or error. Printed: the idle / during-job table (p50/p95,
@@ -534,6 +536,8 @@ JOB_STATUS_ROW = "/job_status/<id>"
 # minutes leaves more sockets in TIME_WAIT than a busy Windows host has ephemeral ports.
 DEFAULT_PAUSE_MS = 50.0
 NO_ANSWER_WARN_SHARE = 0.01
+# Idle p50 after the job / before it outside this range: other load came or went during the measurement.
+IDLE_DRIFT_OK = (0.77, 1.3)
 # Progress marks of AI/pipeline.py: collection runs 10-45 %, domain analyses 47-80 %, the final analysis from 83 %.
 JOB_PHASES = (("сбор метрик и подготовка", 47), ("анализ ИИ по доменам", 83), ("итоговый анализ и сохранение", None))
 DURING_COLUMNS = (
@@ -706,6 +710,16 @@ def during_rows(idle: dict[str, dict], during: dict[str, dict], paths: Sequence[
             "errors": int(before.get("errors", 0)) + int(now.get("errors", 0)),
         })
     return rows
+
+
+def idle_drift(before: dict[str, dict], after: dict[str, dict]) -> Optional[float]:
+    """Median over the endpoints of idle p50 after the job / before it: how much the machine changed meanwhile."""
+    ratios = [
+        after[path]["p50"] / before[path]["p50"]
+        for path in before
+        if path in after and before[path].get("p50") and after[path].get("p50")
+    ]
+    return round(percentile(ratios, 0.5), 2) if ratios else None
 
 
 def _cell(key: str, row: dict) -> str:
@@ -921,6 +935,10 @@ def render_job_summary(job: dict) -> str:
         )
     if job.get("error"):
         lines.append(f"- Ошибка: {job['error']}")
+    drift = job.get("idle_drift")
+    if drift is not None:
+        note = "" if IDLE_DRIFT_OK[0] <= drift <= IDLE_DRIFT_OK[1] else " — машина была занята неравномерно, повторите замер"
+        lines.append(f"- Idle до и после задачи (в таблице оба вместе): p50 после / до = {drift:.2f}×{note}")
     requests_total, no_answer = int(job.get("requests") or 0), int(job.get("no_answer") or 0)
     if requests_total and no_answer > NO_ANSWER_WARN_SHARE * requests_total:
         lines.append(
@@ -971,7 +989,7 @@ def during_job(args: argparse.Namespace) -> int:
     never = threading.Event()
     if args.warmup:
         cycle_clients(target, paths, args.concurrency, pause_sec=pause, stop=never, cycles=args.warmup)
-    idle = phase_stats(cycle_clients(target, paths, args.concurrency, pause_sec=pause, stop=never, cycles=args.rounds))
+    idle_before = cycle_clients(target, paths, args.concurrency, pause_sec=pause, stop=never, cycles=args.rounds)
 
     session = KeepAliveClient(target)
     page_status, _ms_, _app, page = session.request("GET", "/new")
@@ -1014,6 +1032,13 @@ def during_job(args: argparse.Namespace) -> int:
     ]
 
     final = watcher.final or {}
+    report = _check_report(session, final, run_name, csrf, args.keep_report) if final.get("status") == "done" else None
+    session.close()
+    idle_after: list = []
+    if not args.no_idle_after:
+        print(f"idle after the job: {args.rounds} rounds", file=sys.stderr)
+        idle_after = cycle_clients(target, paths, args.concurrency, pause_sec=pause, stop=never, cycles=args.rounds)
+    idle = phase_stats([*idle_before, *idle_after])
     job: dict[str, Any] = {
         "job_id": job_id,
         "label": args.label,
@@ -1032,10 +1057,10 @@ def during_job(args: argparse.Namespace) -> int:
         "error": final.get("error") if final.get("status") == "error" else None,
         "requests": sum(int(item.get("count") or 0) for item in (*idle.values(), *during.values())),
         "no_answer": sum(int((item.get("statuses") or {}).get("0", 0)) for item in (*idle.values(), *during.values())),
+        "idle_drift": idle_drift(phase_stats(idle_before), phase_stats(idle_after)) if idle_after else None,
     }
-    if final.get("status") == "done":
-        job["report"] = _check_report(session, final, run_name, csrf, args.keep_report)
-    session.close()
+    if report is not None:
+        job["report"] = report
     rows = during_rows(idle, during, paths)
     job["rows"] = rows
 
@@ -1055,7 +1080,8 @@ def during_job(args: argparse.Namespace) -> int:
             "python": platform.python_version(), "platform": platform.platform(),
         }
         with open(args.json_path, "w", encoding="utf-8") as handle:
-            json.dump({"meta": meta, "idle": idle, "during": during, "per_phase": dict(per_phase), "rows": rows, "job": job},
+            json.dump({"meta": meta, "idle": idle, "idle_before": phase_stats(idle_before), "idle_after": phase_stats(idle_after),
+                       "during": during, "per_phase": dict(per_phase), "rows": rows, "job": job},
                       handle, ensure_ascii=False, indent=2)
     report_ok = (job.get("report") or {}).get("ok", False)
     return 0 if job["status"] == "done" and report_ok else 1
@@ -1108,6 +1134,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     job.add_argument("--run-name", default="", help="run name of the report (default bench-job-<time>)")
     job.add_argument("--no-llm", action="store_true", help="use_llm false: collection and saving only")
     job.add_argument("--keep-report", action="store_true", help="keep the report run (default: DELETE /runs/<name> after the check)")
+    job.add_argument("--no-idle-after", action="store_true", help="skip the second idle round after the job (idle = the round before it only)")
     job.add_argument("--pause-ms", type=float, default=None,
                      help="pause of every client after each request, ms (default 50 x --concurrency: the same request rate for any number of clients)")
     job.add_argument("--poll-sec", type=float, default=1.0, help="interval of the /job_status polls")

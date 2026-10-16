@@ -937,6 +937,8 @@ def test_during_job_runs_the_report_and_prints_both_tables(outcome, tmp_path, ca
     assert all(row["idle_p50"] is not None for row in saved["rows"][:-1])
     job = saved["job"]
     assert job["status"] == outcome and job["label"] == "thread" and job["server_duration_sec"] == 42.5
+    assert job["idle_drift"] is not None and saved["idle"]["/"]["count"] == 4  # two rounds before the job, two after
+    assert saved["idle_before"]["/"]["count"] == saved["idle_after"]["/"]["count"] == 2
     assert [name for name, _seconds in job["phases"]] == [name for name, _mark in bench.JOB_PHASES]
     tables = bench.parse_during_tables(printed)
     assert len(tables) == 1 and tables[0][-1]["path"] == bench.JOB_STATUS_ROW and tables[0][-1]["job_count"] >= 4
@@ -971,3 +973,14 @@ def test_job_summary_lists_duration_phases_stubs_and_report():
     assert lines[3] == "- Prometheus-заглушка: 69 запросов `query_range`, 99 774 точек"
     assert lines[4].startswith("- Отчёт `bench-job-1`: `/reports/r1` → 200, `/llm_reports` → 200, доменов 7, итог «Успешно»; удалён")
     assert lines[5] == "- Мало замеров во время задачи (меньше 10): `/x`"
+    job["idle_drift"] = 1.1
+    assert "- Idle до и после задачи (в таблице оба вместе): p50 после / до = 1.10×" in bench.render_job_summary(job).splitlines()
+    job["idle_drift"] = 1.6
+    assert "неравномерно" in bench.render_job_summary(job)
+
+
+def test_idle_drift_is_the_median_ratio_of_p50():
+    before = {"/a": {"p50": 10.0}, "/b": {"p50": 20.0}, "/c": {"p50": None}}
+    after = {"/a": {"p50": 12.0}, "/b": {"p50": 30.0}, "/c": {"p50": 5.0}, "/d": {"p50": 1.0}}
+    assert bench.idle_drift(before, after) == 1.35
+    assert bench.idle_drift(before, {}) is None
