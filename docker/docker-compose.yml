@@ -77,6 +77,12 @@ services:
       LOADLENS_RUN_MIGRATIONS: ${LOADLENS_RUN_MIGRATIONS:-1}
       # Watches load tests started from the UI right after a restart (0 switches the watcher off).
       LOADLENS_LOAD_TEST_WATCHER: ${LOADLENS_LOAD_TEST_WATCHER:-1}
+      # Where reports and Confluence publications run: auto, thread or celery (see docker/env.example).
+      LOADLENS_JOB_RUNNER: ${LOADLENS_JOB_RUNNER:-auto}
+      # Minutes without a heartbeat after which a worker job is marked as failed.
+      LOADLENS_JOB_STALE_MIN: ${LOADLENS_JOB_STALE_MIN:-15}
+      # Soft time limit of a report or publication task in the worker, seconds (hard limit 60 s later).
+      LOADLENS_REPORT_TASK_LIMIT_SEC: ${LOADLENS_REPORT_TASK_LIMIT_SEC:-3600}
     volumes:
       # Хранение рендеров/картинок между рестартами
       - ../data_collectors/temporary_files:/app/data_collectors/temporary_files
@@ -121,7 +127,19 @@ services:
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://:${REDIS_PASSWORD}@redis:6379/0}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://:${REDIS_PASSWORD}@redis:6379/0}
       CELERY_TASK_ALWAYS_EAGER: ${CELERY_TASK_ALWAYS_EAGER:-0}
-    command: celery -A loadlens_app.celery_app worker --loglevel=info
+      LOADLENS_JOB_RUNNER: ${LOADLENS_JOB_RUNNER:-auto}
+      LOADLENS_JOB_STALE_MIN: ${LOADLENS_JOB_STALE_MIN:-15}
+      LOADLENS_REPORT_TASK_LIMIT_SEC: ${LOADLENS_REPORT_TASK_LIMIT_SEC:-3600}
+    # Builds reports and publications (queue "reports") and runs the remaining tasks (queue "celery").
+    # A child process is replaced after 20 tasks: pandas does not give memory back to the system.
+    command: celery -A loadlens_app.celery_app worker --loglevel=info -Q reports,celery --concurrency ${WORKER_CONCURRENCY:-2} --max-tasks-per-child 20
+    healthcheck:
+      # Asks this worker for a pong through the broker; $$ leaves $HOSTNAME to the container shell.
+      test: ["CMD-SHELL", "celery -A loadlens_app.celery_app inspect ping -d celery@$$HOSTNAME --timeout 10"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 60s
     volumes:
       - ../data_collectors/temporary_files:/app/data_collectors/temporary_files
       # The worker imports the app package, which reads the same configuration (read-only here).
@@ -145,7 +163,7 @@ services:
       resources:
         limits:
           cpus: "${WORKER_CPUS:-1}"
-          memory: ${WORKER_MEMORY_LIMIT:-1g}
+          memory: ${WORKER_MEMORY_LIMIT:-2g}
           pids: 256
     restart: unless-stopped
 
