@@ -5,6 +5,10 @@ One command per sandbox (made by make_sandbox.py <N>: database ll_s<N> on 127.0.
 
     C:/Python312/python.exe tools/seed_bench_data.py --sandbox 1 --reset
     C:/Python312/python.exe tools/seed_bench_data.py --sandbox 1 --reset --runs 1000      # the large variant
+    C:/Python312/python.exe tools/seed_bench_data.py --sandbox 1 --runtime-only           # after make_sandbox.py
+
+About 45 s for the defaults and 2.5 min for 1000 runs. make_sandbox.py rewrites the sandbox runtime JSON
+on every run; ``--runtime-only`` puts the bench area back without touching the database.
 
 Any other local database: ``--dsn "host=127.0.0.1 port=55432 dbname=ll_s1 user=ltar password=..."`` (or
 ``--host/--port/--dbname/--user/--password``) plus ``--runtime-json <sandbox>/settings_runtime.json``.
@@ -590,6 +594,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     data.add_argument("--runtime-kb", type=int, default=227, help="pad settings_runtime.json to this size (0: no padding)")
     data.add_argument("--metrics-runtime-kb", type=int, default=54, help="pad metrics_config_runtime.json to this size (0: no padding)")
     data.add_argument("--reset", action="store_true", help="remove earlier bench rows first")
+    data.add_argument("--runtime-only", action="store_true",
+                      help="only rewrite the sandbox runtime JSON files (after make_sandbox.py reset them); the database is not touched")
     args = parser.parse_args(argv)
     if args.runs < 1 or args.services < 1 or args.minutes < 1 or args.series < 0 or args.jvm_series < 0:
         parser.error("--runs, --services and --minutes must be positive, --series and --jvm-series not negative")
@@ -600,15 +606,30 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             if not sandbox_app.is_dir():
                 parser.error(f"{sandbox_app} not found: run make_sandbox.py {args.sandbox} first or pass --runtime-json")
             args.runtime_json = sandbox_app / "settings_runtime.json"
-    if not args.dsn and not args.dbname:
+    if args.runtime_only and args.runtime_json is None:
+        parser.error("--runtime-only needs --sandbox N or --runtime-json")
+    if not args.dsn and not args.dbname and not args.runtime_only:
         parser.error("pass --sandbox N, --dsn or --dbname")
     if args.runtime_json is not None and args.metrics_runtime_json is None:
         args.metrics_runtime_json = args.runtime_json.with_name("metrics_config_runtime.json")
     return args
 
 
+def write_runtime_files(args: argparse.Namespace) -> None:
+    if args.runtime_json is None:
+        return
+    size = _rewrite_json(args.runtime_json, lambda data: bench_settings_runtime(data, args.area, args.services, args.runtime_kb))
+    print(f"runtime: area '{args.area}' with {args.services} services -> {args.runtime_json} ({size // 1024} KB)", file=sys.stderr)
+    if args.metrics_runtime_json is not None:
+        size = _rewrite_json(args.metrics_runtime_json, lambda data: bench_metrics_runtime(data, args.area, args.services, args.metrics_runtime_kb))
+        print(f"runtime: metrics services -> {args.metrics_runtime_json} ({size // 1024} KB)", file=sys.stderr)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.runtime_only:
+        write_runtime_files(args)
+        return 0
     import psycopg2
 
     now = datetime.fromisoformat(args.now) if args.now else datetime.now(timezone.utc)
@@ -635,12 +656,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         counts = table_counts(conn)
     finally:
         conn.close()
-    if args.runtime_json is not None:
-        size = _rewrite_json(args.runtime_json, lambda data: bench_settings_runtime(data, args.area, args.services, args.runtime_kb))
-        print(f"runtime: area '{args.area}' with {args.services} services -> {args.runtime_json} ({size // 1024} KB)", file=sys.stderr)
-        if args.metrics_runtime_json is not None:
-            size = _rewrite_json(args.metrics_runtime_json, lambda data: bench_metrics_runtime(data, args.area, args.services, args.metrics_runtime_kb))
-            print(f"runtime: metrics services -> {args.metrics_runtime_json} ({size // 1024} KB)", file=sys.stderr)
+    write_runtime_files(args)
     print(json.dumps({
         "inserted": {"metrics": metrics_rows, "llm_reports": report_rows_count},
         "tables": counts,

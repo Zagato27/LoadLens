@@ -178,6 +178,18 @@ def test_runtime_json_gets_the_bench_area_and_keeps_others():
     assert len(json.dumps(metrics, ensure_ascii=False, indent=2).encode()) >= 10 * 1024
 
 
+def test_runtime_only_rewrites_the_sandbox_files_without_a_database(tmp_path):
+    runtime = tmp_path / "settings_runtime.json"
+    runtime.write_text(json.dumps({"per_area": {"devstack": {"title": "Dev"}}}), encoding="utf-8")
+    assert seed.main(["--runtime-only", "--runtime-json", str(runtime), "--services", "3", "--runtime-kb", "0", "--metrics-runtime-kb", "0"]) == 0
+    data = json.loads(runtime.read_text(encoding="utf-8"))
+    assert sorted(data["per_area"]) == ["bench", "devstack"]
+    metrics = json.loads((tmp_path / "metrics_config_runtime.json").read_text(encoding="utf-8"))
+    assert sorted(metrics["bench"]["services"]) == ["svc01", "svc02", "svc03"]
+    with pytest.raises(SystemExit):
+        seed.parse_args(["--runtime-only"])
+
+
 def test_seed_refuses_a_remote_database():
     args = seed.parse_args(["--dsn", "host=db.example.org dbname=x user=y"])
     with pytest.raises(SystemExit):
