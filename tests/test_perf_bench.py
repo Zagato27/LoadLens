@@ -753,7 +753,9 @@ def test_phase_stats_rows_and_phases():
     ]
     window = bench.phase_stats(samples, since=1.0, until=5.0)
     assert window["/a"]["count"] == 2 and window["/a"]["errors"] == 1 and window["/a"]["statuses"] == {"200": 1, "500": 1}
-    assert window["/b"]["count"] == 1 and window["/b"]["app_p50"] is None
+    # an unanswered request (status 0, refused in a millisecond) is an error, not a latency sample
+    assert window["/b"]["count"] == 0 and window["/b"]["p50"] is None and window["/b"]["errors"] == 1
+    assert window["/a"]["p50"] == 25.0  # the 500 answered: its time counts
     idle = bench.phase_stats(samples, until=1.0)
     rows = bench.during_rows(idle, {**window, bench.JOB_STATUS_ROW: {"p50": 5.0, "p95": 6.0, "count": 3, "errors": 0}}, ["/a", "/b"])
     assert [row["path"] for row in rows] == ["/a", "/b", bench.JOB_STATUS_ROW]
@@ -767,7 +769,8 @@ def test_phase_stats_rows_and_phases():
     assert bench.job_phases(timeline[:3], None) == [("сбор метрик и подготовка", 12.5), ("анализ ИИ по доменам", None), ("итоговый анализ и сохранение", None)]
     table = bench.render_phase_table([("сбор", window), ("анализ", idle)], ["/a", "/b"]).splitlines()
     assert table[0] == "| Эндпоинт | сбор: p50 | сбор: p95 | сбор: n | анализ: p50 | анализ: p95 | анализ: n |"
-    assert table[3] == "| `/b` | 40.0 | 40.0 | 1 | — | — | 0 |"
+    assert table[2] == "| `/a` | 25.0 | 29.5 | 2 | 10.0 | 10.0 | 1 |"
+    assert table[3] == "| `/b` | — | — | 0 | — | — | 0 |"
 
 
 def test_csrf_token_window_and_arguments():

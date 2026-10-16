@@ -673,7 +673,8 @@ def cycle_clients(
 
 def phase_stats(samples: Sequence[tuple[str, float, tuple]], since: float = float("-inf"), until: float = float("inf")) -> dict[str, dict]:
     """Per path: client p50/p95/max, ``Server-Timing`` p50/p95, errors and statuses of the requests started
-    in ``[since, until)``."""
+    in ``[since, until)``. Times and ``count`` cover answered requests only: a connection refused for lack of
+    ephemeral ports fails in a millisecond and would pull the percentiles down; it counts as an error."""
     by_path: dict[str, list[tuple]] = {}
     for path, began, sample in samples:
         if since <= began < until:
@@ -681,9 +682,10 @@ def phase_stats(samples: Sequence[tuple[str, float, tuple]], since: float = floa
     out = {}
     for path, items in by_path.items():
         ok = [s for s in items if 0 < s[0] < 400]
-        app = summarize([s[2] for s in items if s[2] is not None])
+        answered = [s for s in items if s[0] != 0]
+        app = summarize([s[2] for s in answered if s[2] is not None])
         out[path] = {
-            **summarize([s[1] for s in items]),
+            **summarize([s[1] for s in answered]),
             "app_p50": app["p50"],
             "app_p95": app["p95"],
             "errors": len(items) - len(ok),
@@ -1055,7 +1057,7 @@ def during_job(args: argparse.Namespace) -> int:
         "run_name": run_name,
         "message": final.get("message"),
         "error": final.get("error") if final.get("status") == "error" else None,
-        "requests": sum(int(item.get("count") or 0) for item in (*idle.values(), *during.values())),
+        "requests": sum(sum((item.get("statuses") or {}).values()) for item in (*idle.values(), *during.values())),
         "no_answer": sum(int((item.get("statuses") or {}).get("0", 0)) for item in (*idle.values(), *during.values())),
         "idle_drift": idle_drift(phase_stats(idle_before), phase_stats(idle_after)) if idle_after else None,
     }
