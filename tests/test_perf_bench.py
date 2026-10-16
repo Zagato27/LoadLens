@@ -241,6 +241,79 @@ def test_table_with_comparison():
     assert "было" not in bench.render_table(after)
 
 
+PLAN = [
+    "Limit  (cost=294.56..294.57 rows=1 width=727) (actual time=20.251..20.254 rows=1 loops=1)",
+    "  Buffers: shared hit=3066 read=4",
+    "  ->  Seq Scan on llm_reports  (cost=0.03..292.90 rows=332 width=727) (actual time=0.223..19.870 rows=332 loops=1)",
+    "        Buffers: shared hit=3063",
+    "Planning:",
+    "  Buffers: shared hit=12",
+    "Planning Time: 5.432 ms",
+    "Execution Time: 17.100 ms",
+]
+
+
+def test_plan_summary():
+    assert bench.summarize_plan(PLAN) == {"top": "Limit", "planning_ms": 5.432, "execution_ms": 17.1, "buffers": 3070}
+    assert bench.summarize_plan([]) == {"top": "", "planning_ms": None, "execution_ms": None, "buffers": None}
+    assert bench.statement_kind("\n  WITH base AS (SELECT 1) SELECT 1") == "WITH"
+    assert bench.statement_kind("select 1") == "SELECT" and bench.statement_kind("") == ""
+
+
+class FakeCursor:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def mogrify(self, query, params=None):
+        return (query % tuple(repr(p) for p in params) if params else query).encode()
+
+    def execute(self, query, params=None):
+        self.conn.executed.append(query)
+
+    def fetchone(self):
+        return (1,)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.conn.cursor_closed += 1
+        return False
+
+
+class FakeConnection:
+    def __init__(self):
+        self.executed, self.events, self.cursor_closed, self.autocommit = [], [], 0, False
+
+    def cursor(self):
+        return FakeCursor(self)
+
+    def __enter__(self):
+        self.events.append("enter")
+        return self
+
+    def __exit__(self, *exc):
+        self.events.append("commit" if exc[0] is None else "rollback")
+        return False
+
+
+def test_recording_connection_keeps_statements_and_transaction_semantics():
+    inner, log = FakeConnection(), []
+    conn = bench._RecordingConnection(inner, log)
+    conn.autocommit = True
+    assert inner.autocommit is True and conn.autocommit is True
+    with conn, conn.cursor() as cur:
+        cur.execute("SELECT %s FROM t", ("a",))
+        assert cur.fetchone() == (1,)
+    assert log == ["SELECT 'a' FROM t"] and inner.executed == ["SELECT %s FROM t"]
+    assert inner.events == ["enter", "commit"] and inner.cursor_closed == 1
+
+
+def test_explain_refuses_a_working_tree():
+    with pytest.raises(SystemExit, match="not a sandbox copy"):
+        bench._load_sandbox_app(ROOT_DIR, allow_remote=False)
+
+
 def test_bench_arguments():
     assert bench.parse_args(["--sandbox", "3"]).base == "http://127.0.0.1:5073"
     with pytest.raises(SystemExit):

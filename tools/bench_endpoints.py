@@ -19,6 +19,17 @@ full). The table shows p50/p95/max of the client time, the throughput, p50 of th
 
 Only GET requests; only 127.0.0.1/localhost unless ``--allow-remote`` (then ``--token`` or the
 LOADLENS_BENCH_TOKEN variable sends an API token when sign-in is on). Standard library only.
+
+``--explain`` does no timing: it imports the app of the sandbox copy (``%TEMP%/ll_ui_s<N>/app`` or
+``--app-dir``; a git working tree is refused, so a real settings.py is never loaded), calls each endpoint
+with the Flask test client, records every SQL statement and runs ``EXPLAIN (ANALYZE, BUFFERS)`` on each
+SELECT in the sandbox database. It prints planning/execution time and buffers per statement (``--plans``:
+the full plans) and the cost of opening a connection:
+
+    C:/Python312/python.exe -X utf8 tools/bench_endpoints.py --sandbox 1 --explain --only runs --plans
+
+In Git Bash a path argument such as ``--endpoint /runs`` is rewritten to a Windows path; prefix the
+command with ``MSYS_NO_PATHCONV=1`` or use ``--only``.
 """
 
 from __future__ import annotations
@@ -30,11 +41,13 @@ import os
 import platform
 import re
 import sys
+import tempfile
 import threading
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 from urllib.parse import urlsplit
 
@@ -192,6 +205,176 @@ def measure(target: Target, path: str, rounds: int, concurrency: int, warmup: in
     }
 
 
+# ---- --explain: EXPLAIN (ANALYZE, BUFFERS) of the SQL behind each endpoint ------------------------------
+
+_PLAN_TIME = re.compile(r"^(Planning|Execution) Time: ([0-9.]+) ms$")
+_PLAN_BUFFERS = re.compile(r"Buffers: shared(?: hit=(\d+))?(?: read=(\d+))?")
+
+
+def summarize_plan(lines: Sequence[str]) -> dict:
+    """Top node, planning/execution time and shared buffers (hit + read) of the top node of a plan."""
+    out: dict[str, Any] = {"top": "", "planning_ms": None, "execution_ms": None, "buffers": None}
+    if lines:
+        out["top"] = lines[0].split("  (", 1)[0].strip()
+    for line in lines:
+        timing = _PLAN_TIME.match(line.strip())
+        if timing:
+            out["planning_ms" if timing.group(1) == "Planning" else "execution_ms"] = float(timing.group(2))
+        elif out["buffers"] is None:
+            buffers = _PLAN_BUFFERS.search(line)
+            if buffers:
+                out["buffers"] = int(buffers.group(1) or 0) + int(buffers.group(2) or 0)
+    return out
+
+
+def statement_kind(sql_text: str) -> str:
+    words = sql_text.split(None, 1)
+    return words[0].upper() if words else ""
+
+
+class _RecordingCursor:
+    """Cursor proxy that keeps the text of every statement, with the parameters inlined by psycopg2."""
+
+    def __init__(self, cursor, log: list):
+        self._cursor = cursor
+        self._log = log
+
+    def execute(self, query, params=None):
+        self._log.append(self._cursor.mogrify(query, params).decode("utf-8", "replace"))
+        return self._cursor.execute(query, params)
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+    def __iter__(self):
+        return iter(self._cursor)
+
+    def __enter__(self):
+        self._cursor.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._cursor.__exit__(*exc)
+
+
+class _RecordingConnection:
+    """Connection proxy: ``with conn`` still means commit/rollback, cursors record their statements."""
+
+    def __init__(self, connection, log: list):
+        object.__setattr__(self, "_connection", connection)
+        object.__setattr__(self, "_log", log)
+
+    def cursor(self, *args, **kwargs):
+        return _RecordingCursor(self._connection.cursor(*args, **kwargs), self._log)
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._connection, name, value)
+
+    def __enter__(self):
+        self._connection.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._connection.__exit__(*exc)
+
+
+def _load_sandbox_app(app_dir: Path, allow_remote: bool):
+    """The Flask app of a sandbox copy (sign-in off); refuses working trees and non-local databases."""
+    if (app_dir / ".git").exists():
+        raise SystemExit(f"{app_dir} is a git working tree, not a sandbox copy: --explain imports its settings.py")
+    if not (app_dir / "app.py").is_file() or not (app_dir / "settings.py").is_file():
+        raise SystemExit(f"{app_dir}: no app.py/settings.py; run make_sandbox.py first or pass --app-dir")
+    os.environ["LOADLENS_AUTH_ENABLED"] = "0"
+    os.environ.setdefault("LOADLENS_SECRET_KEY", "bench-explain-only-secret-key")
+    os.environ["LOADLENS_LOAD_TEST_WATCHER"] = "0"
+    os.environ.pop("LOADLENS_RUN_MIGRATIONS", None)
+    os.chdir(app_dir)
+    sys.path.insert(0, str(app_dir))
+    import settings  # the sandbox copy
+
+    storage = ((getattr(settings, "CONFIG", {}) or {}).get("storage") or {}).get("timescale") or {}
+    if str(storage.get("host") or "") not in LOCAL_HOSTS and not allow_remote:
+        raise SystemExit("refusing: storage.timescale.host of the sandbox is not local (pass --allow-remote)")
+    from app import app as flask_app
+    from loadlens_app import core
+
+    return flask_app, core
+
+
+def explain_endpoints(args: argparse.Namespace) -> int:
+    """Calls every endpoint in-process and runs EXPLAIN (ANALYZE, BUFFERS) on each SELECT it executed."""
+    if args.app_dir:
+        app_dir = Path(args.app_dir)
+    elif args.sandbox is not None:
+        app_dir = Path(os.environ.get("TEMP") or tempfile.gettempdir()) / f"ll_ui_s{args.sandbox}" / "app"
+    else:
+        raise SystemExit("--explain needs --sandbox N or --app-dir")
+    flask_app, core = _load_sandbox_app(app_dir.resolve(), args.allow_remote)
+    original = core._ts_conn
+    log: list[str] = []
+
+    def recording():
+        return _RecordingConnection(original(), log)
+
+    for module in list(sys.modules.values()):
+        if getattr(module, "__name__", "").startswith("loadlens_app") and getattr(module, "_ts_conn", None) is original:
+            module._ts_conn = recording
+
+    connect_ms = []
+    for _ in range(5):
+        began = time.perf_counter()
+        original().close()
+        connect_ms.append((time.perf_counter() - began) * 1000.0)
+    explain_conn = original()
+    round_trip = []
+    with explain_conn.cursor() as cur:
+        for _ in range(30):
+            began = time.perf_counter()
+            cur.execute("SELECT 1")
+            cur.fetchone()
+            round_trip.append((time.perf_counter() - began) * 1000.0)
+    explain_conn.rollback()
+    print(f"database: connect p50 {_ms(percentile(connect_ms, 0.5))} ms, round trip of SELECT 1 p50 {_ms(percentile(round_trip, 0.5))} ms\n")
+
+    client = flask_app.test_client()
+    if args.area:
+        client.set_cookie("project_area", args.area)
+    report = []
+    for path in selected_endpoints(args):
+        client.get(path)  # first call creates tables and fills process caches
+        log.clear()
+        status = client.get(path).status_code
+        statements = [s.strip() for s in log if statement_kind(s.strip()) in ("SELECT", "WITH")]
+        print(f"### `{path}` — {status}, {len(statements)} SELECT\n")
+        if not statements:
+            continue
+        print("| # | Запрос | Верхний узел | Planning, мс | Execution, мс | Buffers |")
+        print("|---|---|---|---|---|---|")
+        plans = []
+        for number, statement in enumerate(statements, start=1):
+            with explain_conn.cursor() as cur:
+                cur.execute("EXPLAIN (ANALYZE, BUFFERS) " + statement)
+                plan = [row[0] for row in cur.fetchall()]
+            explain_conn.rollback()
+            item = summarize_plan(plan)
+            plans.append({"sql": statement, "plan": plan, **item})
+            short = " ".join(statement.split())[:90].replace("|", "\\|")
+            print(f"| {number} | `{short}` | {item['top']} | {_ms(item['planning_ms'])} | {_ms(item['execution_ms'])} | {item['buffers'] or '—'} |")
+        print()
+        if args.plans:
+            for number, item in enumerate(plans, start=1):
+                print(f"{path} #{number}\n```\n{item['sql']}\n\n" + "\n".join(item["plan"]) + "\n```\n")
+        report.append({"path": path, "status": status, "statements": plans})
+    explain_conn.close()
+    if args.json_path:
+        with open(args.json_path, "w", encoding="utf-8") as handle:
+            json.dump({"connect_ms": connect_ms, "round_trip_ms": round_trip, "endpoints": report}, handle, ensure_ascii=False, indent=2)
+    return 0
+
+
 # ---- command line --------------------------------------------------------------------------------------
 
 
@@ -211,6 +394,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=60.0, help="seconds per request")
     parser.add_argument("--token", default=os.environ.get("LOADLENS_BENCH_TOKEN", ""), help="API token when sign-in is on")
     parser.add_argument("--allow-remote", action="store_true", help="allow a host other than 127.0.0.1/localhost")
+    parser.add_argument("--explain", action="store_true", help="instead of timing: EXPLAIN (ANALYZE, BUFFERS) the SQL of each endpoint (in-process, sandbox copy only)")
+    parser.add_argument("--app-dir", help="sandbox app directory for --explain (default %%TEMP%%/ll_ui_s<N>/app)")
+    parser.add_argument("--plans", action="store_true", help="with --explain: print the full plans too")
     args = parser.parse_args(argv)
     if args.sandbox is not None:
         args.base = f"http://127.0.0.1:{5070 + args.sandbox}"
@@ -231,6 +417,8 @@ def selected_endpoints(args: argparse.Namespace) -> list[str]:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
+    if args.explain:
+        return explain_endpoints(args)
     target = Target(args.base, args.area, args.token, args.timeout)
     before = None
     if args.compare:
