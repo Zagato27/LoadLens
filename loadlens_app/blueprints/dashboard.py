@@ -16,8 +16,10 @@ from flask import (
 )
 
 from AI.db_store import (
+    RUN_INDEX_TABLE,
     _ensure_engineer_reports_table,
     _ensure_llm_reports_table,
+    _ensure_run_index_table,
     list_llm_feedback,
     upsert_llm_feedback,
 )
@@ -483,6 +485,10 @@ def dashboard_data():
             _ensure_llm_reports_table(conn, cfg)
         except Exception:
             pass
+        try:
+            _ensure_run_index_table(conn, cfg)
+        except Exception:
+            pass
         services_filter = _resolve_services_filter(_active_project_area())
         svc_where, svc_params = _services_clause(services_filter)
         periods = _dashboard_periods(_dashboard_now())
@@ -544,8 +550,9 @@ def dashboard_data():
                     verdict_counts[v] = int(cnt)
                 else:
                     verdict_counts["Недостаточно данных"] += int(cnt)
+            # One row per run (run_index), so a plain count; the metrics hypertable is not touched.
             cur.execute(
-                f"SELECT COUNT(DISTINCT run_name) FROM public.metrics WHERE run_name IS NOT NULL AND run_name <> ''{svc_where}",
+                f"SELECT COUNT(*) FROM {schema}.{RUN_INDEX_TABLE} WHERE run_name <> ''{svc_where}",
                 tuple(svc_params),
             )
             total_row = cur.fetchone()
@@ -986,16 +993,12 @@ def list_runs():
         test_type_sql = _runs_test_type_sql("f.test_type", "f.run_name IS NULL")
         max_rps_sql = _runs_max_rps_sql("parsed")
 
+        # ``base`` reads run_index (one row per run with metrics) instead of aggregating the metrics hypertable.
         runs_cte = f"""
             WITH base AS (
-              SELECT run_name,
-                     MIN("time") AS start_time,
-                     MAX("time") AS end_time,
-                     COALESCE(MAX(service), '') AS service,
-                     COALESCE(MAX(NULLIF(run_id, '')), '') AS run_id
-              FROM public.metrics
-              WHERE run_name IS NOT NULL AND run_name <> ''{svc_where}{where_q}
-              GROUP BY run_name
+              SELECT run_name, start_time, end_time, service, run_id
+              FROM {schema}.{RUN_INDEX_TABLE}
+              WHERE run_name <> ''{svc_where}{where_q}
             ), final AS (
               SELECT run_name,
                      COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS verdict,
@@ -1029,19 +1032,18 @@ def list_runs():
             _ensure_llm_reports_table(conn, cfg)
         except Exception:
             pass
+        try:
+            _ensure_run_index_table(conn, cfg)
+        except Exception:
+            pass
         with conn, conn.cursor() as cur:
-            cur.execute(
-                f"{runs_cte} SELECT COUNT(*) FROM joined{where_filters}",
-                (*base_params, *final_params, *filter_params),
-            )
-            count_row = cur.fetchone()
-            total = int(count_row[0]) if count_row and count_row[0] is not None else 0
+            # One statement: the page plus the number of matching runs (the window runs before OFFSET/LIMIT).
             cur.execute(
                 f"""
                 {runs_cte}
                 SELECT run_name, start_time, end_time, service,
                        verdict, llm_verdict, sla_verdict, report_created_at, test_type_raw, run_id,
-                       project_area, max_rps
+                       project_area, max_rps, COUNT(*) OVER () AS total
                 FROM joined
                 {where_filters}
                 ORDER BY {sort_sql} {dir_sql}{nulls_sql}{tiebreak_sql}
@@ -1050,6 +1052,18 @@ def list_runs():
                 (*base_params, *final_params, *filter_params, offset, limit),
             )
             rows = cur.fetchall()
+            if rows:
+                total = int(rows[0][12] or 0)
+            elif offset:
+                # A page past the end has no row to carry the total; the archive needs it to step back.
+                cur.execute(
+                    f"{runs_cte} SELECT COUNT(*) FROM joined{where_filters}",
+                    (*base_params, *final_params, *filter_params),
+                )
+                count_row = cur.fetchone()
+                total = int(count_row[0]) if count_row and count_row[0] is not None else 0
+            else:
+                total = 0
         conn.close()
         out = [_runs_item(r) for r in rows]
         response = make_response(jsonify(out))

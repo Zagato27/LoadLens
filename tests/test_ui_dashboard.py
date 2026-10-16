@@ -35,7 +35,7 @@ ROUTES = (
     ("previous", "r.run_name <> %s"),
     ("last_run", "parsed->'deterministic_sla'->'checks'"),
     ("verdict_counts", "AS cnt"),
-    ("runs_total", "COUNT(DISTINCT run_name)"),
+    ("runs_total", "COUNT(*) FROM public.run_index"),
     ("services", "PARTITION BY service"),
     ("weeks", "date_trunc('week'"),
     ("recent", "start_ms, end_ms, run_id FROM latest"),
@@ -143,6 +143,7 @@ def app_client(monkeypatch, tmp_path):
     monkeypatch.setattr(core, "CONFIG_RUNTIME_PATH", tmp_path / "settings_runtime.json")
     monkeypatch.setattr(core, "METRICS_RUNTIME_PATH", tmp_path / "metrics_config_runtime.json")
     monkeypatch.setattr(dashboard, "_ensure_llm_reports_table", lambda conn, cfg: None)
+    monkeypatch.setattr(dashboard, "_ensure_run_index_table", lambda conn, cfg: None)
     monkeypatch.setattr(dashboard, "_resolve_services_filter", lambda area: [])
     monkeypatch.setattr(dashboard, "_dashboard_now", lambda: NOW)
     app = create_app()

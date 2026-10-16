@@ -82,6 +82,7 @@ def client(monkeypatch):
         monkeypatch.setattr(module, "_ts_conn", lambda: RecordingConnection())
         monkeypatch.setattr(module, "_resolve_services_filter", lambda area: [])
     monkeypatch.setattr(dashboard, "_ensure_llm_reports_table", lambda conn, cfg: None)
+    monkeypatch.setattr(dashboard, "_ensure_run_index_table", lambda conn, cfg: None)
     app = create_app()
     app.config["TESTING"] = True
     return app.test_client()
@@ -98,9 +99,10 @@ def use_conn(monkeypatch, module_name, conn):
 # ---- /runs -----------------------------------------------------------------------------------
 
 def test_runs_rows_carry_project_area_max_rps_and_type_key(client, monkeypatch):
+    # The last column is the COUNT(*) OVER () total of the single /runs statement.
     rows = [
-        ("nightly-1", START, END, "checkout", "Успешно", "Успешно", None, END, "Stability", "rid-1", "devstack", Decimal("1234.5")),
-        ("nightly-2", START, END, "checkout", "Провал", None, None, None, "", "", "", None),
+        ("nightly-1", START, END, "checkout", "Успешно", "Успешно", None, END, "Stability", "rid-1", "devstack", Decimal("1234.5"), 2),
+        ("nightly-2", START, END, "checkout", "Провал", None, None, None, "", "", "", None, 2),
     ]
     conn = use_conn(monkeypatch, "dashboard", RecordingConnection(fetchone_results=[(2,)], fetchall_results=[rows]))
 
@@ -112,8 +114,8 @@ def test_runs_rows_carry_project_area_max_rps_and_type_key(client, monkeypatch):
     assert first["max_rps"] == 1234.5
     assert first["test_type"] == "Stability" and first["test_type_key"] == "soak"
     assert second["max_rps"] is None and second["project_area"] == "" and second["test_type_key"] == ""
-    page_sql, _ = conn.log[1]
-    assert "project_area, max_rps FROM joined" in page_sql
+    page_sql, _ = conn.log[0]
+    assert "project_area, max_rps, COUNT(*) OVER () AS total FROM joined" in page_sql
     assert "->'peak_performance'->>'max_rps'" in page_sql
     assert "->'stability_under_load'->>'actual_rps'" in page_sql
     assert "->'spike_analysis'->>'max_spike_rps'" in page_sql
@@ -121,7 +123,7 @@ def test_runs_rows_carry_project_area_max_rps_and_type_key(client, monkeypatch):
 
 
 def test_runs_non_finite_max_rps_becomes_null(client, monkeypatch):
-    rows = [("r", START, END, "svc", "Успешно", None, None, END, "step", "", "", Decimal("Infinity"))]
+    rows = [("r", START, END, "svc", "Успешно", None, None, END, "step", "", "", Decimal("Infinity"), 1)]
     use_conn(monkeypatch, "dashboard", RecordingConnection(fetchone_results=[(1,)], fetchall_results=[rows]))
 
     body = client.get("/runs").get_json()
@@ -139,9 +141,9 @@ def test_runs_test_type_filter_is_normalized(client, monkeypatch, requested, bou
 
     assert client.get("/runs", query_string={"test_type": requested}).status_code == 200
 
-    count_sql, count_params = conn.log[0]
-    assert "WHERE test_type = %s" in count_sql
-    assert count_params[-1] == bound
+    page_sql, page_params = conn.log[0]
+    assert "WHERE test_type = %s" in page_sql
+    assert page_params[-3] == bound  # followed by offset and limit
 
 
 def test_runs_test_type_column_maps_aliases_like_the_baseline_lookup(client, monkeypatch):
@@ -166,7 +168,7 @@ def test_runs_sorts_by_max_rps_with_nulls_last_and_a_tiebreak(client, monkeypatc
 
     client.get("/runs", query_string={"sort": "max_rps", "dir": "asc"})
 
-    page_sql, _ = conn.log[1]
+    page_sql, _ = conn.log[0]
     assert "ORDER BY max_rps ASC NULLS LAST, run_name ASC" in page_sql
 
 
@@ -184,7 +186,7 @@ def test_runs_sort_is_whitelisted(client, monkeypatch, args, order):
 
     assert client.get("/runs", query_string=args).status_code == 200
 
-    page_sql, _ = conn.log[1]
+    page_sql, _ = conn.log[0]
     assert order in page_sql
     assert "DROP" not in page_sql
 
