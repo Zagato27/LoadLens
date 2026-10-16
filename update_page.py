@@ -1,13 +1,17 @@
 import ast
+import collections
 import copy
 import json
 import json as _json
 import logging
 import os
+import threading
 import time
 import traceback  # для детального вывода ошибок (опционально)
 import uuid
 from datetime import datetime  # если ещё не импортирован
+from functools import partial
+from typing import Callable, Sequence
 
 from urllib.parse import urlsplit
 
@@ -25,7 +29,6 @@ from confluence_manager.update_confluence_template import (
 from data_collectors.grafana_collector import downloadImagesLogin, send_file_to_attachment
 from data_collectors.loki_collector import fetch_loki_logs, send_loki_file_to_attachment
 from data_collectors.temp_files import is_temp_file, safe_basename, temp_file_path
-from loadlens_app.celery_app import celery_app
 from loadlens_app.core import (
     _active_system_context as _core_active_system_context,
     _normalize_system_context,
@@ -38,7 +41,14 @@ from settings import CONFIG  # Импорт базовой конфигурац�
 _METRICS_RUNTIME_PATH = os.path.join(os.path.dirname(__file__), 'metrics_config_runtime.json')
 
 logger = logging.getLogger(__name__)
+# Deadline of one chart or log download and of one attachment upload, in seconds. The variable keeps
+# its old name from the time these ran as Celery tasks, so existing deployments keep their value.
 _TASK_TIMEOUT = int(os.getenv("CELERY_TASK_TIMEOUT", "600"))
+# Downloads and uploads of the template report: tries per item, the pause between them, threads.
+_TRANSFER_ATTEMPTS = 3
+_TRANSFER_RETRY_PAUSE_SEC = 2.0
+_TRANSFER_WORKERS_DEFAULT = 4
+_TRANSFER_WORKERS_MAX = 8
 
 def _deep_merge_dicts(_a: dict, _b: dict) -> dict:
     out = dict(_a or {})
@@ -264,9 +274,146 @@ def _domain_keys_from_config(cfg: dict) -> list[str]:
     return keys
 
 
-def _await_task(async_result):
-    """Возвращает результат Celery-задачи с таймаутом."""
-    return async_result.get(timeout=_TASK_TIMEOUT)
+def _transfer_workers(cfg: dict | None = None) -> int:
+    """Threads for the downloads and uploads of one report: ``llm.max_domain_workers`` or 4, within 1..8."""
+    llm_cfg = (cfg if isinstance(cfg, dict) else CONFIG).get("llm")
+    raw = llm_cfg.get("max_domain_workers") if isinstance(llm_cfg, dict) else None
+    try:
+        count = int(float(raw))
+    except (TypeError, ValueError):
+        count = _TRANSFER_WORKERS_DEFAULT
+    return max(1, min(count, _TRANSFER_WORKERS_MAX))
+
+
+class _TransferPool:
+    """Runs the downloads or the uploads of one report on a few daemon threads.
+
+    It replaces nested Celery tasks: a report running inside a worker that waits for sub-tasks queued
+    on the same worker pool deadlocks once the pool is busy (concurrency 1), and the hop through the
+    broker bought nothing. Items start in their order on up to ``workers`` threads. Each item gets up
+    to ``attempts`` calls, ``pause`` seconds apart: an exception means "try again", a returned value
+    is final (False marks a refused item). :meth:`result` waits at most ``timeout`` seconds counted
+    from the moment the item started.
+
+    A thread cannot be killed, so an item past its deadline is abandoned instead: its thread is a
+    daemon and never holds up the exit of the process, it makes no further attempts and ends once the
+    call returns, and a new thread takes its place, so the items queued behind it still run.
+    """
+
+    def __init__(
+        self,
+        calls: Sequence[Callable[[], object]],
+        *,
+        workers: int,
+        timeout: float,
+        attempts: int = _TRANSFER_ATTEMPTS,
+        pause: float = _TRANSFER_RETRY_PAUSE_SEC,
+        name: str = "transfer",
+    ):
+        self._calls = list(calls)
+        self._timeout = max(0.0, float(timeout))
+        self._attempts = max(1, int(attempts))
+        self._pause = max(0.0, float(pause))
+        self._name = name
+        self._cond = threading.Condition()
+        self._pending = collections.deque(range(len(self._calls)))
+        self._started: list[float | None] = [None] * len(self._calls)
+        self._outcome: dict[int, tuple[object, BaseException | None]] = {}
+        self._abandoned: set[int] = set()
+        self._spawned = 0
+        with self._cond:
+            for _ in range(min(max(1, int(workers)), len(self._calls))):
+                self._spawn()
+
+    def __enter__(self) -> "_TransferPool":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Drops the items that have not started; the running ones finish on their own."""
+        with self._cond:
+            self._pending.clear()
+            self._cond.notify_all()
+
+    def result(self, index: int) -> object:
+        """Value of item ``index``; raises its last error, or :class:`TimeoutError` past its deadline."""
+        with self._cond:
+            while index not in self._outcome:
+                if index in self._abandoned:
+                    raise TimeoutError(f"не завершилось за {self._timeout:g} с")
+                started = self._started[index]
+                if started is None:
+                    if index not in self._pending:
+                        raise RuntimeError("отменено: отчёт перестал ждать")
+                    self._cond.wait(1.0)
+                    continue
+                remaining = started + self._timeout - time.monotonic()
+                if remaining <= 0:
+                    self._abandoned.add(index)
+                    if self._pending:
+                        self._spawn()
+                    raise TimeoutError(f"не завершилось за {self._timeout:g} с")
+                self._cond.wait(remaining)
+            value, error = self._outcome[index]
+        if error is not None:
+            raise error
+        return value
+
+    def _spawn(self) -> None:
+        """Starts one more thread; the caller holds the lock."""
+        self._spawned += 1
+        threading.Thread(target=self._work, name=f"report-{self._name}-{self._spawned}", daemon=True).start()
+
+    def _work(self) -> None:
+        while True:
+            with self._cond:
+                if not self._pending:
+                    return
+                index = self._pending.popleft()
+                self._started[index] = time.monotonic()
+                self._cond.notify_all()
+            value: object = None
+            error: BaseException | None = None
+            try:
+                value = self._attempt(index)
+            except BaseException as exc:  # recorded for result(); the thread itself must not die here
+                # SystemExit and the like stay in this thread: the report only skips the item.
+                error = exc if isinstance(exc, Exception) else RuntimeError(f"{type(exc).__name__}: {exc}")
+            with self._cond:
+                abandoned = index in self._abandoned
+                if not abandoned:
+                    self._outcome[index] = (value, error)
+                self._cond.notify_all()
+            if abandoned:
+                return  # a new thread already took this one's place
+
+    def _given_up(self, index: int) -> bool:
+        with self._cond:
+            return index in self._abandoned
+
+    def _attempt(self, index: int) -> object:
+        call = self._calls[index]
+        attempt = 1
+        while True:
+            try:
+                return call()
+            except Exception as exc:
+                if attempt >= self._attempts or self._given_up(index):
+                    raise
+                logger.warning(
+                    "%s: попытка %s/%s не удалась: %s. Повтор через %s сек.",
+                    self._name,
+                    attempt,
+                    self._attempts,
+                    exc,
+                    self._pause,
+                )
+                time.sleep(self._pause)
+                if self._given_up(index):
+                    raise
+                attempt += 1
 
 
 def _span_percent(start: int, end: int, done: int, total: int) -> int:
@@ -356,13 +503,31 @@ _LEGACY_KEYS = ("user", "password", "grafana_login", "grafana_pass", "url_basic"
 
 
 def _legacy_settings() -> dict:
-    """Confluence, Grafana and Loki settings of the template flow, read where the task runs.
+    """Confluence, Grafana and Loki settings of the template flow, read where the report runs.
 
-    Credentials never travel through the broker. The worker takes them from its own configuration,
-    including changes saved to settings_runtime.json after it started.
+    settings_runtime.json wins over CONFIG, so a Celery worker, which never sees the in-memory CONFIG
+    updates of the web process, still uses the values saved after it started.
     """
     runtime = _load_settings_runtime_data()
     return {key: runtime.get(key, CONFIG.get(key)) for key in _LEGACY_KEYS}
+
+
+def refresh_runtime_config() -> bool:
+    """Applies settings_runtime.json onto the shared CONFIG again, as loadlens_app.core does at import.
+
+    The web process keeps CONFIG current by itself: the settings pages write the runtime file and
+    change CONFIG in memory. A Celery worker reads the file once, when it starts, and its child
+    processes inherit that snapshot, so a task there would use the settings of that moment (LLM
+    provider, Confluence, storage, global queries and SLA). Tasks running in a worker call this first.
+    A key deleted from the runtime file keeps its last value until the worker restarts.
+
+    Returns False, leaving CONFIG as it is, when the file is missing, empty or unreadable.
+    """
+    runtime = _load_settings_runtime_data()
+    if not runtime:
+        return False
+    CONFIG.update(_deep_merge_dicts(CONFIG, runtime))
+    return True
 
 
 def _same_origin(url: str, base: str) -> bool:
@@ -373,10 +538,14 @@ def _same_origin(url: str, base: str) -> bool:
     return bool(right.netloc) and (left.scheme.lower(), left.netloc.lower()) == (right.scheme.lower(), right.netloc.lower())
 
 
-@celery_app.task(bind=True, autoretry_for=(Exception,), retry_kwargs={"max_retries": 3, "countdown": 2})
-def download_grafana_image_task(self, image_url: str, file_basename: str) -> bool:  # pragma: no cover - celery worker
-    settings = _legacy_settings()
-    # The URL arrives through the broker: the Grafana login is only ever sent to the configured Grafana.
+def download_grafana_image(image_url: str, file_basename: str, settings: dict | None = None) -> bool:
+    """Downloads one chart into the temporary files; False when the URL is refused.
+
+    Raises when the download fails, so :class:`_TransferPool` tries again. ``settings`` is the result
+    of :func:`_legacy_settings`, read once per report; without it the function reads it itself.
+    """
+    settings = settings if settings is not None else _legacy_settings()
+    # The URL is built from the metrics config: the Grafana login is only ever sent to the configured Grafana.
     if not _same_origin(image_url, settings.get("grafana_base_url") or ""):
         logger.warning("Адрес графика не совпадает с grafana_base_url, загрузка отклонена")
         return False
@@ -385,21 +554,22 @@ def download_grafana_image_task(self, image_url: str, file_basename: str) -> boo
     raise RuntimeError(f"Не удалось загрузить изображение {file_basename}")
 
 
-@celery_app.task(bind=True, autoretry_for=(Exception,), retry_kwargs={"max_retries": 3, "countdown": 2})
-def download_loki_logs_task(self, start_ts: int, end_ts: int, filter_query: str, file_basename: str) -> bool:  # pragma: no cover - celery worker
-    loki_url = _legacy_settings().get("loki_url") or ""
+def download_loki_logs(start_ts: int, end_ts: int, filter_query: str, file_basename: str, settings: dict | None = None) -> bool:
+    """Downloads the logs of one placeholder into the temporary files; raises when that fails."""
+    settings = settings if settings is not None else _legacy_settings()
+    loki_url = settings.get("loki_url") or ""
     if _download_log_with_retry(loki_url, start_ts, end_ts, filter_query, file_basename):
         return True
     raise RuntimeError(f"Не удалось получить логи {file_basename}")
 
 
-@celery_app.task(bind=True, autoretry_for=(Exception,), retry_kwargs={"max_retries": 3, "countdown": 2})
-def upload_attachment_task(self, kind: str, page_id: str, file_path: str) -> bool:  # pragma: no cover - celery worker
-    # The path arrives through the broker: upload only files the report downloaded itself.
+def upload_attachment(kind: str, page_id: str, file_path: str, settings: dict | None = None) -> bool:
+    """Attaches one downloaded file to the page; False when the path is refused, raises when the upload fails."""
+    # Upload only files the report downloaded itself.
     if not is_temp_file(file_path):
         logger.warning("Вложение вне каталога временных файлов отклонено: %s", file_path)
         return False
-    settings = _legacy_settings()
+    settings = settings if settings is not None else _legacy_settings()
     url_basic = settings.get("url_basic") or ""
     auth = HTTPBasicAuth(settings.get("user") or "", settings.get("password") or "")
     if kind == "grafana":
@@ -409,6 +579,12 @@ def upload_attachment_task(self, kind: str, page_id: str, file_path: str) -> boo
     if ok:
         return True
     raise RuntimeError(f"Не удалось загрузить вложение {file_path}")
+
+
+# Names of the former Celery tasks, still called by tests/test_smoke_api.py. Plain functions now.
+download_grafana_image_task = download_grafana_image
+download_loki_logs_task = download_loki_logs
+upload_attachment_task = upload_attachment
 
 
 def _load_area_overrides(area_name: str) -> dict:
@@ -498,15 +674,13 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
     Исключения:
         Пробрасывает ошибки работы с Confluence/Grafana/LLM при критических сбоях.
     """
-    # Получение параметров из `config.py`
-    user = CONFIG['user']
-    password = CONFIG['password']
-    grafana_login = CONFIG['grafana_login']
-    grafana_pass = CONFIG['grafana_pass']
-    url_basic = CONFIG['url_basic']
-    space_conf = CONFIG['space_conf']
-    grafana_base_url = CONFIG['grafana_base_url']
-    loki_url = CONFIG['loki_url']
+    # Confluence, Grafana and Loki settings of the template flow, as saved now: the report may run in a
+    # Celery worker whose CONFIG is the snapshot taken when the worker started.
+    legacy_settings = _legacy_settings()
+    user = legacy_settings.get("user")
+    password = legacy_settings.get("password")
+    url_basic = legacy_settings.get("url_basic")
+    grafana_base_url = legacy_settings.get("grafana_base_url")
 
     
     # Определяем область проекта (area) для сервиса
@@ -664,37 +838,46 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
             "file_path": file_path,
         })
 
-    download_jobs: list[tuple[str, dict, object]] = []
+    # Downloads and uploads run on a local pool of threads, never as Celery sub-tasks: see _TransferPool.
+    transfer_workers = _transfer_workers(ef_cfg)
+    download_jobs: list[tuple[str, dict, Callable[[], object]]] = []
     for m in metric_items:
         download_jobs.append(
-            ("metric", m, download_grafana_image_task.delay(m["grafana_url"], m["file_basename"]))
+            ("metric", m, partial(download_grafana_image, m["grafana_url"], m["file_basename"], settings=legacy_settings))
         )
     for l in log_items:
         download_jobs.append(
-            ("log", l, download_loki_logs_task.delay(start, end, l["filter_query"], l["file_basename"]))
+            ("log", l, partial(download_loki_logs, start, end, l["filter_query"], l["file_basename"], settings=legacy_settings))
         )
     download_total = len(download_jobs)
-    for index, (kind, item, job) in enumerate(download_jobs, start=1):
-        identifier = item.get("name") if kind == "metric" else item.get("placeholder")
-        kind_label = "графика" if kind == "metric" else "логов"
-        _progress(
-            f"Скачивание {kind_label} «{identifier}» ({index}/{download_total})",
-            _span_percent(10, 30, index - 1, download_total),
-        )
-        try:
-            _await_task(job)
-        except Exception as exc:
-            logger.error("Ошибка при скачивании %s '%s': %s", kind, identifier, exc)
+    with _TransferPool(
+        [call for _kind, _item, call in download_jobs],
+        workers=transfer_workers,
+        timeout=_TASK_TIMEOUT,
+        pause=_TRANSFER_RETRY_PAUSE_SEC,
+        name="download",
+    ) as downloads:
+        for index, (kind, item, _call) in enumerate(download_jobs, start=1):
+            identifier = item.get("name") if kind == "metric" else item.get("placeholder")
+            kind_label = "графика" if kind == "metric" else "логов"
+            _progress(
+                f"Скачивание {kind_label} «{identifier}» ({index}/{download_total})",
+                _span_percent(10, 30, index - 1, download_total),
+            )
+            try:
+                downloads.result(index - 1)
+            except Exception as exc:
+                logger.error("Ошибка при скачивании %s '%s': %s", kind, identifier, exc)
 
     replacements_pending = {}
-    attachment_jobs: list[tuple[tuple[str, str], object]] = []
+    attachment_jobs: list[tuple[tuple[str, str], Callable[[], object]]] = []
 
     for m in metric_items:
         if os.path.exists(m["file_path"]) and os.path.getsize(m["file_path"]) > 0:
             attachment_jobs.append(
                 (
                     (m["placeholder"], f'<ac:image><ri:attachment ri:filename="{m["file_basename"]}.jpg" /></ac:image>'),
-                    upload_attachment_task.delay("grafana", copy_page_id, m["file_path"]),
+                    partial(upload_attachment, "grafana", copy_page_id, m["file_path"], settings=legacy_settings),
                 )
             )
         else:
@@ -715,7 +898,7 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
                             f'</ac:structured-macro>'
                         ),
                     ),
-                    upload_attachment_task.delay("logs", copy_page_id, l["file_path"]),
+                    partial(upload_attachment, "logs", copy_page_id, l["file_path"], settings=legacy_settings),
                 )
             )
         else:
@@ -723,19 +906,26 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
 
     success_placeholders: set[str] = set()
     attachment_total = len(attachment_jobs)
-    for index, ((placeholder, html), job) in enumerate(attachment_jobs, start=1):
-        _progress(
-            f"Загрузка вложения в Confluence ({index}/{attachment_total})",
-            _span_percent(30, 40, index - 1, attachment_total),
-        )
-        ok = False
-        try:
-            ok = bool(_await_task(job))
-        except Exception as exc:
-            logger.error("Ошибка при загрузке вложения: %s", exc)
-        if ok:
-            success_placeholders.add(placeholder)
-            replacements_pending[placeholder] = html
+    with _TransferPool(
+        [call for _replacement, call in attachment_jobs],
+        workers=transfer_workers,
+        timeout=_TASK_TIMEOUT,
+        pause=_TRANSFER_RETRY_PAUSE_SEC,
+        name="upload",
+    ) as uploads:
+        for index, ((placeholder, html), _call) in enumerate(attachment_jobs, start=1):
+            _progress(
+                f"Загрузка вложения в Confluence ({index}/{attachment_total})",
+                _span_percent(30, 40, index - 1, attachment_total),
+            )
+            ok = False
+            try:
+                ok = bool(uploads.result(index - 1))
+            except Exception as exc:
+                logger.error("Ошибка при загрузке вложения: %s", exc)
+            if ok:
+                success_placeholders.add(placeholder)
+                replacements_pending[placeholder] = html
 
     # Убираем временные файлы
     for m in metric_items:
