@@ -49,5 +49,6 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=5 CMD curl -fsS http://localho
 # Production server instead of the Flask development server. gunicorn reads GUNICORN_CMD_ARGS.
 # One process with threads keeps the in-memory job registry, login throttling and limits in one
 # place; gthread workers are not killed for long requests such as LLM calls.
-ENV GUNICORN_CMD_ARGS="--bind 0.0.0.0:5000 --worker-class gthread --workers 1 --threads 8 --timeout 120 --graceful-timeout 30 --access-logfile -"
+# The access log is gunicorn's default format plus %(M)s, the request time in milliseconds.
+ENV GUNICORN_CMD_ARGS="--bind 0.0.0.0:5000 --worker-class gthread --workers 1 --threads 8 --timeout 120 --graceful-timeout 30 --access-logfile - --access-logformat '%(h)s %(l)s %(u)s %(t)s \"%(r)s\" %(s)s %(b)s \"%(f)s\" \"%(a)s\" %(M)s'"
 CMD ["gunicorn", "app:app"]

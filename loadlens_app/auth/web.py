@@ -8,6 +8,7 @@ import os
 import secrets
 import time
 from dataclasses import dataclass
+from time import perf_counter  # bound here: tests replace the ``time`` module of web to move the wall clock
 from typing import Any, Mapping, Optional
 from urllib.parse import quote, urlsplit
 
@@ -261,6 +262,8 @@ def _recovery_gate(service: AuthService, rule: Rule) -> Optional[Response]:
 
 
 def _gate() -> Optional[Response]:
+    # The gate is the first before_request hook: _after_request turns this into the Server-Timing header.
+    g.request_started = perf_counter()
     service = get_service()
     settings = service.settings
     if not settings.enabled:
@@ -360,6 +363,13 @@ def _after_request(response: Response) -> Response:
                 service.audit(rule.audit, current_actor(), details=_audit_details(response))
         except Exception:
             logger.warning("auth: audit hook failed", exc_info=True)
+
+    # Time spent in the application (gate, view, hooks), visible in the browser and in tools/bench_endpoints.py.
+    started = g.get("request_started")
+    if started is not None:
+        timing = f"app;dur={(perf_counter() - started) * 1000.0:.1f}"
+        existing = response.headers.get("Server-Timing")
+        response.headers["Server-Timing"] = f"{existing}, {timing}" if existing else timing
     return response
 
 
