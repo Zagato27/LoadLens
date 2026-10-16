@@ -8,7 +8,22 @@ os.environ.setdefault("LOADLENS_SECRET_KEY", "pytest-secret-key-not-for-producti
 # The load test watcher polls the storage database in a thread; tests drive it with Watcher.tick().
 os.environ["LOADLENS_LOAD_TEST_WATCHER"] = "0"
 
+import psycopg2
 import pytest
+
+# settings.py of a working tree may point at a production database. A connection a test forgot to fake
+# fails at once instead of reaching it; tests that need a database replace psycopg2.connect themselves.
+_LOCAL_DB_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_real_psycopg2_connect = psycopg2.connect
+
+
+def _local_only_connect(dsn=None, connection_factory=None, cursor_factory=None, **kwargs):
+    if dsn or str(kwargs.get("host") or "") not in _LOCAL_DB_HOSTS:
+        raise psycopg2.OperationalError("tests must not connect to a database outside 127.0.0.1")
+    return _real_psycopg2_connect(dsn, connection_factory=connection_factory, cursor_factory=cursor_factory, **kwargs)
+
+
+psycopg2.connect = _local_only_connect
 
 
 @pytest.fixture(autouse=True)

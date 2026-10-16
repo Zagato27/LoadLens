@@ -496,6 +496,12 @@ def world(monkeypatch):
     monkeypatch.setattr(dashboard, "_report_step", lambda area, service_id: "30s")
     monkeypatch.setattr(dashboard, "_run_name_taken", lambda name, service_id: False)
     monkeypatch.setattr(jobs.job_store, "running_counts", lambda owner: (0, 0))
+
+    def no_db():
+        raise RuntimeError("watcher tests keep report jobs in memory, the job table is not reachable")
+
+    # A report job of the fake starter is not in memory: looking it up must not reach the configured database.
+    monkeypatch.setattr(jobs, "_ts_conn", no_db)
     monkeypatch.setattr(watcher, "report_filter", lambda run, tool_set, start, end: (live.run_filter_packs(run, tool_set), ""))
     w = watcher.Watcher(
         store_getter=lambda: memory,
