@@ -994,13 +994,15 @@ def list_runs():
         max_rps_sql = _runs_max_rps_sql("parsed")
 
         # ``base`` reads run_index (one row per run with metrics) instead of aggregating the metrics hypertable.
+        # ``final`` keeps the newest final row of each run; DISTINCT ON (not a ROW_NUMBER filter) lets the
+        # planner estimate one row per run and hash-join it instead of a nested loop over all pairs.
         runs_cte = f"""
             WITH base AS (
               SELECT run_name, start_time, end_time, service, run_id
               FROM {schema}.{RUN_INDEX_TABLE}
               WHERE run_name <> ''{svc_where}{where_q}
             ), final AS (
-              SELECT run_name,
+              SELECT DISTINCT ON (run_name) run_name,
                      COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS verdict,
                      verdict AS llm_verdict,
                      sla_verdict,
@@ -1008,10 +1010,10 @@ def list_runs():
                      test_type,
                      COALESCE(project_area, '') AS project_area,
                      {max_rps_sql} AS max_rps,
-                     MAX(NULLIF(run_id, '')) OVER (PARTITION BY run_name) AS run_id,
-                     ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC) AS rn
+                     MAX(NULLIF(run_id, '')) OVER (PARTITION BY run_name) AS run_id
               FROM {schema}.{llm_table}
               WHERE domain = 'final'{svc_where}
+              ORDER BY run_name, created_at DESC
             ), joined AS (
               SELECT b.run_name, b.start_time, b.end_time, b.service,
                      COALESCE(f.verdict, 'Недостаточно данных') AS verdict,
@@ -1023,7 +1025,7 @@ def list_runs():
                      COALESCE(f.project_area, '') AS project_area,
                      f.max_rps
               FROM base b
-              LEFT JOIN final f ON f.run_name = b.run_name AND f.rn = 1
+              LEFT JOIN final f ON f.run_name = b.run_name
             )
         """
 
