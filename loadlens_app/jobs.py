@@ -22,6 +22,7 @@ import psycopg2
 from psycopg2 import sql
 
 from AI.storage_state import is_storage_error
+from loadlens_app import response_cache
 from loadlens_app.core import _ts_conn
 from settings import CONFIG
 
@@ -162,6 +163,7 @@ class JobStore:
             self._evict_finished_locked()
             self._jobs[record.job_id] = record
         self._persist(record)
+        response_cache.invalidate(response_cache.JOBS)
         return record
 
     def update(self, job_id: str, **fields) -> Optional[JobRecord]:
@@ -176,6 +178,10 @@ class JobStore:
             updated = replace(current, **fields, updated_at=_utcnow())
             self._jobs[job_id] = updated
         self._persist(updated)
+        response_cache.invalidate(response_cache.JOBS)
+        if updated.status != current.status and updated.status in (JOB_STATUS_DONE, JOB_STATUS_ERROR):
+            # A finished report job has saved (or failed to save) its rows: the dashboard may have changed.
+            response_cache.invalidate(response_cache.DASHBOARD)
         return updated
 
     def running_counts(self, owner: str) -> tuple[int, int]:
@@ -231,6 +237,7 @@ class JobStore:
                 record = self._jobs.get(job_id)
                 if record is not None:
                     self._jobs[job_id] = replace(record, dismissed=True)
+        response_cache.invalidate(response_cache.JOBS)
         # The in-memory status is the fresher one when its last write to the table failed.
         dismissed = hidden | finished_here
         skipped = running_here | (running_in_table - finished_here)

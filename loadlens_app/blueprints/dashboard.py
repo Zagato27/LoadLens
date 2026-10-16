@@ -58,6 +58,7 @@ from loadlens_app.jobs import (
     JobStoreError,
     job_store,
 )
+from loadlens_app import response_cache
 
 dashboard_bp = Blueprint("dashboard", __name__)
 
@@ -466,7 +467,13 @@ def _dashboard_previous_run(conn, schema: str, table: str, last: dict, created_a
     }
 
 
+def _dashboard_cache_key() -> tuple:
+    """The dashboard depends on the services of the active area only (not on the user)."""
+    return (tuple(_resolve_services_filter(_active_project_area())),)
+
+
 @dashboard_bp.route("/dashboard_data", methods=["GET"])
+@response_cache.cached_json(response_cache.DASHBOARD, response_cache.DASHBOARD_TTL_SEC, _dashboard_cache_key)
 def dashboard_data():
     """Сводка дашборда: последний запуск, распределение вердиктов, состояние по сервисам, недавние запуски.
 
@@ -665,6 +672,7 @@ def demo_seed():
         return jsonify({"status": "exists", "message": str(e), "run_name": e.run_name, "report_url": e.report_url}), 409
     except Exception as e:
         return internal_error(e, "Не удалось создать демо-прогон")
+    response_cache.invalidate(response_cache.DASHBOARD)
     resp = jsonify({"status": "ok", **result})
     if result.get("area"):
         # Switch the UI to the demo area so the new run is visible right away.
@@ -1256,7 +1264,21 @@ def job_status(job_id: str):
     return jsonify(_job_view(job)), 200
 
 
+def _jobs_cache_key() -> tuple | None:
+    """Statuses, limit and whether raw errors are shown (admins only); ``None`` lets the view reject bad input."""
+    raw_statuses = (request.args.get("status") or "running,error").split(",")
+    statuses = tuple(s.strip() for s in raw_statuses if s.strip())
+    if any(s not in JOB_STATUSES for s in statuses):
+        return None
+    try:
+        limit = int(request.args.get("limit", "20") or 20)
+    except ValueError:
+        return None
+    return statuses, max(1, min(limit, JOBS_LIST_MAX_LIMIT)), current_auth().role >= Role.ADMIN
+
+
 @dashboard_bp.route("/jobs", methods=["GET"])
+@response_cache.cached_json(response_cache.JOBS, response_cache.JOBS_TTL_SEC, _jobs_cache_key)
 def list_jobs():
     """Недавние фоновые задачи; по умолчанию — выполняющиеся и завершившиеся ошибкой."""
     raw_statuses = (request.args.get("status") or "running,error").split(",")
@@ -1305,6 +1327,7 @@ def delete_run(run_name: str):
         return jsonify({"error": "run_name обязателен"}), 400
     try:
         _delete_run_data(run_name)
+        response_cache.invalidate(response_cache.DASHBOARD)
         return jsonify({"status": "ok", "message": "Отчёт удалён"})
     except Exception as e:  # pragma: no cover
         return internal_error(e)
@@ -1330,6 +1353,7 @@ def rename_run(run_name: str):
         return jsonify({"error": str(e)}), 400
     except Exception as e:  # pragma: no cover
         return internal_error(e)
+    response_cache.invalidate(response_cache.DASHBOARD)
     renamed = result["run_name"]
     ref = _lookup_report_ref(run_name=renamed, service=service)
     result["run_id"] = (ref or {}).get("run_id") or ""
