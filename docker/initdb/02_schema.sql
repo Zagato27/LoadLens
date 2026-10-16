@@ -128,23 +128,38 @@ CREATE INDEX IF NOT EXISTS idx_confluence_publications_run ON public.confluence_
 
 -- ============================================================
 -- Фоновые задачи (генерация отчётов, публикация в Confluence)
+-- (mirrors loadlens_app/jobs.py: the source of truth for jobs of the web process and the Celery worker)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS public.report_jobs (
-    job_id      TEXT        PRIMARY KEY,
-    kind        TEXT        NOT NULL,
-    run_name    TEXT,
-    service     TEXT,
-    status      TEXT        NOT NULL,
-    progress    INTEGER     NOT NULL DEFAULT 0,
-    message     TEXT,
-    error       TEXT,
-    report_url  TEXT,
-    page_url    TEXT,
-    page_id     TEXT,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    job_id       TEXT        PRIMARY KEY,
+    kind         TEXT        NOT NULL,
+    run_name     TEXT,
+    service      TEXT,
+    status       TEXT        NOT NULL,
+    progress     INTEGER     NOT NULL DEFAULT 0,
+    message      TEXT,
+    error        TEXT,
+    report_url   TEXT,
+    page_url     TEXT,
+    page_id      TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    dismissed_at TIMESTAMPTZ,
+    owner        TEXT        NOT NULL DEFAULT '',
+    runner       TEXT        NOT NULL DEFAULT 'thread',
+    started_at   TIMESTAMPTZ
 );
 
+-- Columns newer than the table; for older databases the application adds them as well.
+-- dismissed_at hides a finished job from the list; owner started the job (job limits); runner is where it
+-- runs: 'thread' (the web process) or 'celery' (the worker); started_at is empty while a Celery job is queued.
+ALTER TABLE public.report_jobs ADD COLUMN IF NOT EXISTS dismissed_at TIMESTAMPTZ;
+ALTER TABLE public.report_jobs ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL DEFAULT '';
+ALTER TABLE public.report_jobs ADD COLUMN IF NOT EXISTS runner TEXT NOT NULL DEFAULT 'thread';
+ALTER TABLE public.report_jobs ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
+
+-- Job lists by status, newest first; the running-job count and the sweep of stuck jobs read the
+-- status = 'running' prefix.
 CREATE INDEX IF NOT EXISTS idx_report_jobs_status_updated ON public.report_jobs (status, updated_at DESC);
 
 -- ============================================================

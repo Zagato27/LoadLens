@@ -34,12 +34,13 @@ class FakeJobsTable:
         self.alter_fails = alter_fails
         self.statements = []
 
-    def add(self, job_id, status, *, minutes_ago=0.0, dismissed=False, kind="report"):
+    def add(self, job_id, status, *, minutes_ago=0.0, dismissed=False, kind="report", runner="thread"):
         stamp = utc(minutes_ago)
         self.rows[job_id] = {
             "job_id": job_id, "kind": kind, "run_name": f"run-{job_id}", "service": "demo", "status": status,
             "progress": 50, "message": "stage", "error": None, "report_url": None, "page_url": None, "page_id": None,
             "created_at": stamp, "updated_at": stamp, "dismissed_at": stamp if dismissed else None,
+            "owner": "", "runner": runner, "started_at": stamp,
         }
 
     def connect(self):
@@ -83,7 +84,7 @@ class FakeCursor:
         rows = table.rows
         self.result = []
         if "information_schema.columns" in text:
-            self.result = [("dismissed_at",)] if table.has_column else []
+            self.result = ([("dismissed_at",)] if table.has_column else []) + [("owner",), ("runner",), ("started_at",)]
         elif "ALTER TABLE" in text:
             if table.alter_fails:
                 raise psycopg2.ProgrammingError("must be owner of table report_jobs")
@@ -92,12 +93,12 @@ class FakeCursor:
             pass
         elif "INSERT INTO" in text:
             values = dict(zip(COLUMNS, params))
-            row = rows.setdefault(values["job_id"], {"dismissed_at": None})
+            row = rows.setdefault(values["job_id"], {"dismissed_at": None, "owner": "", "runner": "thread", "started_at": None})
             row.update(values)
         elif "SET status = %s, message = %s, error = %s, updated_at = %s" in text:
-            status, message, error, now, running, started = params
+            status, message, error, now, running, *runner, started = params
             for row in rows.values():
-                if row["status"] == running and row["updated_at"] < started:
+                if row["status"] == running and row["updated_at"] < started and row["runner"] in (runner or [row["runner"]]):
                     row.update(status=status, message=message, error=error, updated_at=now)
                     self.result.append((row["job_id"],))
         elif "SET dismissed_at = %s" in text:
