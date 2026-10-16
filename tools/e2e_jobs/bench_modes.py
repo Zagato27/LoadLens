@@ -10,7 +10,8 @@ For every repeat it runs ``tools/bench_endpoints.py --during-job`` twice, back t
 LOADLENS_JOB_RUNNER=thread, no worker) and ``celery`` (server with LOADLENS_JOB_RUNNER=celery plus a solo
 worker), each with a freshly started server; the stubs stay up (LLM --delay 2, Prometheus defaults: 6 series,
 4 steps), as in the thread baseline of docs/perf-baseline.md. Between runs it pauses --pause-sec seconds and
-prints the TIME_WAIT count (the Werkzeug server closes every connection; ephemeral ports run short).
+prints the TIME_WAIT count (the Werkzeug server closes every connection; ephemeral ports run short). The bench
+connects with blocking sockets (see BLOCKING_CONNECT; --timeout-connect runs it unchanged).
 
 The JSON of every run goes to --out (default %TEMP%/ll_e2e_jobs/bench-c<C>); the summary (also written as
 summary.md there) has, per mode, the median over the repeats of idle and during-job p50/p95, of the
@@ -49,12 +50,30 @@ def time_wait_count() -> int:
     return sum(1 for line in out.splitlines() if "TIME_WAIT" in line)
 
 
+# Runs tools/bench_endpoints.py with blocking TCP connects. Python connects a socket that has a timeout
+# without blocking and then waits in select(); on a Windows host with thousands of open connections that
+# wait alone took 15-25 ms on loopback (a blocking connect: 2 ms), which hid the server-side differences.
+BLOCKING_CONNECT = """
+import runpy, socket, sys
+_create = socket.create_connection
+def _blocking(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None, *args, **kwargs):
+    sock = _create(address, None, source_address)
+    if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+        sock.settimeout(timeout)
+    return sock
+socket.create_connection = _blocking
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+
+
 def run_bench(sb: Sandbox, mode: str, out: Path, args: argparse.Namespace) -> int:
-    cmd = [
-        sys.executable, "-X", "utf8", str(REPO / "tools" / "bench_endpoints.py"), "--sandbox", str(sb.n), "--during-job",
+    bench = [
+        str(REPO / "tools" / "bench_endpoints.py"), "--sandbox", str(sb.n), "--during-job",
         "--label", mode, "--json", str(out), "--concurrency", str(args.concurrency), "--rounds", str(args.rounds),
     ]
-    log("bench: " + " ".join(cmd[3:]))
+    cmd = [sys.executable, "-X", "utf8", *(["-c", BLOCKING_CONNECT] if not args.timeout_connect else []), *bench]
+    log("bench: " + " ".join(bench) + (" (timeout connect)" if args.timeout_connect else " (blocking connect)"))
     with open(out.with_suffix(".txt"), "w", encoding="utf-8") as handle:
         return subprocess.run(cmd, cwd=str(REPO), stdout=handle, stderr=subprocess.STDOUT).returncode
 
@@ -93,13 +112,16 @@ def summarize(out_dir: Path) -> tuple[str, bool]:
             idle50, idle95 = _median(r.get("idle_p50") for r in rows), _median(r.get("idle_p95") for r in rows)
             job50, job95 = _median(r.get("job_p50") for r in rows), _median(r.get("job_p95") for r in rows)
             c50, c95 = _median(c.get("p50") for c in collect), _median(c.get("p95") for c in collect)
-            per_run = ", ".join(_fmt(_ratio(r.get("job_p95"), r.get("idle_p95")), "×") for r in rows)
+            run_ratios = [_ratio(r.get("job_p95"), r.get("idle_p95")) for r in rows]
+            per_run = ", ".join(_fmt(value, "×") for value in run_ratios)
             lines.append(
                 f"| `{path}` | {mode} | {_fmt(idle50)} | {_fmt(idle95)} | {_fmt(job50)} | {_fmt(job95)} | {_fmt(_ratio(job95, idle95), '×')} "
                 f"| {_fmt(c50)} | {_fmt(c95)} | {_fmt(_ratio(c95, idle95), '×')} | {per_run} |"
             )
             if mode == "celery" and path in CRITERIA_PATHS:
-                ratio = _ratio(job95, idle95)
+                # Each run compares the job with the idle rounds of the same server minutes later or earlier;
+                # the median over the runs keeps one noisy idle round from deciding.
+                ratio = _median(run_ratios)
                 verdicts.append((path, ratio, ratio is not None and ratio <= P95_LIMIT))
     lines.append("")
     durations = {}
@@ -118,7 +140,7 @@ def summarize(out_dir: Path) -> tuple[str, bool]:
     duration_ratio = _ratio(durations.get("celery"), durations.get("thread"))
     duration_ok = duration_ratio is not None and duration_ratio <= DURATION_LIMIT
     lines.append("")
-    lines.append(f"Критерии 11.7 (режим celery, job p95 ≤ {P95_LIMIT}× idle p95):")
+    lines.append(f"Критерии 11.7 (режим celery, медиана по прогонам job p95 / idle p95 ≤ {P95_LIMIT}):")
     for path, ratio, ok in verdicts:
         lines.append(f"- `{path}`: {_fmt(ratio, '×')} — {'да' if ok else 'нет'}")
     lines.append(f"- длительность задачи celery / thread: {_fmt(duration_ratio, '×')} (≤ {DURATION_LIMIT}×) — {'да' if duration_ok else 'нет'}")
@@ -133,6 +155,8 @@ def main() -> int:
     parser.add_argument("--rounds", type=int, default=20)
     parser.add_argument("--modes", default="thread,celery", help="comma-separated, run in this order every repeat")
     parser.add_argument("--pause-sec", type=float, default=90, help="pause between runs (TIME_WAIT lasts 2 minutes)")
+    parser.add_argument("--timeout-connect", action="store_true",
+                        help="let the bench connect as it does by itself (non-blocking connect + select, see BLOCKING_CONNECT)")
     parser.add_argument("--out", help="directory for the JSON of the runs")
     parser.add_argument("--summarize", metavar="DIR", help="only print the summary of the runs in DIR")
     args = parser.parse_args()
