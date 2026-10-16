@@ -89,7 +89,7 @@ except ModuleNotFoundError:  # pragma: no cover - tests/test_perf_celery_infra.p
 
 #: Queue of the report and publication tasks; the worker consumes it next to DEFAULT_QUEUE.
 REPORTS_QUEUE = "reports"
-#: Celery's default queue: the remaining tasks (image and log downloads, attachment uploads).
+#: Celery's default queue for any task outside TASK_NAME_PREFIX (reports download and upload in their own threads).
 DEFAULT_QUEUE = "celery"
 #: Task names starting with this prefix are routed to REPORTS_QUEUE.
 TASK_NAME_PREFIX = "loadlens."
@@ -201,8 +201,8 @@ def _make_celery() -> Celery:
         task_serializer="json",
         result_serializer="json",
         accept_content=["json"],
-        # A stuck download or upload must not hold a worker for ever; the report waits CELERY_TASK_TIMEOUT.
-        # Report and publication tasks set their own limits (report_task_time_limits()).
+        # Default limits of any task without its own; report and publication tasks set theirs
+        # (report_task_time_limits()).
         task_soft_time_limit=int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", "600")),
         task_time_limit=int(os.getenv("CELERY_TASK_TIME_LIMIT", "660")),
         task_default_queue=DEFAULT_QUEUE,

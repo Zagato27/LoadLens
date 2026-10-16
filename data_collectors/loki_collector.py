@@ -28,7 +28,9 @@ def send_loki_file_to_attachment(url_basic, auth, page_id, file_path):
                 files=files,
                 auth=auth,
                 headers={'X-Atlassian-Token': 'nocheck'},
-                verify=False
+                verify=False,
+                # (connect, read) seconds: a silent Confluence must not hold the report thread for ever.
+                timeout=(10, 300),
             )
 
         # Проверка ответа от Confluence
@@ -61,7 +63,7 @@ def fetch_loki_logs(loki_url, start_timestamp, end_timestamp, filter_query, file
     }
 
     # Отправка запроса на Loki
-    response = requests.get(loki_url, params=params)
+    response = requests.get(loki_url, params=params, timeout=(10, 120))
 
     # Обработка ответа от Loki
     if response.status_code == 200:

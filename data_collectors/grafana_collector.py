@@ -69,6 +69,8 @@ def send_file_to_attachment(url_basic, auth_header, page_id, filename):
                 files=files,
                 auth=auth_header,
                 headers=({'X-Atlassian-Token': 'nocheck'}),
+                # (connect, read) seconds: a silent Confluence must not hold the report thread for ever.
+                timeout=(10, 300),
             )
 
             # Возвращение ответа от сервера
