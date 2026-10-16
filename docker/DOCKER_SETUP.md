@@ -9,7 +9,7 @@
 - `initdb/01_timescaledb.sql` — автоматическое включение расширения TimescaleDB в базе при первом старте.
 - `initdb/03_app_role.sh` — непривилегированная роль приложения: владелец таблиц, без прав суперпользователя.
 - `initdb/02_schema.sql` — таблицы `metrics` (гипертаблица), `llm_reports`, `engineer_reports`, `confluence_publications`, `report_jobs`, `load_test_runs`, `app_users`, `api_tokens`, `audit_log` и индексы; приложение создаёт их и само, скрипт лишь готовит схему заранее.
-- Redis + Celery worker — через `docker-compose` теперь поднимаются брокер `redis` и отдельный контейнер `celery_worker` для фоновых задач.
+- Redis + Celery worker — через `docker-compose` теперь поднимаются брокер `redis` и отдельный контейнер `celery_worker`: он строит отчёты и публикует их в Confluence, веб-приложение только ставит задачи (§4).
 - `env.example` (лежит в этой же папке) — пример файла окружения для Compose. Скопируйте его в `.env` и отредактируйте.
 - `settings.example.py` — обезличенный пример `settings.py`. Скопируйте и заполните.
 - `.gitignore` — добавлены правила для игнорирования действующих конфигов (`settings.py`, `settings_runtime.json`, `docker/.env` и прочих `.env`).
@@ -48,7 +48,8 @@
    - `APP_CPUS`, `APP_MEMORY_LIMIT`, `WORKER_CPUS`, `WORKER_MEMORY_LIMIT`, `REDIS_MEMORY_LIMIT` — ограничения контейнеров
    - `REDIS_PASSWORD` — **обязательный** пароль Redis (`openssl rand -hex 32`; только символы, допустимые в URL). Без него `docker compose up` не запустится
    - `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` — по умолчанию собираются из `REDIS_PASSWORD` (`redis://:<пароль>@redis:6379/0`). Задавайте их только для внешнего Redis и с паролем в URL
-   - `CELERY_TASK_ALWAYS_EAGER` — `0` для настоящих фоновых задач, `1` чтобы выполнять их синхронно (режим отладки)
+   - `CELERY_TASK_ALWAYS_EAGER` — `0`: отчёты и публикации строит воркер; `1`: они выполняются потоком внутри `app` (режим отладки)
+   - `LOADLENS_JOB_RUNNER`, `LOADLENS_JOB_STALE_MIN`, `LOADLENS_JOB_QUEUE_MAX_MIN`, `LOADLENS_REPORT_TASK_LIMIT_SEC`, `WORKER_CONCURRENCY` — где выполняются фоновые задачи, когда зависшая задача считается прерванной, лимит времени задачи и сколько задач воркер выполняет одновременно (§4)
    - `LOADLENS_SECRET_KEY` — ключ подписи сессий: длинная случайная строка (`openssl rand -hex 32`), одна и та же между пересозданиями контейнера. Без неё ключ создаётся внутри контейнера и сессии сбрасываются при его пересоздании.
    - `LOADLENS_ADMIN_USER` / `LOADLENS_ADMIN_PASSWORD` — первый администратор; создаётся при первом открытии страницы входа, пока в базе нет пользователей. После первого входа удалите пароль из `.env`.
    - `LOADLENS_RECOVERY_USER` / `LOADLENS_RECOVERY_PASSWORD_HASH` — аварийный администратор: входит, только пока база недоступна, и может лишь исправить подключение к хранилищу на `/recovery`. Хеш выдаёт `docker compose exec app python -m loadlens_app.auth hash-password`; в `.env` заключите хеш в одинарные кавычки, иначе docker compose обрежет его на первом `$`. Подробнее — README, «Режим восстановления».
@@ -72,7 +73,7 @@
 
    При необходимости обновите блоки `llm`, `data_sources`, `domain_sources`, `grafana_base_url`, `loki_url` — используйте безопасные ключи/URL.
 
-4. Секреты не попадают в образ: `.dockerignore` исключает `settings.py`, `metrics_config.py`, `settings_runtime*.json`, `metrics_config_runtime.json`, все `.env` и `AI/GigaChat/`, а `docker/docker-compose.yml` монтирует эти файлы в `app` и `celery_worker` (в воркер — только для чтения). Изменения из «Настроек» пишутся прямо в `settings_runtime.json` и `metrics_config_runtime.json` на хосте и переживают пересоздание контейнера. Сертификаты GigaChat кладите в `AI/GigaChat/` — каталог монтируется в `app`.
+4. Секреты не попадают в образ: `.dockerignore` исключает `settings.py`, `metrics_config.py`, `settings_runtime*.json`, `metrics_config_runtime.json`, все `.env` и `AI/GigaChat/`, а `docker/docker-compose.yml` монтирует эти файлы в `app` и `celery_worker` (в воркер — только для чтения). Изменения из «Настроек» пишутся прямо в `settings_runtime.json` и `metrics_config_runtime.json` на хосте и переживают пересоздание контейнера. Сертификаты GigaChat кладите в `AI/GigaChat/` — каталог монтируется в `app` и `celery_worker` (отчёты с провайдером GigaChat строит воркер).
 
 ### 2) Поднятие в Docker
 
@@ -109,6 +110,8 @@ docker compose exec app python -m loadlens_app.auth create-user admin --role adm
 
 Базы, созданные до появления авторизации, дополнительных действий не требуют: таблицы пользователей приложение создаёт само при первом обращении (пользователю БД из `settings.py` нужно право `CREATE` в схеме).
 
+При каждом старте `app` в фоне выполняет миграции данных (`LOADLENS_RUN_MIGRATIONS=1`): идентификаторы старых отчётов, таблица прогонов `run_index`, колонка `max_rps`, индекс `idx_metrics_run_name`. Повторный запуск ничего не меняет. На базе с уже сохранёнными прогонами архив пуст, пока первая миграция не заполнит `run_index` (около 2 с на 2 млн строк `metrics`); ход виден в `docker logs ltar_app`.
+
 ### 3) Что делает TimescaleDB при старте
 
 - Разворачивается образ `timescale/timescaledb:latest-pg16`.
@@ -125,14 +128,25 @@ docker exec -it ltar_timescaledb psql -U $POSTGRES_USER -d $POSTGRES_DB -c "\dx"
 ### 4) Redis и Celery worker
 
 - `redis` — официальный образ `redis:7.4-alpine` с volume `redis_data`. Используется как брокер и backend для Celery. Требует пароль `REDIS_PASSWORD` (`--requirepass`); healthcheck и `redis-cli` внутри контейнера авторизуются через `REDISCLI_AUTH`, например `docker exec ltar_redis redis-cli ping`.
-- `celery_worker` — отдельный контейнер из того же образа, что и приложение. Команда запуска:  
-  `celery -A loadlens_app.celery_app worker --loglevel=info`.
+- `celery_worker` — отдельный контейнер из того же образа, что и приложение. Он строит отчёты, публикует отчёты и прогнозы в Confluence (очередь `reports`) и выполняет прочие задачи (очередь `celery`). Команда запуска:  
+  `celery -A loadlens_app.celery_app worker --loglevel=info -Q reports,celery --concurrency ${WORKER_CONCURRENCY:-2} --max-tasks-per-child 20`.  
+  Процесс воркера заменяется после 20 задач (pandas не отдаёт память системе); лимит памяти контейнера — `WORKER_MEMORY_LIMIT` (2g).
 - Переменные `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` по умолчанию указывают на `redis://:<REDIS_PASSWORD>@redis:6379/0`.
-- `CELERY_TASK_ALWAYS_EAGER=0` — фоновые задачи (скачивание графиков, загрузка вложений, LLM) выполняются асинхронно.
-  Поставьте `1`, если нужно временно отключить Redis/Celery и выполнять всё внутри процесса `app`.
-- Логи воркера: `docker logs -f ltar_celery_worker`.  
+- `CELERY_TASK_ALWAYS_EAGER=0` и `LOADLENS_JOB_RUNNER=auto` (по умолчанию) — отчёты и публикации выполняет воркер, `app` только ставит задачи в очередь и показывает их ход из таблицы `report_jobs`; пока строится отчёт, страницы не замедляются. Графики Grafana, логи Loki и вложения Confluence отчёт скачивает и загружает сам, своим пулом потоков. Поставьте `CELERY_TASK_ALWAYS_EAGER=1` или `LOADLENS_JOB_RUNNER=thread`, чтобы выполнять задачи потоком внутри `app`, как раньше.
+- Если Redis недоступен, задача не теряется: `app` выполняет её своим потоком и пишет в журнал `Could not send job … to the Celery broker`. Упавший воркер не повторяет задачу: через `LOADLENS_JOB_STALE_MIN` (15) минут без признаков жизни она становится ошибкой «Задача прервана: воркер не отвечает». Задача, которую воркер не взял за `LOADLENS_JOB_QUEUE_MAX_MIN` (120) минут, — ошибкой «Задача прервана: воркер не взял её из очереди». Лимит времени одной задачи — `LOADLENS_REPORT_TASK_LIMIT_SEC` (3600 с). Все эти переменные compose передаёт и `app`, и воркеру.
+- Одновременно воркер выполняет `WORKER_CONCURRENCY` (2) задач, остальные ждут в очереди; лимит приложения `limits.max_parallel_jobs` по умолчанию 4. Поднимая `WORKER_CONCURRENCY`, поднимите `WORKER_MEMORY_LIMIT` и проверьте лимиты LLM-провайдера: `max_concurrent` действует на каждый процесс воркера. `docker compose up --scale celery_worker=2` не сработает: у сервиса задан `container_name`.
+- Healthcheck воркера — `celery inspect ping` раз в минуту (`docker compose ps` показывает `healthy`). При остановке воркер ждёт до 2 минут (`stop_grace_period`), чтобы идущие задачи закончились.
+- Логи воркера: `docker logs -f ltar_celery_worker` (строки `Task loadlens.report[<номер задачи>] received` и `… succeeded`).  
   Перезапуск: `cd docker && docker compose restart celery_worker`.
-- Масштабирование (независимые воркеры): `cd docker && docker compose up -d --scale celery_worker=2`.
+- Что выполняется сейчас и что ждёт:
+  ```bash
+  cd docker
+  docker compose exec celery_worker celery -A loadlens_app.celery_app inspect active
+  docker exec ltar_redis redis-cli llen reports
+  ```
+- Код у `app` и воркера должен совпадать: после обновления пересобирайте и перезапускайте оба сервиса. Часы хоста одни на оба контейнера; если воркер вынесен на другой хост, синхронизируйте часы (NTP).
+
+Режимы, поведение при сбоях, просмотр очереди и запуск воркера на Windows — в [docs/jobs-runner.md](../docs/jobs-runner.md).
 
 ### 5) Тестовая запись в БД
 
@@ -201,9 +215,9 @@ git commit -m "chore: stop tracking local configs; add examples"
 
 ### 7) Типичные сценарии
 
-- Пересобрать приложение после изменений кода:
+- Пересобрать приложение после изменений кода (воркер собирается из того же образа и должен обновляться вместе с `app`):
   ```bash
-  cd docker && docker compose up -d --build app
+  cd docker && docker compose up -d --build app celery_worker
   ```
 
 - Обновить только БД (обычно не требуется):
