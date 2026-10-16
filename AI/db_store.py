@@ -1,5 +1,7 @@
 import logging
 import json
+import math
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -367,6 +369,34 @@ def _ensure_llm_reports_table(conn, storage_cfg: Dict[str, object]) -> None:
                 cur.execute(
                     sql.SQL("ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS project_area TEXT;").format(
                         sql.Identifier(schema), sql.Identifier(table)
+                    )
+                )
+            except Exception:
+                pass
+            # Load level of a final row (max_rps_from_parsed), so list queries need not parse JSONB per row.
+            try:
+                cur.execute(
+                    sql.SQL("ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS max_rps NUMERIC;").format(
+                        sql.Identifier(schema), sql.Identifier(table)
+                    )
+                )
+            except Exception:
+                pass
+            # Final rows newest first, overall (dashboard "last run") and per service (baseline lookup).
+            try:
+                cur.execute(
+                    sql.SQL(
+                        "CREATE INDEX IF NOT EXISTS {} ON {}.{} (created_at DESC) WHERE domain = 'final';"
+                    ).format(sql.Identifier(f"idx_{table}_final_created"), sql.Identifier(schema), sql.Identifier(table))
+                )
+            except Exception:
+                pass
+            try:
+                cur.execute(
+                    sql.SQL(
+                        "CREATE INDEX IF NOT EXISTS {} ON {}.{} (service, created_at DESC) WHERE domain = 'final';"
+                    ).format(
+                        sql.Identifier(f"idx_{table}_final_service_created"), sql.Identifier(schema), sql.Identifier(table)
                     )
                 )
             except Exception:
@@ -868,6 +898,88 @@ def load_run_frames(
     return frames
 
 
+# Final-analysis fields with the run's load level, in priority order: the peak of step/stress runs,
+# the held RPS of soak runs, the spike level of spike runs. One rule for Python and SQL below.
+MAX_RPS_FIELDS = (
+    ("peak_performance", "max_rps"),
+    ("stability_under_load", "actual_rps"),
+    ("spike_analysis", "max_spike_rps"),
+)
+# A plain decimal number; the exponent is bounded so the numeric cast cannot overflow. The LLM sometimes
+# writes text such as «~1200», which is not a load level and is skipped in favour of the next field.
+MAX_RPS_NUMBER_PATTERN = "^[-+]?[0-9]+([.][0-9]+)?([eE][-+]?[0-9]{1,3})?$"
+_MAX_RPS_NUMBER_RE = re.compile(MAX_RPS_NUMBER_PATTERN)
+
+
+def _max_rps_sql_literal(value: str) -> str:
+    """SQL text literal for a trusted constant; ``%`` is doubled for psycopg2 parameter binding."""
+    return "'" + str(value).replace("'", "''").replace("%", "%%") + "'"
+
+
+def _max_rps_json_text(value: Any) -> Optional[str]:
+    """Text of a scalar as PostgreSQL ``->>`` prints it, trimmed of spaces like ``TRIM``.
+
+    None for JSON null, booleans, objects and arrays: their text is never a plain number.
+    """
+    if isinstance(value, str):
+        return value.strip(" ")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        # repr of a finite float is a plain or exponent literal; nan/inf (impossible in jsonb) do not match.
+        return repr(value)
+    return None
+
+
+def max_rps_from_parsed(parsed: Any) -> Optional[float]:
+    """Load level of a parsed final analysis: the first ``MAX_RPS_FIELDS`` value that is a plain number.
+
+    The same rule as ``max_rps_sql``: a field whose text is not a plain number («~1200», «1,2 тыс.»)
+    is skipped; the first plain number wins. A number beyond the float range gives None (JSON has no
+    Infinity), as the API does for the value the SQL rule returns.
+    """
+    if not isinstance(parsed, dict):
+        return None
+    for section, field_name in MAX_RPS_FIELDS:
+        block = parsed.get(section)
+        if not isinstance(block, dict):
+            continue
+        text = _max_rps_json_text(block.get(field_name))
+        if text is None or not _MAX_RPS_NUMBER_RE.fullmatch(text):
+            continue
+        number = float(text)
+        return number if math.isfinite(number) else None
+    return None
+
+
+def max_rps_sql(parsed_column: str = "parsed") -> str:
+    """SQL twin of ``max_rps_from_parsed`` over a JSONB column: a NUMERIC or NULL.
+
+    ``parsed_column`` is a trusted column reference (``parsed``, ``f.parsed``); only constants are inlined.
+    """
+    parts = []
+    for section, field_name in MAX_RPS_FIELDS:
+        text = f"TRIM({parsed_column}->{_max_rps_sql_literal(section)}->>{_max_rps_sql_literal(field_name)})"
+        parts.append(
+            f"CASE WHEN {text} ~ {_max_rps_sql_literal(MAX_RPS_NUMBER_PATTERN)} THEN ({text})::numeric END"
+        )
+    return f"COALESCE({', '.join(parts)})"
+
+
+def max_rps_select_sql(parsed_column: str = "parsed") -> str:
+    """The stored ``max_rps`` of a final row, else ``max_rps_sql`` over ``parsed_column``.
+
+    ``COALESCE`` evaluates the parse only when the column is NULL, so a filled row never detoasts
+    ``parsed``; rows saved before the column existed (or not yet backfilled) still get their value.
+    The column takes the qualifier of ``parsed_column`` (``f.parsed`` -> ``f.max_rps``).
+    """
+    qualifier = parsed_column.rpartition(".")[0]
+    column = f"{qualifier}.max_rps" if qualifier else "max_rps"
+    return f"COALESCE({column}, {max_rps_sql(parsed_column)})"
+
+
 def _coerce_json_object(raw: Any) -> Optional[Dict[str, Any]]:
     if isinstance(raw, dict):
         return raw
@@ -907,8 +1019,9 @@ def save_llm_results(
             """
             INSERT INTO {}.{} (
                 run_id, run_name, service, test_type, start_ms, end_ms, domain,
-                text, parsed, scores, context, system_context, verdict, sla_verdict, sla_details, project_area
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);
+                text, parsed, scores, context, system_context, verdict, sla_verdict, sla_details, project_area,
+                max_rps
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);
             """
         ).format(sql.Identifier(schema), sql.Identifier(table))
 
@@ -983,12 +1096,13 @@ def save_llm_results(
             is_final = (domain == "final")
             sla_v = run_sla_verdict if is_final else None
             sla_d = Json(run_sla_details) if (is_final and run_sla_details) else None
+            max_rps = max_rps_from_parsed(parsed_val) if is_final else None
 
             rows.append(
                 (
                     run_id, run_name, service, test_type, start_ms, end_ms, domain,
                     text_str, parsed_json, scores_json, context_json, system_context_json,
-                    verdict_std, sla_v, sla_d, project_area,
+                    verdict_std, sla_v, sla_d, project_area, max_rps,
                 )
             )
 
