@@ -8,6 +8,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict
@@ -208,9 +209,121 @@ def _active_project_area() -> str | None:
 # Serialises reads and writes of the runtime JSON files within the process.
 _RUNTIME_FILES_LOCK = threading.RLock()
 
+# A file read less than this long after its mtime may change again within the same timestamp tick
+# and keep its size (coarse mtimes on FAT, network shares and some bind mounts, quick rewrites in
+# tests). Such a cache entry is checked byte by byte until the file is older than the window.
+_RACY_WINDOW_NS = 2_000_000_000
+
 
 class RuntimeConfigError(ValueError):
     """A runtime configuration file exists but cannot be read; it is left untouched."""
+
+
+class _CachedJson:
+    """Parsed runtime JSON file with the stat signature and the bytes it was read from."""
+
+    __slots__ = ("signature", "raw", "data", "verified_ns")
+
+    def __init__(self, signature: tuple, raw: bytes, data: dict, verified_ns: int) -> None:
+        self.signature = signature
+        self.raw = raw
+        self.data = data
+        self.verified_ns = verified_ns
+
+    def trusted(self, signature: tuple) -> bool:
+        """Same signature as when read, and the file had last changed well before that read."""
+        return self.signature == signature and signature[0] < self.verified_ns - _RACY_WINDOW_NS
+
+
+# os.fspath(path) -> entry. Entries are replaced, never changed, so readers need no lock.
+_JSON_CACHE: dict[str, _CachedJson] = {}
+
+
+def _file_signature(st: os.stat_result) -> tuple:
+    # st_mtime_ns comes first: _CachedJson.trusted reads it from there.
+    return (st.st_mtime_ns, st.st_size, st.st_ino, st.st_dev, st.st_ctime_ns)
+
+
+def _decode_runtime_json(path: Path, raw: bytes) -> dict:
+    """Contents of a runtime JSON file already read as bytes; same rules as _read_json_file."""
+    try:
+        text = raw.decode("utf-8-sig")
+        data = json.loads(text) if text.strip() else {}
+    except ValueError as exc:
+        raise RuntimeConfigError(f"{path.name}: файл не читается или содержит некорректный JSON ({exc})") from exc
+    if not isinstance(data, dict):
+        raise RuntimeConfigError(f"{path.name}: ожидается JSON-объект")
+    return data
+
+
+def _refresh_cached_json(path: Path, force: bool = False) -> _CachedJson | None:
+    """Reads ``path`` under the lock and stores its cache entry; None when the file is missing.
+
+    When the bytes did not change, the new entry keeps the parsed object of the old one, so caches
+    derived from it (_active_metrics_config) stay valid. ``force`` re-reads even a trusted entry.
+
+    Raises:
+        RuntimeConfigError: the file cannot be read or parsed. Its entry is dropped, so the next
+            call reads the file again.
+    """
+    key = os.fspath(path)
+    with _RUNTIME_FILES_LOCK:
+        started = time.time_ns()
+        entry = None
+        try:
+            signature = _file_signature(os.stat(key))
+            entry = _JSON_CACHE.get(key)
+            if not force and entry is not None and entry.trusted(signature):
+                return entry  # another thread refreshed it while this one waited for the lock
+            raw = path.read_bytes()
+        except OSError as exc:
+            _JSON_CACHE.pop(key, None)
+            if not path.exists():
+                return None
+            raise RuntimeConfigError(f"{path.name}: файл не читается или содержит некорректный JSON ({exc})") from exc
+        if entry is not None and entry.raw == raw:
+            data = entry.data
+        else:
+            try:
+                data = _decode_runtime_json(path, raw)
+            except RuntimeConfigError:
+                _JSON_CACHE.pop(key, None)
+                raise
+        fresh = _CachedJson(signature, raw, data, started)
+        _JSON_CACHE[key] = fresh
+        return fresh
+
+
+def _cached_entry(path: Path) -> _CachedJson | None:
+    """Cache entry of a runtime JSON file, None when it is missing; one ``os.stat`` while unchanged."""
+    key = os.fspath(path)
+    try:
+        signature = _file_signature(os.stat(key))
+    except FileNotFoundError:
+        _JSON_CACHE.pop(key, None)
+        return None
+    except OSError:
+        return _refresh_cached_json(path)
+    entry = _JSON_CACHE.get(key)
+    if entry is not None and entry.trusted(signature):
+        return entry
+    return _refresh_cached_json(path)
+
+
+def _cached_json(path: Path) -> dict:
+    """Parsed runtime JSON file, ``{}`` when missing or empty; read and parsed again only after a change.
+
+    The dict is shared by every caller in the process: never modify it or anything inside it, and
+    ``copy.deepcopy`` a part before changing it. Read-modify-write paths take a private copy from
+    _load_settings_runtime_data() / _load_metrics_runtime_data() instead. A change is noticed by
+    the file's stat signature (mtime, size, inode, ctime), byte by byte while the mtime is too
+    recent to trust, and at once after _write_json_atomic; other processes are seen by the stat.
+
+    Raises:
+        RuntimeConfigError: as _read_json_file; a broken file is not cached.
+    """
+    entry = _cached_entry(path)
+    return entry.data if entry is not None else {}
 
 
 def _read_json_file(path: Path) -> dict:
@@ -238,7 +351,8 @@ def _write_json_atomic(path: Path, payload: dict) -> None:
 
     The text goes to a temporary file in the same directory, is flushed to disk and renamed over the
     target. A single-file bind mount (docker-compose) cannot be replaced by rename; then the file is
-    rewritten in place, still under the process-wide lock.
+    rewritten in place, still under the process-wide lock. The cache of _cached_json is refreshed
+    from the written file before the lock is released, whatever its mtime says.
     """
     text = json.dumps(payload, ensure_ascii=False, indent=2)
     with _RUNTIME_FILES_LOCK:
@@ -262,6 +376,10 @@ def _write_json_atomic(path: Path, payload: dict) -> None:
                     os.unlink(tmp_name)
                 except OSError:
                     pass
+        try:
+            _refresh_cached_json(path, force=True)
+        except RuntimeConfigError:
+            pass  # the entry is dropped; the next read reports the problem
 
 
 def public_base_url() -> str:
@@ -277,6 +395,7 @@ def public_base_url() -> str:
 
 
 def _load_settings_runtime_data() -> dict:
+    """Private copy of settings_runtime.json, read from disk: for read-modify-write paths."""
     return _read_json_file(CONFIG_RUNTIME_PATH)
 
 
@@ -285,7 +404,10 @@ def _save_settings_runtime_data(payload: dict) -> None:
 
 
 def _load_metrics_runtime_data() -> dict:
-    """Runtime metrics_config overrides; an unreadable file is an error, not an empty config."""
+    """Private copy of the runtime metrics_config overrides, read from disk: for read-modify-write paths.
+
+    An unreadable file is an error, not an empty config.
+    """
     return _read_json_file(METRICS_RUNTIME_PATH)
 
 
@@ -293,13 +415,24 @@ def _save_metrics_runtime_data(payload: dict) -> None:
     _write_json_atomic(METRICS_RUNTIME_PATH, payload or {})
 
 
+def _settings_runtime_view() -> dict:
+    """Shared cached settings_runtime.json for readers; do not modify (see _cached_json)."""
+    return _cached_json(CONFIG_RUNTIME_PATH)
+
+
+def _metrics_runtime_view() -> dict:
+    """Shared cached metrics_config_runtime.json for readers; do not modify (see _cached_json)."""
+    return _cached_json(METRICS_RUNTIME_PATH)
+
+
 def _per_area_config() -> dict:
-    data = _load_settings_runtime_data()
-    per_area = data.get("per_area") if isinstance(data, dict) else {}
+    """``per_area`` of the runtime settings. Shared and cached: do not modify (see _cached_json)."""
+    per_area = _settings_runtime_view().get("per_area")
     return per_area if isinstance(per_area, dict) else {}
 
 
 def _area_entry(area_name: str | None) -> dict:
+    """Runtime entry of an area. Shared and cached: do not modify."""
     if not area_name:
         return {}
     entry = _per_area_config().get(area_name)
@@ -307,6 +440,7 @@ def _area_entry(area_name: str | None) -> dict:
 
 
 def _services_map_for_area(area_name: str | None) -> dict:
+    """Runtime services of an area, by id. Shared and cached: do not modify."""
     entry = _area_entry(area_name)
     services = entry.get("services")
     return services if isinstance(services, dict) else {}
@@ -341,27 +475,59 @@ def _load_base_prompts() -> dict:
     return prompts
 
 
-def _active_metrics_config() -> dict:
-    base = METRICS_CONFIG if isinstance(METRICS_CONFIG, dict) else {}
+def _merged_metrics_config(base: dict, override: dict | None) -> dict:
+    """Deep copy of ``base`` with the runtime overrides applied (``__replace__`` swaps a whole entry)."""
     raw = copy.deepcopy(base)
     try:
-        if METRICS_RUNTIME_PATH.exists():
-            with METRICS_RUNTIME_PATH.open("r", encoding="utf-8") as f:
-                override = json.load(f)
-            if isinstance(override, dict):
-                for key, value in override.items():
-                    if not isinstance(value, dict):
-                        continue
-                    value_copy = copy.deepcopy(value)
-                    replace = bool(value_copy.pop("__replace__", False))
-                    if replace:
-                        raw[key] = value_copy
-                    else:
-                        base_entry = raw.get(key, {})
-                        raw[key] = _deep_merge_dicts(base_entry if isinstance(base_entry, dict) else {}, value_copy)
+        for key, value in (override or {}).items():
+            if not isinstance(value, dict):
+                continue
+            value_copy = copy.deepcopy(value)
+            replace = bool(value_copy.pop("__replace__", False))
+            if replace:
+                raw[key] = value_copy
+            else:
+                base_entry = raw.get(key, {})
+                raw[key] = _deep_merge_dicts(base_entry if isinstance(base_entry, dict) else {}, value_copy)
     except Exception:
         pass
-    return _normalize_metrics_config(raw)
+    return raw
+
+
+# (METRICS_CONFIG, settings data, metrics data, result) of the last computed _active_metrics_config().
+_METRICS_VIEW: tuple | None = None
+
+
+def _active_metrics_config() -> dict:
+    """metrics_config with the runtime overrides, grouped by area (see _normalize_metrics_config).
+
+    Computed again only when metrics_config_runtime.json or settings_runtime.json (whose per_area the
+    grouping follows) changes. The result is shared by every caller: treat it as read-only and
+    ``copy.deepcopy`` whatever is going to be changed. An unreadable metrics file counts as missing.
+    """
+    global _METRICS_VIEW
+    base = METRICS_CONFIG if isinstance(METRICS_CONFIG, dict) else {}
+    settings_entry = _cached_entry(CONFIG_RUNTIME_PATH)
+    try:
+        metrics_entry = _cached_entry(METRICS_RUNTIME_PATH)
+    except RuntimeConfigError:
+        metrics_entry = None
+    settings_data = settings_entry.data if settings_entry is not None else None
+    metrics_data = metrics_entry.data if metrics_entry is not None else None
+    view = _METRICS_VIEW
+    if view is not None and view[0] is base and view[1] is settings_data and view[2] is metrics_data:
+        return view[3]
+    result = _normalize_metrics_config(_merged_metrics_config(base, metrics_data))
+    _METRICS_VIEW = (base, settings_data, metrics_data, result)
+    return result
+
+
+def _clear_runtime_cache() -> None:
+    """Forgets every cached runtime file and the cached _active_metrics_config() (used by tests)."""
+    global _METRICS_VIEW
+    with _RUNTIME_FILES_LOCK:
+        _JSON_CACHE.clear()
+        _METRICS_VIEW = None
 
 
 def _service_area_map() -> dict:
@@ -409,6 +575,7 @@ def _normalize_metrics_config(raw: dict | None) -> dict:
 
 
 def _metrics_services_for_area(area_name: str | None) -> dict:
+    """metrics_config services of an area, by id. Part of _active_metrics_config(): do not modify."""
     metrics = _active_metrics_config() or {}
     if not area_name:
         return {}
@@ -508,18 +675,20 @@ def _bootstrap_service_configs(area_name: str | None, service_id: str | None) ->
     if not area_name or not service_id:
         return
     _bootstrap_area_defaults(area_name)
-    runtime, area_entry = _ensure_area_runtime(area_name)
-    if "services" not in area_entry or not isinstance(area_entry.get("services"), dict):
-        area_entry["services"] = {}
-    changed = False
-    if service_id not in area_entry["services"] or not isinstance(area_entry["services"].get(service_id), dict):
-        area_entry["services"][service_id] = {}
-        changed = True
-    # Area settings are not copied onto the service. A copied snapshot would hide
-    # later edits of the area. queries, sla and prompts land here only when the
-    # user saves that service in the settings UI.
-    if changed:
-        _save_settings_runtime_data(runtime)
+    # The cached view answers the common case (already registered) without reading the file again.
+    if not isinstance(_services_map_for_area(area_name).get(service_id), dict):
+        runtime, area_entry = _ensure_area_runtime(area_name)
+        if "services" not in area_entry or not isinstance(area_entry.get("services"), dict):
+            area_entry["services"] = {}
+        changed = False
+        if service_id not in area_entry["services"] or not isinstance(area_entry["services"].get(service_id), dict):
+            area_entry["services"][service_id] = {}
+            changed = True
+        # Area settings are not copied onto the service. A copied snapshot would hide
+        # later edits of the area. queries, sla and prompts land here only when the
+        # user saves that service in the settings UI.
+        if changed:
+            _save_settings_runtime_data(runtime)
     _bootstrap_metrics_service_config(area_name, service_id)
 
 
@@ -532,6 +701,10 @@ def _default_metrics_service_template() -> dict:
 
 def _bootstrap_metrics_service_config(area_name: str | None, service_id: str | None) -> None:
     if not area_name or not service_id:
+        return
+    cached_area = _metrics_runtime_view().get(area_name)
+    cached_services = cached_area.get("services") if isinstance(cached_area, dict) else None
+    if isinstance(cached_services, dict) and service_id in cached_services:
         return
     base_metrics = _default_metrics_service_template()
     current = _load_metrics_runtime_data()
@@ -821,6 +994,7 @@ __all__ = [
     "_load_base_prompts",
     "_load_metrics_runtime_data",
     "_load_settings_runtime_data",
+    "_metrics_runtime_view",
     "_metrics_service_entry",
     "_metrics_services_for_area",
     "_normalize_metrics_config",
@@ -839,6 +1013,7 @@ __all__ = [
     "_service_meta",
     "_service_disabled_domains",
     "_services_map_for_area",
+    "_settings_runtime_view",
     "_ts_conn",
     "convert_to_timestamp",
     "_deep_merge_dicts",
