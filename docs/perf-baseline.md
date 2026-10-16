@@ -483,9 +483,18 @@ os.environ["CELERY_TASK_ALWAYS_EAGER"] = "0"
 os.environ["LOADLENS_JOB_RUNNER"] = "celery"
 ```
 
-и воркер из `%TEMP%\ll_ui_s<N>\app` с теми же переменными плюс `LOADLENS_AUTH_ENABLED=0`, `LOADLENS_SECRET_KEY`:
-`C:/Python312/python.exe -m celery -A loadlens_app.celery_app worker --loglevel=info --pool=solo -Q reports,celery`.
-Что задача ушла в воркер, видно по `Received task` в его журнале (до B4 их 0).
+и воркер из каталога `app` песочницы с теми же переменными (так он запускался из Git Bash, в фоне):
+
+```
+cd C:/Users/<user>/AppData/Local/Temp/ll_ui_s<N>/app && CELERY_BROKER_URL=redis://127.0.0.1:16379/<N> \
+  CELERY_RESULT_BACKEND=redis://127.0.0.1:16379/<N> CELERY_TASK_ALWAYS_EAGER=0 LOADLENS_JOB_RUNNER=celery \
+  LOADLENS_AUTH_ENABLED=0 LOADLENS_SECRET_KEY=ui-sandbox-only-secret-key \
+  C:/Python312/python.exe -m celery -A loadlens_app.celery_app worker --loglevel=info --pool=solo -Q reports,celery
+```
+
+Что задача ушла в воркер, видно по `Received task` в его журнале (до B4 их 0). Сейчас воркер регистрирует только
+`update_page.download_*`/`upload_attachment_task` (побочным эффектом импорта); остановить — по PID процесса
+`python.exe`, у которого есть соединение с `:16379` (`netstat -ano | grep :16379`).
 
 ### Базовая линия: режим `thread`
 
