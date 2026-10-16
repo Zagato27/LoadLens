@@ -213,12 +213,16 @@ CONFIG = {
         "max_parallel_jobs_per_user": 2,
         "llm_reports_per_user_per_day": 20,   # reports with AI analysis
         "llm_explanations_per_user_per_day": 50,  # LLM explanations of the forecast limit
-        "llm_context_imports_per_user_per_day": 20  # system context filled from a document
+        "llm_context_imports_per_user_per_day": 20,  # system context filled from a document
+        "max_parallel_load_tests": 5,         # load test runs started from LoadLens and still active
+        "max_parallel_load_tests_per_user": 3,
+        "max_load_test_instances": 20,        # instances (tool processes) in one run
+        "max_load_test_hours": 24             # the generator stops the tool after this time anyway
     },
 
     # Accent of the whole install: buttons, logo and the browser tab icon. #rrggbb.
     "appearance": {
-        "accent": "#6200ee"
+        "accent": "#6c5ce7"
     },
 
     # Подключения. В источнике только адрес, авторизация и TLS.
@@ -325,6 +329,38 @@ CONFIG = {
         "recovery_password_hash": ""
     },
 
+    # Генераторы нагрузки страницы «Запуск теста» (docs/load-tests.md): ssh, docker, kubernetes, gitlab, jenkins,
+    # manual. Секреты (private_key, passphrase, password, client_key, token, trigger_token, api_token) удобнее
+    # задавать в «Настройки → Подключения → Генераторы нагрузки»: там же «Проверить» закрепляет ключ хоста SSH.
+    "load_generators": {
+        "manual": {"title": "Вручную", "type": "manual"},
+        # "gen-1": {
+        #     "title": "Генератор 1", "type": "ssh",
+        #     "ssh": {"host": "10.0.0.5", "port": 22, "username": "loadlens", "private_key": "", "host_key": ""},
+        #     "work_dir": "/opt/loadlens/runs", "scripts_dir": "/opt/loadlens/tests", "tools": {},
+        # },
+        # "docker-1": {
+        #     "title": "Docker", "type": "docker",
+        #     "docker": {"url": "https://gen2:2376", "ca_cert": "", "client_cert": "", "client_key": ""},
+        #     "network": "loadtest", "mounts": [{"source": "loadlens-scripts", "target": "/scripts", "read_only": True}],
+        #     "scripts_dir": "/scripts",
+        # },
+        # Пайплайн команды как есть: LoadLens выбирает ветку и значения параметров пайплайна (docs/load-tests.md).
+        # "gitlab-1": {
+        #     "title": "GitLab CI", "type": "gitlab",
+        #     "gitlab": {"url": "https://gitlab.example.ru", "project": "perf/load-tests", "ref": "", "api_token": ""},
+        #     "loadlens_url": "https://loadlens.example.ru", "tags_metrics": False,
+        # },
+        # "jenkins-1": {
+        #     "title": "Jenkins", "type": "jenkins",
+        #     "jenkins": {"url": "https://jenkins.example.ru", "job": "perf/load-test", "username": "loadlens", "api_token": ""},
+        #     "param_options": {"STAND": ["stage", "preprod"]},
+        # },
+    },
+    # Отличия от встроенных шаблонов команд k6, JMeter, Locust и Gatling (loadlens_app/load_tests/tools.py)
+    # и свои инструменты; пусто — встроенные шаблоны как есть.
+    "load_tools": {},
+
     # Запросы набора «Spring Boot на Kubernetes + k6 (InfluxDB)» из каталога пакетов (AI/query_packs).
     # Блок и ссылки SLA выше генерирует `python -m AI.query_packs example`; другой стек удобнее выбрать
     # в «Настройки → Запросы → Добавить из пакета». roles и packs — служебные ключи пакетов.
@@ -343,19 +379,21 @@ CONFIG = {
                 "LT (InfluxQL): http_req_duration mean(ms)",
                 "LT (InfluxQL): error rate (%)",
                 "LT (InfluxQL): failed requests per second by group & name",
-                "LT (InfluxQL): VUs"
+                "LT (InfluxQL): VUs",
+                "LT (InfluxQL): RPS by LoadLens instance"
             ],
             "influxql_queries": [
-                'SELECT sum("value") FROM "http_reqs" WHERE $timeFilter GROUP BY time(1s), "group"::tag, "name"::tag fill(null)',
-                'SELECT sum("value") FROM "checks" WHERE $timeFilter GROUP BY time(1s), "check", "group"::tag fill(none)',
-                'SELECT percentile("value", 95) FROM "http_req_duration" WHERE $timeFilter GROUP BY time($__interval), "group"::tag, "name"::tag fill(null)',
-                'SELECT sum("value") as "all" FROM "http_reqs" WHERE $timeFilter GROUP BY "all", time(1s) fill(null)',
-                'SELECT percentile("value", 95) FROM "http_req_duration" WHERE $timeFilter GROUP BY time($__interval) fill(null)',
-                'SELECT percentile("value", 99) FROM "http_req_duration" WHERE $timeFilter GROUP BY time($__interval) fill(null)',
-                'SELECT mean("value") FROM "http_req_duration" WHERE $timeFilter GROUP BY time($__interval) fill(null)',
-                'SELECT mean("value") * 100 FROM "http_req_failed" WHERE $timeFilter GROUP BY time($__interval) fill(null)',
-                'SELECT sum("value") FROM "http_req_failed" WHERE $timeFilter GROUP BY time(1s), "group"::tag, "name"::tag fill(null)',
-                'SELECT max("value") FROM "vus" WHERE $timeFilter GROUP BY time(1s) fill(null)'
+                'SELECT sum("value") FROM "http_reqs" WHERE "testid" =~ /^.*$/ AND $timeFilter GROUP BY time(1s), "group"::tag, "name"::tag fill(null)',
+                'SELECT sum("value") FROM "checks" WHERE "testid" =~ /^.*$/ AND $timeFilter GROUP BY time(1s), "check", "group"::tag fill(none)',
+                'SELECT percentile("value", 95) FROM "http_req_duration" WHERE "testid" =~ /^.*$/ AND $timeFilter GROUP BY time($__interval), "group"::tag, "name"::tag fill(null)',
+                'SELECT sum("value") as "all" FROM "http_reqs" WHERE "testid" =~ /^.*$/ AND $timeFilter GROUP BY "all", time(1s) fill(null)',
+                'SELECT percentile("value", 95) FROM "http_req_duration" WHERE "testid" =~ /^.*$/ AND $timeFilter GROUP BY time($__interval) fill(null)',
+                'SELECT percentile("value", 99) FROM "http_req_duration" WHERE "testid" =~ /^.*$/ AND $timeFilter GROUP BY time($__interval) fill(null)',
+                'SELECT mean("value") FROM "http_req_duration" WHERE "testid" =~ /^.*$/ AND $timeFilter GROUP BY time($__interval) fill(null)',
+                'SELECT mean("value") * 100 FROM "http_req_failed" WHERE "testid" =~ /^.*$/ AND $timeFilter GROUP BY time($__interval) fill(null)',
+                'SELECT sum("value") FROM "http_req_failed" WHERE "testid" =~ /^.*$/ AND $timeFilter GROUP BY time(1s), "group"::tag, "name"::tag fill(null)',
+                'SELECT max("value") FROM "vus" WHERE "testid" =~ /^.*$/ AND $timeFilter GROUP BY time(1s) fill(null)',
+                'SELECT sum("value") FROM "http_reqs" WHERE "testid" =~ /^.*$/ AND $timeFilter GROUP BY "lt_instance", time(1s) fill(null)'
             ],
             "label_tag_keys_list": [
                 ["group", "name"],
@@ -367,7 +405,8 @@ CONFIG = {
                 [],
                 [],
                 ["group", "name"],
-                []
+                [],
+                ["lt_instance"]
             ],
             "roles": {
                 "LT (InfluxQL): RPS by group & name": "lt.rps_by_request",
@@ -379,13 +418,15 @@ CONFIG = {
                 "LT (InfluxQL): http_req_duration mean(ms)": "lt.mean_latency_total",
                 "LT (InfluxQL): error rate (%)": "lt.error_rate_pct",
                 "LT (InfluxQL): failed requests per second by group & name": "lt.errors_by_request",
-                "LT (InfluxQL): VUs": "lt.vus"
+                "LT (InfluxQL): VUs": "lt.vus",
+                "LT (InfluxQL): RPS by LoadLens instance": "lt.rps_by_instance"
             },
             "packs": [
                 {
                     "id": "lt-k6-influxql",
-                    "version": 1,
+                    "version": 3,
                     "variables": {
+                        "testid": ".*",
                         "load_model": "open"
                     }
                 }

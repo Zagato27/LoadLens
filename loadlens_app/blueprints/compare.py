@@ -154,13 +154,37 @@ def compare_metric_summary():
         return internal_error(e)
 
 
+def _baseline_current_run(conn, schema: str, table: str, run_name: str) -> tuple | None:
+    """(service, created_at, test_type, project_area) of the run's latest final report.
+
+    Only runs of the active project area are found, like every other compare endpoint.
+    """
+    svc_where, svc_params = _services_clause()
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT COALESCE(service, ''), created_at, COALESCE(test_type, ''), COALESCE(project_area, '')
+            FROM {schema}.{table}
+            WHERE run_name = %s AND domain = 'final'{svc_where}
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (run_name, *svc_params),
+        )
+        return cur.fetchone()
+
+
 @compare_bp.route("/compare_baseline", methods=["GET"])
 def compare_baseline():
-    """Ищет предыдущий прогон того же сервиса для сравнения.
+    """Ищет предыдущий прогон того же сервиса, проектной области и типа теста для сравнения.
 
     ``mode=previous_success`` (по умолчанию) — последний более ранний прогон с итоговым
     вердиктом «Успешно»; ``mode=previous`` — последний более ранний прогон без учёта вердикта.
+    Тип теста сравнивается с учётом синонимов (``AI.db_store.find_previous_run``); отчёты,
+    сохранённые без области, подходят любой области.
     """
+    from AI.db_store import find_previous_run
+    from AI.test_profile import normalize_test_type
+
     run_name = (request.args.get("run_name") or "").strip()
     mode = (request.args.get("mode") or "previous_success").strip().lower()
     if not run_name:
@@ -170,37 +194,38 @@ def compare_baseline():
     cfg = (CONFIG.get("storage", {}) or {}).get("timescale", {})
     schema = cfg.get("schema", "public")
     table = cfg.get("llm_table", "llm_reports")
-    success_filter = "AND COALESCE(r.sla_verdict, r.verdict) = 'Успешно'" if mode == "previous_success" else ""
+    type_key = ""
+    previous = None
     try:
         conn = _ts_conn()
-        with conn, conn.cursor() as cur:
-            cur.execute(
-                f"""
-                WITH current AS (
-                  SELECT service, created_at FROM {schema}.{table}
-                  WHERE run_name = %s AND domain = 'final'
-                  ORDER BY created_at DESC LIMIT 1
-                )
-                SELECT r.run_name, r.service, COALESCE(r.sla_verdict, r.verdict, 'Недостаточно данных'), r.created_at
-                FROM {schema}.{table} r, current c
-                WHERE r.domain = 'final' AND r.service = c.service AND r.run_name <> %s AND r.created_at < c.created_at
-                {success_filter}
-                ORDER BY r.created_at DESC LIMIT 1
-                """,
-                (run_name, run_name),
-            )
-            row = cur.fetchone()
-        conn.close()
+        try:
+            with conn:
+                current = _baseline_current_run(conn, schema, table, run_name)
+                if current:
+                    service, created_at, test_type, area = (list(current) + [None] * 4)[:4]
+                    type_key = normalize_test_type(str(test_type or ""))
+                    previous = find_previous_run(
+                        conn, schema, table,
+                        exclude_run_name=run_name,
+                        mode=mode,
+                        service=str(service or ""),
+                        before=created_at,
+                        project_area=str(area or "").strip() or _active_project_area() or None,
+                        test_type=type_key or None,
+                    )
+        finally:
+            conn.close()
     except Exception as e:  # pragma: no cover
         return internal_error(e)
-    if not row:
+    if previous is None:
         label = "предыдущий успешный прогон" if mode == "previous_success" else "предыдущий прогон"
-        return jsonify({"error": f"Для «{run_name}» не найден {label} того же сервиса", "mode": mode}), 404
+        type_note = f" с типом теста «{type_key}»" if type_key else ""
+        return jsonify({"error": f"Для «{run_name}» не найден {label} того же сервиса{type_note}", "mode": mode}), 404
     return jsonify({
-        "run_name": row[0],
-        "service": row[1],
-        "verdict": row[2],
-        "created_at": row[3].isoformat() if row[3] else None,
+        "run_name": previous.run_name,
+        "service": previous.service,
+        "verdict": previous.verdict,
+        "created_at": previous.created_at.isoformat() if previous.created_at else None,
         "mode": mode,
     })
 

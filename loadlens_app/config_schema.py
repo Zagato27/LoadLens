@@ -181,6 +181,13 @@ def _validate_pack_keys(domain: str, block: dict) -> None:
     if roles is not None:
         if not isinstance(roles, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in roles.items()):
             raise QueryConfigError(f"{domain}: roles должен быть объектом «название запроса → роль»")
+    derived = block.get("derived")
+    if derived is not None:
+        if not isinstance(derived, dict) or not all(
+            isinstance(meta, dict) and meta.get("kind") == "sum" and isinstance(meta.get("of"), list)
+            for meta in derived.values()
+        ):
+            raise QueryConfigError(f"{domain}: derived должен быть объектом «название → {{kind: sum, of: [названия]}}»")
     packs = block.get("packs")
     if packs is not None:
         if not isinstance(packs, list):

@@ -14,8 +14,9 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Literal, Mapping, Optional
 
 from .catalog import Catalog, load_catalog
-from .render import PackRenderError, RenderedPack, RenderedQuery, render_pack
-from .roles import ROLES, SLA_FIELDS, UNIT_TITLES
+from .models import TEMPLATE_RE, QueryPack
+from .render import PackRenderError, RenderedPack, RenderedQuery, render_pack, resolve_variables
+from .roles import LIVE_ONLY_ROLES, ROLES, SLA_FIELDS, UNIT_TITLES
 
 LANG_FIELDS: dict[str, tuple[str, str]] = {
     "promql": ("promql_queries", "label_keys_list"),
@@ -148,10 +149,181 @@ def prompt_addenda(block: Optional[Mapping[str, Any]], catalog: Optional[Catalog
     return out
 
 
+def run_filter_variables(pack: QueryPack, variables: Mapping[str, Any], run_tag: str) -> Optional[dict[str, str]]:
+    """Full variable set with the pack's run filter applied, or ``None`` when the pack has no run filter."""
+    rule = pack.run_filter
+    if rule is None:
+        return None
+    values = resolve_variables(pack, {k: v for k, v in variables.items() if k in pack.variables})
+    current = values.get(rule.variable, "").strip()
+    added = TEMPLATE_RE.sub(lambda _match: run_tag, rule.value)
+    values[rule.variable] = f"{current}{rule.join}{added}" if rule.join and current else added
+    return values
+
+
+def apply_run_filter(
+    queries: Mapping[str, Any],
+    run_tag: str,
+    packs: Optional[Iterable[str]] = None,
+    catalog: Optional[Catalog] = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Copy of ``queries`` where rows of load tool packs read only the metrics of one run.
+
+    ``packs`` limits the filter to these pack ids: only packs whose tool really tagged the run. Rows keep
+    their labels (stored series ids); only the query text changes. A row whose text differs from what its
+    pack renders was edited by hand and stays as it is. Returns the copy and the ids of filtered packs.
+    """
+    out = copy.deepcopy(dict(queries or {}))
+    tag = str(run_tag or "").strip()
+    wanted = set(packs) if packs is not None else None
+    if not tag or wanted == set():
+        return out, []
+    known = catalog or load_catalog()
+    applied: list[str] = []
+    for block in out.values():
+        if not isinstance(block, dict):
+            continue
+        for entry in installed_packs(block):
+            pack = known.pack(entry["id"])
+            if pack is None or pack.run_filter is None or (wanted is not None and pack.id not in wanted):
+                continue
+            try:
+                original = resolve_variables(pack, {k: v for k, v in entry["variables"].items() if k in pack.variables})
+                filtered = run_filter_variables(pack, original, tag)
+                before = render_pack(pack, original)
+                after = render_pack(pack, filtered)
+            except PackRenderError:
+                continue
+            qkey, _ = LANG_FIELDS[pack.language]
+            rows = _list(block, qkey)
+            positions = {label: index for index, label in enumerate(block_labels(block))}
+            changed = False
+            for old, new in zip(before.queries, after.queries):
+                index = positions.get(old.label)
+                if index is None or index >= len(rows):
+                    continue
+                if str(rows[index] or "").strip() != old.query.strip():
+                    continue
+                rows[index] = new.query
+                changed = True
+            if changed:
+                block[qkey] = rows
+                applied.append(pack.id)
+        # A summed row follows its filtered components.
+        refresh_derived(block)
+    return out, applied
+
+
+DERIVED_KEY = "derived"
+SUMMED_RPS_LABEL = "LT: RPS total, all tools"
+SUMMED_ROLE = "lt.rps_total"
+
+
+class DerivedRowError(ValueError):
+    """The summed row cannot be built for this block; the message is for the user."""
+
+
+def strip_live_rows(queries: Optional[Mapping[str, Any]]) -> dict[str, Any]:
+    """A copy of ``queries`` without the rows of live-only roles: the report does not read them."""
+    out = copy.deepcopy(dict(queries or {}))
+    for block in out.values():
+        if not isinstance(block, dict):
+            continue
+        roles = block_roles(block)
+        drop = {label for label, role in roles.items() if role in LIVE_ONLY_ROLES}
+        if not drop:
+            continue
+        labels = block_labels(block)
+        keep = [index for index, label in enumerate(labels) if label not in drop]
+        for key in PARALLEL_KEYS:
+            values = block.get(key)
+            if isinstance(values, list) and len(values) == len(labels):
+                block[key] = [values[index] for index in keep]
+        kept_roles = {label: role for label, role in roles.items() if label not in drop}
+        if kept_roles:
+            block[ROLES_KEY] = kept_roles
+        else:
+            block.pop(ROLES_KEY, None)
+    return out
+
+
+def derived_rows(block: Optional[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    """{label: {"kind": "sum", "of": [labels]}} of rows computed from other rows of the block."""
+    raw = block.get(DERIVED_KEY) if isinstance(block, Mapping) else None
+    if not isinstance(raw, Mapping):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for label, meta in raw.items():
+        if isinstance(meta, Mapping) and meta.get("kind") == "sum" and isinstance(meta.get("of"), list):
+            out[str(label)] = {"kind": "sum", "of": [str(item) for item in meta["of"] if isinstance(item, str)]}
+    return out
+
+
+def summed_query(parts: list[str]) -> str:
+    """PromQL sum of single-series queries: each part gets its own label so ``or`` keeps them all."""
+    branches = [f'label_replace({part.strip()}, "ll_part", "{index}", "", "")' for index, part in enumerate(parts, start=1)]
+    return f"sum by (series) ({' or '.join(branches)})"
+
+
+def refresh_derived(block: dict[str, Any]) -> dict[str, Any]:
+    """Recomputes derived rows from their components (after a run filter or a pack update). Mutates ``block``."""
+    derived = derived_rows(block)
+    if not derived or "promql" not in filled_languages(block):
+        return block
+    rows = _rows(block, "promql_queries", "label_keys_list")
+    queries = _list(block, "promql_queries")
+    positions = {label: index for index, label in enumerate(block_labels(block))}
+    for label, meta in derived.items():
+        parts = [rows[item][0] for item in meta["of"] if item in rows and item != label and rows[item][0].strip()]
+        index = positions.get(label)
+        if len(parts) >= 2 and index is not None and index < len(queries):
+            queries[index] = summed_query(parts)
+    block["promql_queries"] = queries
+    return block
+
+
+def add_summed_rps(block: Optional[Mapping[str, Any]]) -> tuple[dict[str, Any], str, list[str]]:
+    """Copy of the block with a row summing the RPS of every load tool; (block, label, component labels).
+
+    For a complex run (k6 for REST and Gatling for Kafka writing to one PromQL source) the steps and SLA
+    can then follow the whole load instead of one tool.
+    """
+    if not isinstance(block, Mapping):
+        raise DerivedRowError("В домене нет запросов")
+    if filled_languages(block) != ["promql"]:
+        raise DerivedRowError("Суммарный RPS собирается только из запросов PromQL")
+    current = _aligned(block, ("labels", "promql_queries", "label_keys_list"))
+    derived = derived_rows(current)
+    parts = [label for label in labels_for_role(current, SUMMED_ROLE) if label not in derived]
+    if len(parts) < 2:
+        raise DerivedRowError("Нужны хотя бы два запроса с ролью «Общий RPS теста» от разных инструментов")
+    labels = current["labels"]
+    if SUMMED_RPS_LABEL not in labels:
+        for key in PARALLEL_KEYS:
+            if key in current:
+                current[key].append(_blank(key))
+        current["labels"][-1] = SUMMED_RPS_LABEL
+    index = current["labels"].index(SUMMED_RPS_LABEL)
+    current["label_keys_list"][index] = ["series"]
+    derived[SUMMED_RPS_LABEL] = {"kind": "sum", "of": parts}
+    current[DERIVED_KEY] = derived
+    refresh_derived(current)
+    return current, SUMMED_RPS_LABEL, parts
+
+
 def prune_block(block: dict[str, Any], catalog: Optional[Catalog] = None) -> dict[str, Any]:
     """Drops roles of deleted rows and packs none of whose rows are left. Mutates and returns ``block``."""
     if not isinstance(block, dict):
         return block
+    if DERIVED_KEY in block:
+        labels = set(block_labels(block))
+        kept = {label: meta for label, meta in derived_rows(block).items()
+                if label in labels and len([item for item in meta["of"] if item in labels]) >= 2}
+        if kept:
+            block[DERIVED_KEY] = kept
+            refresh_derived(block)
+        else:
+            block.pop(DERIVED_KEY, None)
     if ROLES_KEY in block:
         roles = block_roles(block)
         if roles:
@@ -495,13 +667,21 @@ def missing_sla_references(
 
 
 __all__ = [
+    "DERIVED_KEY",
+    "DerivedRowError",
+    "SUMMED_RPS_LABEL",
     "BlockConflictError",
+    "add_summed_rps",
+    "derived_rows",
+    "refresh_derived",
+    "summed_query",
     "LANG_FIELDS",
     "MergePlan",
     "PACKS_KEY",
     "PARALLEL_KEYS",
     "ROLES_KEY",
     "SlaUpdate",
+    "apply_run_filter",
     "block_labels",
     "block_roles",
     "filled_languages",
@@ -516,6 +696,7 @@ __all__ = [
     "prune_queries",
     "query_meta",
     "resolve_sla_refs",
+    "run_filter_variables",
     "series_annotations",
     "sla_update",
     "update_selection",

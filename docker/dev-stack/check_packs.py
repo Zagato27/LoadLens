@@ -34,11 +34,13 @@ SOURCES = {
         "grafana": {"base_url": "http://127.0.0.1:13000", "auth": {"method": "basic", "username": "admin", "password": "devstack-admin"}},
     },
     "influx": {"title": "dev InfluxDB", "type": "influxdb", "influxdb": {"url": "http://127.0.0.1:18086", "org": "devstack", "token": "devstack:devstack"}},
+    "vm": {"title": "dev VictoriaMetrics", "type": "prometheus", "prometheus": {"url": "http://127.0.0.1:18428"}},
 }
 BINDINGS = {
     "prom": {"source": "prom"},
     "graf-influxql": {"source": "graf", "datasource_uid": "devstack-influx-k6", "database": "k6"},
     "influx-flux": {"source": "influx", "bucket": "k6/autogen"},
+    "vm": {"source": "vm"},
 }
 # pack -> (binding, variables, compose profile that produces its metrics)
 PLAN: dict[str, tuple[str, dict[str, str], str]] = {
@@ -47,6 +49,7 @@ PLAN: dict[str, tuple[str, dict[str, str], str]] = {
     "lt-k6-prometheus-rw": ("prom", {"matchers": 'testid="devstack"'}, "load"),
     "lt-k6-prometheus-native": ("prom", {"matchers": 'testid="devstack-native"'}, "load"),
     "lt-locust-prometheus": ("prom", {}, "locust"),
+    "lt-gatling-graphite-victoriametrics": ("vm", {"simulation": "checkoutsimulation"}, "gatling"),
     "jvm-micrometer": ("prom", {"service_label": "job", "matchers": 'job="keycloak"'}, "core"),
     "http-micrometer": ("prom", {"service_label": "job", "matchers": 'job="keycloak"'}, "core"),
     "runtime-go": ("prom", {"matchers": 'job=~"prometheus|node|postgres|pgbouncer|redis"'}, "core"),
@@ -54,6 +57,8 @@ PLAN: dict[str, tuple[str, dict[str, str], str]] = {
     "runtime-python": ("prom", {"matchers": 'job="pyapp"'}, "core"),
     "http-python-fastapi": ("prom", {"matchers": 'job="pyapp"'}, "core"),
     "node-exporter": ("prom", {"matchers": 'job="node"'}, "core"),
+    # The stand has no separate load generator host: the Docker VM node stands in for it.
+    "lt-generators-node-exporter": ("prom", {"matchers": 'job="node"'}, "core"),
     "db-postgres-exporter": ("prom", {}, "core"),
     "db-pgbouncer": ("prom", {}, "core"),
     "db-redis-exporter": ("prom", {}, "core"),
@@ -96,7 +101,7 @@ def check_pack(pack_id: str, start_ts: float, end_ts: float) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--packs", default="", help="comma-separated pack ids (default: every pack of the plan)")
-    parser.add_argument("--profiles", default="core,load,kafka,locust", help="compose profiles that are running")
+    parser.add_argument("--profiles", default="core,load,kafka,locust,gatling", help="compose profiles that are running")
     parser.add_argument("--minutes", type=float, default=15.0, help="window that ends now")
     parser.add_argument("--json", default="", help="write the full results to this file")
     args = parser.parse_args()

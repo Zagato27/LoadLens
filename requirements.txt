@@ -24,6 +24,10 @@ python-docx==1.2.0
 # GigaChat LLM provider (llm.provider = "gigachat")
 langchain-core==1.6.8
 langchain-gigachat==0.5.1
+# SSH to load generators (Run test page); brings cryptography, bcrypt and PyNaCl
+paramiko==5.0.0
+# Parameters of GitLab CI pipelines (.gitlab-ci.yml) for CI generators
+PyYAML==6.0.3
 
 # Lowest safe versions of transitive dependencies with known vulnerabilities in older releases
 Jinja2>=3.1.6

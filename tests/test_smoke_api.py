@@ -1353,20 +1353,22 @@ def test_compare_baseline(client, monkeypatch):
     from loadlens_app.blueprints import compare
 
     created = datetime(2024, 10, 31, 11, 0, tzinfo=timezone.utc)
-    conn = RecordingConnection(fetchone_results=[("release-2.4", "demo", "Успешно", created)])
+    run_created = datetime(2024, 11, 1, 11, 0, tzinfo=timezone.utc)
+    # First the run's own final report (service, created_at, test_type, project_area), then the baseline.
+    conn = RecordingConnection(fetchone_results=[("demo", run_created, "step", ""), ("release-2.4", "demo", "Успешно", created)])
     monkeypatch.setattr(compare, "_ts_conn", lambda: conn)
     resp = client.get("/compare_baseline", query_string={"run_name": "nightly-1"})
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["run_name"] == "release-2.4" and data["mode"] == "previous_success"
-    assert "= 'Успешно'" in conn.log[0][0]
+    assert "= 'Успешно'" in conn.log[1][0]
 
-    empty = RecordingConnection(fetchone_results=[None])
+    empty = RecordingConnection(fetchone_results=[("demo", run_created, "", ""), None])
     monkeypatch.setattr(compare, "_ts_conn", lambda: empty)
     resp = client.get("/compare_baseline", query_string={"run_name": "nightly-1", "mode": "previous"})
     assert resp.status_code == 404
     assert "предыдущий прогон" in resp.get_json()["error"]
-    assert "= 'Успешно'" not in empty.log[0][0]
+    assert "= 'Успешно'" not in empty.log[1][0]
 
     resp = client.get("/compare_baseline", query_string={"run_name": "nightly-1", "mode": "best"})
     assert resp.status_code == 400
@@ -2408,7 +2410,7 @@ def test_forecasting_pages(client):
 
 
 def test_appearance_accent_recolors_pages_and_logo(client):
-    from loadlens_app.appearance import accent_palette, palette_css
+    from loadlens_app.appearance import DEFAULT_ACCENT, accent_palette, palette_css
     from loadlens_app.core import CONFIG
 
     original = copy.deepcopy(CONFIG.get("appearance"))
@@ -2424,7 +2426,7 @@ def test_appearance_accent_recolors_pages_and_logo(client):
         assert "logo.png?c=00a884" in page and "--accent:#00a884" in page
         yellow = accent_palette("#ffeb3b")
         assert yellow.light.on_accent == "#1a1f24"
-        assert palette_css(accent_palette("#6200ee")) == ""
+        assert palette_css(accent_palette(DEFAULT_ACCENT)) == ""
     finally:
         CONFIG["appearance"] = original
 

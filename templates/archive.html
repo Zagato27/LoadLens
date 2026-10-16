@@ -3,22 +3,31 @@
 {% block title %}Архив отчётов{% endblock %}
 {% block head %}
 <style>
-  td.run-name { font-weight: 600; white-space: nowrap; max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
+  td.run-name { font-weight: 600; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
   td.actions { white-space: nowrap; }
   .actions-inner { display: flex; gap: 6px; align-items: center; justify-content: flex-end; }
 </style>
 {% endblock %}
 {% block content %}
-  <h2 id="archiveTitle">Архив отчётов</h2>
-  <div id="archiveBreadcrumbs" class="breadcrumbs" style="display:none"></div>
+  <nav id="archiveBreadcrumbs" class="breadcrumbs" aria-label="Навигация по разделу" hidden></nav>
+  <div class="page-header">
+    <div class="page-heading">
+      <h2 id="archiveTitle">Архив отчётов</h2>
+      <p class="page-subtitle">Все запуски активной проектной области. Отметьте два запуска, чтобы сравнить их.</p>
+    </div>
+    <div class="page-actions">
+      <a class="btn" href="/compare">Сравнение тестов</a>
+      <a class="btn btn-primary" href="/new" data-min-role="engineer">Новый отчёт</a>
+    </div>
+  </div>
 
   <section id="jobsStrip" class="jobs-strip" style="display:none" aria-live="polite">
     <div class="jobs-title"><span>Задачи в работе и с ошибками</span><span class="jobs-actions"><small id="jobsStripNote"></small><button type="button" class="btn btn-sm btn-ghost" id="jobsStripClear" data-min-role="engineer" hidden>Очистить завершённые</button></span></div>
     <div id="jobsStripList"></div>
   </section>
 
-  <form class="toolbar" id="filtersForm">
-    <input type="search" id="searchInput" placeholder="Поиск по названию запуска или сервису…" aria-label="Поиск" />
+  <form class="toolbar archive-filters" id="filtersForm" role="search">
+    <input type="search" id="searchInput" placeholder="Поиск по названию запуска или сервису…" title="Клавиша / — перейти к поиску" aria-label="Поиск по названию запуска или сервису" aria-keyshortcuts="/" data-slash-focus />
     <label>Сервис
       <select id="serviceFilter"><option value="">Все</option></select>
     </label>
@@ -32,17 +41,20 @@
     <button type="button" class="btn" id="clearBtn">Сбросить</button>
   </form>
 
+  <div id="filterChips" class="filter-chips" role="group" aria-label="Активные фильтры" hidden></div>
+
   <div class="table-wrap">
-    <table class="data-table">
+    <table class="data-table responsive archive-table" id="runsTable">
       <thead>
         <tr>
-          <th data-sort="run_name">Запуск</th>
-          <th data-sort="service">Сервис</th>
-          <th data-sort="test_type">Тип теста</th>
-          <th data-sort="end_time">Дата/время теста</th>
-          <th data-sort="report_created_at">Отчёт создан</th>
-          <th data-sort="verdict">Вердикт</th>
-          <th>Длительность</th>
+          <th class="select-col"><span class="visually-hidden">Выбор для сравнения</span></th>
+          <th data-sort="run_name" tabindex="0">Запуск</th>
+          <th data-sort="service" tabindex="0">Сервис</th>
+          <th data-sort="test_type" tabindex="0">Тип теста</th>
+          <th data-sort="end_time" tabindex="0" title="Окончание теста; ниже — длительность">Дата теста</th>
+          <th data-sort="report_created_at" tabindex="0">Отчёт создан</th>
+          <th data-sort="verdict" tabindex="0">Вердикт</th>
+          <th data-sort="max_rps" tabindex="0" class="num" title="Пиковый RPS из итогового анализа; для soak — удерживаемый RPS, для spike — уровень всплеска">Max RPS</th>
           <th><span class="visually-hidden">Действия</span></th>
         </tr>
       </thead>
@@ -50,9 +62,19 @@
     </table>
   </div>
   <div class="pager">
-    <button class="btn" id="prevBtn">Назад</button>
-    <span class="info" id="pageInfo"></span>
-    <button class="btn" id="nextBtn">Вперёд</button>
+    <button type="button" class="btn" id="prevBtn">Назад</button>
+    <span class="info" id="pageInfo" aria-live="polite"></span>
+    <button type="button" class="btn" id="nextBtn">Вперёд</button>
+  </div>
+
+  <div id="selectionBar" class="selection-bar" role="region" aria-label="Выбранные запуски" hidden>
+    <span class="selection-count" id="selectionCount" aria-live="polite"></span>
+    <span class="selection-names" id="selectionNames"></span>
+    <span class="selection-hint" id="selectionHint"></span>
+    <span class="selection-actions">
+      <button type="button" class="btn btn-primary btn-sm" id="selectionCompare">Сравнить</button>
+      <button type="button" class="btn btn-ghost btn-sm" id="selectionClear">Снять выбор</button>
+    </span>
   </div>
 {% endblock %}
 {% block scripts %}

@@ -11,12 +11,16 @@ from .compare import compare_bp
 from .config_api import config_bp
 from .dashboard import dashboard_bp
 from .forecast import forecast_bp
+from .load_tests import load_tests_bp
 from .projects import projects_bp
 from .query_packs import query_packs_bp
 from .recovery import recovery_bp
 from .settings import settings_bp
 
-BLUEPRINTS = (dashboard_bp, compare_bp, settings_bp, config_bp, projects_bp, forecast_bp, appearance_bp, query_packs_bp, recovery_bp)
+BLUEPRINTS = (
+    dashboard_bp, compare_bp, settings_bp, config_bp, projects_bp, forecast_bp, appearance_bp, query_packs_bp,
+    recovery_bp, load_tests_bp,
+)
 
 
 def register_blueprints(app: Flask) -> None:

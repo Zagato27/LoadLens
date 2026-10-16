@@ -67,6 +67,9 @@ JOB_ID_MAX_LENGTH = 64
 ENGINEER_NOTE_MAX_CHARS = 200_000
 DASHBOARD_RECENT_RUNS = 5
 DASHBOARD_VERDICTS_PER_SERVICE = 5
+DASHBOARD_VERDICT_WEEKS = 8
+DASHBOARD_VERDICTS = ("Успешно", "Есть риски", "Провал", "Недостаточно данных")
+DASHBOARD_RISKY_VERDICTS = ("Есть риски", "Провал")
 PROJECT_AREA_COOKIE_MAX_AGE = 60 * 60 * 24 * 365
 
 
@@ -281,31 +284,196 @@ def get_services():
 
 
 def _group_service_rows(rows: list) -> list[dict]:
-    """Groups (service, run_name, verdict, created_at, max_rps, test_type) rows, newest first per service.
+    """Groups (service, run_name, verdict, created_at, max_rps, test_type[, run_id]) rows, newest first per service.
 
     ``max_rps`` is the peak for step/stress runs, the held RPS for soak and the spike level for spike runs.
+    ``history`` keeps every row of the service, newest first; ``recent_verdicts`` (its verdicts) stays for
+    older clients.
     """
     grouped: dict[str, dict] = {}
-    for service, run_name, verdict, created_at, max_rps, test_type in rows:
+    for row in rows:
+        service, run_name, verdict, created_at, max_rps, test_type = row[:6]
+        run_id = str(row[6] or "").strip() if len(row) > 6 else ""
+        created = created_at.isoformat() if created_at else None
+        rps = _dashboard_number(max_rps)
         entry = grouped.get(service)
         if entry is None:
             entry = {
                 "service": service,
                 "last_run": run_name,
+                "run_id": run_id,
                 "verdict": verdict,
-                "created_at": created_at.isoformat() if created_at else None,
+                "created_at": created,
                 "test_type": test_type or "",
-                "max_rps": float(max_rps) if max_rps not in (None, "") else None,
+                "max_rps": rps,
                 "recent_verdicts": [],
+                "history": [],
             }
             grouped[service] = entry
         entry["recent_verdicts"].append(verdict)
+        entry["history"].append({
+            "run_name": run_name,
+            "run_id": run_id,
+            "created_at": created,
+            "verdict": verdict,
+            "max_rps": rps,
+            "test_type": test_type or "",
+        })
     return sorted(grouped.values(), key=lambda e: e["created_at"] or "", reverse=True)
+
+
+# Peak RPS of a final row: the step/stress peak, the held RPS of a soak run or the spike level.
+DASHBOARD_MAX_RPS_SQL = (
+    "COALESCE(parsed->'peak_performance'->>'max_rps', "
+    "parsed->'stability_under_load'->>'actual_rps', "
+    "parsed->'spike_analysis'->>'max_spike_rps')"
+)
+
+
+def _dashboard_number(value) -> float | None:
+    """A finite number from a stored value; the LLM writes these fields, so text that is not a number is None."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return number if abs(number) < float("inf") else None
+
+
+def _dashboard_now():
+    """Current UTC time; the KPI periods and verdict weeks are counted from it."""
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc)
+
+
+def _dashboard_periods(now) -> dict:
+    """Week starts (UTC Mondays, oldest first) of the verdict chart and the lower bounds of the KPI periods."""
+    from datetime import datetime, timedelta, timezone
+
+    today = now.astimezone(timezone.utc).date()
+    current_week = today - timedelta(days=today.weekday())
+    weeks = [current_week - timedelta(weeks=DASHBOARD_VERDICT_WEEKS - 1 - i) for i in range(DASHBOARD_VERDICT_WEEKS)]
+    first = datetime(weeks[0].year, weeks[0].month, weeks[0].day, tzinfo=timezone.utc)
+    since_7d = now - timedelta(days=7)
+    since_30d = now - timedelta(days=30)
+    return {"weeks": weeks, "since": min(first, since_30d), "since_7d": since_7d, "since_30d": since_30d}
+
+
+def _dashboard_date(value):
+    """``date`` of a week start returned as a date, a datetime or an ISO string."""
+    from datetime import date, datetime
+
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value or "")[:10])
+    except ValueError:
+        return None
+
+
+def _dashboard_activity(rows: list, weeks: list) -> tuple[list[dict], dict]:
+    """Verdict counts per week and the run counters from (week_start, verdict, runs, runs_7d, runs_30d) rows.
+
+    Every week of ``weeks`` is present, empty ones with zero counts; an unknown verdict counts as
+    «Недостаточно данных». ``risky_share_30d`` is the share of «Есть риски» and «Провал» among the runs of
+    the last 30 days, None without runs.
+    """
+    buckets = {week: {v: 0 for v in DASHBOARD_VERDICTS} for week in weeks}
+    runs_7d = runs_30d = risky_30d = 0
+    for week_start, verdict, runs, last_7d, last_30d in rows:
+        label = verdict if verdict in DASHBOARD_VERDICTS else "Недостаточно данных"
+        counts = buckets.get(_dashboard_date(week_start))
+        if counts is not None:
+            counts[label] += int(runs or 0)
+        runs_7d += int(last_7d or 0)
+        runs_30d += int(last_30d or 0)
+        if label in DASHBOARD_RISKY_VERDICTS:
+            risky_30d += int(last_30d or 0)
+    verdict_weeks = [
+        {"week_start": week.isoformat(), "counts": counts, "total": sum(counts.values())}
+        for week, counts in buckets.items()
+    ]
+    kpi = {
+        "runs_7d": runs_7d,
+        "runs_30d": runs_30d,
+        "risky_30d": risky_30d,
+        "risky_share_30d": round(risky_30d / runs_30d, 4) if runs_30d else None,
+    }
+    return verdict_weeks, kpi
+
+
+def _dashboard_sla_summary(sla_details, fallback_checks) -> dict:
+    """``{passed, failed, total}`` of the SLA checks of a final row; ``total`` counts the evaluated checks.
+
+    The checks come from ``sla_details.checks``, else from ``parsed.deterministic_sla.checks`` (older rows).
+    """
+    import json
+
+    def _load(value):
+        if isinstance(value, (str, bytes)):
+            try:
+                return json.loads(value)
+            except ValueError:
+                return None
+        return value
+
+    details = _load(sla_details)
+    checks = details.get("checks") if isinstance(details, dict) else None
+    if not (isinstance(checks, list) and checks):
+        checks = _load(fallback_checks)
+    checks = [c for c in checks if isinstance(c, dict)] if isinstance(checks, list) else []
+    passed = sum(1 for c in checks if c.get("passed") is True)
+    failed = sum(1 for c in checks if c.get("passed") is False)
+    return {"passed": passed, "failed": failed, "total": passed + failed}
+
+
+def _dashboard_previous_run(conn, schema: str, table: str, last: dict, created_at) -> dict | None:
+    """Previous run of the last run's service and test type (the baseline conditions of the report)."""
+    from AI.db_store import BASELINE_MODE_PREVIOUS, find_previous_run
+
+    service = str(last.get("service") or "").strip()
+    run_name = str(last.get("run_name") or "").strip()
+    if not service or not run_name or created_at is None:
+        return None
+    previous = find_previous_run(
+        conn, schema, table,
+        exclude_run_name=run_name,
+        mode=BASELINE_MODE_PREVIOUS,
+        service=service,
+        project_area=_active_project_area(),
+        before=created_at,
+        test_type=last.get("test_type") or None,
+    )
+    if previous is None:
+        return None
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT COALESCE(run_id, ''), {DASHBOARD_MAX_RPS_SQL} FROM {schema}.{table} "
+            "WHERE domain = 'final' AND run_name = %s AND service = %s ORDER BY created_at DESC LIMIT 1",
+            (previous.run_name, previous.service or service),
+        )
+        row = cur.fetchone()
+    return {
+        "run_name": previous.run_name,
+        "run_id": str(row[0] or "").strip() if row else "",
+        "max_rps": _dashboard_number(row[1]) if row and len(row) > 1 else None,
+        "verdict": previous.verdict,
+        "created_at": previous.created_at.isoformat() if previous.created_at else None,
+    }
 
 
 @dashboard_bp.route("/dashboard_data", methods=["GET"])
 def dashboard_data():
-    """Сводка дашборда: последний запуск, распределение вердиктов, состояние по сервисам, недавние запуски."""
+    """Сводка дашборда: последний запуск, распределение вердиктов, состояние по сервисам, недавние запуски.
+
+    A run with several final rows (a re-analysis) counts once, by its newest row. ``kpi`` holds the run
+    counters of the last 7 and 30 days, the share of risky runs and the max RPS of the last run next to the
+    previous run of the same service and test type; ``verdict_weeks`` counts verdicts per UTC week.
+    """
     try:
         cfg = _storage_cfg()
         schema = cfg.get("schema", "public")
@@ -317,17 +485,23 @@ def dashboard_data():
             pass
         services_filter = _resolve_services_filter(_active_project_area())
         svc_where, svc_params = _services_clause(services_filter)
+        periods = _dashboard_periods(_dashboard_now())
         last_run = None
-        verdict_counts = {"Успешно": 0, "Есть риски": 0, "Провал": 0, "Недостаточно данных": 0}
+        last_created_at = None
+        verdict_counts = {v: 0 for v in DASHBOARD_VERDICTS}
         runs_total = 0
         services: list[dict] = []
         recent_runs: list[dict] = []
+        activity_rows: list = []
+        previous = None
         with conn, conn.cursor() as cur:
             cur.execute(
                 f"""
                 SELECT run_name, service, start_ms, end_ms,
                        COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS effective_verdict,
-                       verdict AS llm_verdict, sla_verdict, created_at, COALESCE(run_id, '')
+                       verdict AS llm_verdict, sla_verdict, created_at, COALESCE(run_id, ''),
+                       COALESCE(test_type, ''), {DASHBOARD_MAX_RPS_SQL} AS max_rps,
+                       sla_details, parsed->'deterministic_sla'->'checks'
                 FROM {schema}.{table}
                 WHERE domain = 'final'{svc_where}
                 ORDER BY created_at DESC
@@ -337,6 +511,7 @@ def dashboard_data():
             )
             r = cur.fetchone()
             if r:
+                last_created_at = r[7]
                 last_run = {
                     "run_name": r[0],
                     "service": r[1],
@@ -347,6 +522,9 @@ def dashboard_data():
                     "sla_verdict": r[6],
                     "created_at": r[7].isoformat() if r[7] else None,
                     "run_id": str(r[8] or "").strip() if len(r) > 8 else "",
+                    "test_type": str(r[9] or "") if len(r) > 9 else "",
+                    "max_rps": _dashboard_number(r[10]) if len(r) > 10 else None,
+                    "sla": _dashboard_sla_summary(r[11] if len(r) > 11 else None, r[12] if len(r) > 12 else None),
                 }
             cur.execute(
                 f"""
@@ -374,21 +552,21 @@ def dashboard_data():
             runs_total = int(total_row[0]) if total_row and total_row[0] is not None else 0
             cur.execute(
                 f"""
-                WITH ranked AS (
-                  SELECT service, run_name,
+                WITH latest AS (
+                  SELECT service, run_name, COALESCE(run_id, '') AS run_id,
                          COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS verdict,
                          created_at,
-                         COALESCE(
-                           parsed->'peak_performance'->>'max_rps',
-                           parsed->'stability_under_load'->>'actual_rps',
-                           parsed->'spike_analysis'->>'max_spike_rps'
-                         ) AS max_rps,
+                         {DASHBOARD_MAX_RPS_SQL} AS max_rps,
                          test_type,
-                         ROW_NUMBER() OVER (PARTITION BY service ORDER BY created_at DESC) AS rn
+                         ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC) AS run_rn
                   FROM {schema}.{table}
                   WHERE domain = 'final' AND service IS NOT NULL AND service <> ''{svc_where}
+                ), ranked AS (
+                  SELECT service, run_name, run_id, verdict, created_at, max_rps, test_type,
+                         ROW_NUMBER() OVER (PARTITION BY service ORDER BY created_at DESC) AS rn
+                  FROM latest WHERE run_rn = 1
                 )
-                SELECT service, run_name, verdict, created_at, max_rps, test_type
+                SELECT service, run_name, verdict, created_at, max_rps, test_type, run_id
                 FROM ranked WHERE rn <= %s
                 ORDER BY service, rn
                 """,
@@ -397,11 +575,16 @@ def dashboard_data():
             services = _group_service_rows(cur.fetchall())
             cur.execute(
                 f"""
-                SELECT run_name, service,
-                       COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS verdict,
-                       created_at, test_type, start_ms, end_ms, COALESCE(run_id, '')
-                FROM {schema}.{table}
-                WHERE domain = 'final'{svc_where}
+                WITH latest AS (
+                  SELECT run_name, service,
+                         COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS verdict,
+                         created_at, test_type, start_ms, end_ms, COALESCE(run_id, '') AS run_id,
+                         ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC) AS rn
+                  FROM {schema}.{table}
+                  WHERE domain = 'final'{svc_where}
+                )
+                SELECT run_name, service, verdict, created_at, test_type, start_ms, end_ms, run_id
+                FROM latest WHERE rn = 1
                 ORDER BY created_at DESC
                 LIMIT %s
                 """,
@@ -420,13 +603,54 @@ def dashboard_data():
                     "end_ms": int(end_ms) if end_ms is not None else None,
                     "run_id": run_id,
                 })
+            cur.execute(
+                f"""
+                WITH latest AS (
+                  SELECT created_at,
+                         COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS verdict,
+                         ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC) AS rn
+                  FROM {schema}.{table}
+                  WHERE domain = 'final' AND created_at >= %s{svc_where}
+                )
+                SELECT (date_trunc('week', created_at AT TIME ZONE 'UTC'))::date AS week_start, verdict,
+                       COUNT(*) AS runs,
+                       COUNT(*) FILTER (WHERE created_at >= %s) AS runs_7d,
+                       COUNT(*) FILTER (WHERE created_at >= %s) AS runs_30d
+                FROM latest WHERE rn = 1
+                GROUP BY 1, 2
+                """,
+                (periods["since"], *svc_params, periods["since_7d"], periods["since_30d"]),
+            )
+            activity_rows = cur.fetchall()
+            if last_run is not None:
+                try:
+                    previous = _dashboard_previous_run(conn, schema, table, last_run, last_created_at)
+                except Exception as exc:
+                    # The comparison is optional: a failed lookup leaves the rest of the dashboard intact.
+                    import logging
+
+                    logging.getLogger(__name__).warning("dashboard: previous run lookup failed: %s", exc)
+                    previous = None
+                    conn.rollback()
         conn.close()
+        verdict_weeks, kpi = _dashboard_activity(activity_rows, periods["weeks"])
+        if last_run is not None:
+            kpi["last"] = {
+                "run_name": last_run["run_name"],
+                "max_rps": last_run["max_rps"],
+                "test_type": last_run["test_type"],
+            }
+        else:
+            kpi["last"] = None
+        kpi["previous"] = previous
         return jsonify({
             "last_run": last_run,
             "verdict_counts": verdict_counts,
             "runs_total": runs_total,
             "services": services,
             "recent_runs": recent_runs,
+            "kpi": kpi,
+            "verdict_weeks": verdict_weeks,
         })
     except Exception as e:  # pragma: no cover - defensive
         return internal_error(e)
@@ -611,16 +835,107 @@ RUNS_SORT_COLUMNS = {
     "verdict": "verdict",
     "test_type": "test_type",
     "report_created_at": "report_created_at",
+    "max_rps": "max_rps",
 }
+# Sort keys whose column may be NULL (no saved report, no load level); such runs stay at the end.
+RUNS_NULLS_LAST_SORTS = frozenset({"report_created_at", "max_rps"})
+# Final-analysis fields with the run's load level, in priority order (as on the dashboard):
+# the peak for step/stress runs, the held RPS for soak runs, the spike level for spike runs.
+RUNS_MAX_RPS_FIELDS = (
+    ("peak_performance", "max_rps"),
+    ("stability_under_load", "actual_rps"),
+    ("spike_analysis", "max_spike_rps"),
+)
+
+
+def _runs_sql_literal(value: str) -> str:
+    """SQL text literal for a trusted constant; ``%`` is doubled for psycopg2 parameter binding."""
+    return "'" + str(value).replace("'", "''").replace("%", "%%") + "'"
+
+
+def _runs_test_type_sql(column: str, missing_report_sql: str) -> str:
+    """SQL expression mapping a stored test type to step/soak/spike/stress.
+
+    Uses the same alias sets as the baseline lookup (``AI.db_store._test_type_filter_values``), so a
+    report typed «stability» is found by the «soak» filter and a report saved without a type counts
+    as step. Runs without a final report get ''. Unknown types keep their lowercased stored text.
+    Only constants from ``AI.test_profile`` are inlined, never request values.
+    """
+    from AI.db_store import _test_type_filter_values
+    from AI.test_profile import TEST_TYPE_ALIASES
+
+    stored = f"LOWER(TRIM(COALESCE({column}, '')))"
+    branches = []
+    for key in TEST_TYPE_ALIASES:
+        values = ", ".join(_runs_sql_literal(v) for v in _test_type_filter_values(key))
+        branches.append(f"WHEN {stored} IN ({values}) THEN {_runs_sql_literal(key)}")
+    return f"CASE WHEN {missing_report_sql} THEN '' {' '.join(branches)} ELSE {stored} END"
+
+
+def _runs_test_type_filter(raw: str) -> str:
+    """Value of the normalized ``test_type`` column that the ``test_type`` request param selects."""
+    from AI.test_profile import normalize_test_type
+
+    return normalize_test_type(raw) or raw.strip().lower()
+
+
+def _runs_max_rps_sql(parsed_column: str) -> str:
+    """First numeric value of ``RUNS_MAX_RPS_FIELDS`` in the parsed final analysis, else NULL.
+
+    Text that is not a plain number (the LLM sometimes writes «~1200») is skipped instead of
+    failing the cast; the exponent is bounded so the numeric cast cannot overflow.
+    """
+    parts = []
+    for section, field in RUNS_MAX_RPS_FIELDS:
+        text = f"TRIM({parsed_column}->{_runs_sql_literal(section)}->>{_runs_sql_literal(field)})"
+        parts.append(
+            f"CASE WHEN {text} ~ '^[-+]?[0-9]+([.][0-9]+)?([eE][-+]?[0-9]{{1,3}})?$' THEN ({text})::numeric END"
+        )
+    return f"COALESCE({', '.join(parts)})"
+
+
+def _runs_float(value) -> float | None:
+    """Finite float of a numeric DB value, else None (JSON has no Infinity)."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number and abs(number) != float("inf") else None
+
+
+def _runs_item(row) -> dict:
+    """One ``/runs`` item from (run_name, start_time, end_time, service, verdict, llm_verdict,
+    sla_verdict, report_created_at, test_type, run_id, project_area, max_rps)."""
+    from AI.test_profile import normalize_test_type
+
+    cols = list(row) + [None] * max(0, 12 - len(row))
+    test_type = str(cols[8] or "")
+    return {
+        "run_name": cols[0],
+        "start_time": cols[1].isoformat() if cols[1] else None,
+        "end_time": cols[2].isoformat() if cols[2] else None,
+        "service": cols[3],
+        "verdict": cols[4],
+        "llm_verdict": cols[5],
+        "sla_verdict": cols[6],
+        "report_created_at": cols[7].isoformat() if cols[7] else None,
+        "test_type": test_type,
+        "test_type_key": normalize_test_type(test_type),
+        "run_id": str(cols[9] or "").strip(),
+        "project_area": str(cols[10] or ""),
+        "max_rps": _runs_float(cols[11]) if cols[11] is not None else None,
+    }
 
 
 @dashboard_bp.route("/runs", methods=["GET"])
 def list_runs():
     """Постраничный список запусков активной области.
 
-    Query params: ``q`` (подстрока run_name/service), ``service``, ``verdict``,
-    ``test_type`` (точные совпадения), ``offset``, ``limit``, ``sort``, ``dir``.
-    Тело ответа — массив; общее число подходящих запусков в заголовке ``X-Total-Count``.
+    Query params: ``q`` (подстрока run_name/service), ``service``, ``verdict`` (точные совпадения),
+    ``test_type`` (step/soak/spike/stress или любой их синоним), ``offset``, ``limit``, ``sort``
+    (включая ``max_rps``), ``dir``. Тело ответа — массив; общее число подходящих запусков
+    в заголовке ``X-Total-Count``. ``test_type`` в ответе — сохранённое значение,
+    ``test_type_key`` — нормализованный тип; ``max_rps`` и ``project_area`` берутся из итогового отчёта.
     """
     try:
         cfg = _storage_cfg()
@@ -637,10 +952,14 @@ def list_runs():
         except ValueError:
             return jsonify({"error": "offset и limit должны быть целыми числами"}), 400
         sort_key = (request.args.get("sort", "end_time") or "end_time").lower()
-        sort_sql = RUNS_SORT_COLUMNS.get(sort_key, "end_time")
+        if sort_key not in RUNS_SORT_COLUMNS:
+            sort_key = "end_time"
+        sort_sql = RUNS_SORT_COLUMNS[sort_key]
         dir_sql = "ASC" if (request.args.get("dir", "desc") or "desc").lower() == "asc" else "DESC"
-        # Runs without a saved report have no creation time; keep them at the end.
-        nulls_sql = " NULLS LAST" if sort_key == "report_created_at" else ""
+        # Runs without a saved report have no creation time or load level; keep them at the end.
+        nulls_sql = " NULLS LAST" if sort_key in RUNS_NULLS_LAST_SORTS else ""
+        # Equal sort values (same service, verdict...) need a fixed order, or pages overlap.
+        tiebreak_sql = "" if sort_sql == "run_name" else ", run_name ASC"
 
         svc_where, svc_params = _services_clause(services_filter)
         base_params: list = [*svc_params]
@@ -660,9 +979,12 @@ def list_runs():
             filter_clauses.append("verdict = %s")
             filter_params.append(verdict_filter)
         if test_type_filter:
+            # ``test_type`` of ``joined`` is the normalized type, so any stored synonym matches.
             filter_clauses.append("test_type = %s")
-            filter_params.append(test_type_filter)
+            filter_params.append(_runs_test_type_filter(test_type_filter))
         where_filters = (" WHERE " + " AND ".join(filter_clauses)) if filter_clauses else ""
+        test_type_sql = _runs_test_type_sql("f.test_type", "f.run_name IS NULL")
+        max_rps_sql = _runs_max_rps_sql("parsed")
 
         runs_cte = f"""
             WITH base AS (
@@ -681,6 +1003,8 @@ def list_runs():
                      sla_verdict,
                      created_at,
                      test_type,
+                     COALESCE(project_area, '') AS project_area,
+                     {max_rps_sql} AS max_rps,
                      MAX(NULLIF(run_id, '')) OVER (PARTITION BY run_name) AS run_id,
                      ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC) AS rn
               FROM {schema}.{llm_table}
@@ -690,8 +1014,11 @@ def list_runs():
                      COALESCE(f.verdict, 'Недостаточно данных') AS verdict,
                      f.llm_verdict, f.sla_verdict,
                      f.created_at AS report_created_at,
-                     COALESCE(f.test_type, '') AS test_type,
-                     COALESCE(NULLIF(f.run_id, ''), NULLIF(b.run_id, ''), '') AS run_id
+                     COALESCE(f.test_type, '') AS test_type_raw,
+                     {test_type_sql} AS test_type,
+                     COALESCE(NULLIF(f.run_id, ''), NULLIF(b.run_id, ''), '') AS run_id,
+                     COALESCE(f.project_area, '') AS project_area,
+                     f.max_rps
               FROM base b
               LEFT JOIN final f ON f.run_name = b.run_name AND f.rn = 1
             )
@@ -713,33 +1040,18 @@ def list_runs():
                 f"""
                 {runs_cte}
                 SELECT run_name, start_time, end_time, service,
-                       verdict, llm_verdict, sla_verdict, report_created_at, test_type, run_id
+                       verdict, llm_verdict, sla_verdict, report_created_at, test_type_raw, run_id,
+                       project_area, max_rps
                 FROM joined
                 {where_filters}
-                ORDER BY {sort_sql} {dir_sql}{nulls_sql}
+                ORDER BY {sort_sql} {dir_sql}{nulls_sql}{tiebreak_sql}
                 OFFSET %s LIMIT %s
                 """,
                 (*base_params, *final_params, *filter_params, offset, limit),
             )
             rows = cur.fetchall()
-            stored = [(*r[:9], str(r[9] or "").strip() if len(r) > 9 else "") for r in rows]
         conn.close()
-        out = []
-        for r in stored:
-            out.append(
-                {
-                    "run_name": r[0],
-                    "start_time": r[1].isoformat() if r[1] else None,
-                    "end_time": r[2].isoformat() if r[2] else None,
-                    "service": r[3],
-                    "verdict": r[4],
-                    "llm_verdict": r[5],
-                    "sla_verdict": r[6],
-                    "report_created_at": r[7].isoformat() if r[7] else None,
-                    "test_type": r[8] or "",
-                    "run_id": r[9] or "",
-                }
-            )
+        out = [_runs_item(r) for r in rows]
         response = make_response(jsonify(out))
         response.headers["X-Total-Count"] = str(total)
         return response
@@ -811,20 +1123,10 @@ def create_report():
     if run_name_error:
         return jsonify({"status": "error", "message": run_name_error}), 400
 
-    # Reports run only for services an administrator has configured, and nothing is written to the
-    # runtime configuration before that is checked: otherwise a request could create areas and
-    # services that everyone sees, and the service name also ends up in file names of the report.
-    service_area = _find_area_for_service(service)
-    if not service_area:
-        return jsonify({"status": "error", "message": f"Сервис '{service}' не найден в настройках"}), 400
-    if project_area and project_area != service_area:
-        return jsonify({"status": "error", "message": f"Сервис '{service}' принадлежит другой области"}), 400
-    project_area = service_area
-    _bootstrap_service_configs(service_area, service)
-
-    _metrics_area, service_metrics_cfg = _metrics_service_entry(service)
-    if not service_metrics_cfg:
-        return jsonify({"status": "error", "message": f"Конфигурация для сервиса '{service}' не найдена"}), 400
+    try:
+        project_area = resolve_report_target(service, project_area)
+    except ReportRequestError as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 400
 
     if run_name:
         try:
@@ -834,14 +1136,75 @@ def create_report():
         if taken:
             return jsonify({"status": "error", "message": f"Запуск '{run_name}' уже существует для сервиса '{service}'. Выберите другое имя."}), 400
 
-    owner = _job_owner()
     try:
-        check_report_window(start, end, _report_step(project_area, service))
-        check_job_slot(*job_store.running_counts(owner))
-        if use_llm:
-            consume_llm(owner, "report")
+        job = start_report_job(
+            start, end, service, project_area,
+            use_llm=use_llm,
+            save_to_db=save_to_db,
+            web_only=web_only,
+            run_name=run_name,
+            test_type=test_type,
+            owner=_job_owner(),
+        )
     except LimitError as exc:
         return _limit_error(exc)
+    return jsonify({
+        "status": "accepted",
+        "job_id": job.job_id,
+        "service": service,
+        "project_area": project_area,
+        "run_name": job.run_name,
+        "message": "Задача принята. Формирование отчёта началось.",
+    }), 200
+
+
+class ReportRequestError(ValueError):
+    """A report cannot be started for this service; the message is for the user."""
+
+
+def resolve_report_target(service: str, project_area: str = "") -> str:
+    """Area of a configured service, with its configs bootstrapped; raises :class:`ReportRequestError`.
+
+    Reports run only for services an administrator has configured, and nothing is written to the
+    runtime configuration before that is checked: otherwise a request could create areas and
+    services that everyone sees, and the service name also ends up in file names of the report.
+    """
+    service_area = _find_area_for_service(service)
+    if not service_area:
+        raise ReportRequestError(f"Сервис '{service}' не найден в настройках")
+    if project_area and project_area != service_area:
+        raise ReportRequestError(f"Сервис '{service}' принадлежит другой области")
+    _bootstrap_service_configs(service_area, service)
+    _metrics_area, service_metrics_cfg = _metrics_service_entry(service)
+    if not service_metrics_cfg:
+        raise ReportRequestError(f"Конфигурация для сервиса '{service}' не найдена")
+    return service_area
+
+
+def start_report_job(
+    start: int,
+    end: int,
+    service: str,
+    project_area: str,
+    *,
+    use_llm: bool,
+    save_to_db: bool,
+    web_only: bool,
+    run_name: str,
+    test_type: str,
+    owner: str,
+    run_tag: str | None = None,
+    run_filter_packs: list[str] | None = None,
+):
+    """Checks the limits, creates a report job and runs it in a thread; raises :class:`LimitError`.
+
+    Shared by POST /create_report and the load test watcher, which passes ``run_tag`` and the packs its
+    tools tagged, so the load tool queries read only the metrics of its run.
+    """
+    check_report_window(start, end, _report_step(project_area, service))
+    check_job_slot(*job_store.running_counts(owner))
+    if use_llm:
+        consume_llm(owner, "report")
 
     # Name the run up front so the job is identifiable in the archive while it runs.
     run_name = run_name or default_run_name()
@@ -862,6 +1225,8 @@ def create_report():
                 test_type=test_type,
                 project_area=project_area,
                 progress_callback=_progress_cb,
+                run_tag=run_tag,
+                run_filter_packs=run_filter_packs,
             )
             result = res if isinstance(res, dict) else {}
             run_id = str(result.get("run_id") or "")
@@ -879,14 +1244,7 @@ def create_report():
             job_store.update(job_id, status=JOB_STATUS_ERROR, message=_job_failure_message(job_id), error=str(e))
 
     threading.Thread(target=_runner, daemon=True).start()
-    return jsonify({
-        "status": "accepted",
-        "job_id": job_id,
-        "service": service,
-        "project_area": project_area,
-        "run_name": run_name,
-        "message": "Задача принята. Формирование отчёта началось.",
-    }), 200
+    return job
 
 
 @dashboard_bp.route("/job_status/<job_id>", methods=["GET"])

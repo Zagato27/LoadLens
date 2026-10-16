@@ -47,9 +47,35 @@ Graphite-вывод Gatling (data.writers = [graphite]) в InfluxDB 1.x с graph
 | LT (Gatling): errors per second by request | Ошибки в секунду по запросам | в секунду |  |
 | LT (Gatling): active users | Виртуальные пользователи | шт. | VU (прогноз) |
 
+### Gatling Graphite → VictoriaMetrics (PromQL)
+
+`lt-gatling-graphite-victoriametrics` v1 · домен «Нагрузочный инструмент» · PromQL · проверен на стенде `docker/dev-stack`
+
+Graphite-вывод Gatling (gatling.data.writers = [graphite]) в VictoriaMetrics с приёмом Graphite (-graphiteListenAddr=:2003). VictoriaMetrics хранит путь Graphite целиком как имя метрики: gatling.<симуляция>.allRequests.<ok|ko|all>.<count|mean|percentiles95|…> — сводка, gatling.<симуляция>.<группа>.<запрос>.<статус>.<метрика> — запросы (пробелы в именах становятся «_»), gatling.<симуляция>.users.allUsers.active — пользователи. Серии выбираются по __name__, имя запроса достаётся из пути через label_replace. Источник — VictoriaMetrics как Prometheus (http://victoria:8428, у кластера — vmselect …/select/0/prometheus) или датасорс Grafana типа Prometheus/VictoriaMetrics. count — запросы за writePeriod (по умолчанию 1 с), время в мс. По умолчанию VictoriaMetrics не отдаёт последние 30 с (-search.latencyOffset): отчёт по только что закончившемуся тесту строите через минуту.
+
+| Переменная | По умолчанию | Описание |
+|---|---|---|
+| `root_prefix` | `gatling` | Корневой префикс. gatling.data.graphite.rootPathPrefix из gatling.conf. Префикс с точками не поддерживается |
+| `simulation` | `[^.]+` | Симуляция (регулярное выражение). Имя симуляции в нижнем регистре, как его пишет Gatling, например checkoutsimulation. По умолчанию — любая |
+| `window_sec` | `30` | Окно усреднения, с. За это окно суммируются счётчики и усредняются задержки. Должно быть не меньше периода записи |
+| `write_period_sec` | `1` | Период записи, с. gatling.data.graphite.writePeriod |
+| `load_model` | `open` | Модель нагрузки сценария. open — constantUsersPerSec, rampUsersPerSec; closed — constantConcurrentUsers, rampConcurrentUsers. Варианты: open, closed |
+
+| Запрос | Роль | Единица | SLA |
+|---|---|---|---|
+| LT (Gatling VM): RPS total | Общий RPS теста (обязательный) | в секунду | запрос производительности |
+| LT (Gatling VM): RPS by request | RPS по запросам | в секунду |  |
+| LT (Gatling VM): p95(ms) total | p95 времени ответа, весь тест | мс | p95 |
+| LT (Gatling VM): p99(ms) total | p99 времени ответа, весь тест | мс | p99 |
+| LT (Gatling VM): p95(ms) by request | p95 времени ответа по запросам | мс |  |
+| LT (Gatling VM): mean response time(ms) | Среднее время ответа, весь тест (обязательный) | мс | среднее время (прогноз) |
+| LT (Gatling VM): error rate (%) | Доля ошибок, весь тест | % | доля ошибок |
+| LT (Gatling VM): errors per second by request | Ошибки в секунду по запросам | в секунду |  |
+| LT (Gatling VM): active users | Виртуальные пользователи | шт. | VU (прогноз) |
+
 ### JMeter Backend Listener → InfluxDB (InfluxQL)
 
-`lt-jmeter-influxql` v1 · домен «Нагрузочный инструмент» · InfluxQL
+`lt-jmeter-influxql` v2 · домен «Нагрузочный инструмент» · InfluxQL
 
 Встроенный InfluxdbBackendListenerClient JMeter: measurement jmeter, теги application, transaction, statut; поля count, countError, avg, pct95.0, pct99.0, maxAT. Строки transaction="all" — сводка по всем семплерам, transaction="internal" — потоки. RPS = count за интервал отправки, делённый на его длину. Перцентили JMeter считает по скользящему окну семплов (backend_metrics_window), значения в мс.
 
@@ -71,15 +97,17 @@ Graphite-вывод Gatling (data.writers = [graphite]) в InfluxDB 1.x с graph
 | LT (JMeter): error rate (%) | Доля ошибок, весь тест | % | доля ошибок |
 | LT (JMeter): errors per second by transaction | Ошибки в секунду по запросам | в секунду |  |
 | LT (JMeter): active threads | Виртуальные пользователи | шт. | VU (прогноз) |
+| LT (JMeter): RPS by LoadLens instance | RPS по инстансам прогона LoadLens | в секунду |  |
 
 ### k6 → InfluxDB 1.x (InfluxQL)
 
-`lt-k6-influxql` v1 · домен «Нагрузочный инструмент» · InfluxQL · проверен на стенде `docker/dev-stack`
+`lt-k6-influxql` v3 · домен «Нагрузочный инструмент» · InfluxQL · проверен на стенде `docker/dev-stack`
 
 Встроенный вывод k6 `--out influxdb=http://influxdb:8086/k6`. Задержки переводятся в миллисекунды (единица порогов SLA). Общие p95, p99, среднее и доля ошибок считаются по интервалу ресемплинга отчёта, RPS — по секундам. Домену lt_framework нужен датасорс InfluxQL с базой k6.
 
 | Переменная | По умолчанию | Описание |
 |---|---|---|
+| `testid` | `.*` | Тег testid (регулярное выражение). Значение тега testid, с которым запущен k6 (--tag testid=...). По умолчанию — все прогоны; прогоны, запущенные из LoadLens, подставляют свой тег сами |
 | `load_model` | `open` | Модель нагрузки сценария. open — executors constant/ramping-arrival-rate, closed — ramping-vus, constant-vus, per-vu-iterations. Варианты: open, closed |
 
 | Запрос | Роль | Единица | SLA |
@@ -94,6 +122,7 @@ Graphite-вывод Gatling (data.writers = [graphite]) в InfluxDB 1.x с graph
 | LT (InfluxQL): error rate (%) | Доля ошибок, весь тест | % | доля ошибок |
 | LT (InfluxQL): failed requests per second by group & name | Ошибки в секунду по запросам | в секунду |  |
 | LT (InfluxQL): VUs | Виртуальные пользователи | шт. | VU (прогноз) |
+| LT (InfluxQL): RPS by LoadLens instance | RPS по инстансам прогона LoadLens | в секунду |  |
 
 ### k6 → InfluxDB 2.x (Flux)
 
@@ -119,7 +148,7 @@ Graphite-вывод Gatling (data.writers = [graphite]) в InfluxDB 1.x с graph
 
 ### k6 → Prometheus remote write (native histograms)
 
-`lt-k6-prometheus-native` v1 · домен «Нагрузочный инструмент» · PromQL · проверен на стенде `docker/dev-stack`
+`lt-k6-prometheus-native` v2 · домен «Нагрузочный инструмент» · PromQL · проверен на стенде `docker/dev-stack`
 
 Вывод k6 `--out experimental-prometheus-rw` с K6_PROMETHEUS_RW_TREND_AS_NATIVE_HISTOGRAM=true. Перцентили и среднее считаются по окну rate(), поэтому точнее статистик trend. Нужен Prometheus 2.40+ с включёнными native histograms (--enable-feature=native-histograms).
 
@@ -140,10 +169,11 @@ Graphite-вывод Gatling (data.writers = [graphite]) в InfluxDB 1.x с graph
 | LT (k6 native): error rate (%) | Доля ошибок, весь тест | % | доля ошибок |
 | LT (k6 native): VUs | Виртуальные пользователи | шт. | VU (прогноз) |
 | LT (k6 native): checks passed (%) by check | Доля успешных проверок | % |  |
+| LT (k6 native): RPS by LoadLens instance | RPS по инстансам прогона LoadLens | в секунду |  |
 
 ### k6 → Prometheus remote write (trend stats)
 
-`lt-k6-prometheus-rw` v1 · домен «Нагрузочный инструмент» · PromQL · проверен на стенде `docker/dev-stack`
+`lt-k6-prometheus-rw` v2 · домен «Нагрузочный инструмент» · PromQL · проверен на стенде `docker/dev-stack`
 
 Вывод k6 `--out experimental-prometheus-rw` со статистиками trend: задайте K6_PROMETHEUS_RW_TREND_STATS="p(95),p(99),avg". Статистики trend k6 считает сам, поэтому общий p95 — худший p95 среди серий. Для точных перцентилей по окнам используйте пакет с native histograms. Чтобы отделить прогон от других тестов, добавьте матчер testid и запускайте k6 с --tag testid=...
 
@@ -164,6 +194,7 @@ Graphite-вывод Gatling (data.writers = [graphite]) в InfluxDB 1.x с graph
 | LT (k6 Prometheus): error rate (%) | Доля ошибок, весь тест | % | доля ошибок |
 | LT (k6 Prometheus): VUs | Виртуальные пользователи | шт. | VU (прогноз) |
 | LT (k6 Prometheus): checks passed (%) by check | Доля успешных проверок | % |  |
+| LT (k6 Prometheus): RPS by LoadLens instance | RPS по инстансам прогона LoadLens | в секунду |  |
 
 ### Locust → Prometheus (locust_exporter)
 
@@ -808,6 +839,26 @@ HTTP-гистограмма, которую Go-сервисы обычно ре�
 | K8s nodes: CPU requests (% of allocatable) by node | CPU requests, % от allocatable (обязательный) | % |  |
 | K8s nodes: Memory requests (% of allocatable) by node | Memory requests, % от allocatable | % |  |
 | K8s nodes: Pods by node | Поды на узле | шт. |  |
+
+### Генераторы нагрузки: node_exporter
+
+`lt-generators-node-exporter` v1 · домен «Ресурсы генераторов нагрузки» · PromQL · проверен на стенде `docker/dev-stack`
+
+Ресурсы машин, на которых работает инструмент нагрузочного тестирования: CPU, память, load на ядро, сеть и TCP-соединения из node_exporter на генераторах. Отчёт видит по ним, не упёрся ли генератор в ресурс и можно ли доверять поданной нагрузке и задержкам. Ограничьте матчеры хостами генераторов, а не тестируемой системы.
+
+| Переменная | По умолчанию | Описание |
+|---|---|---|
+| `matchers` | `job=~".*loadgen.*"` | Матчеры генераторов. Только хосты генераторов, например job="loadgen" или instance=~"10.0.5.*" |
+| `window` | `1m` | Окно rate() |
+
+| Запрос | Роль | Единица | SLA |
+|---|---|---|---|
+| Generators: CPU usage (%) by host | CPU генератора нагрузки (обязательный) | % |  |
+| Generators: Memory usage (%) by host | Память генератора нагрузки (обязательный) | % |  |
+| Generators: load1 per core by host | load1 на ядро генератора | отношение |  |
+| Generators: Network receive (bytes/s) by host | Сеть генератора: приём | байт/с |  |
+| Generators: Network transmit (bytes/s) by host | Сеть генератора: передача | байт/с |  |
+| Generators: TCP established by host | TCP-соединения генератора | шт. |  |
 
 ### Узлы Windows: windows_exporter
 

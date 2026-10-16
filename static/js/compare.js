@@ -13,6 +13,8 @@
   };
   const HIGHER_BETTER = ['rps', 'request count', 'checks', 'throughput', 'fetch rate', 'requests'];
   const LOWER_BETTER = ['latency', 'duration', 'time', 'p95', 'p99', 'lag', 'cpu', 'memory', 'mem', 'disk', 'error', 'ошиб', 'gc', 'pause', 'heap', 'threads'];
+  // Lines in the overlay tooltip next to the cursor; the rest is «ещё N», all values are in the legend.
+  const TOOLTIP_MAX = 8;
 
   const state = {
     runA: null,
@@ -20,6 +22,8 @@
     agg: 'p95',
     schema: {},
     charts: {},
+    // Legend chips and zoom handles of the open overlay chart, by the same key as `charts`.
+    chartAddons: {},
     pickers: {},
     // Domain titles stored with the reports (run A wins when both have one).
     domainTitles: {}
@@ -122,8 +126,7 @@
   }
   function durationText(row) {
     if (!row || !Number.isFinite(Number(row.start_ms)) || !Number.isFinite(Number(row.end_ms))) return '—';
-    const minutes = Math.round((Number(row.end_ms) - Number(row.start_ms)) / 60000);
-    return `${minutes} мин`;
+    return LL.formatDuration(Number(row.end_ms) - Number(row.start_ms));
   }
   // Peak for step/stress, held RPS for soak, spike level for spike.
   function keyRpsText(row, peak) {
@@ -137,7 +140,7 @@
     return '—';
   }
   function renderVerdicts(a, b) {
-    const order = ['final', 'lt_framework', 'microservices', 'jvm', 'database', 'kafka', 'hard_resources', 'application_logs'];
+    const order = ['final', 'lt_framework', 'microservices', 'jvm', 'database', 'kafka', 'hard_resources', 'lt_generators', 'application_logs'];
     const domains = order.filter((d) => a[d] || b[d]);
     const finalA = a.final; const finalB = b.final;
     const peakA = parsedOf(finalA).peak_performance || {}; const peakB = parsedOf(finalB).peak_performance || {};
@@ -192,12 +195,21 @@
 
   function destroyCharts(domain) {
     Object.keys(state.charts).forEach((key) => {
-      if (!domain || key.startsWith(`${domain}::`)) { try { state.charts[key].destroy(); } catch (e) { /* already gone */ } delete state.charts[key]; }
+      if (domain && !key.startsWith(`${domain}::`)) return;
+      (state.chartAddons[key] || []).forEach((addon) => { try { addon.destroy(); } catch (e) { /* already gone */ } });
+      delete state.chartAddons[key];
+      try { state.charts[key].destroy(); } catch (e) { /* already gone */ }
+      delete state.charts[key];
     });
   }
 
+  function metricsTableHead() {
+    const aggLabel = esc(AGG_LABELS[state.agg]);
+    return `<thead><tr><th>Метрика</th><th class="num">A (${aggLabel})</th><th class="num">B (${aggLabel})</th><th>Изменение B к A</th></tr></thead>`;
+  }
+
   async function renderDomainTable(domain, panel) {
-    panel.innerHTML = `<div class="card">${ui.skeleton(4)}</div>`;
+    panel.innerHTML = `<div class="card"><div class="table-wrap"><table class="data-table">${metricsTableHead()}<tbody>${ui.skeletonRows(4, 4)}</tbody></table></div></div>`;
     destroyCharts(domain);
     const u = new URL('/compare_summary', location.origin);
     u.searchParams.set('run_a', state.runA.value);
@@ -213,12 +225,11 @@
       panel.innerHTML = `<div class="card"><div class="empty-state">Не удалось загрузить сводку: ${esc(e.message)}</div></div>`;
       return;
     }
-    const aggLabel = AGG_LABELS[state.agg];
     const table = document.createElement('table');
     table.className = 'data-table';
-    table.innerHTML = `<thead><tr><th>Метрика</th><th class="num">A (${esc(aggLabel)})</th><th class="num">B (${esc(aggLabel)})</th><th>Изменение B к A</th></tr></thead>`;
+    table.innerHTML = metricsTableHead();
     const tbody = document.createElement('tbody');
-    if (!rows.length) tbody.innerHTML = '<tr class="empty-row"><td colspan="4">В этом домене нет общих метрик у выбранных прогонов.</td></tr>';
+    if (!rows.length) tbody.innerHTML = ui.emptyRow(4, 'В этом домене нет общих метрик у выбранных прогонов.', { icon: 'columns' });
     rows.forEach((r) => {
       const tr = document.createElement('tr');
       tr.className = 'metric-row clickable';
@@ -249,7 +260,14 @@
     chartRow.dataset.label = queryLabel;
     const td = document.createElement('td');
     td.colSpan = 4;
-    td.innerHTML = `<div class="chart-toolbar"><strong>${esc(queryLabel)}</strong><span class="dim">A — сплошная, B — пунктир; время от старта прогона</span><button type="button" class="btn btn-sm chart-png">Скачать PNG</button></div><div class="cmp-chart-wrap" style="margin-top:0"><div class="cmp-chart-canvas"><canvas height="140"></canvas></div><div class="cmp-legend-panel"><h4>Серии</h4><div class="series-legend-host">${ui.skeleton(3)}</div></div></div><div class="series-table-wrap"></div>`;
+    td.innerHTML = [
+      `<div class="chart-toolbar"><strong>${esc(queryLabel)}</strong><span class="dim">A — сплошная, B — пунктир; время от старта прогона. Выделите участок мышью, чтобы приблизить</span>`,
+      `<button type="button" class="chart-zoom-reset" hidden>${ui.icon('x')}Сбросить масштаб</button></div>`,
+      '<div class="cmp-chart-wrap cmp-overlay">',
+      `<div class="cmp-overlay-canvas"><canvas role="img" aria-label="${esc(`График: ${queryLabel}, прогоны A и B`)}"></canvas><div class="cmp-overlay-pending">${ui.skeleton(3)}</div></div>`,
+      '<div class="cmp-legend"></div>',
+      '</div><div class="series-table-wrap"></div>'
+    ].join('');
     chartRow.appendChild(td);
     tr.after(chartRow);
     await drawOverlay(domain, queryLabel, chartRow);
@@ -258,7 +276,12 @@
 
   async function drawOverlay(domain, queryLabel, chartRow) {
     const canvas = chartRow.querySelector('canvas');
-    const legendHost = chartRow.querySelector('.series-legend-host');
+    const pending = chartRow.querySelector('.cmp-overlay-pending');
+    const legendHost = chartRow.querySelector('.cmp-legend');
+    const showProblem = (text) => {
+      pending.innerHTML = `<div class="dim">${esc(text)}</div>`;
+      pending.classList.add('is-message');
+    };
     const u = new URL('/compare_series', location.origin);
     u.searchParams.set('run_a', state.runA.value);
     u.searchParams.set('run_b', state.runB.value);
@@ -272,68 +295,75 @@
       data = await resp.json();
       if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
     } catch (e) {
-      legendHost.innerHTML = `<div class="dim">Ошибка загрузки: ${esc(e.message)}</div>`;
+      showProblem(`Ошибка загрузки: ${e.message}`);
       return;
     }
-    if (!data.points || !data.points.length) { legendHost.innerHTML = '<div class="dim">Нет данных для выбранной метрики</div>'; return; }
-    const xs = new Set();
-    const seriesMap = new Map();
-    data.points.forEach((p) => {
-      xs.add(p.t_offset_sec);
-      const key = `${p.run_name}\u0000${p.series}`;
-      if (!seriesMap.has(key)) seriesMap.set(key, new Map());
-      seriesMap.get(key).set(p.t_offset_sec, p.value);
-    });
-    const labels = Array.from(xs).sort((a, b) => a - b);
-    const datasets = [];
-    seriesMap.forEach((m, key) => {
-      const [runName, series] = key.split('\u0000');
-      const isB = runName === state.runB.value && runName !== state.runA.value;
-      const color = LL.colorFor(series);
-      datasets.push({ label: `${isB ? 'B' : 'A'} · ${series}`, series, isB, data: labels.map((x) => (m.has(x) ? m.get(x) : null)), borderColor: color, backgroundColor: color, pointRadius: 0, borderWidth: 2, spanGaps: true, borderDash: isB ? [6, 4] : [] });
-    });
+    if (!data.points || !data.points.length) { showProblem('Нет данных для выбранной метрики'); return; }
+    // The row may have been closed while the series were loading.
+    if (!chartRow.isConnected) return;
+    const { labels, datasets } = overlayDatasets(data.points);
     const colors = ui.chartColors();
+    const offsetLabel = (sec) => `${String(Math.floor(sec / 3600)).padStart(2, '0')}:${String(Math.floor((sec % 3600) / 60)).padStart(2, '0')}`;
+    // The tooltip sits next to the cursor (largest values first, «ещё N»); the legend shows every value.
+    const tooltip = LL.charts.htmlTooltip({ max: TOOLTIP_MAX });
+    tooltip.callbacks = Object.assign({}, tooltip.callbacks, {
+      title: (items) => (items.length ? `+${offsetLabel(Number(items[0].label) || 0)} от старта` : '')
+    });
     // eslint-disable-next-line no-undef
     const chart = new Chart(canvas.getContext('2d'), {
       type: 'line',
       data: { labels, datasets },
       options: {
         responsive: true,
-        interaction: { mode: 'nearest', intersect: false },
-        plugins: { legend: { display: false }, customBackground: { color: colors.background } },
+        maintainAspectRatio: false,
+        animation: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          customBackground: { color: colors.background },
+          tooltip: tooltip
+        },
         scales: {
-          x: { title: { display: true, text: 'Время от старта (чч:мм)', color: colors.text }, ticks: { color: colors.text, callback(v) { const sec = parseInt(this.getLabelForValue(v), 10) || 0; return `${String(Math.floor(sec / 3600)).padStart(2, '0')}:${String(Math.floor((sec % 3600) / 60)).padStart(2, '0')}`; } }, grid: { color: colors.grid } },
+          x: { title: { display: true, text: 'Время от старта (чч:мм)', color: colors.text }, ticks: { color: colors.text, maxRotation: 0, autoSkipPadding: 12, callback(v) { return offsetLabel(parseInt(this.getLabelForValue(v), 10) || 0); } }, grid: { color: colors.grid } },
           y: { ticks: { color: colors.text }, grid: { color: colors.grid } }
         }
-      }
+      },
+      plugins: [LL.charts.crosshair]
     });
-    state.charts[`${domain}::${queryLabel}`] = chart;
-    renderLegend(chart, legendHost);
-    chartRow.querySelector('.chart-png').addEventListener('click', () => {
-      const a = document.createElement('a');
-      a.href = chart.toBase64Image();
-      a.download = `compare-${queryLabel.replace(/[^\w\-]+/g, '_')}.png`;
-      document.body.appendChild(a); a.click(); a.remove();
-    });
+    pending.remove();
+    const key = `${domain}::${queryLabel}`;
+    state.charts[key] = chart;
+    const legend = LL.charts.legendChips(chart, legendHost, { filename: `compare-${queryLabel}` });
+    const resetBtn = chartRow.querySelector('.chart-zoom-reset');
+    const zoom = LL.charts.zoom([chart], { onChange: (range) => { resetBtn.hidden = !range; } });
+    resetBtn.addEventListener('click', () => zoom.reset());
+    state.chartAddons[key] = [legend, zoom];
   }
 
-  function renderLegend(chart, host) {
-    const rows = chart.data.datasets.map((ds, i) => {
-      const vals = ds.data.filter((v) => v !== null && Number.isFinite(v));
-      const avg = vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
-      return { idx: i, ds, avg, visible: chart.isDatasetVisible(i) };
+  // Datasets of the A/B overlay: one color per series name (shared by A and B, palette slot in
+  // llSeries so a theme switch recolors them), A solid and B dashed, A and B of a series side by side.
+  function overlayDatasets(points) {
+    const xs = new Set();
+    const seriesMap = new Map();
+    const names = [];
+    points.forEach((p) => {
+      xs.add(p.t_offset_sec);
+      const key = `${p.run_name}\u0000${p.series}`;
+      if (!seriesMap.has(key)) seriesMap.set(key, new Map());
+      seriesMap.get(key).set(p.t_offset_sec, p.value);
+      if (!names.includes(p.series)) names.push(p.series);
     });
-    host.innerHTML = `<table class="series-legend"><thead><tr><th>Серия</th><th class="num">Среднее</th></tr></thead><tbody>${rows.map((r) => `<tr data-idx="${r.idx}" class="${r.visible ? '' : 'off'}" title="Нажмите, чтобы скрыть/показать"><td><span class="swatch ${r.ds.isB ? 'dashed' : ''}" style="background:${r.ds.isB ? 'none' : r.ds.borderColor};color:${r.ds.borderColor}"></span>${esc(r.ds.label)}</td><td class="num">${fmt(r.avg)}</td></tr>`).join('')}</tbody></table>`;
-    host.querySelectorAll('tr[data-idx]').forEach((tr) => {
-      tr.style.cursor = 'pointer';
-      tr.addEventListener('click', () => {
-        const idx = Number(tr.dataset.idx);
-        const visible = chart.isDatasetVisible(idx);
-        chart.setDatasetVisibility(idx, !visible);
-        chart.update();
-        tr.classList.toggle('off', visible);
-      });
+    const labels = Array.from(xs).sort((a, b) => a - b);
+    const datasets = [];
+    seriesMap.forEach((m, key) => {
+      const [runName, series] = key.split('\u0000');
+      const isB = runName === state.runB.value && runName !== state.runA.value;
+      const slot = names.indexOf(series);
+      const color = LL.charts.palette(slot);
+      datasets.push({ label: `${isB ? 'B' : 'A'} · ${series}`, series, isB, llSeries: slot, data: labels.map((x) => (m.has(x) ? m.get(x) : null)), borderColor: color, backgroundColor: color, pointRadius: 0, borderWidth: 2, spanGaps: true, borderDash: isB ? [6, 4] : [] });
     });
+    datasets.sort((a, b) => (a.llSeries - b.llSeries) || (Number(a.isB) - Number(b.isB)));
+    return { labels, datasets };
   }
 
   async function renderSeriesTable(domain, queryLabel, host) {
@@ -350,20 +380,23 @@
       const rows = Array.isArray(data.rows) ? data.rows : [];
       if (!rows.length) { host.innerHTML = ''; return; }
       const aggLabel = AGG_LABELS[state.agg];
-      host.innerHTML = `<table class="data-table" style="margin-top:8px"><thead><tr><th>Серия</th><th class="num">A (${esc(aggLabel)})</th><th class="num">B (${esc(aggLabel)})</th><th>Изменение</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${esc(r.series)}</td><td class="num">${fmt(r.value_a)}</td><td class="num">${fmt(r.value_b)}</td><td>${trendHtml(r.trend_pct, queryLabel)}</td></tr>`).join('')}</tbody></table>`;
+      host.innerHTML = `<div class="table-wrap"><table class="data-table" style="margin-top:8px"><thead><tr><th>Серия</th><th class="num">A (${esc(aggLabel)})</th><th class="num">B (${esc(aggLabel)})</th><th>Изменение</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${esc(r.series)}</td><td class="num">${fmt(r.value_a)}</td><td class="num">${fmt(r.value_b)}</td><td>${trendHtml(r.trend_pct, queryLabel)}</td></tr>`).join('')}</tbody></table></div>`;
     } catch (e) {
       host.innerHTML = `<div class="dim">Не удалось загрузить разбивку по сериям: ${esc(e.message)}</div>`;
     }
   }
 
   function renderDomainTabs() {
-    const order = ['lt_framework', 'microservices', 'jvm', 'database', 'kafka', 'hard_resources'];
+    const order = ['lt_framework', 'microservices', 'jvm', 'database', 'kafka', 'hard_resources', 'lt_generators'];
     const domains = Object.keys(state.schema).sort((a, b) => { const ia = order.indexOf(a); const ib = order.indexOf(b); return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib); });
     const nav = $('domainTabs');
     const panels = $('domainPanels');
     nav.innerHTML = '';
     panels.innerHTML = '';
-    if (!domains.length) { panels.innerHTML = '<div class="card empty-state">В базе нет сохранённых метрик.</div>'; return; }
+    if (!domains.length) {
+      panels.innerHTML = `<div class="card">${ui.emptyState({ icon: 'columns', title: 'Метрик для сравнения нет', text: 'В базе нет сохранённых метрик: они появляются после создания отчёта по прогону.', actionHtml: '<a class="btn btn-primary" href="/new" data-min-role="engineer">Новый отчёт</a>' })}</div>`;
+      return;
+    }
     domains.forEach((d, i) => {
       const btn = document.createElement('button');
       btn.className = `tab ${i === 0 ? 'active' : ''}`;
@@ -391,12 +424,39 @@
       await loadSchema();
       $('metricsCompare').hidden = false;
       $('aggNote').textContent = AGG_NOTES[state.agg];
+      if ($('compareEmpty')) $('compareEmpty').hidden = true;
       renderDomainTabs();
       try { history.replaceState(null, '', `/compare?run_a=${encodeURIComponent(state.runA.value)}&run_b=${encodeURIComponent(state.runB.value)}`); } catch (e) { /* ignore */ }
       $('compareHint').textContent = '';
     } catch (e) {
       ui.toast(`Не удалось выполнить сравнение: ${e.message}`, { tone: 'error' });
       $('compareHint').textContent = e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // Empty-state action: the run with the newest report as A, the previous (successful if any) run of its
+  // service as B. /compare_baseline looks for reports created earlier, hence the sort by report time.
+  async function compareLatest(btn) {
+    btn.disabled = true;
+    try {
+      const u = new URL('/runs', location.origin);
+      u.searchParams.set('limit', '1');
+      u.searchParams.set('sort', 'report_created_at');
+      const resp = await fetch(u);
+      const rows = await resp.json();
+      if (!resp.ok) throw new Error(rows.error || `HTTP ${resp.status}`);
+      if (!Array.isArray(rows) || !rows.length) { ui.toast('Прогонов пока нет: сначала создайте отчёт', { tone: 'info' }); return; }
+      const r = rows[0];
+      const item = { value: r.run_name, label: r.run_name, meta: runMeta(r), run: r };
+      state.pickers.runA.setItem(item);
+      setRun('runA', item);
+      const found = (await pickBaseline('previous_success', true)) || (await pickBaseline('previous', true));
+      if (found) await runCompare();
+      else ui.toast(`У прогона «${r.run_name}» нет предыдущего прогона того же сервиса: выберите B вручную`, { tone: 'info' });
+    } catch (e) {
+      ui.toast(`Не удалось подобрать прогоны: ${e.message}`, { tone: 'error' });
     } finally {
       btn.disabled = false;
     }
@@ -422,16 +482,30 @@
     $('baselinePrevBtn').addEventListener('click', () => pickBaseline('previous', false));
     $('compareBtn').addEventListener('click', runCompare);
     wireAgg();
-    ui.theme.onChange(() => ui.restyleCharts());
 
     const params = new URLSearchParams(location.search);
     const ra = params.get('run_a'); const rb = params.get('run_b');
+    // Empty state until the first comparison; hidden while runs from the link are being resolved.
+    const empty = document.createElement('div');
+    empty.id = 'compareEmpty';
+    empty.className = 'card compare-empty';
+    empty.hidden = !!ra;
+    empty.innerHTML = ui.emptyState({
+      icon: 'columns',
+      title: 'Выберите два прогона',
+      text: 'A — прогон, который нужно оценить; B — с чем сравнить: после выбора A его можно подставить кнопкой «Предыдущий успешный». Можно сразу сравнить последний прогон с предыдущим прогоном того же сервиса.',
+      actionHtml: '<button type="button" class="btn" id="compareLatestBtn">Сравнить последний прогон</button>'
+    });
+    $('verdictCompare').before(empty);
+    $('compareLatestBtn').addEventListener('click', (event) => compareLatest(event.currentTarget));
     try {
       if (ra) { const item = await findRun(ra); state.pickers.runA.setItem(item); setRun('runA', item); }
       if (rb) { const item = await findRun(rb); state.pickers.runB.setItem(item); setRun('runB', item); }
       else if (ra) { if (!(await pickBaseline('previous_success', true))) await pickBaseline('previous', true); }
       if (state.runA && state.runB) runCompare();
+      else empty.hidden = false;
     } catch (e) {
+      empty.hidden = false;
       ui.toast(`Не удалось подставить прогоны из ссылки: ${e.message}`, { tone: 'error' });
     }
   });

@@ -122,6 +122,50 @@ CREATE TABLE IF NOT EXISTS public.report_jobs (
 CREATE INDEX IF NOT EXISTS idx_report_jobs_status_updated ON public.report_jobs (status, updated_at DESC);
 
 -- ============================================================
+-- Прогоны, запущенные со страницы «Запуск теста»
+-- (mirrors loadlens_app/load_tests/store.py; instances live in JSONB)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS public.load_test_runs (
+    run_id          TEXT        PRIMARY KEY,
+    run_name        TEXT        NOT NULL,
+    run_tag         TEXT        NOT NULL,
+    service         TEXT        NOT NULL,
+    project_area    TEXT        NOT NULL DEFAULT '',
+    test_type       TEXT        NOT NULL DEFAULT '',
+    status          TEXT        NOT NULL,
+    message         TEXT        NOT NULL DEFAULT '',
+    owner           TEXT        NOT NULL DEFAULT '',
+    options         JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    instances       JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    report_job_id   TEXT,
+    report_url      TEXT,
+    stop_all_at     TIMESTAMPTZ,
+    stop_instances  INTEGER[]   NOT NULL DEFAULT '{}',
+    started_at      TIMESTAMPTZ,
+    finished_at     TIMESTAMPTZ,
+    watcher         TEXT,
+    watcher_seen    TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    events          JSONB       NOT NULL DEFAULT '[]'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_load_test_runs_status_created ON public.load_test_runs (status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_load_test_runs_service_name ON public.load_test_runs (service, run_name);
+
+CREATE TABLE IF NOT EXISTS public.load_test_presets (
+    preset_id    TEXT        PRIMARY KEY,
+    name         TEXT        NOT NULL,
+    service      TEXT        NOT NULL,
+    project_area TEXT        NOT NULL DEFAULT '',
+    spec         JSONB       NOT NULL,
+    owner        TEXT        NOT NULL DEFAULT '',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (service, name)
+);
+
+-- ============================================================
 -- Разбор предела прогноза мощностей моделью (кэш на отчёт)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS public.forecast_explanations (

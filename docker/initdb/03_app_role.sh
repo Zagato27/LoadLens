@@ -20,7 +20,7 @@
 # server log; a superuser run switches statement logging off for the transaction.
 # The image may source this file instead of executing it, so it never calls exit or set -e.
 
-LOADLENS_TABLES="metrics llm_reports engineer_reports llm_feedback report_jobs confluence_publications forecast_explanations forecast_publications app_users api_tokens audit_log"
+LOADLENS_TABLES="metrics llm_reports engineer_reports llm_feedback report_jobs load_test_runs load_test_presets confluence_publications forecast_explanations forecast_publications app_users api_tokens audit_log"
 
 if [ -n "${APP_DB_USER:-}" ] && [ -n "${APP_DB_PASSWORD:-}" ]; then
   case "$APP_DB_USER" in

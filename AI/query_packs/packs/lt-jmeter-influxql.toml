@@ -1,6 +1,6 @@
 schema_version = 1
 id = "lt-jmeter-influxql"
-version = 1
+version = 2
 title = "JMeter Backend Listener → InfluxDB (InfluxQL)"
 category = "load_tool"
 stack = ["jmeter", "influxdb"]
@@ -41,6 +41,10 @@ title = "Модель нагрузки сценария"
 default = "closed"
 choices = ["open", "closed"]
 help = "Thread Group — closed; Arrivals/Free-Form Arrivals Thread Group — open."
+
+[run_filter]
+variable = "application"
+value = "{{run_tag}}"
 
 [sla]
 max_performance_query = "@lt.rps_total"
@@ -119,3 +123,12 @@ role = "lt.vus"
 unit = "count"
 query = '''SELECT max("maxAT") FROM "{{measurement}}" WHERE "application" =~ /^{{application}}$/ AND "transaction" = 'internal' AND $timeFilter GROUP BY time({{send_interval_sec}}s) fill(null)'''
 description = "Активные потоки JMeter (аналог VU)."
+
+[[queries]]
+label = "LT (JMeter): RPS by LoadLens instance"
+role = "lt.rps_by_instance"
+unit = "per_second"
+query = '''SELECT sum("count") / {{send_interval_sec}} FROM "{{measurement}}" WHERE "application" =~ /^{{application}}$/ AND "transaction" = 'all' AND "statut" = 'all' AND $timeFilter GROUP BY time({{send_interval_sec}}s), "lt_instance" fill(null)'''
+keys = ["lt_instance"]
+since = 2
+description = "RPS каждого инстанса прогона LoadLens (тег lt_instance) для живых графиков страницы прогона; в отчёт не входит."

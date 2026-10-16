@@ -5,7 +5,7 @@ from the table is treated as admin-only, and a test fails until every registered
 
 Role guide:
   viewer    reads reports, archive, comparison and forecasts
-  engineer  also runs analyses, publishes to Confluence, writes notes and votes
+  engineer  also runs analyses and load tests, publishes to Confluence, writes notes and votes
   admin     also changes settings, connections and secrets, manages users, deletes data
 
 Settings, connections, projects, prompts and deletions are ``session_only``: an API token, even an
@@ -156,6 +156,30 @@ POLICY: dict[str, Rule] = {
     "query_packs.check_query_pack": _write(A, "config.query_pack_check", session_only=True),
     "query_packs.detect_query_packs": _write(A, "config.query_pack_detect", session_only=True),
     "query_packs.apply_query_pack": _write(A, "config.query_pack_apply", session_only=True),
+    "query_packs.summed_rps": _write(A, "config.summed_rps", session_only=True),
+    # ---- load tests started from LoadLens (commands run on the configured generators) ----
+    # Engineers only: commands and parameters may name internal hosts or carry test credentials.
+    "load_tests.launch_page": _page(E),
+    "load_tests.run_page": _page(E),
+    "load_tests.options": _read(E),
+    "load_tests.scripts": _read(E),
+    "load_tests.ci_params": _read(E),
+    "load_tests.ci_refs": _read(E),
+    "load_tests.preview": _write(E),  # validates the form and renders commands, starts nothing
+    "load_tests.create": _write(E, "load_test.start"),
+    "load_tests.list_runs": _read(E),
+    "load_tests.get_run": _read(E),
+    "load_tests.stop": _write(E, "load_test.stop"),
+    "load_tests.logs": _read(E),
+    "load_tests.live": _read(E),
+    # Test window hint of the new report form: queries the service's load tool metrics like "live" does.
+    "load_tests.lt_windows": _read(E),
+    "load_tests.hints": _read(E),
+    "load_tests.list_presets": _read(E),
+    "load_tests.save_preset": _write(E, "load_test.preset_save"),
+    "load_tests.delete_preset": _write(E, "load_test.preset_delete"),
+    # CI pipelines report events with the secret of their instance, not a user session.
+    "load_tests.ci_events": Rule(None, csrf=False),
 }
 
 

@@ -6,6 +6,13 @@
   const LONG_WINDOW_WARN_MINUTES = 24 * 60;
   const SERVICE_HINT = 'Список сервисов задаётся в настройках (раздел «Сервисы»).';
   const TEST_TYPE_HINT = 'Тип теста определяет программный анализ и инструкции для ИИ: поиск максимума, удержание нагрузки, реакцию на всплески или точку насыщения.';
+  // Test window hint: how far back /lt_windows looks and how many chips are shown.
+  const WINDOWS_HOURS = 6;
+  const WINDOWS_MAX_CHIPS = 5;
+  // Progress card: "обычно около N мин" is the median of this many latest finished report jobs.
+  const TYPICAL_SAMPLE = 10;
+  const TYPICAL_MIN_SAMPLES = 3;
+  const JOB_KIND_REPORT = 'report';
 
   // Phase boundaries mirror the progress budget in AI/pipeline.py and update_page.py.
   // The Confluence template path spends 0..40 on charts and attachments, then maps the pipeline into 40..94.
@@ -37,8 +44,11 @@
   let jobsTimer = null;
   // Options of the job currently shown in the progress card (run name, service, publication target).
   let currentJobOpts = {};
+  // Service combobox (static/js/service_picker.js); the hidden #service input keeps the value.
+  let picker = null;
 
   const $ = (id) => document.getElementById(id);
+  const pad2 = (n) => String(n).padStart(2, '0');
 
   function setHint(id, text, tone) {
     const el = $(id);
@@ -51,49 +61,155 @@
   function setInvalid(id, invalid) {
     const el = $(id);
     if (el) el.setAttribute('aria-invalid', invalid ? 'true' : 'false');
+    if (id === 'service' && picker) picker.setInvalid(invalid);
   }
 
   function toLocalInputValue(date) {
-    const pad = (n) => String(n).padStart(2, '0');
-    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}T${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
   }
 
   // ---- services ---------------------------------------------------------
 
   async function loadServices() {
-    const select = $('service');
-    if (!select) return;
+    const hidden = $('service');
+    const host = $('serviceCombo');
+    if (!hidden || !host || !LL.servicePicker) return;
+    picker = LL.servicePicker({ host, input: hidden, inputId: 'serviceInput', describedBy: 'serviceHint' });
     try {
-      const response = await fetch('/services');
-      const payload = await response.json();
-      const services = Array.isArray(payload && payload.services) ? payload.services : [];
-      select.innerHTML = '';
-      if (!services.length) {
-        const opt = document.createElement('option');
-        opt.value = '';
-        opt.textContent = 'Нет настроенных сервисов';
-        select.appendChild(opt);
-        select.disabled = true;
-        setHint('serviceHint', 'Добавьте сервис в настройках (раздел «Сервисы»), затем обновите страницу.', 'warn');
-        return;
-      }
-      const placeholder = document.createElement('option');
-      placeholder.value = '';
-      placeholder.textContent = 'Выберите сервис…';
-      select.appendChild(placeholder);
-      services.forEach((svc) => {
-        const id = typeof svc === 'string' ? svc : String((svc && svc.id) || '');
-        if (!id) return;
-        const opt = document.createElement('option');
-        opt.value = id;
-        opt.textContent = typeof svc === 'string' ? svc : ((svc && svc.title) || id);
-        select.appendChild(opt);
-      });
-      if (services.length === 1) select.value = String(services[0].id || services[0]);
+      const services = await picker.ready;
+      if (!services.length) setHint('serviceHint', 'Добавьте сервис в настройках (раздел «Сервисы»), затем обновите страницу.', 'warn');
     } catch (error) {
-      select.innerHTML = '<option value="">Не удалось загрузить сервисы</option>';
-      select.disabled = true;
       setHint('serviceHint', `Ошибка загрузки списка сервисов: ${error.message}`, 'error');
+    }
+  }
+
+  // ---- detected test windows (GET /lt_windows) ---------------------------
+
+  let windowsSeq = 0;
+
+  function overlapMs(a, b) {
+    return Math.max(0, Math.min(a.end, b.end) - Math.max(a.start, b.start));
+  }
+
+  // Chips of the /lt_windows answer, newest first: stretches with RPS above zero and finished load test runs.
+  // A run overlapping more than half of a stretch (or of itself) merges into it: the run's exact times and
+  // name win, the RPS peak of the stretch stays.
+  function mergeWindows(windows, runs, maxChips) {
+    const valid = (w) => Number.isFinite(w.start) && Number.isFinite(w.end) && w.end > w.start;
+    const peakOf = (value) => (value === null || value === undefined || value === '' || !Number.isFinite(Number(value)) ? null : Number(value));
+    const items = (Array.isArray(windows) ? windows : []).filter(Boolean).map((w) => ({
+      start: Date.parse(w.start), end: Date.parse(w.end), peak: peakOf(w.rps_peak), name: '', ongoing: !!w.ongoing
+    })).filter(valid);
+    (Array.isArray(runs) ? runs : []).filter(Boolean).forEach((run) => {
+      const item = { start: Date.parse(run.start), end: Date.parse(run.end), peak: null, name: String(run.run_name || ''), ongoing: false };
+      if (!valid(item)) return;
+      const hit = items.find((w) => !w.name && overlapMs(w, item) > 0.5 * Math.min(w.end - w.start, item.end - item.start));
+      if (hit) Object.assign(hit, { start: item.start, end: item.end, name: item.name, ongoing: false });
+      else items.push(item);
+    });
+    return items.sort((a, b) => b.start - a.start).slice(0, maxChips || WINDOWS_MAX_CHIPS);
+  }
+
+  // '' for today, «вчера», otherwise «14.10» (browser time zone).
+  function dayText(ms, nowMs) {
+    const d = new Date(ms);
+    const key = (x) => `${x.getFullYear()}-${x.getMonth()}-${x.getDate()}`;
+    const today = new Date(nowMs);
+    if (key(d) === key(today)) return '';
+    const yesterday = new Date(nowMs);
+    yesterday.setDate(yesterday.getDate() - 1);
+    if (key(d) === key(yesterday)) return 'вчера';
+    return `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}`;
+  }
+
+  // «release-2.5 · 15:57–16:57 (1 ч 00 мин, пик 249 RPS)»; the clock times are those the chip puts into
+  // the fields (start rounded down, end rounded up to the minute).
+  function windowLabel(item, nowMs) {
+    const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+    const clock = (ms) => { const d = new Date(ms); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
+    const startMs = Math.floor(item.start / 60000) * 60000;
+    const endMs = Math.ceil(item.end / 60000) * 60000;
+    const startDay = dayText(startMs, now);
+    const endDay = dayText(endMs, now);
+    const range = `${startDay ? `${startDay} ` : ''}${clock(startMs)}–${endDay && endDay !== startDay ? `${endDay} ` : ''}${clock(endMs)}`;
+    const bits = [LL.formatDuration(item.end - item.start)];
+    if (item.peak !== null && item.peak > 0) bits.push(`пик ${item.peak >= 10 ? Math.round(item.peak) : Math.round(item.peak * 10) / 10} RPS`);
+    if (item.ongoing) bits.push('идёт');
+    return `${item.name ? `${item.name} · ` : ''}${range} (${bits.join(', ')})`;
+  }
+
+  // datetime-local values of a chip: the start rounded down and the end rounded up to the minute.
+  function windowInputs(item) {
+    return {
+      start: toLocalInputValue(new Date(Math.floor(item.start / 60000) * 60000)),
+      end: toLocalInputValue(new Date(Math.ceil(item.end / 60000) * 60000))
+    };
+  }
+
+  function highlightWindowChips() {
+    const startVal = $('start').value;
+    const endVal = $('end').value;
+    document.querySelectorAll('#ltWindowsChips .lt-chip').forEach((chip) => {
+      const on = !!startVal && chip.dataset.start === startVal && chip.dataset.end === endVal;
+      chip.classList.toggle('active', on);
+      chip.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+  }
+
+  function renderWindows(items) {
+    const host = $('ltWindowsChips');
+    host.replaceChildren();
+    items.forEach((item) => {
+      const values = windowInputs(item);
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'lt-chip';
+      chip.textContent = windowLabel(item);
+      chip.title = 'Подставить начало и окончание';
+      chip.dataset.start = values.start;
+      chip.dataset.end = values.end;
+      chip.setAttribute('aria-pressed', 'false');
+      chip.addEventListener('click', () => {
+        $('start').value = chip.dataset.start;
+        $('end').value = chip.dataset.end;
+        validateRange();
+        highlightPreset();
+      });
+      host.appendChild(chip);
+    });
+    $('ltWindows').hidden = !items.length;
+    highlightWindowChips();
+  }
+
+  // Quiet one-line status under the chips; the error text of the source goes into the tooltip.
+  function windowsHint(text, tone, detail) {
+    setHint('ltWindowsHint', text, tone);
+    const el = $('ltWindowsHint');
+    if (!el) return;
+    if (detail) el.title = String(detail);
+    else el.removeAttribute('title');
+  }
+
+  async function loadWindows(service) {
+    const seq = ++windowsSeq;
+    renderWindows([]);
+    if (!service) { windowsHint(''); return; }
+    windowsHint('Ищем недавние прогоны сервиса…');
+    try {
+      const resp = await fetch(`/lt_windows?service=${encodeURIComponent(service)}&hours=${WINDOWS_HOURS}`);
+      const data = await resp.json().catch(() => ({}));
+      if (seq !== windowsSeq) return;
+      if (!resp.ok) throw new Error(data.error || data.message || `HTTP ${resp.status}`);
+      const items = mergeWindows(data.windows, data.runs);
+      renderWindows(items);
+      const message = String(data.message || '').slice(0, 200).replace(/\.$/, '');
+      const lower = message ? message.charAt(0).toLowerCase() + message.slice(1) : '';
+      if (data.ok === false && lower) windowsHint(`Окно теста по метрикам не определено: ${lower}.`, 'warn', data.detail);
+      else if (!items.length) windowsHint(`За последние ${data.hours || WINDOWS_HOURS} ч нагрузки на сервис не найдено.`);
+      else windowsHint('');
+    } catch (error) {
+      if (seq !== windowsSeq) return;
+      windowsHint('Подсказка окна теста недоступна.', 'warn', error.message);
     }
   }
 
@@ -147,6 +263,7 @@
       btn.classList.toggle('active', active);
       btn.setAttribute('aria-pressed', active ? 'true' : 'false');
     });
+    highlightWindowChips();
   }
 
   // ---- LLM toggle -------------------------------------------------------
@@ -238,6 +355,7 @@
       });
       const result = await resp.json();
       if (resp.ok && result.status === 'accepted' && result.job_id) {
+        if (LL.servicePicker) LL.servicePicker.remember(payload.service);
         showProgressForJob(result.job_id, {
           runName: result.run_name || payload.run_name,
           service: payload.service,
@@ -258,6 +376,93 @@
       formError.textContent = `Ошибка создания отчёта: ${error.message}`;
     } finally {
       button.disabled = false;
+    }
+  }
+
+  // ---- progress timing ----------------------------------------------------
+
+  let elapsedTimer = null;
+  let elapsedStart = 0;
+  let jobFinished = false;
+
+  // «2:15», «1:02:03».
+  function formatElapsed(ms) {
+    const total = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const seconds = total % 60;
+    return hours ? `${hours}:${pad2(minutes)}:${pad2(seconds)}` : `${minutes}:${pad2(seconds)}`;
+  }
+
+  // Median run time (ms, created_at to updated_at) of the latest ``sample`` finished jobs of ``kind``
+  // (the list is newest first, as /jobs returns it); null with fewer than ``minSamples`` usable jobs.
+  function medianDurationMs(jobs, kind, sample, minSamples) {
+    const values = (Array.isArray(jobs) ? jobs : [])
+      .filter((job) => job && job.status === 'done' && (!kind || job.kind === kind))
+      .slice(0, sample || TYPICAL_SAMPLE)
+      .map((job) => Date.parse(job.updated_at) - Date.parse(job.created_at))
+      .filter((ms) => Number.isFinite(ms) && ms > 0)
+      .sort((a, b) => a - b);
+    if (!values.length || values.length < (minSamples || TYPICAL_MIN_SAMPLES)) return null;
+    const mid = Math.floor(values.length / 2);
+    return values.length % 2 ? values[mid] : (values[mid - 1] + values[mid]) / 2;
+  }
+
+  function typicalText(ms) {
+    if (!Number.isFinite(ms) || ms <= 0) return '';
+    return `обычно около ${Math.max(1, Math.round(ms / 60000))} мин`;
+  }
+
+  function tickElapsed() {
+    const el = $('progressElapsed');
+    if (el) el.textContent = `идёт ${formatElapsed(Date.now() - elapsedStart)}`;
+  }
+
+  function startElapsed() {
+    jobFinished = false;
+    elapsedStart = Date.now();
+    clearInterval(elapsedTimer);
+    tickElapsed();
+    elapsedTimer = setInterval(tickElapsed, 1000);
+    loadTypicalDuration();
+  }
+
+  // The server's creation time wins for a resumed job; one ahead of this browser's clock is ignored.
+  function syncElapsed(job) {
+    const created = Date.parse(job && job.created_at);
+    if (Number.isFinite(created) && created <= Date.now() + 5000) elapsedStart = created;
+  }
+
+  function stopElapsed(job) {
+    jobFinished = true;
+    clearInterval(elapsedTimer);
+    elapsedTimer = null;
+    const el = $('progressElapsed');
+    const typical = $('progressTypical');
+    if (typical) typical.hidden = true;
+    if (!el) return;
+    if (!job) { el.textContent = ''; return; }
+    const created = Date.parse(job.created_at);
+    const updated = Date.parse(job.updated_at);
+    const took = Number.isFinite(created) && Number.isFinite(updated) && updated >= created ? updated - created : Date.now() - elapsedStart;
+    el.textContent = `${job.status === 'done' ? 'заняло' : 'прошло'} ${formatElapsed(took)}`;
+  }
+
+  async function loadTypicalDuration() {
+    const el = $('progressTypical');
+    if (!el) return;
+    el.hidden = true;
+    try {
+      const resp = await fetch(`/jobs?status=done&limit=${TYPICAL_SAMPLE * 2}`);
+      if (!resp.ok) return;
+      const payload = await resp.json();
+      const ms = medianDurationMs(payload && payload.jobs, JOB_KIND_REPORT);
+      if (ms && !jobFinished) {
+        el.textContent = typicalText(ms);
+        el.hidden = false;
+      }
+    } catch (e) {
+      // the typical duration is a hint only
     }
   }
 
@@ -314,6 +519,7 @@
     $('newReportLink').style.display = 'none';
     $('progressErrorDetails').style.display = 'none';
     renderPhases(0, 'running');
+    startElapsed();
     startPolling(jobId);
   }
 
@@ -347,6 +553,8 @@
     $('progressMessage').textContent = job.message || '';
     if (job.run_name) $('progressTitle').textContent = `Формирование отчёта «${job.run_name}»`;
     renderPhases(pct, job.status);
+    if (job.status === 'done' || job.status === 'error') stopElapsed(job);
+    else syncElapsed(job);
     if (job.status === 'done') {
       showResultLinks(job);
       $('progressMessage').textContent = 'Отчёт готов.';
@@ -372,6 +580,7 @@
         const r = await fetch(`/job_status/${encodeURIComponent(jobId)}`);
         if (r.status === 404) {
           clearInterval(progressTimer);
+          stopElapsed(null);
           $('progressMessage').textContent = 'Задача не найдена: возможно, сервер был перезапущен до сохранения статуса. Проверьте архив.';
           $('newReportLink').style.display = '';
           return;
@@ -482,12 +691,18 @@
     }
   }
 
+  // Pure helpers for tests (tests/test_ui_forms_js.py).
+  LL.newReport = {
+    _internals: { mergeWindows, windowLabel, windowInputs, dayText, formatElapsed, medianDurationMs, typicalText }
+  };
+
   // ---- wiring -----------------------------------------------------------
 
   document.addEventListener('DOMContentLoaded', async () => {
     $('tzLabel').textContent = LL.timeZoneLabel();
     await LL.initProjectArea();
     await loadServices();
+    if ($('service').value) loadWindows($('service').value);
     $('activeJobsClear').addEventListener('click', clearFinishedJobs);
     loadActiveJobs();
 
@@ -502,6 +717,7 @@
     });
     $('service').addEventListener('change', () => {
       if ($('service').value) { setInvalid('service', false); setHint('serviceHint', SERVICE_HINT); }
+      loadWindows($('service').value);
     });
     document.querySelectorAll('input[name="test_type"]').forEach((radio) => {
       radio.addEventListener('change', () => setHint('testTypeHint', TEST_TYPE_HINT));

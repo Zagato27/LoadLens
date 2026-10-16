@@ -8,6 +8,7 @@ only pack logic and stays testable without Flask.
 from __future__ import annotations
 
 import copy
+import fnmatch
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
@@ -322,6 +323,16 @@ def check_pack(
     }
 
 
+def _metric_present(required: str, names: frozenset[str]) -> bool:
+    """An exact name, or a pattern with ``*`` for metric names that carry a variable part.
+
+    Graphite paths stored in VictoriaMetrics hold the simulation name, e.g. ``gatling.*.allRequests.all.count``.
+    """
+    if "*" not in required:
+        return required in names
+    return any(fnmatch.fnmatchcase(name, required) for name in names)
+
+
 def detect_packs(state: ScopeState, discover: Optional[Callable[..., Any]] = None) -> dict[str, Any]:
     """Which packs fit the metrics the bound sources hold: share of ``requires_metrics`` found per pack.
 
@@ -337,7 +348,7 @@ def detect_packs(state: ScopeState, discover: Optional[Callable[..., Any]] = Non
         result = found_names.get(pack.domain)
         names = result.names if result is not None else frozenset()
         language_ok = result is not None and result.language in ("", pack.language)
-        found = [name for name in pack.requires_metrics if name in names] if language_ok else []
+        found = [name for name in pack.requires_metrics if _metric_present(name, names)] if language_ok else []
         required = len(pack.requires_metrics)
         packs[pack.id] = {
             "found": found,

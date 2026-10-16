@@ -52,6 +52,7 @@ def _roles(*items: Role) -> dict[str, Role]:
 
 
 LT, JVM, MS, DB, KAFKA, HR = "lt_framework", "jvm", "microservices", "database", "kafka", "hard_resources"
+GEN = "lt_generators"
 
 ROLES: dict[str, Role] = _roles(
     # ---- load tool (lt_framework); latencies are milliseconds, the unit of the SLA thresholds ----
@@ -66,6 +67,8 @@ ROLES: dict[str, Role] = _roles(
     Role("lt.checks_rate", LT, "per_second", "Проверки в секунду"),
     Role("lt.checks_pct", LT, "percent", "Доля успешных проверок"),
     Role("lt.vus", LT, "count", "Виртуальные пользователи", True, "vus_query"),
+    # Live charts of the Run test page only: the report does not read it (see LIVE_ONLY_ROLES).
+    Role("lt.rps_by_instance", LT, "per_second", "RPS по инстансам прогона LoadLens"),
     # ---- application runtime (domain jvm, also Go and Python) ----
     Role("runtime.cpu", JVM, "fraction", "CPU экземпляра сервиса", sla_field="service_cpu_query"),
     Role("runtime.heap_used", JVM, "bytes", "Занятая куча"),
@@ -152,6 +155,13 @@ ROLES: dict[str, Role] = _roles(
     Role("node.cpu_requests_pct", HR, "percent", "CPU requests, % от allocatable"),
     Role("node.mem_requests_pct", HR, "percent", "Memory requests, % от allocatable"),
     Role("node.pods", HR, "count", "Поды на узле"),
+    # ---- load generators (lt_generators): the hosts that produce the load, not the system under test ----
+    Role("generator.cpu_pct", GEN, "percent", "CPU генератора нагрузки"),
+    Role("generator.mem_pct", GEN, "percent", "Память генератора нагрузки"),
+    Role("generator.load_per_core", GEN, "ratio", "load1 на ядро генератора"),
+    Role("generator.net_rx", GEN, "bytes_per_second", "Сеть генератора: приём"),
+    Role("generator.net_tx", GEN, "bytes_per_second", "Сеть генератора: передача"),
+    Role("generator.tcp_established", GEN, "count", "TCP-соединения генератора"),
     Role("k8s.restarts", HR, "count", "Перезапуски контейнеров"),
     Role("k8s.cpu_throttled_pct", HR, "percent", "Троттлинг CPU"),
     Role("k8s.memory_pct_of_limit", HR, "percent", "Память, % от лимита"),
@@ -175,6 +185,10 @@ READINESS_SLA_FIELDS: dict[str, tuple[str, ...]] = {
     "forecast": ("max_performance_query", "mean_latency_query"),
     "resource_plan": ("service_cpu_query", "cpu_query"),
 }
+
+
+# Rows of these roles serve the live charts of a running test; reports drop them (blocks.strip_live_rows).
+LIVE_ONLY_ROLES: frozenset[str] = frozenset({"lt.rps_by_instance"})
 
 
 def role_for_sla_field(field: str) -> Optional[Role]:

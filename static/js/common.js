@@ -230,6 +230,7 @@ window.LoadLens.DOMAIN_TITLES = {
   microservices: 'Микросервисы',
   hard_resources: 'Ресурсы узлов',
   lt_framework: 'Нагрузочный инструмент',
+  lt_generators: 'Ресурсы генераторов нагрузки',
   application_logs: 'Логи приложений',
 };
 window.LoadLens.domainTitle = function domainTitle(key) {
@@ -275,6 +276,49 @@ window.LoadLens.formatDateTime = function formatDateTime(value) {
   if (!Number.isFinite(d.getTime())) return '—';
   const pad = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+
+// Web report link of a run: by run_id when known, else by run name, else the archive.
+window.LoadLens.reportUrl = function reportUrl(run) {
+  const id = run && run.run_id ? String(run.run_id) : '';
+  if (id) return `/reports/${encodeURIComponent(id)}`;
+  const name = run && run.run_name ? String(run.run_name) : '';
+  return name ? `/reports/${encodeURIComponent(name)}` : '/reports';
+};
+
+// "5 мин назад" style date for lists; older than a week (or in the future) falls back to formatDateTime.
+// Up to a minute in the future still reads «только что» to absorb clock skew between server and browser.
+window.LoadLens.relativeTime = function relativeTime(value, now = Date.now()) {
+  const d = value instanceof Date ? value : new Date(value);
+  const t = d.getTime();
+  const nowMs = now instanceof Date ? now.getTime() : Number(now);
+  if (value === null || value === undefined || value === '' || !Number.isFinite(t) || !Number.isFinite(nowMs)) return '—';
+  const diff = nowMs - t;
+  const MIN = 60000; const HOUR = 60 * MIN; const DAY = 24 * HOUR;
+  if (diff < -MIN) return window.LoadLens.formatDateTime(d);
+  if (diff < MIN) return 'только что';
+  if (diff < HOUR) return `${Math.floor(diff / MIN)} мин назад`;
+  if (diff < DAY) return `${Math.floor(diff / HOUR)} ч назад`;
+  const midnight = (ms) => { const x = new Date(ms); x.setHours(0, 0, 0, 0); return x.getTime(); };
+  const days = Math.round((midnight(nowMs) - midnight(t)) / DAY);
+  const pad = (n) => String(n).padStart(2, '0');
+  if (days <= 1) return `вчера в ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  if (days < 7) return `${days} дн назад`;
+  return window.LoadLens.formatDateTime(d);
+};
+
+// Human duration: «45 с», «59 мин», «1 ч 05 мин», «2 д 3 ч»; '—' for invalid or negative input.
+window.LoadLens.formatDuration = function formatDuration(ms) {
+  if (ms === null || ms === undefined || ms === '' || typeof ms === 'boolean') return '—';
+  const value = Number(ms);
+  if (!Number.isFinite(value) || value < 0) return '—';
+  const totalSec = Math.floor(value / 1000);
+  if (totalSec < 60) return `${totalSec} с`;
+  const totalMin = Math.floor(totalSec / 60);
+  if (totalMin < 60) return `${totalMin} мин`;
+  const totalHours = Math.floor(totalMin / 60);
+  if (totalHours < 24) return `${totalHours} ч ${String(totalMin % 60).padStart(2, '0')} мин`;
+  return `${Math.floor(totalHours / 24)} д ${totalHours % 24} ч`;
 };
 
 // Browser time zone as "UTC+03:00 (Europe/Moscow)" so users know which clock the dates use.

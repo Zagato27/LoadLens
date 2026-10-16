@@ -5,6 +5,8 @@ import os
 # Sessions need a stable key. Setting it before the app is imported keeps the test run from
 # creating .loadlens_secret_key in the repository root.
 os.environ.setdefault("LOADLENS_SECRET_KEY", "pytest-secret-key-not-for-production")
+# The load test watcher polls the storage database in a thread; tests drive it with Watcher.tick().
+os.environ["LOADLENS_LOAD_TEST_WATCHER"] = "0"
 
 import pytest
 

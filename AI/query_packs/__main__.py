@@ -31,6 +31,7 @@ DOMAIN_TITLES = {
     "database": "Базы данных",
     "kafka": "Kafka",
     "hard_resources": "Ресурсы узлов",
+    "lt_generators": "Ресурсы генераторов нагрузки",
 }
 SLA_FIELD_TITLES = {
     "max_performance_query": "запрос производительности",

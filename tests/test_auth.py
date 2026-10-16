@@ -857,8 +857,10 @@ def test_pages_and_navigation_follow_the_role(logged_in):
     assert 'data-role="viewer"' in html and 'name="loadlens-role" content="viewer"' in html
     assert re.search(r'name="csrf-token" content="[\w-]{20,}"', html)
 
+    assert logged_in("viewer").get("/launch").status_code == 403
+
     engineer = logged_in("engineer")
-    assert nav_links(engineer)[0] == {"/", "/new", "/reports", "/compare", "/forecasting"}
+    assert nav_links(engineer)[0] == {"/", "/new", "/launch", "/reports", "/compare", "/forecasting"}
     assert engineer.get("/new").status_code == 200 and engineer.get("/settings").status_code == 403
 
     admin = logged_in("admin")

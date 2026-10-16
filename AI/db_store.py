@@ -946,6 +946,8 @@ def save_llm_results(
         ]
         if "lt_framework" in results:
             domains.insert(-1, ("lt_framework", results.get("lt_framework"), results.get("lt_framework_parsed"), scores_all.get("lt_framework")))
+        if "lt_generators" in results:
+            domains.insert(-1, ("lt_generators", results.get("lt_generators"), results.get("lt_generators_parsed"), scores_all.get("lt_generators")))
         if "application_logs" in results:
             domains.insert(-1, ("application_logs", results.get("application_logs"), results.get("application_logs_parsed"), scores_all.get("application_logs")))
 

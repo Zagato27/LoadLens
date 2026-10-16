@@ -35,6 +35,7 @@ PROMPT_DOMAIN_FILES = {
     "jvm": "jvm_prompt.txt",
     "hard_resources": "hard_resources_prompt.txt",
     "lt_framework": "lt_framework_prompt.txt",
+    "lt_generators": "lt_generators_prompt.txt",
     "application_logs": "application_logs_prompt.txt",
     "judge": "judge_prompt.txt",
     "critic": "critic_prompt.txt",
@@ -436,7 +437,7 @@ def _available_domain_keys(cfg: dict | None = None) -> list[str]:
     """Domains available for analysis: query-based ones plus application_logs when OpenSearch is enabled."""
     config = cfg or CONFIG
     queries = config.get("queries") or {}
-    preferred_order = ["jvm", "database", "kafka", "microservices", "hard_resources", "lt_framework"]
+    preferred_order = ["jvm", "database", "kafka", "microservices", "hard_resources", "lt_framework", "lt_generators"]
     result = [d for d in preferred_order if d in queries]
     logs_cfg = config.get("logs_source") if isinstance(config.get("logs_source"), dict) else {}
     if logs_cfg.get("enabled"):

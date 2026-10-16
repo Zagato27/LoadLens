@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import html
 import io
 import json
@@ -17,6 +16,7 @@ from xml.sax.saxutils import escape as xml_escape
 import requests
 from psycopg2 import sql
 
+from AI import report_markers
 from AI.report_sections import test_type_section
 from AI.test_profile import profile_for
 from loadlens_app.core import _ts_conn
@@ -48,6 +48,7 @@ LLM_DOMAIN_ORDER = [
     "microservices",
     "hard_resources",
     "lt_framework",
+    "lt_generators",
     "application_logs",
 ]
 LLM_DOMAIN_TITLES = {
@@ -58,6 +59,7 @@ LLM_DOMAIN_TITLES = {
     "microservices": "microservices",
     "hard_resources": "hard_resources",
     "lt_framework": "lt_framework",
+    "lt_generators": "lt_generators",
     "application_logs": "application_logs",
 }
 METRIC_DOMAIN_ORDER = [
@@ -67,6 +69,7 @@ METRIC_DOMAIN_ORDER = [
     "microservices",
     "hard_resources",
     "lt_framework",
+    "lt_generators",
 ]
 ALLOWED_HTML_TAGS = {
     "p", "br", "b", "strong", "i", "em", "u", "ul", "ol", "li",
@@ -814,18 +817,18 @@ def _system_context_items(ctx: dict[str, Any]) -> list[str]:
     return items
 
 
-def _hash_color(label: str) -> str:
-    digest = hashlib.md5(label.encode("utf-8")).hexdigest()
-    return f"#{digest[:6]}"
+PNG_MAX_SERIES = 15
+_PNG_INK = "#15171c"  # light-theme --text
 
 
-def render_series_png(points: list[dict[str, Any]], title: str) -> bytes:
-    import matplotlib
+def series_plan(points: list[dict[str, Any]]) -> tuple[list[str], list[tuple[str, str, dict[str, float]]]]:
+    """Sorted bucket labels and the drawn series as (name, color, values by label).
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
+    Series are ordered like the web page orders its datasets (AI/report_markers.order_series) and
+    colored by slot from the shared palette, so a series has the same color on the page and in the PNG.
+    """
     labels: list[str] = []
+    seen: set[str] = set()
     series_map: dict[str, dict[str, float]] = {}
     for point in points:
         ts = str(point.get("t") or "")
@@ -834,41 +837,169 @@ def render_series_png(points: list[dict[str, Any]], title: str) -> bytes:
             value = float(point.get("value"))
         except (TypeError, ValueError):
             continue
-        if ts not in labels:
+        if ts not in seen:
+            seen.add(ts)
             labels.append(ts)
         series_map.setdefault(series, {})[ts] = value
-    labels.sort()
-    ranked = sorted(
-        series_map.items(),
-        key=lambda item: abs(sum(item[1].values()) / max(len(item[1]), 1)),
-        reverse=True,
-    )[:15]
+    labels.sort(key=lambda ts: (report_markers.moment_ms(ts) is None, report_markers.moment_ms(ts) or 0, ts))
+    ordered = report_markers.order_series({name: [values[ts] for ts in labels if ts in values] for name, values in series_map.items()})
+    return labels, [(name, report_markers.series_color(i), series_map[name]) for i, name in enumerate(ordered[:PNG_MAX_SERIES])]
+
+
+def marker_geometry(markers: Iterable[dict[str, Any]] | None, times: list[float]) -> list[dict[str, Any]]:
+    """Markers placed on the category axis like LL.charts.markers places them on the web chart.
+
+    Returns ``{"kind", "x" | ("x0", "x1"), "label", "tone"}`` in axis units (bucket positions);
+    markers outside the data range (beyond half a bucket) are dropped and bands are clipped.
+    """
+    if not times:
+        return []
+    gaps = sorted(b - a for a, b in zip(times, times[1:]))
+    half = 0.0
+    if gaps:
+        mid = len(gaps) // 2
+        half = max(0.0, (gaps[mid] if len(gaps) % 2 else (gaps[mid - 1] + gaps[mid]) / 2) / 2)
+    first, last = times[0], times[-1]
+    out: list[dict[str, Any]] = []
+    for item in markers or []:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "line")
+        tone = str(item.get("tone") or ("muted" if kind == "tick" else "accent"))
+        label = str(item.get("label") or "")
+        start = report_markers._finite(item.get("t"))
+        if start is None:
+            continue
+        if kind == "band":
+            end = report_markers._finite(item.get("to"))
+            if end is None:
+                continue
+            a, b = min(start, end), max(start, end)
+            if b < first - half or a > last + half:
+                continue
+            x0 = report_markers.fractional_index(times, max(a, first))
+            x1 = report_markers.fractional_index(times, min(b, last))
+            out.append({"kind": "band", "x0": x0, "x1": max(x1, x0), "label": label, "tone": tone})
+            continue
+        if start < first - half or start > last + half:
+            continue
+        out.append({"kind": "tick" if kind == "tick" else "line", "x": report_markers.fractional_index(times, start), "label": label, "tone": tone})
+    return out
+
+
+def _draw_thresholds(ax: Any, thresholds: Iterable[dict[str, Any]] | None) -> None:
+    items = [item for item in thresholds or [] if isinstance(item, dict) and report_markers._finite(item.get("value")) is not None]
+    if not items:
+        return
+    values = [float(item["value"]) for item in items]
+    lo, hi = ax.get_ylim()
+    span = (max(hi, *values) - min(lo, *values)) or abs(max(values)) or 1.0
+    if max(values) + span * 0.05 > hi:
+        hi = max(values) + span * 0.05
+    if min(values) < lo:
+        lo = min(values) - span * 0.05
+    ax.set_ylim(lo, hi)
+    for item in items:
+        color = report_markers.TONE_COLORS.get(str(item.get("tone") or "fail"), report_markers.TONE_COLORS["fail"])
+        ax.axhline(float(item["value"]), color=color, linestyle=(0, (6, 4)), linewidth=1.5, zorder=3)
+        if item.get("label"):
+            ax.annotate(
+                str(item["label"]), xy=(1, float(item["value"])), xycoords=("axes fraction", "data"),
+                xytext=(-4, 3), textcoords="offset points", ha="right", va="bottom", fontsize=8, color=_PNG_INK, zorder=5,
+                bbox={"boxstyle": "round,pad=0.25", "fc": "#ffffff", "ec": color, "lw": 0.8, "alpha": 0.92},
+            )
+
+
+def _draw_markers(fig: Any, ax: Any, placed: list[dict[str, Any]]) -> None:
+    """Bands under the lines, dashed lines and ticks over them, labels stacked along the top (max 3 rows)."""
+    labels: list[tuple[float, str, str]] = []
+    for item in placed:
+        color = report_markers.TONE_COLORS.get(item["tone"], report_markers.TONE_COLORS["accent"])
+        if item["kind"] == "band":
+            ax.axvspan(item["x0"], item["x1"], color=color, alpha=0.1 if item["tone"] == "muted" else 0.14, linewidth=0, zorder=0.5)
+            if item["label"]:
+                labels.append((item["x0"], item["label"], color))
+        elif item["kind"] == "tick":
+            ax.axvline(item["x"], ymin=0, ymax=0.04, color=color, linewidth=1.5, zorder=3)
+        else:
+            ax.axvline(item["x"], color=color, linestyle=(0, (5, 4)), linewidth=1.5, zorder=3)
+            if item["label"]:
+                labels.append((item["x"], item["label"], color))
+    if not labels:
+        return
+    renderer = fig.canvas.get_renderer()
+    area = ax.get_window_extent(renderer)
+    rows_right = [float("-inf")] * 3
+    for x, text, color in sorted(labels, key=lambda entry: entry[0]):
+        note = ax.annotate(
+            text, xy=(x, 1), xycoords=("data", "axes fraction"), xytext=(4, -4), textcoords="offset points",
+            ha="left", va="top", fontsize=8, color=_PNG_INK, zorder=6, annotation_clip=False,
+            bbox={"boxstyle": "round,pad=0.25", "fc": "#ffffff", "ec": color, "lw": 0.8, "alpha": 0.92},
+        )
+        box = note.get_window_extent(renderer)
+        if box.x1 > area.x1 - 2:
+            note.set_horizontalalignment("right")
+            note.xyann = (-4, -4)
+            box = note.get_window_extent(renderer)
+        row = next((i for i, right in enumerate(rows_right) if right + 4 <= box.x0), None)
+        if row is None:
+            row = rows_right.index(min(rows_right))
+        rows_right[row] = max(rows_right[row], box.x1)
+        note.xyann = (note.xyann[0], -4 - row * 16)
+
+
+def render_series_png(
+    points: list[dict[str, Any]],
+    title: str,
+    *,
+    markers: Iterable[dict[str, Any]] | None = None,
+    thresholds: Iterable[dict[str, Any]] | None = None,
+    clock_offset: float | None = None,
+) -> bytes:
+    """Chart PNG for Confluence: the web chart's series colors, markers and SLA thresholds.
+
+    ``markers`` and ``thresholds`` come from AI/report_markers (``markers_for``, ``thresholds_for``
+    filtered by the chart query). ``clock_offset`` (hours) formats the time ticks in the report
+    clock, as the marker labels and the step table; without it the bucket text is shown as is.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    labels, ranked = series_plan(points)
+    times = [report_markers.moment_ms(ts) for ts in labels]
 
     fig, ax = plt.subplots(figsize=(12.0, 4.6), dpi=110)
     fig.patch.set_facecolor("#ffffff")
-    ax.set_facecolor("#f7f7f7")
+    ax.set_facecolor("#fafbfc")
     ax.set_title(title)
     ax.set_xlabel("Время")
-    ax.grid(True, color="#dddddd")
+    ax.grid(True, color="#e6e9ef")
+    placed: list[dict[str, Any]] = []
     if not labels or not ranked:
         ax.text(0.5, 0.5, "Нет данных", ha="center", va="center", transform=ax.transAxes)
     else:
-        xticks = labels[:: max(1, len(labels) // 8)]
-        for name, values in ranked:
-            ax.plot(
-                labels,
-                [values.get(ts) for ts in labels],
-                label=name[:60],
-                color=_hash_color(name),
-                linewidth=1.6,
-            )
-        ax.set_xticks(xticks)
-        ax.set_xticklabels(
-            [ts.replace("T", " ")[11:16] if "T" in ts else ts[-5:] for ts in xticks],
-            rotation=0,
-        )
+        for name, color, values in ranked:
+            xs = [i for i, ts in enumerate(labels) if ts in values]
+            ax.plot(xs, [values[labels[i]] for i in xs], label=name[:60], color=color, linewidth=1.6, zorder=2)
+        if len(labels) > 1:
+            ax.set_xlim(0, len(labels) - 1)
+        tick_positions = list(range(0, len(labels), max(1, len(labels) // 8)))
+        ax.set_xticks(tick_positions)
+
+        def tick_text(ts: str, ms: int | None) -> str:
+            if clock_offset is not None and ms is not None:
+                return report_markers.clock(ms, clock_offset)
+            return ts.replace("T", " ")[11:16] if "T" in ts else ts[-5:]
+
+        ax.set_xticklabels([tick_text(labels[i], times[i]) for i in tick_positions], rotation=0)
         ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0, fontsize=8)
+        _draw_thresholds(ax, thresholds)
+        if all(t is not None for t in times):
+            placed = marker_geometry(markers, [float(t) for t in times])
     fig.tight_layout()
+    _draw_markers(fig, ax, placed)
     buffer = io.BytesIO()
     fig.savefig(buffer, format="png")
     plt.close(fig)
@@ -1326,6 +1457,26 @@ class ConfluenceClient:
         return f"{self.base_url}/pages/viewpage.action?pageId={page.get('id')}"
 
 
+_UNRESOLVED: Any = object()
+
+
+def chart_annotations(llm_rows: list[dict[str, Any]], step_table: dict[str, Any] | None) -> dict[str, Any]:
+    """Markers (for every chart), SLA thresholds (per query) and the report clock offset.
+
+    The web report draws the same items (static/js/reports.js); see AI/report_markers.
+    """
+    final_row = next((row for row in llm_rows if str(row.get("domain")) == "final"), {})
+    final_row = final_row if isinstance(final_row, dict) else {}
+    steps = [step for step in ((step_table or {}).get("steps") or []) if isinstance(step, dict)]
+    try:
+        markers = report_markers.markers_for(final_row, step_table)
+        thresholds = report_markers.thresholds_for(final_row, step_table)
+    except Exception:
+        logger.exception("Не удалось собрать маркеры графиков для Confluence")
+        markers, thresholds = [], []
+    return {"markers": markers, "thresholds": thresholds, "clock_offset": report_markers.offset_hours(steps)}
+
+
 def build_page_body(
     *,
     run_name: str,
@@ -1334,6 +1485,7 @@ def build_page_body(
     llm_rows: list[dict[str, Any]],
     engineer_html: str,
     charts: list[dict[str, str]],
+    step_table: dict[str, Any] | None = _UNRESOLVED,
 ) -> str:
     first = llm_rows[0] if llm_rows else {}
     test_type = next((str(row.get("test_type")) for row in llm_rows if row.get("test_type")), "")
@@ -1358,7 +1510,8 @@ def build_page_body(
     ]
     if source_url:
         parts.append(f'<p><a href="{xml_text(source_url)}">Открыть отчёт в LoadLens</a></p>')
-    step_table = resolve_load_step_table(run_name, llm_rows)
+    if step_table is _UNRESOLVED:
+        step_table = resolve_load_step_table(run_name, llm_rows)
     final_row = next((row for row in llm_rows if str(row.get("domain")) == "final"), {})
     parts.append(h2("SLA-критерии"))
     parts.append(sla_criteria_block(final_row if isinstance(final_row, dict) else {}, step_table))
@@ -1432,13 +1585,22 @@ def publish_report(
             raise RuntimeError(
                 "Для публикации графиков в Confluence нужен пакет matplotlib. Установите: pip install matplotlib"
             ) from exc
+    step_table = resolve_load_step_table(run_name, llm_rows)
+    annotations = chart_annotations(llm_rows, step_table)
+    all_labels = [label for labels in schema.values() for label in labels]
     charts: list[dict[str, str]] = []
     attachments: dict[str, bytes] = {}
     for domain, query_labels in schema.items():
         for query_label in query_labels:
             filename = _safe_filename(f"{domain}-{query_label}") + ".png"
             try:
-                png = render_series_png(load_run_series(run_name, domain, query_label), query_label)
+                png = render_series_png(
+                    load_run_series(run_name, domain, query_label),
+                    query_label,
+                    markers=annotations["markers"],
+                    thresholds=report_markers.thresholds_for_query(annotations["thresholds"], query_label, all_labels),
+                    clock_offset=annotations["clock_offset"],
+                )
             except Exception as exc:
                 logger.warning("Failed to render chart %s/%s: %s", domain, query_label, exc)
                 continue
@@ -1453,6 +1615,7 @@ def publish_report(
         llm_rows=llm_rows,
         engineer_html=engineer_html,
         charts=charts,
+        step_table=step_table,
     )
 
     client = ConfluenceClient(cfg)

@@ -2,8 +2,8 @@
 
 Covers vector selectors with matchers, range vectors, function calls, aggregations with
 by/without (before or after the arguments), binary operators with bool / on / ignoring /
-group_left / group_right, unary signs, numbers, strings and durations. Offsets, @ modifiers and
-subqueries are reported as unsupported: the packs do not use them. This is a guard against typos
+group_left / group_right, unary signs, numbers, strings, durations and subqueries ``[range:step]``.
+Offsets and @ modifiers are reported as unsupported: the packs do not use them. This is a guard against typos
 (unbalanced braces, a missing comma, an unknown function), not a replacement for Prometheus.
 """
 
@@ -58,7 +58,7 @@ _TOKEN_RE = re.compile(
    |(?P<string>"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`[^`]*`)
    |(?P<duration>\d+(?:ms|[smhdwy])(?:\d+(?:ms|[smhdwy]))*(?![a-zA-Z0-9_]))
    |(?P<number>(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)
-   |(?P<ident>[a-zA-Z_:][a-zA-Z0-9_:]*)
+   |(?P<ident>[a-zA-Z_][a-zA-Z0-9_:]*)
    |(?P<op>==|!=|>=|<=|=~|!~|[-+*/%^<>=,(){}\[\]@:])
     """,
     re.X,
@@ -171,14 +171,20 @@ class _Parser:
     def postfix(self) -> str:
         kind = self.primary()
         if self.is_op("["):
-            if kind != "selector":
-                raise self.fail("range only after a vector selector")
             self.next()
             token = self.next()
             if token.kind != "duration":
                 raise PromQLSyntaxError(f"expected a duration at {token.pos}, got {token.text!r}")
             if self.is_op(":"):
-                raise self.fail("subqueries are not supported by this check")
+                # Subquery: [range:resolution] after any instant expression; the resolution is optional.
+                self._no_range(kind)
+                self.next()
+                if not self.is_op("]"):
+                    step = self.next()
+                    if step.kind != "duration":
+                        raise PromQLSyntaxError(f"expected a subquery resolution at {step.pos}, got {step.text!r}")
+            elif kind != "selector":
+                raise self.fail("range only after a vector selector")
             self.expect_op("]")
             kind = "range"
         if self.is_ident("offset") or self.is_op("@"):

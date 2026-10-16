@@ -269,3 +269,23 @@ def test_catalog_marks_outdated_pack_and_preselects_rows(client):
     assert len(pack["installed"]["selected_indexes"]) == len(labels)
     assert data["roles"]["runtime.cpu"]["sla_field"] == "service_cpu_query"
     assert next(item for item in data["packs"] if item["id"] == "runtime-go")["domain_title"] == "Go runtime"
+
+
+def test_detect_matches_graphite_paths_with_wildcards():
+    from loadlens_app.metric_discovery import DomainNames
+    from loadlens_app.query_pack_service import ScopeState, detect_packs
+
+    graphite = frozenset({
+        "gatling.checkoutsimulation.allRequests.all.count",
+        "gatling.checkoutsimulation.Catalog.Item_page.all.count",
+        "gatling.checkoutsimulation.users.allUsers.active",
+    })
+
+    def discover(cfg, domains):
+        return {domain: DomainNames(domain, "VictoriaMetrics", "promql", graphite if domain == "lt_framework" else frozenset()) for domain in domains}
+
+    packs = detect_packs(ScopeState(queries={}, sla={}, effective_cfg={}), discover)["packs"]
+    assert packs["lt-gatling-graphite-victoriametrics"]["score"] == 1.0
+    assert packs["lt-gatling-graphite-victoriametrics"]["found"] == ["gatling.*.allRequests.all.count", "gatling.*.users.allUsers.active"]
+    assert packs["lt-gatling-influxql"]["score"] == 0.0  # another language
+    assert packs["lt-k6-prometheus-rw"]["score"] == 0.0

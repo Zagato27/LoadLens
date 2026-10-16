@@ -65,13 +65,15 @@
 
   async function loadTokens() {
     const body = $('tokensBody');
+    // Skeleton rows only before the first load; a reload after an action keeps the old rows.
+    if (!body.querySelector('tr:not(.empty-row):not(.skeleton-row)')) body.innerHTML = ui.skeletonRows(8, 2);
     try {
       const data = await api('GET', '/auth/tokens');
       body.innerHTML = data.tokens.length
         ? data.tokens.map(tokenRow).join('')
-        : '<tr class="empty-row"><td colspan="8">Токенов пока нет</td></tr>';
+        : ui.emptyRow(8, 'Токенов пока нет');
     } catch (e) {
-      body.innerHTML = `<tr class="empty-row"><td colspan="8">Не удалось загрузить токены: ${esc(e.message)}</td></tr>`;
+      body.innerHTML = ui.emptyRow(8, `Не удалось загрузить токены: ${e.message}`);
     }
   }
 

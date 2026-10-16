@@ -29,6 +29,8 @@ DEMO_TEST_TYPE = "step"
 DEMO_DURATION_MIN = 60
 DEMO_RPS_LABEL = "LT (InfluxQL): RPS sum by all groups"
 DEMO_P95_BY_REQUEST_LABEL = "LT (InfluxQL): http_req_duration p95(ms) by group & name"
+DEMO_P95_TOTAL_LABEL = "LT (InfluxQL): http_req_duration p95(ms) total"
+DEMO_ERROR_RATE_LABEL = "LT (InfluxQL): error rate (%)"
 _STEP_LEVELS = [50.0, 100.0, 150.0, 200.0, 250.0]
 _STEP_MINUTES = 10
 _DROP_MINUTE = (len(_STEP_LEVELS) - 1) * _STEP_MINUTES + 5
@@ -113,9 +115,9 @@ def _lt_frames(index: pd.DatetimeIndex, rps: List[float], rng: random.Random) ->
         {"label": "LT (InfluxQL): checks per second by group & check", "df": _series_frame(index, {"group=checkout|check=status is 200": [c * 0.6 for c in checks], "group=search|check=status is 200": [c * 0.4 for c in checks]})},
         {"label": DEMO_P95_BY_REQUEST_LABEL, "df": _series_frame(index, {"group=checkout|name=POST /checkout": p95_ms, "group=search|name=GET /search": [v * 0.7 for v in p95_ms]})},
         {"label": DEMO_RPS_LABEL, "df": _series_frame(index, {"all": rps})},
-        {"label": "LT (InfluxQL): http_req_duration p95(ms) total", "df": _series_frame(index, {"http_req_duration": p95_ms})},
+        {"label": DEMO_P95_TOTAL_LABEL, "df": _series_frame(index, {"http_req_duration": p95_ms})},
         {"label": "LT (InfluxQL): http_req_duration mean(ms)", "df": _series_frame(index, {"http_req_duration": [s * 1000.0 for s in response]})},
-        {"label": "LT (InfluxQL): error rate (%)", "df": _series_frame(index, {"http_req_failed": error_pct})},
+        {"label": DEMO_ERROR_RATE_LABEL, "df": _series_frame(index, {"http_req_failed": error_pct})},
         {"label": "LT (InfluxQL): VUs", "df": _series_frame(index, {"vus": vus})},
     ]
 
@@ -211,10 +213,14 @@ def _demo_results(peak_time: str, drop_time: str, system_context: dict) -> dict:
         [{"summary": "Увеличить пул соединений orders-api и повторить ступень 250 RPS", "details": "После изменения повторить step-тест и убедиться, что p95 остаётся ниже 300 мс на протяжении 10 минут.", "priority": "high", "affected_components": ["orders-api"], "for_finding_ids": ["f1"]}],
         peak,
     )
+    # query_label/series name the chart each value was measured on, as AI/sla_evaluator._make_check stores them.
     checks = [
-        {"name": "target_rps", "threshold": 200, "actual": 249.3, "passed": True, "severity": "critical", "message": "RPS 249.3 (stable_max) ≥ целевой 200"},
-        {"name": "p95_latency", "threshold": 300, "actual": 450.0, "passed": False, "severity": "warning", "message": "P95 latency 450.0 ms > порог 300 ms"},
-        {"name": "error_rate", "threshold": 1.0, "actual": 0.4, "passed": True, "severity": "warning", "message": "Error rate 0.40% ≤ порог 1.0%"},
+        {"name": "target_rps", "threshold": 200, "actual": 249.3, "passed": True, "severity": "critical", "message": "RPS 249.3 (stable_max) ≥ целевой 200",
+         "query_label": DEMO_RPS_LABEL, "series": "all"},
+        {"name": "p95_latency", "threshold": 300, "actual": 450.0, "passed": False, "severity": "warning", "message": "P95 latency 450.0 ms > порог 300 ms",
+         "query_label": DEMO_P95_TOTAL_LABEL, "series": "http_req_duration"},
+        {"name": "error_rate", "threshold": 1.0, "actual": 0.4, "passed": True, "severity": "warning", "message": "Error rate 0.40% ≤ порог 1.0%",
+         "query_label": DEMO_ERROR_RATE_LABEL, "series": "http_req_failed"},
     ]
     return {
         "jvm": "", "database": "", "kafka": "", "ms": "", "hard_resources": "", "lt_framework": "", "final": "",
@@ -249,6 +255,34 @@ def _demo_steps(start: datetime, end: datetime, shift_hours: int):
         })
     steps = derive_load_steps(segments, start.timestamp(), end.timestamp(), shift_hours, min_step_minutes=0.0)
     return steps, first_rps_drop(segments)
+
+
+def demo_sla_window(steps) -> dict:
+    """SLA window of the demo: the plateau of the last step (250 RPS), where the target is reached and
+    p95 is breached. The tail after the RPS drop is not part of the window."""
+    last = steps[-1].to_dict()
+    return {
+        "start": last["start_iso"],
+        "end": last.get("plateau_end_iso") or last["end_iso"],
+        "level": _STEP_LEVELS[-1],
+        "series": "all",
+        "label": DEMO_RPS_LABEL,
+        "degraded_level": None,
+        "degraded_checks": [],
+    }
+
+
+def demo_step_table(steps, lt_frames: List[dict]) -> dict:
+    """Step table of the demo with the SLA step selected."""
+    window = demo_sla_window(steps)
+    return load_step_report_from_frames(
+        steps,
+        lt_frames,
+        rps_query=DEMO_RPS_LABEL,
+        latency_query=DEMO_P95_BY_REQUEST_LABEL,
+        selected_level=window["level"],
+        selected_start=window["start"],
+    )
 
 
 def _demo_system_context() -> dict:
@@ -303,12 +337,8 @@ def seed_demo_run(now: datetime | None = None) -> dict:
             "lt_series_labels": [frame["label"] for frame in domains["lt_framework"]],
         }
     }
-    results["load_step_table"] = load_step_report_from_frames(
-        steps,
-        domains["lt_framework"],
-        rps_query=DEMO_RPS_LABEL,
-        latency_query=DEMO_P95_BY_REQUEST_LABEL,
-    )
+    results["load_step_table"] = demo_step_table(steps, domains["lt_framework"])
+    results["sla_window"] = demo_sla_window(steps)
     save_llm_results(results, run_meta, storage_cfg)
     return {
         "run_name": DEMO_RUN_NAME,

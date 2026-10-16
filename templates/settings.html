@@ -15,7 +15,6 @@
   .project-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; flex-wrap: wrap; }
   .project-title { font-weight: 600; font-size: 15px; }
   .project-actions { display: flex; gap: 6px; flex-wrap: wrap; }
-  .project-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
   .project-card .report-collapsible { margin-top: 10px; }
   .domain-toggle-list { display: flex; flex-wrap: wrap; gap: 6px; }
   .domain-toggle-list label { display: inline-flex; align-items: center; gap: 6px; background: var(--bg-elev2); border: 1px solid var(--border); border-radius: 20px; padding: 4px 10px; font-size: 12px; color: var(--text); cursor: pointer; margin: 0; }
@@ -45,7 +44,7 @@
 
   <div class="area-bar" id="areaBar">
     <span class="scope" id="areaScopeLabel">Глобальные настройки</span>
-    <span class="scope-note" id="areaScopeNote">Выберите область в шапке, чтобы задать переопределения для неё; без области редактируются значения по умолчанию.</span>
+    <span class="scope-note" id="areaScopeNote">Выберите область в боковом меню, чтобы задать переопределения для неё; без области редактируются значения по умолчанию.</span>
   </div>
 
   <div id="wizardStepper" class="stepper wizard-only" aria-label="Шаги мастера"></div>
@@ -221,7 +220,7 @@
 
       <section id="sec-appearance" class="settings-section" aria-labelledby="h-appearance">
         <h3 id="h-appearance">Оформление</h3>
-        <p class="help">Акцентный цвет всей установки: кнопки, логотип и иконка вкладки. Один для всех областей. Светлая и тёмная тема остаются отдельным переключателем в шапке.</p>
+        <p class="help">Акцентный цвет всей установки: кнопки, логотип и иконка вкладки. Один для всех областей. Светлая и тёмная тема остаются отдельным переключателем внизу бокового меню.</p>
         <p id="appearanceError" class="field-hint error" hidden></p>
         <div id="accentPresets" class="accent-presets" role="group" aria-label="Готовые цвета"></div>
         <div id="accentCustom" class="accent-wheel-wrap" hidden>

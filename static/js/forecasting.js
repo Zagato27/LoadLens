@@ -1,5 +1,7 @@
 (function () {
   const LL = window.LoadLens;
+  // Columns of the reports table in forecasting.html.
+  const COLUMNS = 6;
 
   function hintText(missingSeries, missingSettings) {
     const total = missingSeries + missingSettings;
@@ -21,13 +23,10 @@
     const body = document.getElementById('forecastRows');
     body.innerHTML = '';
     if (!reports.length) {
-      const row = document.createElement('tr');
-      row.className = 'empty-row';
-      const cell = document.createElement('td');
-      cell.colSpan = 6;
-      cell.textContent = 'Отчётов, по которым возможен прогноз, пока нет';
-      row.appendChild(cell);
-      body.appendChild(row);
+      body.innerHTML = LL.ui.emptyRow(COLUMNS, 'Отчётов, по которым возможен прогноз, пока нет. Прогноз строится по ступенчатым и стресс-тестам с рядом среднего времени отклика.', {
+        icon: 'trending',
+        actionHtml: '<a class="btn btn-primary" href="/new" data-min-role="engineer">Новый отчёт</a>'
+      });
       return;
     }
     reports.forEach((report) => {
@@ -67,7 +66,7 @@
 
   document.addEventListener('DOMContentLoaded', async () => {
     const body = document.getElementById('forecastRows');
-    body.innerHTML = `<tr><td colspan="6">${LL.ui.skeleton(3)}</td></tr>`;
+    body.innerHTML = LL.ui.skeletonRows(COLUMNS, 4);
     try {
       const resp = await fetch('/forecast_reports');
       const data = await resp.json();

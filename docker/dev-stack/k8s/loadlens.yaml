@@ -1,0 +1,61 @@
+# Namespace, service account with the Role LoadLens needs, and the scripts ConfigMap for the k3s check (docker/dev-stack/README.md).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: loadtest
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: loadlens
+  namespace: loadtest
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: loadlens
+  namespace: loadtest
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "get", "delete", "deletecollection"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: loadlens
+  namespace: loadtest
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: loadlens
+subjects:
+  - kind: ServiceAccount
+    name: loadlens
+    namespace: loadtest
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loadtest-scripts
+  namespace: loadtest
+data:
+  pyapp.js: |
+    import http from 'k6/http';
+    import { check } from 'k6';
+    export default function () {
+      const res = http.get(`${__ENV.BASE_URL}/items/${Math.floor(Math.random() * 999) + 1}`, { tags: { name: 'GET /items/{id}' } });
+      check(res, { 'status is 200': (r) => r.status === 200 });
+    }

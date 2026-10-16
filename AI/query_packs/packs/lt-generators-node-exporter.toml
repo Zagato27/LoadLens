@@ -1,0 +1,80 @@
+schema_version = 1
+id = "lt-generators-node-exporter"
+version = 1
+title = "Генераторы нагрузки: node_exporter"
+category = "infrastructure"
+stack = ["linux", "load-generator"]
+domain = "lt_generators"
+language = "promql"
+verified = true
+description = """
+Ресурсы машин, на которых работает инструмент нагрузочного тестирования: CPU, память, load на ядро, сеть \
+и TCP-соединения из node_exporter на генераторах. Отчёт видит по ним, не упёрся ли генератор в ресурс и можно \
+ли доверять поданной нагрузке и задержкам. Ограничьте матчеры хостами генераторов, а не тестируемой системы.
+"""
+requires_metrics = ["node_cpu_seconds_total", "node_memory_MemAvailable_bytes", "node_uname_info"]
+prompt_addendum = """
+Метрики генераторов нагрузки из node_exporter: CPU % — доля не-idle времени всех ядер, память % — \
+1 − MemAvailable/MemTotal, load1 на ядро выше 1 — очередь на CPU, TCP established — открытые соединения \
+инструмента. Это не тестируемая система: перегруженный генератор искажает нагрузку и задержки.
+"""
+
+[variables.matchers]
+title = "Матчеры генераторов"
+default = 'job=~".*loadgen.*"'
+help = "Только хосты генераторов, например job=\"loadgen\" или instance=~\"10.0.5.*\"."
+
+[variables.window]
+title = "Окно rate()"
+default = "1m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[[queries]]
+label = "Generators: CPU usage (%) by host"
+role = "generator.cpu_pct"
+unit = "percent"
+required = true
+query = 'label_replace(100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle", {{matchers}} }[{{window}}]))) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
+keys = ["node"]
+description = "CPU генератора, %. Выше 80–85 % генератор сам добавляет задержку и недодаёт нагрузку."
+
+[[queries]]
+label = "Generators: Memory usage (%) by host"
+role = "generator.mem_pct"
+unit = "percent"
+required = true
+query = 'label_replace(100 * (1 - max by (instance) (node_memory_MemAvailable_bytes{ {{matchers}} }) / max by (instance) (node_memory_MemTotal_bytes{ {{matchers}} })) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
+keys = ["node"]
+description = "Память генератора без учёта кэша страниц, %."
+
+[[queries]]
+label = "Generators: load1 per core by host"
+role = "generator.load_per_core"
+unit = "ratio"
+query = 'label_replace(max by (instance) (node_load1{ {{matchers}} }) / count by (instance) (node_cpu_seconds_total{mode="idle", {{matchers}} }) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
+keys = ["node"]
+description = "Очередь на CPU генератора на одно ядро."
+
+[[queries]]
+label = "Generators: Network receive (bytes/s) by host"
+role = "generator.net_rx"
+unit = "bytes_per_second"
+query = 'label_replace(sum by (instance) (rate(node_network_receive_bytes_total{device!~"lo|veth.*|docker.*|cali.*|flannel.*|cni.*|virbr.*|br-.*|vxlan.*|tunl.*", {{matchers}} }[{{window}}])) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
+keys = ["node"]
+description = "Входящий трафик генератора (ответы тестируемой системы)."
+
+[[queries]]
+label = "Generators: Network transmit (bytes/s) by host"
+role = "generator.net_tx"
+unit = "bytes_per_second"
+query = 'label_replace(sum by (instance) (rate(node_network_transmit_bytes_total{device!~"lo|veth.*|docker.*|cali.*|flannel.*|cni.*|virbr.*|br-.*|vxlan.*|tunl.*", {{matchers}} }[{{window}}])) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
+keys = ["node"]
+description = "Исходящий трафик генератора (запросы к тестируемой системе)."
+
+[[queries]]
+label = "Generators: TCP established by host"
+role = "generator.tcp_established"
+unit = "count"
+query = 'label_replace(max by (instance) (node_netstat_Tcp_CurrEstab{ {{matchers}} }) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
+keys = ["node"]
+description = "Открытые TCP-соединения генератора."

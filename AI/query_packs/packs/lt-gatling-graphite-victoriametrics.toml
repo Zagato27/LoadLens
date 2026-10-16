@@ -1,0 +1,145 @@
+schema_version = 1
+id = "lt-gatling-graphite-victoriametrics"
+version = 1
+title = "Gatling Graphite → VictoriaMetrics (PromQL)"
+category = "load_tool"
+stack = ["gatling", "graphite", "victoriametrics"]
+domain = "lt_framework"
+language = "promql"
+verified = true
+description = """
+Graphite-вывод Gatling (gatling.data.writers = [graphite]) в VictoriaMetrics с приёмом Graphite \
+(-graphiteListenAddr=:2003). VictoriaMetrics хранит путь Graphite целиком как имя метрики: \
+gatling.<симуляция>.allRequests.<ok|ko|all>.<count|mean|percentiles95|…> — сводка, \
+gatling.<симуляция>.<группа>.<запрос>.<статус>.<метрика> — запросы (пробелы в именах становятся «_»), \
+gatling.<симуляция>.users.allUsers.active — пользователи. Серии выбираются по __name__, имя запроса \
+достаётся из пути через label_replace. Источник — VictoriaMetrics как Prometheus (http://victoria:8428, \
+у кластера — vmselect …/select/0/prometheus) или датасорс Grafana типа Prometheus/VictoriaMetrics. \
+count — запросы за writePeriod (по умолчанию 1 с), время в мс. По умолчанию VictoriaMetrics не отдаёт \
+последние 30 с (-search.latencyOffset): отчёт по только что закончившемуся тесту строите через минуту.
+"""
+requires_metrics = ["gatling.*.allRequests.all.count", "gatling.*.users.allUsers.active"]
+prompt_addendum = """
+Метрики Gatling через Graphite в VictoriaMetrics: request — путь запроса «группа.запрос» (пробелы заменены \
+на «_»), сводка — allRequests. RPS — сумма счётчиков count за окно, делённая на окно; p95/p99 и mean — \
+время ответа в мс, усреднённое по периодам записи в окне; active users — активные пользователи всех \
+сценариев.
+"""
+
+[variables.root_prefix]
+title = "Корневой префикс"
+default = "gatling"
+pattern = '^[A-Za-z0-9_-]+$'
+help = "gatling.data.graphite.rootPathPrefix из gatling.conf. Префикс с точками не поддерживается."
+
+[variables.simulation]
+title = "Симуляция (регулярное выражение)"
+default = "[^.]+"
+pattern = '^[^"\\\s]+$'
+help = "Имя симуляции в нижнем регистре, как его пишет Gatling, например checkoutsimulation. По умолчанию — любая."
+
+[variables.window_sec]
+title = "Окно усреднения, с"
+default = "30"
+pattern = '^[1-9][0-9]*$'
+help = "За это окно суммируются счётчики и усредняются задержки. Должно быть не меньше периода записи."
+
+[variables.write_period_sec]
+title = "Период записи, с"
+default = "1"
+pattern = '^[1-9][0-9]*$'
+help = "gatling.data.graphite.writePeriod."
+
+[variables.load_model]
+title = "Модель нагрузки сценария"
+default = "open"
+choices = ["open", "closed"]
+help = "open — constantUsersPerSec, rampUsersPerSec; closed — constantConcurrentUsers, rampConcurrentUsers."
+
+[run_filter]
+variable = "root_prefix"
+value = "{{run_tag}}"
+
+[sla]
+max_performance_query = "@lt.rps_total"
+p95_query = "@lt.p95_total"
+p99_query = "@lt.p99_total"
+mean_latency_query = "@lt.mean_latency_total"
+error_rate_query = "@lt.error_rate_pct"
+vus_query = "@lt.vus"
+latency_unit = "ms"
+load_model = "{{load_model}}"
+
+[[queries]]
+label = "LT (Gatling VM): RPS total"
+role = "lt.rps_total"
+unit = "per_second"
+required = true
+query = '''label_replace(sum(sum_over_time({__name__=~"{{root_prefix}}\\.{{simulation}}\\.allRequests\\.all\\.count"}[{{window_sec}}s])) / {{window_sec}}, "series", "all", "", "")'''
+keys = ["series"]
+description = "Общий RPS теста: запросы за окно, делённые на окно."
+
+[[queries]]
+label = "LT (Gatling VM): RPS by request"
+role = "lt.rps_by_request"
+unit = "per_second"
+query = '''topk(20, sum by (request) (avg_over_time(label_replace({__name__=~"{{root_prefix}}\\.{{simulation}}\\..+\\.all\\.count", __name__!~"{{root_prefix}}\\.{{simulation}}\\.(allRequests|users)\\..+"}, "request", "$1", "__name__", "{{root_prefix}}\\.{{simulation}}\\.(.+)\\.all\\.count")[{{window_sec}}s:{{write_period_sec}}s])) / {{write_period_sec}})'''
+keys = ["request"]
+description = "RPS по запросам; request — путь «группа.запрос»."
+
+[[queries]]
+label = "LT (Gatling VM): p95(ms) total"
+role = "lt.p95_total"
+unit = "ms"
+query = '''label_replace(max(avg_over_time({__name__=~"{{root_prefix}}\\.{{simulation}}\\.allRequests\\.all\\.percentiles95"}[{{window_sec}}s])), "series", "all", "", "")'''
+keys = ["series"]
+description = "p95 времени ответа всех запросов, мс: среднее p95 периодов записи в окне."
+
+[[queries]]
+label = "LT (Gatling VM): p99(ms) total"
+role = "lt.p99_total"
+unit = "ms"
+query = '''label_replace(max(avg_over_time({__name__=~"{{root_prefix}}\\.{{simulation}}\\.allRequests\\.all\\.percentiles99"}[{{window_sec}}s])), "series", "all", "", "")'''
+keys = ["series"]
+description = "p99 времени ответа всех запросов, мс."
+
+[[queries]]
+label = "LT (Gatling VM): p95(ms) by request"
+role = "lt.p95_by_request"
+unit = "ms"
+query = '''topk(20, max by (request) (avg_over_time(label_replace({__name__=~"{{root_prefix}}\\.{{simulation}}\\..+\\.all\\.percentiles95", __name__!~"{{root_prefix}}\\.{{simulation}}\\.(allRequests|users)\\..+"}, "request", "$1", "__name__", "{{root_prefix}}\\.{{simulation}}\\.(.+)\\.all\\.percentiles95")[{{window_sec}}s:{{write_period_sec}}s])))'''
+keys = ["request"]
+description = "p95 по запросам, мс."
+
+[[queries]]
+label = "LT (Gatling VM): mean response time(ms)"
+role = "lt.mean_latency_total"
+unit = "ms"
+required = true
+query = '''label_replace(max(avg_over_time({__name__=~"{{root_prefix}}\\.{{simulation}}\\.allRequests\\.all\\.mean"}[{{window_sec}}s])), "series", "all", "", "")'''
+keys = ["series"]
+description = "Среднее время ответа, мс."
+
+[[queries]]
+label = "LT (Gatling VM): error rate (%)"
+role = "lt.error_rate_pct"
+unit = "percent"
+query = '''label_replace(100 * (sum(sum_over_time({__name__=~"{{root_prefix}}\\.{{simulation}}\\.allRequests\\.ko\\.count"}[{{window_sec}}s])) or vector(0)) / sum(sum_over_time({__name__=~"{{root_prefix}}\\.{{simulation}}\\.allRequests\\.all\\.count"}[{{window_sec}}s])), "series", "all", "", "")'''
+keys = ["series"]
+description = "Доля ошибочных (KO) запросов за окно, %."
+
+[[queries]]
+label = "LT (Gatling VM): errors per second by request"
+role = "lt.errors_by_request"
+unit = "per_second"
+query = '''topk(20, sum by (request) (avg_over_time(label_replace({__name__=~"{{root_prefix}}\\.{{simulation}}\\..+\\.ko\\.count", __name__!~"{{root_prefix}}\\.{{simulation}}\\.(allRequests|users)\\..+"}, "request", "$1", "__name__", "{{root_prefix}}\\.{{simulation}}\\.(.+)\\.ko\\.count")[{{window_sec}}s:{{write_period_sec}}s])) / {{write_period_sec}})'''
+keys = ["request"]
+description = "Ошибочные запросы в секунду по запросам."
+
+[[queries]]
+label = "LT (Gatling VM): active users"
+role = "lt.vus"
+unit = "count"
+query = '''label_replace(sum(max_over_time({__name__=~"{{root_prefix}}\\.{{simulation}}\\.users\\.allUsers\\.active"}[{{window_sec}}s])), "series", "all", "", "")'''
+keys = ["series"]
+description = "Активные пользователи всех сценариев (аналог VU)."

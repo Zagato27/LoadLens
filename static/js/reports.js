@@ -1,10 +1,20 @@
 // Reports page logic
 (function () {
-  // Chart background plugin
-  const cmpBgPlugin = { id: 'cmpBg', beforeDraw(chart, args, opts) { const { ctx, chartArea } = chart; if (!chartArea) return; ctx.save(); ctx.fillStyle = (opts && opts.color) || '#151515'; ctx.fillRect(chartArea.left, chartArea.top, chartArea.right - chartArea.left, chartArea.bottom - chartArea.top); ctx.restore(); } };
+  // Chart background plugin: the plot area gets the color passed in options.plugins.cmpBg (ui.restyleCharts
+  // keeps it in sync with the theme), else --bg-chart of the current theme.
+  function chartBackground() {
+    try { return getComputedStyle(document.documentElement).getPropertyValue('--bg-chart').trim() || '#12151c'; } catch (e) { return '#12151c'; }
+  }
+  const cmpBgPlugin = { id: 'cmpBg', beforeDraw(chart, args, opts) { const { ctx, chartArea } = chart; if (!chartArea) return; ctx.save(); ctx.fillStyle = (opts && opts.color) || chartBackground(); ctx.fillRect(chartArea.left, chartArea.top, chartArea.right - chartArea.left, chartArea.bottom - chartArea.top); ctx.restore(); } };
   if (window.Chart && Chart.register) Chart.register(cmpBgPlugin);
 
   const LL = window.LoadLens;
+  // Report-wide chart state: markers and thresholds of the final row, every chart drawn so far and the
+  // per-tab chart groups (synchronized hover, drag zoom, legend chips).
+  const reportState = { finalRow: null, stepTable: null, markers: [], thresholds: [], queryLabels: [], charts: [], groups: {}, activePane: '', paneRenderers: {} };
+  const MAX_VISIBLE_SERIES = 12;
+  // Rows in the hover tooltip next to the cursor; the rest is «ещё N», all values are in the legend.
+  const TOOLTIP_ROWS = 8;
 
   let feedbackByKey = {};
   // Domain titles stored with the report (query packs title «jvm» as «Go runtime» and the like).
@@ -1314,6 +1324,31 @@
     if (value === null || value === undefined || value === '' || !Number.isFinite(n)) return '—';
     return Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/\.?0+$/, '');
   }
+  // Mini bar of the «Факт» column: the track is 0…1.5× the threshold, the mark sits at the threshold
+  // (2/3 of the track), the fill is the actual value colored by the check status. For target_rps a
+  // longer bar is better; for the other checks a bar past the mark is a breach.
+  const SLA_BAR_SPAN = 1.5;
+  function slaBarModel(check) {
+    const actual = finiteOrNull(check && check.actual);
+    const threshold = finiteOrNull(check && check.threshold);
+    if (actual === null || threshold === null || threshold <= 0 || actual < 0) return null;
+    const ratio = Math.min(actual / threshold, SLA_BAR_SPAN);
+    const passed = check.passed;
+    return {
+      fill: Math.round((ratio / SLA_BAR_SPAN) * 1000) / 10,
+      mark: Math.round((1 / SLA_BAR_SPAN) * 1000) / 10,
+      tone: passed === true ? 'ok' : (passed === false ? 'fail' : 'na'),
+      higherBetter: safeStr(check.name) === 'target_rps',
+      percent: Math.round((actual / threshold) * 100)
+    };
+  }
+  function slaBarHtml(check) {
+    const bar = slaBarModel(check);
+    if (!bar) return '';
+    const title = `${bar.percent} % от порога${bar.higherBetter ? ' (больше — лучше)' : ''}`;
+    return `<div class="sla-bar ${bar.tone}${bar.higherBetter ? ' is-higher-better' : ''}" title="${escapeHtml(title)}" aria-hidden="true">`
+      + `<span class="sla-bar-fill" style="width:${bar.fill}%"></span><span class="sla-bar-mark" style="left:${bar.mark}%"></span></div>`;
+  }
   function renderSlaChecklist(finalRow) {
     const slaDetails = parseJsonish(finalRow.sla_details) || {};
     const checks = Array.isArray(slaDetails.checks) ? slaDetails.checks : [];
@@ -1339,7 +1374,7 @@
         `<td><span class="sla-status ${statusClass}" title="${escapeHtml(statusTitle)}">${statusMark}</span></td>`,
         `<td>${label}${note ? `<div class="sla-check-note">${escapeHtml(note)}</div>` : ''}</td>`,
         `<td class="num">${escapeHtml(formatNumber(check && check.threshold))}</td>`,
-        `<td class="num">${escapeHtml(formatNumber(check && check.actual))}</td>`,
+        `<td class="num sla-actual">${escapeHtml(formatNumber(check && check.actual))}${slaBarHtml(check)}</td>`,
         '</tr>'
       ].join('');
     }).join('');
@@ -1613,8 +1648,11 @@
       else if (step.dip === true) flagText = 'кратковременная просадка';
       else if (step.stable === false) flagText = 'нестабильная';
       const drop = flagText ? `<span class="step-flag">${flagText}</span>` : '';
+      // The interval shown in the row (plateau when known) is what the charts highlight on hover.
+      const range = stepRangeMs(step);
+      const rangeAttrs = range[0] !== null && range[1] !== null ? ` data-step-from="${range[0]}" data-step-to="${range[1]}"` : '';
       return [
-        `<tr class="${classes.join(' ')}">`,
+        `<tr class="${classes.join(' ')}"${rangeAttrs}>`,
         `<td>${escapeHtml(String(step.index || ''))}${badge}${drop}</td>`,
         `<td>${escapeHtml(stepInterval(step))}</td>`,
         `<td class="num">${escapeHtml(formatNumber(step.rps))}</td>`,
@@ -1634,10 +1672,267 @@
       '<div class="step-table-wrap"><table class="step-table">',
       '<thead><tr><th>Ступень</th><th>Интервал</th><th class="num">RPS</th><th class="num">Время отклика, p95</th></tr></thead>',
       `<tbody>${rows}</tbody></table></div>`,
-      `<p class="step-note">RPS — уровень ступени. Время отклика — p95 на плато, без хвоста после просадки.${source}</p>`,
+      `<p class="step-note">RPS — уровень ступени. Время отклика — p95 на плато, без хвоста после просадки.${source} Наведите на строку, чтобы подсветить ступень на графиках.</p>`,
       table.slaNote ? `<p class="step-sla">${escapeHtml(table.slaNote)}</p>` : '',
       '</div></details>'
     ].join('');
+  }
+  // ---- chart markers, SLA thresholds and series order ------------------------------------------------
+  // Mirrors AI/report_markers.py (markers_for, thresholds_for, order_series), which draws the same items
+  // on the Confluence PNGs; tests/test_report_markers.py runs both sides on the same rows. Only
+  // deterministic data is used: the step table, the SLA window and the test-type payloads, never the
+  // LLM text of peak_performance.max_time / drop_time.
+  const THRESHOLD_SPECS = {
+    target_rps: ['цель ≥ {} RPS', 'accent'],
+    p95_latency: ['p95 ≤ {} мс', 'fail'],
+    p99_latency: ['p99 ≤ {} мс', 'fail'],
+    error_rate: ['ошибки ≤ {} %', 'fail'],
+    cpu_usage: ['CPU ≤ {} %', 'fail'],
+    memory_usage: ['память ≤ {} %', 'fail']
+  };
+  const DROP_MERGE_MS = 60000;
+  function isPlainObject(value) { return !!value && typeof value === 'object' && !Array.isArray(value); }
+  function finiteOrNull(value) {
+    if (value === null || value === undefined || typeof value === 'boolean' || typeof value === 'object') return null;
+    if (typeof value === 'string' && !value.trim()) return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+  // Epoch ms of an ISO string; a string without a zone is UTC (as on the server).
+  function utcMoment(value) {
+    let text = safeStr(value);
+    if (!text) return null;
+    text = text.replace(' ', 'T');
+    if (/T\d/.test(text) && !/(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(text)) text += 'Z';
+    const ms = Date.parse(text);
+    return Number.isFinite(ms) ? ms : null;
+  }
+  function stepRangeMs(step) {
+    return [
+      utcMoment(step && (step.plateau_start_iso || step.start_iso)),
+      utcMoment(step && (step.plateau_end_iso || step.end_iso))
+    ];
+  }
+  function markerSlaWindow(finalRow) {
+    const sla = parseJsonish(finalRow && finalRow.sla_details) || {};
+    let window = sla.stable_window;
+    if (!isPlainObject(window)) {
+      const parsed = parseJsonish(finalRow && finalRow.parsed) || {};
+      window = isPlainObject(parsed.deterministic_sla) ? parsed.deterministic_sla.stable_window : null;
+    }
+    return isPlainObject(window) ? window : {};
+  }
+  function markerChecks(finalRow) {
+    const sla = parseJsonish(finalRow && finalRow.sla_details) || {};
+    let checks = sla.checks;
+    if (!(Array.isArray(checks) && checks.length)) {
+      const parsed = parseJsonish(finalRow && finalRow.parsed) || {};
+      checks = isPlainObject(parsed.deterministic_sla) ? parsed.deterministic_sla.checks : null;
+    }
+    return Array.isArray(checks) ? checks.filter(isPlainObject) : [];
+  }
+  function markerTable(finalRow, table) {
+    if (isPlainObject(table) && Array.isArray(table.steps) && table.steps.length) return table;
+    return embeddedLoadStepTable(finalRow) || {};
+  }
+  function markerMode(parsed, window) {
+    const kind = safeStr(window.kind).toLowerCase();
+    if (isPlainObject(parsed.spike_analysis) || kind === 'spike') return 'spike';
+    const profile = isPlainObject(parsed.test_profile) ? parsed.test_profile : {};
+    if (isPlainObject(parsed.stability_under_load) || kind === 'hold' || ['stability', 'soak'].indexOf(safeStr(profile.mode).toLowerCase()) >= 0) return 'hold';
+    return 'step';
+  }
+  function markerItem(kind, t, to, label, tone, role) {
+    return { kind: kind, t: t, to: to, label: label, tone: tone, role: role };
+  }
+  function bandItem(start, end, label, tone, role) {
+    let a = utcMoment(start);
+    let b = utcMoment(end);
+    if (a === null || b === null) return null;
+    if (b < a) { const swap = a; a = b; b = swap; }
+    return markerItem('band', a, b, label, tone, role);
+  }
+  function checkNamed(checks, name) {
+    return checks.find((check) => safeStr(check.name) === name) || {};
+  }
+  // Step the SLA was checked on: the marked one, the one under the window start, else by target RPS.
+  function chosenSlaStep(steps, window, checks) {
+    const selected = steps.find((step) => step.selected);
+    if (selected) return selected;
+    const start = utcMoment(window.start || window.start_iso);
+    const covered = steps.find((step) => {
+      const range = stepRangeMs(step);
+      return start !== null && range[0] !== null && range[1] !== null && range[0] <= start && start <= range[1];
+    });
+    if (covered) return covered;
+    const target = finiteOrNull(checkNamed(checks, 'target_rps').actual);
+    if (target === null) return null;
+    const matches = steps.filter((step) => finiteOrNull(step.rps) !== null && Math.abs(Number(step.rps) - target) <= 0.51);
+    const stable = matches.filter((step) => step.stable !== false);
+    const pool = stable.length ? stable : matches;
+    return pool.length ? pool[pool.length - 1] : null;
+  }
+  function stepPosition(steps, step) {
+    if (!step) return -1;
+    const same = (a, b) => (a === undefined ? null : a) === (b === undefined ? null : b);
+    return steps.findIndex((item) => same(item.index, step.index) && same(item.start_iso, step.start_iso));
+  }
+  function stepMarkers(parsed, window, checks, steps) {
+    const out = [];
+    const offset = reportOffsetHours(steps);
+    const saturation = isPlainObject(parsed.saturation) ? parsed.saturation : null;
+    const chosen = chosenSlaStep(steps, window, checks);
+    const kind = safeStr(window.kind).toLowerCase() || 'step';
+    const hasWindow = Object.keys(window).length > 0;
+    const label = chosen && safeStr(chosen.index) ? `SLA: ступень ${safeStr(chosen.index)}` : 'SLA: окно';
+    let band = null;
+    if (hasWindow && kind === 'step') band = bandItem(window.start || window.start_iso, window.end || window.end_iso, label, 'accent', 'sla');
+    if (!band && chosen) band = bandItem(chosen.plateau_start_iso || chosen.start_iso, chosen.plateau_end_iso || chosen.end_iso, label, 'accent', 'sla');
+    if (!band && saturation) {
+      const satWindow = isPlainObject(saturation.saturation_window) ? saturation.saturation_window : {};
+      band = bandItem(satWindow.start_iso, satWindow.end_iso, label, 'accent', 'sla');
+    }
+    if (band) out.push(band);
+    steps.slice(1).forEach((step) => {
+      const t = utcMoment(step.start_iso);
+      if (t !== null) out.push(markerItem('tick', t, null, '', 'muted', 'step'));
+    });
+    let degradationMs = null;
+    const degradedChecks = window.degraded_checks;
+    const degraded = (window.degraded_level !== null && window.degraded_level !== undefined)
+      || (Array.isArray(degradedChecks) ? degradedChecks.length > 0 : !!degradedChecks);
+    if (hasWindow && kind === 'step' && degraded) {
+      const position = stepPosition(steps, chosen);
+      const following = position >= 0 && position < steps.length - 1 ? steps[position + 1] : null;
+      degradationMs = following ? utcMoment(following.start_iso) : utcMoment(window.end || window.end_iso);
+      if (degradationMs !== null) out.push(markerItem('line', degradationMs, null, `деградация ${clockAt(degradationMs, offset)}`, 'fail', 'degradation'));
+    }
+    let dropMs = saturation ? utcMoment(saturation.rps_drop_iso) : null;
+    if (dropMs === null) {
+      const afterDrop = steps.find((step) => step.after_drop === true);
+      dropMs = afterDrop ? utcMoment(afterDrop.start_iso) : null;
+    }
+    if (dropMs !== null && (degradationMs === null || Math.abs(dropMs - degradationMs) > DROP_MERGE_MS)) {
+      out.push(markerItem('line', dropMs, null, `падение RPS ${clockAt(dropMs, offset)}`, 'fail', 'rps_drop'));
+    }
+    return out;
+  }
+  function holdMarkers(parsed, window) {
+    const stability = isPlainObject(parsed.stability_under_load) ? parsed.stability_under_load : {};
+    const hold = isPlainObject(stability.hold) ? stability.hold : {};
+    let band = bandItem(hold.start_iso, hold.end_iso, 'окно удержания', 'accent', 'hold');
+    if (!band && safeStr(window.kind).toLowerCase() === 'hold') {
+      band = bandItem(window.start || window.start_iso, window.end || window.end_iso, 'окно удержания', 'accent', 'hold');
+    }
+    return band ? [band] : [];
+  }
+  function spikeMarkers(parsed, window) {
+    const out = [];
+    const analysis = isPlainObject(parsed.spike_analysis) ? parsed.spike_analysis : {};
+    (Array.isArray(analysis.spikes) ? analysis.spikes : []).forEach((spike, position) => {
+      if (!isPlainObject(spike)) return;
+      const label = safeStr(spike.label) || `всплеск ${safeStr(spike.index) || position + 1}`;
+      const band = bandItem(spike.start_iso, spike.end_iso, label, 'warn', 'spike');
+      if (band) out.push(band);
+    });
+    if (!out.length && safeStr(window.kind).toLowerCase() === 'spike') {
+      const band = bandItem(window.start || window.start_iso, window.end || window.end_iso, safeStr(window.title) || 'всплеск', 'warn', 'spike');
+      if (band) out.push(band);
+    }
+    return out;
+  }
+  // reportMarkers(finalRow, table): markers drawn on every chart (see AI/report_markers.markers_for).
+  function reportMarkers(finalRow, table) {
+    if (!finalRow) return [];
+    const parsed = parseJsonish(finalRow.parsed) || {};
+    const window = markerSlaWindow(finalRow);
+    const mode = markerMode(parsed, window);
+    if (mode === 'spike') return spikeMarkers(parsed, window);
+    if (mode === 'hold') return holdMarkers(parsed, window);
+    const steps = (markerTable(finalRow, table).steps || []).filter(isPlainObject);
+    return stepMarkers(parsed, window, markerChecks(finalRow), steps);
+  }
+  function messageHint(message) {
+    const label = (message.match(/label='([^']*)'/) || message.match(/запрос «([^»]*)»/) || [])[1] || '';
+    const series = (message.match(/series='([^']*)'/) || message.match(/серия «([^»]*)»/) || [])[1] || '';
+    return { label: label, series: series };
+  }
+  // Query label and series of a check: explicit fields, then the message, then the SLA window and the step table.
+  function checkSource(check, window, table) {
+    const name = safeStr(check.name);
+    let label = safeStr(check.query_label);
+    let series = safeStr(check.series);
+    if (!label) {
+      const hint = messageHint(safeStr(check.message));
+      label = hint.label;
+      series = series || hint.series;
+    }
+    if (!label && name === 'target_rps') {
+      label = safeStr(window.label) || safeStr(table.rps_query);
+      series = series || (safeStr(window.label) ? safeStr(window.series) : safeStr(table.rps_series));
+    }
+    if (!label && (name === 'p95_latency' || name === 'p99_latency')) {
+      label = safeStr(table.latency_query);
+      series = series || safeStr(table.latency_series);
+    }
+    return { label: label, series: series };
+  }
+  // slaThresholds(finalRow, table): [{name, query_label, series, value, label, tone}] (AI/report_markers.thresholds_for).
+  function slaThresholds(finalRow, table) {
+    if (!finalRow) return [];
+    const window = markerSlaWindow(finalRow);
+    const source = markerTable(finalRow, table);
+    const out = [];
+    markerChecks(finalRow).forEach((check) => {
+      const name = safeStr(check.name);
+      const spec = THRESHOLD_SPECS[name];
+      const value = finiteOrNull(check.threshold);
+      if (!spec || value === null) return;
+      const where = checkSource(check, window, source);
+      if (!where.label) return;
+      out.push({ name: name, query_label: where.label, series: where.series, value: value, label: spec[0].replace('{}', formatNumber(value)), tone: spec[1] });
+    });
+    return out;
+  }
+  // Chart label a check label refers to: the exact one, else the only label containing it (case-insensitive,
+  // as AI/sla_evaluator finds the SLA query), else the label itself (AI/report_markers.resolve_query_label).
+  function resolveQueryLabel(label, allLabels) {
+    const text = safeStr(label);
+    const labels = (allLabels || []).map(safeStr).filter(Boolean);
+    if (!text || !labels.length) return text;
+    const lower = text.toLowerCase();
+    const exact = labels.filter((item) => item.toLowerCase() === lower);
+    if (exact.length === 1) return exact[0];
+    const partial = labels.filter((item) => item.toLowerCase().indexOf(lower) >= 0);
+    return partial.length === 1 ? partial[0] : text;
+  }
+  // Items for options.plugins.llThresholds of the chart of `queryLabel`; `allLabels` are the run's chart labels.
+  function thresholdsForQuery(thresholds, queryLabel, allLabels) {
+    const target = safeStr(queryLabel);
+    return (thresholds || []).filter((item) => target && resolveQueryLabel(item.query_label, allLabels) === target)
+      .map((item) => ({ value: item.value, label: item.label, tone: item.tone }));
+  }
+  function seriesMean(values) {
+    let total = 0;
+    let count = 0;
+    (values || []).forEach((value) => {
+      const n = finiteOrNull(value);
+      if (n === null) return;
+      total += n;
+      count += 1;
+    });
+    return count ? Math.abs(total / count) : -1;
+  }
+  // orderSeries({name: values[]}): names by the absolute mean, largest first, then by name; series i gets palette slot i.
+  function orderSeries(valuesBySeries) {
+    return Object.keys(valuesBySeries || {})
+      .map((name) => ({ name: name, mean: seriesMean(valuesBySeries[name]) }))
+      .sort((a, b) => (b.mean - a.mean) || (a.name < b.name ? -1 : (a.name > b.name ? 1 : 0)))
+      .map((item) => item.name);
+  }
+  function highlightCharts(range) {
+    if (!LL.charts || typeof LL.charts.setHighlight !== 'function') return;
+    LL.charts.setHighlight(reportState.charts.filter((chart) => chart && chart.canvas), range);
   }
   async function fetchContextPack(run, domain) {
     const resp = await fetch('/llm_context?run_name=' + encodeURIComponent(run) + '&domain=' + encodeURIComponent(domain));
@@ -1658,22 +1953,12 @@
     anchor.parentNode.insertBefore(box, anchor);
     return box;
   }
-  async function renderLoadSteps(finalRow) {
-    const box = stepsHost();
-    if (!box) return;
+  // Step table saved with the report, else rebuilt from the stored model context (as Confluence does).
+  async function resolveStepTable(finalRow) {
     const embedded = embeddedLoadStepTable(finalRow);
-    if (embedded) {
-      const linked = linkSlaToSteps(embedded, finalRow);
-      box.hidden = false;
-      box.innerHTML = renderLoadStepTableHtml(Object.assign({}, embedded, linked));
-      return;
-    }
+    if (embedded) return embedded;
     const run = getRunFromPath();
-    if (!finalRow || !run) {
-      box.hidden = true;
-      box.innerHTML = '';
-      return;
-    }
+    if (!finalRow || !run) return null;
     try {
       const sla = parseJsonish(finalRow.sla_details) || {};
       const checks = Array.isArray(sla.checks) ? sla.checks : [];
@@ -1681,19 +1966,35 @@
       if (!pack || !Array.isArray(pack.load_steps) || !pack.load_steps.length) {
         pack = await fetchContextPack(run, 'final');
       }
-      const table = stepTableFromPack(pack, checks);
-      if (!table) {
-        box.hidden = true;
-        box.innerHTML = '';
-        return;
-      }
-      const linked = linkSlaToSteps(table, finalRow);
-      box.hidden = false;
-      box.innerHTML = renderLoadStepTableHtml(Object.assign({}, table, linked));
+      return stepTableFromPack(pack, checks);
     } catch (e) {
+      return null;
+    }
+  }
+  // Hovering a row of the step table highlights that step on every chart of the report.
+  function bindStepHighlight(box) {
+    const rows = Array.from(box.querySelectorAll('tr[data-step-from]'));
+    const clear = () => highlightCharts(null);
+    rows.forEach((row) => {
+      const range = { t: Number(row.dataset.stepFrom), to: Number(row.dataset.stepTo), tone: 'accent' };
+      row.addEventListener('mouseenter', () => highlightCharts(range));
+      row.addEventListener('mouseleave', clear);
+    });
+  }
+  async function renderLoadSteps(finalRow) {
+    const box = stepsHost();
+    const table = await resolveStepTable(finalRow);
+    if (!box) return table;
+    if (!table) {
       box.hidden = true;
       box.innerHTML = '';
+      return null;
     }
+    const linked = linkSlaToSteps(table, finalRow);
+    box.hidden = false;
+    box.innerHTML = renderLoadStepTableHtml(Object.assign({}, table, linked));
+    bindStepHighlight(box);
+    return table;
   }
   async function renderForecastLink() {
     const link = document.getElementById('forecastLink');
@@ -1709,46 +2010,122 @@
     } catch (e) {}
   }
 
-  function heroTypeEntries(parsed, peak, ctx) {
+  // Hero meta entries of the test type that are not KPI tiles (heroKpis shows the numbers).
+  function heroTypeEntries(parsed, peak) {
     const mode = reportMode(parsed);
     if (mode === 'stability') {
       const st = parsed.stability_under_load || {};
       const hold = (st.hold && typeof st.hold === 'object') ? st.hold : {};
       return [
-        { label: 'Целевой RPS', labelHtml: LL.ui.term('target_rps', 'Целевой RPS'), value: formatNumber(st.target_rps) },
-        { label: 'Средний RPS', labelHtml: LL.ui.term('hold_window', 'Средний RPS (окно удержания)'), value: formatNumber(st.actual_rps), note: hold.start_iso ? `${hhmm(hold.start_iso)}–${hhmm(hold.end_iso)}` : '' },
         { label: 'Мин. интервал RPS', value: hold.min_bucket_rps != null ? formatNumber(hold.min_bucket_rps) : '', note: hold.drop_pct ? `−${formatNumber(hold.drop_pct)} % от среднего` : '' }
       ];
     }
-    if (mode === 'spike') {
-      const sa = parsed.spike_analysis || {};
-      const spikes = Array.isArray(sa.spikes) ? sa.spikes : [];
-      const worst = spikes.find((item) => item.index === sa.worst_spike_index) || spikes[0] || {};
-      const notRecovered = spikes.filter((item) => item.recovered === false).length;
-      const times = spikes.map((item) => Number(item.recovery_time_sec)).filter((n) => Number.isFinite(n));
-      const recovery = notRecovered ? `не восстановилось: ${notRecovered} из ${spikes.length}` : (times.length ? `${formatNumber(Math.max.apply(null, times))} с` : '—');
-      return [
-        { label: 'Фоновая нагрузка', value: sa.baseline_rps != null ? formatNumber(sa.baseline_rps) + ' RPS' : '—' },
-        { label: 'Всплеск', labelHtml: LL.ui.term('spike_window', 'Всплеск'), value: sa.detected ? formatNumber(sa.max_spike_rps) + ' RPS' : 'не обнаружен', note: sa.detected ? `всплесков: ${spikes.length}` : '' },
-        { label: 'Рост p95', labelHtml: LL.ui.term('overshoot', 'Рост p95 (худший всплеск)'), value: signed(worst.overshoot_p95_pct, ' %') || '—' },
-        { label: 'Восстановление', labelHtml: LL.ui.term('recovery_time', 'Восстановление'), value: recovery }
-      ];
-    }
-    if (!peakTableApplies('final', peak)) return [];
+    if (mode === 'spike') return [];
     if (mode === 'stress') {
       const sat = parsed.saturation || {};
       const resource = (sat.limiting_resource && typeof sat.limiting_resource === 'object') ? resourceText(sat.limiting_resource) : '';
       return [
-        { label: 'Точка насыщения', labelHtml: LL.ui.term('saturation_point', 'Точка насыщения'), value: ctx.maxRps, note: safeStr(sat.saturation_step_label) },
         { label: 'Характер деградации', value: safeStr(sat.failure_mode_title) || '—', note: safeStr(sat.degraded_step_label) ? 'с ' + safeStr(sat.degraded_step_label) : '' },
         { label: 'Ограничивающий ресурс', labelHtml: LL.ui.term('limiting_resource', 'Ограничивающий ресурс'), value: resource || 'не определён' }
       ];
     }
+    if (!peakTableApplies('final', peak)) return [];
     return [
-      { label: 'Максимальный RPS', labelHtml: LL.ui.term(ctx.rpsTermKey, 'Максимальный RPS'), value: ctx.maxRps, note: ctx.peakMethod ? `метод: ${ctx.peakMethod}` : '' },
       { label: 'Время пика', value: safeStr(peak.max_time) || '—' },
       { label: 'Время деградации', value: safeStr(peak.drop_time) || '—' }
     ];
+  }
+  function kpiTone(passed) {
+    if (passed === true) return 'ok';
+    if (passed === false) return 'fail';
+    return '';
+  }
+  function kpiThresholdNote(check, op, unit, words) {
+    if (!check || finiteOrNull(check.threshold) === null) return '';
+    const state = check.passed === true ? words[0] : (check.passed === false ? words[1] : '');
+    return `${op} ${formatNumber(check.threshold)}${unit}${state ? ' · ' + state : ''}`;
+  }
+  // heroKpis(finalRow): up to three number tiles {key, label, term, value, unit, note, tone} above the meta.
+  // Step tests: max RPS, p95 and errors with their SLA thresholds; soak, spike and stress take their own
+  // numbers (the meta then skips them, see heroTypeEntries).
+  function heroKpis(finalRow) {
+    if (!finalRow) return [];
+    const parsed = parseJsonish(finalRow.parsed) || {};
+    const peak = isPlainObject(parsed.peak_performance) ? parsed.peak_performance : {};
+    const checks = slaChecksOf(finalRow).filter(isPlainObject);
+    const byName = (name) => checks.find((check) => safeStr(check.name) === name) || null;
+    const target = byName('target_rps');
+    const latency = byName('p95_latency') || byName('p99_latency');
+    const errors = byName('error_rate');
+    const mode = reportMode(parsed);
+    const tile = (key, label, term, value, unit, note, tone) => {
+      const text = formatNumber(value);
+      return { key: key, label: label, term: term, value: text, unit: text === '—' ? '' : unit, note: note || '', tone: tone || '' };
+    };
+    const textTile = (key, label, term, value, note, tone) => ({ key: key, label: label, term: term, value: value, unit: '', note: note || '', tone: tone || '' });
+    const latencyTile = latency ? tile('latency', latency.name === 'p99_latency' ? 'p99' : 'p95', latency.name === 'p99_latency' ? '' : 'p95', latency.actual, ' мс', kpiThresholdNote(latency, 'порог ≤', ' мс', ['соблюдён', 'нарушен']), kpiTone(latency.passed)) : null;
+    const errorTile = errors ? tile('errors', 'Ошибки', 'error_rate', errors.actual, ' %', kpiThresholdNote(errors, 'порог ≤', ' %', ['соблюдён', 'нарушен']), kpiTone(errors.passed)) : null;
+    const targetNote = kpiThresholdNote(target, 'цель ≥', ' RPS', ['достигнута', 'не достигнута']);
+    if (mode === 'spike') {
+      const sa = parsed.spike_analysis || {};
+      const spikes = Array.isArray(sa.spikes) ? sa.spikes : [];
+      const worst = spikes.find((item) => item && item.index === sa.worst_spike_index) || spikes[0] || {};
+      const notRecovered = spikes.filter((item) => item && item.recovered === false).length;
+      const times = spikes.map((item) => Number(item && item.recovery_time_sec)).filter((n) => Number.isFinite(n));
+      const recovery = notRecovered ? `не восстановилось: ${notRecovered} из ${spikes.length}` : (times.length ? `${formatNumber(Math.max.apply(null, times))} с` : '—');
+      const recoveryCheck = byName('recovery');
+      const baseline = sa.baseline_rps != null ? `фон ${formatNumber(sa.baseline_rps)} RPS` : '';
+      return [
+        sa.detected
+          ? tile('spike', 'Всплеск', 'spike_window', sa.max_spike_rps, ' RPS', [baseline, `всплесков: ${spikes.length}`, targetNote].filter(Boolean).join(' · '), kpiTone(target && target.passed))
+          : textTile('spike', 'Всплеск', 'spike_window', 'не обнаружен', baseline, ''),
+        textTile('overshoot', 'Рост p95', 'overshoot', signed(worst.overshoot_p95_pct, ' %') || '—', 'худший всплеск', kpiTone(latency && latency.passed)),
+        textTile('recovery', 'Восстановление', 'recovery_time', recovery, recoveryCheck && finiteOrNull(recoveryCheck.threshold) !== null ? `предел ${formatNumber(recoveryCheck.threshold)} мин` : '', kpiTone(recoveryCheck && recoveryCheck.passed))
+      ];
+    }
+    if (mode === 'stability') {
+      const st = parsed.stability_under_load || {};
+      const hold = isPlainObject(st.hold) ? st.hold : {};
+      const span = hold.start_iso ? `${hhmm(hold.start_iso)}–${hhmm(hold.end_iso)}` : '';
+      const goal = finiteOrNull(st.target_rps) !== null ? `цель ≥ ${formatNumber(st.target_rps)} RPS${target && target.passed === true ? ' · удержана' : (target && target.passed === false ? ' · не удержана' : '')}` : targetNote;
+      return [
+        tile('rps', 'Средний RPS', 'hold_window', st.actual_rps, ' RPS', [goal, span].filter(Boolean).join(' · '), kpiTone(target && target.passed)),
+        latencyTile,
+        errorTile
+      ].filter(Boolean);
+    }
+    if (mode === 'stress') {
+      const sat = parsed.saturation || {};
+      const point = finiteOrNull(sat.saturation_rps) !== null ? sat.saturation_rps : peak.max_rps;
+      return [
+        tile('rps', 'Точка насыщения', 'saturation_point', point, ' RPS', safeStr(sat.saturation_step_label), ''),
+        latencyTile,
+        errorTile
+      ].filter(Boolean);
+    }
+    const peakRps = finiteOrNull(peak.max_rps) !== null ? peak.max_rps : (target ? target.actual : null);
+    const method = safeStr(peak.method);
+    const rpsTerm = /stable/i.test(method) ? 'stable_max' : 'peak_max';
+    const rpsTile = finiteOrNull(peakRps) !== null || target
+      ? tile('rps', 'Максимальный RPS', rpsTerm, peakRps, ' RPS', targetNote || (method ? `метод: ${method}` : ''), kpiTone(target && target.passed))
+      : null;
+    return [rpsTile, latencyTile, errorTile].filter(Boolean);
+  }
+  function renderHeroKpis(tiles) {
+    if (!tiles.length) return '';
+    const items = tiles.map((item) => {
+      const label = item.term ? LL.ui.term(item.term, item.label) : escapeHtml(item.label);
+      const unit = item.unit ? `<span class="report-kpi-unit">${escapeHtml(item.unit)}</span>` : '';
+      const tone = item.tone ? ` is-${item.tone}` : '';
+      return [
+        `<div class="report-kpi${tone}${item.unit ? '' : ' is-text'}" role="listitem">`,
+        `<div class="report-kpi-label">${label}</div>`,
+        `<div class="report-kpi-value">${escapeHtml(item.value)}${unit}</div>`,
+        item.note ? `<div class="report-kpi-note">${escapeHtml(item.note)}</div>` : '',
+        '</div>'
+      ].join('');
+    });
+    return `<div class="report-kpis" role="list" aria-label="Ключевые показатели">${items.join('')}</div>`;
   }
   function renderHero(finalRow, allRows) {
     const hero = document.getElementById('reportHero');
@@ -1772,10 +2149,7 @@
     const verdictSource = slaVerdict
       ? `Определён по SLA-критериям. Оценка ИИ: ${llmVerdict || '—'}.`
       : 'Определён оценкой ИИ: SLA-критерии не заданы.';
-    const maxRps = formatNumber(peak.max_rps);
-    const peakMethod = safeStr(peak.method);
     const verdictTermKey = { 'Успешно': 'verdict_success', 'Есть риски': 'verdict_risk', 'Провал': 'verdict_fail' }[effective.text] || 'verdict_na';
-    const rpsTermKey = /stable/i.test(peakMethod) ? 'stable_max' : 'peak_max';
     const testType = normalizedTestType(parsed, finalRow.test_type);
     const typeTermKey = LL.GLOSSARY['test_type_' + testType] ? 'test_type_' + testType : 'step_profile';
     hero.innerHTML = [
@@ -1794,13 +2168,17 @@
         const usageLine = formatUsageLine(collectRunUsage(finalRow, allRows));
         return usageLine ? `<div class="hero-sub hero-usage">${escapeHtml(usageLine)}</div>` : '';
       })(),
-      `<div class="hero-feedback">${renderVoteGroup('final', 'verdict', '', 'Согласен с вердиктом', 'Не согласен')}</div>`,
+      renderHeroKpis(heroKpis(finalRow)),
       renderHeroMeta([
         { label: 'Сервис', value: service || '—' },
         { label: 'Тип теста', labelHtml: LL.ui.term(typeTermKey, 'Тип теста'), value: LL.testTypeLabel(finalRow.test_type) },
         { label: 'Период', value: period || '—', note: period ? `${durationMin} мин · ${LL.timeZoneLabel()}` : '' },
-        ...heroTypeEntries(parsed, peak, { maxRps: maxRps, peakMethod: peakMethod, rpsTermKey: rpsTermKey })
+        ...heroTypeEntries(parsed, peak)
       ]),
+      (function () {
+        const votes = renderVoteGroup('final', 'verdict', '', 'Согласен с вердиктом', 'Не согласен');
+        return votes ? `<div class="hero-card-foot" data-min-role="engineer"><span class="hero-card-foot-label">Вердикт верен?</span>${votes}</div>` : '';
+      })(),
       '</div>',
       `<div class="hero-card">${renderSlaChecklist(finalRow)}</div>`
     ].join('');
@@ -1822,7 +2200,7 @@
     if (!Array.isArray(arr)) {
       renderSystemContextBox(null);
       renderHero(null);
-      renderLoadSteps(null);
+      await renderLoadSteps(null);
       renderForecastLink();
       box.textContent = 'Нет данных';
       return;
@@ -1850,10 +2228,21 @@
       const range = document.getElementById('pageTimeRange');
       if (range) range.textContent = `Время теста: ${startStr} — ${endStr} · ${LL.timeZoneLabel()}`;
     } catch (e) {}
-    renderHero(arr.find((x) => x.domain === 'final') || null, arr);
-    renderLoadSteps(arr.find((x) => x.domain === 'final') || null);
+    const finalRow = arr.find((x) => x.domain === 'final') || null;
+    renderHero(finalRow, arr);
+    // Charts read the markers and thresholds, so the step table is resolved before they are drawn.
+    const stepTable = await renderLoadSteps(finalRow);
+    reportState.finalRow = finalRow;
+    reportState.stepTable = stepTable;
+    try {
+      reportState.markers = reportMarkers(finalRow, stepTable);
+      reportState.thresholds = slaThresholds(finalRow, stepTable);
+    } catch (e) {
+      reportState.markers = [];
+      reportState.thresholds = [];
+    }
     renderForecastLink();
-    const domainsOrder = ['final', 'jvm', 'database', 'kafka', 'microservices', 'hard_resources', 'lt_framework', 'application_logs'];
+    const domainsOrder = ['final', 'jvm', 'database', 'kafka', 'microservices', 'hard_resources', 'lt_framework', 'lt_generators', 'application_logs'];
     arr.sort((a, b) => domainsOrder.indexOf(a.domain) - domainsOrder.indexOf(b.domain));
     const tabsNav = document.createElement('div'); tabsNav.className = 'tabs'; tabsNav.setAttribute('aria-label', 'Анализ по доменам');
     const tabsBody = document.createElement('div');
@@ -1909,245 +2298,235 @@
         html = markdownToSafeHtml(md);
       }
       const aiBadge = '<div class="ai-badge" title="Текст ниже сгенерирован языковой моделью по агрегированным метрикам">Сгенерировано ИИ · сверяйте выводы с графиками</div>';
-      pane.innerHTML = `<div class="report-analysis-card">${aiBadge}${html}</div>`;
+      // Print shows every tab panel; the heading names the domain there (hidden on screen).
+      const printTitle = `<h3 class="report-print-title">Анализ: ${escapeHtml(LL.domainTitleFor(x.domain, reportDomainTitles))}</h3>`;
+      pane.innerHTML = `${printTitle}<div class="report-analysis-card">${aiBadge}${html}</div>`;
       tabsBody.appendChild(pane);
     });
     box.innerHTML = ''; box.appendChild(tabsNav); box.appendChild(tabsBody);
-    LL.ui.tabs(tabsNav, { onChange: () => scheduleLegendSync() });
+    LL.ui.tabs(tabsNav);
     LL.ui.applyTerms(box);
     bindFeedbackVotes(box);
   }
 
-  async function reportsDrawOne(run, domain, ql, canvasId, legendRoot) {
+  // Chart data of /run_series points: category labels are the minute buckets in time order; series are
+  // ordered by orderSeries and take palette slots in that order (the Confluence PNG of the chart does the
+  // same). Series past MAX_VISIBLE_SERIES start hidden; the legend chips show them on demand.
+  function buildChartData(points) {
+    const seen = new Set();
+    const labels = [];
+    const map = {};
+    (Array.isArray(points) ? points : []).forEach((p) => {
+      if (!p) return;
+      const t = p.t;
+      if (!seen.has(t)) { seen.add(t); labels.push(t); }
+      const key = String(p.series || 'series');
+      if (!map[key]) map[key] = new Map();
+      map[key].set(t, p.value);
+    });
+    labels.sort((a, b) => {
+      const ma = utcMoment(a); const mb = utcMoment(b);
+      if (ma === null || mb === null) return (ma === null) - (mb === null);
+      return ma - mb;
+    });
+    const values = {};
+    Object.keys(map).forEach((key) => { values[key] = labels.map((t) => (map[key].has(t) ? map[key].get(t) : null)); });
+    const palette = (i) => (LL.charts && typeof LL.charts.palette === 'function' ? LL.charts.palette(i) : LL.colorFor(String(i)));
+    const datasets = orderSeries(values).map((name, i) => ({
+      label: name,
+      data: values[name],
+      llSeries: i,
+      borderColor: palette(i),
+      backgroundColor: palette(i),
+      pointRadius: 0,
+      pointHoverRadius: 3,
+      borderWidth: 2,
+      spanGaps: true,
+      hidden: i >= MAX_VISIBLE_SERIES
+    }));
+    return { labels: labels, datasets: datasets };
+  }
+  function clockLabel(label) {
+    const ms = utcMoment(label);
+    if (ms === null) return String(label || '');
+    const d = new Date(ms);
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  }
+  async function reportsDrawOne(run, domain, ql, canvas, legendHost, group) {
     const u = new URL('/run_series', location.origin);
     u.searchParams.set('run_name', run);
     u.searchParams.set('domain', domain);
     u.searchParams.set('query_label', ql);
     u.searchParams.set('series_key', 'auto');
     u.searchParams.set('align', 'absolute');
-    const resp = await fetch(u);
-    const data = await resp.json();
-    if (!data || !data.points || !data.points.length) {
-      try { const tbl = legendRoot.querySelector('.table'); if (tbl) tbl.innerHTML = 'Нет данных'; } catch (e) {}
-      return;
+    let data = null;
+    try {
+      const resp = await fetch(u);
+      data = await resp.json();
+    } catch (e) {
+      data = null;
     }
-    const labels = []; const map = {};
-    data.points.forEach((p) => {
-      const t = p.t;
-      if (labels.indexOf(t) < 0) labels.push(t);
-      const k = p.series; if (!map[k]) map[k] = new Map();
-      map[k].set(t, p.value);
-    });
-    labels.sort((a, b) => new Date(a) - new Date(b));
-    const datasets = Object.keys(map).map((k) => { const color = LL.colorFor(k); return { label: k, data: labels.map((t) => (map[k].has(t) ? map[k].get(t) : null)), borderColor: color, backgroundColor: color, pointRadius: 0, borderWidth: 2, spanGaps: true }; });
-    const ctx = document.getElementById(canvasId).getContext('2d');
+    const box = canvas.parentNode;
+    if (!data || !Array.isArray(data.points) || !data.points.length) {
+      if (box) {
+        box.classList.add('is-empty');
+        box.innerHTML = '<div class="report-chart-empty">Нет данных за время теста</div>';
+      }
+      if (legendHost) legendHost.remove();
+      return null;
+    }
+    const built = buildChartData(data.points);
     const colors = LL.ui.chartColors();
+    const tooltip = LL.charts && typeof LL.charts.htmlTooltip === 'function' ? LL.charts.htmlTooltip({ max: TOOLTIP_ROWS }) : {};
+    tooltip.callbacks = Object.assign({}, tooltip.callbacks, {
+      title(items) {
+        const ms = items && items.length ? utcMoment(items[0].label) : null;
+        return ms === null ? '' : LL.formatDateTime(ms);
+      }
+    });
+    const plugins = LL.charts ? [LL.charts.markers, LL.charts.thresholds, LL.charts.crosshair] : [];
     // eslint-disable-next-line no-undef
-    const chart = new Chart(ctx, {
+    const chart = new Chart(canvas.getContext('2d'), {
       type: 'line',
-      data: { labels, datasets },
+      data: built,
       options: {
         responsive: true,
-        interaction: { mode: 'nearest', intersect: false },
-        plugins: { legend: { display: false }, cmpBg: { color: colors.background } },
+        maintainAspectRatio: false,
+        animation: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          cmpBg: { color: colors.background },
+          tooltip: tooltip,
+          llMarkers: { items: reportState.markers.slice(), highlight: null },
+          llThresholds: { items: thresholdsForQuery(reportState.thresholds, ql, reportState.queryLabels) }
+        },
         scales: {
           x: {
-            title: { display: true, text: 'Время', color: colors.text },
             ticks: {
               color: colors.text,
-              callback(value) {
-                const raw = this.getLabelForValue(value);
-                const d = new Date(raw);
-                const hh = String(d.getHours()).padStart(2, '0');
-                const mm = String(d.getMinutes()).padStart(2, '0');
-                return `${hh}:${mm}`;
-              }
+              maxRotation: 0,
+              autoSkipPadding: 16,
+              callback(value) { return clockLabel(this.getLabelForValue(value)); }
             },
             grid: { color: colors.grid }
           },
           y: { ticks: { color: colors.text }, grid: { color: colors.grid } }
         }
-      }
+      },
+      plugins: plugins
     });
-    try { legendRoot.dataset.domain = domain; legendRoot.dataset.queryLabel = ql; } catch (e) {}
-    buildLegendFor(chart, legendRoot);
-    try {
-      const canvasEl = document.getElementById(canvasId);
-      legendRoot.style.height = 'auto';
-      const rect = canvasEl.getBoundingClientRect();
-      const attrH = (canvasEl.height || parseInt(canvasEl.getAttribute('height') || '0', 10)) || 0;
-      const h = Math.max(160, Math.floor((rect && rect.height) || attrH || 0));
-      legendRoot.style.height = h + 'px';
-      if (window.requestAnimationFrame) requestAnimationFrame(() => {
-        const rect2 = canvasEl.getBoundingClientRect();
-        const attrH2 = (canvasEl.height || parseInt(canvasEl.getAttribute('height') || '0', 10)) || 0;
-        const h2 = Math.max(160, Math.floor((rect2 && rect2.height) || attrH2 || 0));
-        legendRoot.style.height = h2 + 'px';
-      });
-    } catch (e) {}
-    scheduleLegendSync();
-  }
-
-  function downloadChartWithLegend(currentChart, root) {
-    if (!currentChart) return null;
-    const canvas = currentChart.canvas;
-    const chartW = canvas.width;
-    const chartH = canvas.height;
-    const rows = (currentChart.data?.datasets || []).map((ds, i) => {
-      const vals = (ds.data || []).filter((v) => v != null && !isNaN(v));
-      const avg = vals.length ? (vals.reduce((a, b) => a + b, 0) / vals.length) : 0;
-      return { idx: i, label: ds.label, color: ds.borderColor, avg, visible: currentChart.isDatasetVisible(i) };
-    }).filter((r) => r.visible);
-    const pad = 16, rowH = 24, titleH = 22, hdrH = rows.length ? (titleH + 10) : 0;
-    const legendH = rows.length ? (hdrH + rows.length * rowH + pad) : 0;
-    const outH = chartH + (legendH ? (legendH + pad) : 0);
-    const out = document.createElement('canvas');
-    out.width = chartW; out.height = outH;
-    const ctx = out.getContext('2d');
-    const theme = LL.ui.chartColors();
-    ctx.fillStyle = theme.background;
-    ctx.fillRect(0, 0, out.width, out.height);
-    ctx.drawImage(canvas, 0, 0);
-    if (rows.length) {
-      let y = chartH + pad;
-      ctx.fillStyle = theme.text; ctx.font = '16px Montserrat, Arial, sans-serif';
-      ctx.fillText('Легенда', pad, y);
-      y += titleH;
-      ctx.font = '13px Montserrat, Arial, sans-serif';
-      rows.forEach((r) => {
-        ctx.fillStyle = r.color || '#888';
-        ctx.fillRect(pad, y - 12, 14, 14);
-        ctx.strokeStyle = theme.grid; ctx.strokeRect(pad, y - 12, 14, 14);
-        ctx.fillStyle = theme.text;
-        const label = String(r.label || '');
-        ctx.fillText(label, pad + 20, y);
-        const avgStr = Number.isFinite(r.avg) ? r.avg.toFixed(2) : '—';
-        const right = out.width - pad;
-        const text = `Среднее: ${avgStr}`;
-        const tw = ctx.measureText(text).width;
-        ctx.fillText(text, right - tw, y);
-        y += rowH;
-      });
+    const shown = Math.min(built.datasets.length, MAX_VISIBLE_SERIES);
+    canvas.setAttribute('aria-label', `График «${ql}»: серий ${built.datasets.length}${built.datasets.length > shown ? `, показаны ${shown} с наибольшим средним` : ''}`);
+    reportState.charts.push(chart);
+    if (group) group.charts.push(chart);
+    if (legendHost && LL.charts && typeof LL.charts.legendChips === 'function') {
+      const chips = LL.charts.legendChips(chart, legendHost, { filename: `report-${domain}-${ql}`, maxVisible: MAX_VISIBLE_SERIES });
+      if (group) group.chips.push(chips);
     }
-    const a = document.createElement('a');
-    a.href = out.toDataURL('image/png');
-    const nameParts = [];
-    try { const d = root?.dataset?.domain; if (d) nameParts.push(d); const q = root?.dataset?.queryLabel; if (q) nameParts.push(q); } catch (e) {}
-    a.download = `report-${(nameParts.join('-') || 'chart')}.png`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    return true;
-  }
-  let repLegendSortBy = 'avg'; let repLegendSortDir = 'desc';
-  function buildLegendFor(chart, root) {
-    const box = root.querySelector('.table'); if (!box) return; box.innerHTML = '';
-    const tbl = document.createElement('table'); tbl.className = 'cmp-legend-table';
-    const thead = document.createElement('thead'); thead.innerHTML = '<tr><th data-sort=\"name\" style=\"cursor:pointer\">Серия</th><th>Цвет</th><th data-sort=\"avg\" style=\"cursor:pointer\">Среднее</th><th>Вкл</th></tr>';
-    tbl.appendChild(thead); const tbody = document.createElement('tbody');
-    let rows = (chart?.data?.datasets || []).map((ds, i) => {
-      const vals = (ds.data || []).filter((v) => v != null && !isNaN(v));
-      const avg = vals.length ? (vals.reduce((a, b) => a + b, 0) / vals.length) : 0;
-      return { idx: i, label: ds.label, color: ds.borderColor, avg: avg, visible: chart.isDatasetVisible(i) };
-    });
-    rows.sort((a, b) => repLegendSortBy === 'name' ? (repLegendSortDir === 'asc' ? a.label.localeCompare(b.label) : b.label.localeCompare(a.label)) : (repLegendSortDir === 'asc' ? (a.avg - b.avg) : (b.avg - a.avg)));
-    rows.forEach((row) => {
-      const tr = document.createElement('tr'); tr.className = 'cmp-legend-row' + (row.visible ? '' : ' cmp-off');
-      const tdName = document.createElement('td'); tdName.textContent = row.label;
-      const tdColor = document.createElement('td'); const sw = document.createElement('span'); sw.className = 'cmp-legend-color'; sw.style.background = row.color; tdColor.appendChild(sw);
-      const tdAvg = document.createElement('td'); tdAvg.textContent = isFinite(row.avg) ? row.avg.toFixed(2) : '—';
-      const tdToggle = document.createElement('td'); tdToggle.textContent = row.visible ? '✓' : '✕';
-      tr.appendChild(tdName); tr.appendChild(tdColor); tr.appendChild(tdAvg); tr.appendChild(tdToggle);
-      tr.addEventListener('click', () => {
-        const vis = chart.isDatasetVisible(row.idx);
-        chart.setDatasetVisibility(row.idx, !vis);
-        chart.update();
-        buildLegendFor(chart, root);
-      });
-      tbody.appendChild(tr);
-    });
-    tbl.appendChild(tbody); box.appendChild(tbl);
-    thead.addEventListener('click', (e) => {
-      const th = e.target.closest('[data-sort]'); if (!th) return;
-      const by = th.getAttribute('data-sort');
-      if (repLegendSortBy === by) { repLegendSortDir = (repLegendSortDir === 'asc') ? 'desc' : 'asc'; }
-      else { repLegendSortBy = by; repLegendSortDir = (by === 'avg') ? 'desc' : 'asc'; }
-      buildLegendFor(chart, root);
-    });
-    const hideBtn = root.querySelector('.hideAll'); const showBtn = root.querySelector('.showAll');
-    if (hideBtn) hideBtn.onclick = () => { for (let i = 0; i < chart.data.datasets.length; i++) { chart.setDatasetVisibility(i, false); } chart.update(); buildLegendFor(chart, root); };
-    if (showBtn) showBtn.onclick = () => { for (let i = 0; i < chart.data.datasets.length; i++) { chart.setDatasetVisibility(i, true); } chart.update(); buildLegendFor(chart, root); };
-    const dlBtn = root.querySelector('.downloadPng'); if (dlBtn) dlBtn.onclick = () => { downloadChartWithLegend(chart, root); };
+    return chart;
   }
 
-  function syncLegends() {
-    try {
-      const doSync = () => {
-        // Определяем эталонную высоту по первому видимому канвасу
-        let referenceH = 0;
-        document.querySelectorAll('.cmp-chart-wrap').forEach((w) => {
-          if (referenceH > 0) return;
-          // считаем видимым, если элемент участвует в раскладке
-          if (!w || w.offsetParent === null) return;
-          const canvas = w.querySelector('canvas');
-          if (!canvas) return;
-          const rect = canvas.getBoundingClientRect();
-          const attrH = (canvas.height || parseInt(canvas.getAttribute('height') || '0', 10)) || 0;
-          const h = Math.max(0, Math.floor((rect && rect.height) || 0), attrH);
-          if (h > 0) referenceH = h;
+  // Charts of one domain tab share hover and zoom once all of them are drawn.
+  function wireChartGroup(group) {
+    const live = group.charts.filter((chart) => chart && chart.canvas);
+    if (!live.length || !LL.charts) return;
+    if (typeof LL.charts.syncHover === 'function') group.sync = LL.charts.syncHover(live);
+    if (typeof LL.charts.zoom === 'function') group.zoom = LL.charts.zoom(live, { onChange: () => syncZoomButton() });
+  }
+  function syncZoomButton() {
+    const btn = document.querySelector('#rep-domain-tabs .chart-zoom-reset');
+    if (!btn) return;
+    const group = reportState.groups[reportState.activePane];
+    btn.hidden = !(group && group.zoom && group.zoom.range());
+  }
+  // The domain tab bar sticks to the top; a sentinel just above it tells when it is stuck (for the shadow).
+  function observeSticky(bar, sentinel) {
+    if (!('IntersectionObserver' in window)) return;
+    let observer = null;
+    const connect = () => {
+      if (observer) observer.disconnect();
+      const top = parseFloat(getComputedStyle(bar).top) || 0;
+      observer = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+          bar.classList.toggle('is-stuck', !entry.isIntersecting && entry.boundingClientRect.top < top + 1);
         });
-        // Фолбэк по умолчанию
-        if (referenceH <= 0) referenceH = 160;
-
-        document.querySelectorAll('.cmp-chart-wrap').forEach((w) => {
-          const canvas = w.querySelector('canvas');
-          const legend = w.querySelector('.cmp-legend-panel');
-          if (!canvas || !legend) return;
-          legend.style.height = 'auto';
-          const rect = canvas.getBoundingClientRect();
-          const attrH = (canvas.height || parseInt(canvas.getAttribute('height') || '0', 10)) || 0;
-          let h = Math.max(Math.floor((rect && rect.height) || 0), attrH, referenceH);
-          h = Math.max(160, h);
-          legend.style.height = h + 'px';
-        });
-      };
-      doSync();
-      if (window.requestAnimationFrame) {
-        requestAnimationFrame(() => doSync());
-        // Дополнительная попытка после финального ресайза графиков
-        requestAnimationFrame(() => requestAnimationFrame(() => doSync()));
-      }
-      // Фолбэк таймером для случаев скрытых табов
-      setTimeout(doSync, 60);
-      setTimeout(doSync, 120);
-      setTimeout(doSync, 250);
-    } catch (e) {}
+      }, { rootMargin: `-${Math.ceil(top) + 1}px 0px 0px 0px`, threshold: 0 });
+      observer.observe(sentinel);
+    };
+    connect();
+    const narrow = window.matchMedia ? window.matchMedia('(max-width: 1023px)') : null;
+    if (narrow && typeof narrow.addEventListener === 'function') narrow.addEventListener('change', connect);
+    else if (narrow && typeof narrow.addListener === 'function') narrow.addListener(connect);
   }
-  window.addEventListener('resize', syncLegends);
 
-  // Планировщик повторного пересчёта (надёжнее при скрытых табах и ленивой отрисовке)
-  function scheduleLegendSync() {
+  // ---- print / PDF -------------------------------------------------------------------------------
+  // Print shows every tab panel with its charts, opens collapsed sections and draws the charts in the light
+  // theme (the print stylesheet forces light tokens too); everything is restored after printing.
+  const printState = { active: false, theme: null, opened: [], restylePending: false };
+  function restyleReportCharts() {
+    if (LL.ui && typeof LL.ui.restyleCharts === 'function') LL.ui.restyleCharts();
+    Object.keys(reportState.groups).forEach((id) => {
+      (reportState.groups[id].chips || []).forEach((chips) => { if (chips && typeof chips.refresh === 'function') chips.refresh(); });
+    });
+    reportState.charts.forEach((chart) => { try { if (chart && chart.canvas) chart.resize(); } catch (e) { /* destroyed */ } });
+  }
+  function enterPrintMode() {
+    if (printState.active) return;
+    printState.active = true;
+    const root = document.documentElement;
+    printState.theme = root.getAttribute('data-theme');
+    root.classList.add('report-printing');
+    root.setAttribute('data-theme', 'light');
+    printState.opened = Array.from(document.querySelectorAll('#main details:not([open])'));
+    printState.opened.forEach((details) => { details.open = true; });
+    highlightCharts(null);
+    restyleReportCharts();
+  }
+  const printMedia = window.matchMedia ? window.matchMedia('print') : null;
+  function leavePrintMode() {
+    const root = document.documentElement;
+    root.classList.remove('report-print-prep');
+    if (!printState.active) return;
+    printState.active = false;
+    root.classList.remove('report-printing');
+    if (printState.theme) root.setAttribute('data-theme', printState.theme);
+    else root.removeAttribute('data-theme');
+    printState.opened.forEach((details) => { details.open = false; });
+    printState.opened = [];
+    // While print media still applies, the print stylesheet keeps the light tokens: restyle once it is gone.
+    if (printMedia && printMedia.matches) printState.restylePending = true;
+    else restyleReportCharts();
+  }
+  function onPrintMediaChange(event) {
+    if (event.matches) { enterPrintMode(); return; }
+    if (printState.active) { leavePrintMode(); return; }
+    if (printState.restylePending) {
+      printState.restylePending = false;
+      restyleReportCharts();
+    }
+  }
+  async function printReport(btn) {
+    if (btn) btn.disabled = true;
+    // All tab panels are laid out first so charts of tabs never opened are drawn at their real size.
+    document.documentElement.classList.add('report-print-prep');
     try {
-      try {
-        if (window.Chart && typeof Chart.getChart === 'function') {
-          document.querySelectorAll('.cmp-chart-wrap canvas').forEach((c) => {
-            const inst = Chart.getChart(c);
-            if (inst && typeof inst.resize === 'function') {
-              try { inst.resize(); } catch (e) {}
-            }
-          });
-        }
-      } catch (e) {}
-      syncLegends();
-      if (window.requestAnimationFrame) {
-        requestAnimationFrame(syncLegends);
-        requestAnimationFrame(() => requestAnimationFrame(syncLegends));
-      }
-      setTimeout(syncLegends, 0);
-      setTimeout(syncLegends, 60);
-      setTimeout(syncLegends, 120);
-      setTimeout(syncLegends, 250);
-    } catch (e) {}
+      await Promise.all(Object.keys(reportState.paneRenderers).map((id) => Promise.resolve(reportState.paneRenderers[id]()).catch(() => null)));
+      enterPrintMode();
+      await new Promise((resolve) => (window.requestAnimationFrame ? window.requestAnimationFrame(() => resolve()) : setTimeout(resolve, 16)));
+      window.print();
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+  function wirePrint() {
+    const btn = document.getElementById('printReport');
+    if (btn) btn.addEventListener('click', () => { printReport(btn); });
+    window.addEventListener('beforeprint', enterPrintMode);
+    window.addEventListener('afterprint', leavePrintMode);
+    // Browsers without print events (and page.pdf-style captures) still switch the print media query.
+    if (printMedia && typeof printMedia.addEventListener === 'function') printMedia.addEventListener('change', onPrintMediaChange);
+    else if (printMedia && typeof printMedia.addListener === 'function') printMedia.addListener(onPrintMediaChange);
   }
 
   async function engineerLoad() {
@@ -2231,32 +2610,72 @@
     }
   }
 
-  // Charts of one domain are drawn on first activation of its tab, not all at once.
+  // Charts of one domain are drawn on first activation of its tab, not all at once. Returns a promise
+  // that settles when every chart of the tab is drawn and the tab's hover and zoom group is wired.
   function renderDomainPane(run, domain, pane, queryLabels, domainIdx) {
-    if (pane.dataset.rendered === '1') return;
+    if (pane.dataset.rendered === '1') return pane.$llReady || Promise.resolve();
     pane.dataset.rendered = '1';
     pane.innerHTML = '';
-    queryLabels.forEach((ql, qi) => {
-      const wrap = document.createElement('div'); wrap.className = 'cmp-chart-wrap'; wrap.style.marginTop = '12px';
-      const canvasBox = document.createElement('div'); canvasBox.className = 'cmp-chart-canvas';
-      const title = document.createElement('div'); title.style.padding = '8px 0'; title.style.fontWeight = '600'; title.textContent = ql;
-      const cnv = document.createElement('canvas'); cnv.id = `rep-chart-${domainIdx}-${qi}`; cnv.height = 120; canvasBox.appendChild(title); canvasBox.appendChild(cnv);
-      const legend = document.createElement('div'); legend.className = 'cmp-legend-panel'; legend.innerHTML = '<h4>Легенда</h4><div class=\"cmp-legend-controls\"><button class=\"hideAll\">Выключить все</button><button class=\"showAll\">Включить все</button><button class=\"downloadPng\">Скачать PNG</button></div><div class=\"table\"></div>';
-      wrap.appendChild(canvasBox); wrap.appendChild(legend); pane.appendChild(wrap);
-      setTimeout(async () => { await reportsDrawOne(run, domain, ql, cnv.id, legend); }, 0);
+    const printTitle = document.createElement('h3');
+    printTitle.className = 'report-print-title';
+    printTitle.textContent = `Графики: ${LL.domainTitleFor(domain, reportDomainTitles)}`;
+    pane.appendChild(printTitle);
+    const hint = document.createElement('p');
+    hint.className = 'report-chart-hint';
+    hint.textContent = 'Выделите участок графика мышью, чтобы увеличить его на всех графиках вкладки; двойной щелчок возвращает весь тест.';
+    pane.appendChild(hint);
+    const group = { charts: [], chips: [], sync: null, zoom: null };
+    reportState.groups[pane.id] = group;
+    const jobs = queryLabels.map((ql, qi) => {
+      const wrap = document.createElement('section');
+      wrap.className = 'report-chart';
+      const title = document.createElement('h4');
+      title.className = 'report-chart-title';
+      title.textContent = ql;
+      const canvasBox = document.createElement('div');
+      canvasBox.className = 'report-chart-canvas';
+      const cnv = document.createElement('canvas');
+      cnv.id = `rep-chart-${domainIdx}-${qi}`;
+      cnv.setAttribute('role', 'img');
+      cnv.setAttribute('aria-label', `График «${ql}»`);
+      canvasBox.appendChild(cnv);
+      const legend = document.createElement('div');
+      legend.className = 'report-chart-legend';
+      wrap.appendChild(title);
+      wrap.appendChild(canvasBox);
+      wrap.appendChild(legend);
+      pane.appendChild(wrap);
+      return reportsDrawOne(run, domain, ql, cnv, legend, group).catch(() => null);
     });
+    pane.$llReady = Promise.all(jobs).then(() => { wireChartGroup(group); syncZoomButton(); });
+    return pane.$llReady;
   }
 
   async function reportsRenderDomains(schema) {
     const run = getRunFromPath(); if (!run) return;
     const root = document.getElementById('rep-domain-tabs'); if (!root) return;
     root.innerHTML = 'Загрузка…';
-    const domainsOrder = ['lt_framework', 'microservices', 'jvm', 'database', 'kafka', 'hard_resources'];
+    const domainsOrder = ['lt_framework', 'microservices', 'jvm', 'database', 'kafka', 'hard_resources', 'lt_generators'];
     const domains = Object.keys(schema || {}).sort((a, b) => {
       const ia = domainsOrder.indexOf(a); const ib = domainsOrder.indexOf(b);
       return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
     });
+    // Sticky bar: the domain tabs and, while the open tab is zoomed, «Сбросить масштаб».
+    const bar = document.createElement('div'); bar.className = 'report-tabs-bar tabs-sticky';
+    const sentinel = document.createElement('div'); sentinel.className = 'tabs-sticky-sentinel'; sentinel.setAttribute('aria-hidden', 'true');
     const tabsNav = document.createElement('div'); tabsNav.className = 'tabs'; tabsNav.setAttribute('aria-label', 'Графики по доменам');
+    const reset = document.createElement('button');
+    reset.type = 'button';
+    reset.className = 'chart-zoom-reset';
+    reset.hidden = true;
+    reset.title = 'Вернуть весь интервал теста на графиках вкладки (или двойной щелчок по графику)';
+    reset.innerHTML = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg><span>Сбросить масштаб</span>';
+    reset.addEventListener('click', () => {
+      const group = reportState.groups[reportState.activePane];
+      if (group && group.zoom) group.zoom.reset();
+    });
+    bar.appendChild(tabsNav);
+    bar.appendChild(reset);
     const tabsBody = document.createElement('div');
     const idBase = 'rep-dom-tab-';
     const paneRenderers = {};
@@ -2269,30 +2688,40 @@
       paneRenderers[pane.id] = () => renderDomainPane(run, domain, pane, list, di);
       tabsBody.appendChild(pane);
     });
+    reportState.paneRenderers = paneRenderers;
+    reportState.queryLabels = domains.reduce((all, domain) => all.concat((schema[domain] || []).map((x) => x.query_label)), []);
     if (!domains.length) { root.innerHTML = '<div class="empty-state">Для этого запуска нет сохранённых метрик.</div>'; return; }
-    root.innerHTML = ''; root.appendChild(tabsNav); root.appendChild(tabsBody);
+    root.innerHTML = ''; root.appendChild(sentinel); root.appendChild(bar); root.appendChild(tabsBody);
     LL.ui.tabs(tabsNav, {
       onChange: (target) => {
+        reportState.activePane = target;
         if (paneRenderers[target]) paneRenderers[target]();
-        scheduleLegendSync();
+        syncZoomButton();
       }
     });
+    observeSticky(bar, sentinel);
   }
 
-  // Наблюдатели за переключением классов панелей (пересчёт при показе)
-  function attachPanelObservers() {
-    try {
-      const targets = ['rep-llm-tabs', 'rep-domain-tabs'];
-      targets.forEach((id) => {
-        const el = document.getElementById(id);
-        if (!el) return;
-        const mo = new MutationObserver(() => { scheduleLegendSync(); });
-        mo.observe(el, { attributes: true, subtree: true, attributeFilter: ['class'] });
-      });
-    } catch (e) {}
-  }
+  // Pure helpers for tests (tests/test_ui_report_js.py, tests/test_report_markers.py).
+  LL.report = LL.report || {};
+  LL.report._internals = {
+    utcMoment: utcMoment,
+    reportMarkers: reportMarkers,
+    slaThresholds: slaThresholds,
+    thresholdsForQuery: thresholdsForQuery,
+    resolveQueryLabel: resolveQueryLabel,
+    orderSeries: orderSeries,
+    buildChartData: buildChartData,
+    chosenSlaStep: chosenSlaStep,
+    markerMode: markerMode,
+    slaBarModel: slaBarModel,
+    heroKpis: heroKpis,
+    heroTypeEntries: heroTypeEntries,
+    reportState: reportState
+  };
 
   document.addEventListener('DOMContentLoaded', async () => {
+    wirePrint();
     await loadReportRef();
     setPageTitle(getRunFromPath());
     wireRenameReport();
@@ -2303,8 +2732,6 @@
     await engineerLoad();
     wireConfluencePublish();
     await loadConfluencePublication();
-    attachPanelObservers();
-    scheduleLegendSync();
   });
 })();
 

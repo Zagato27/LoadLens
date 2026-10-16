@@ -14,12 +14,13 @@ from PIL import Image
 
 from settings import CONFIG
 
-DEFAULT_ACCENT = "#6200ee"
+# Must match the accent block of both themes in static/css/app.css and the hue of templates/logo.png.
+DEFAULT_ACCENT = "#6c5ce7"
 _HEX = 16
 _WHITE = (1.0, 1.0, 1.0)
 _INK = (0x1A / 255, 0x1F / 255, 0x24 / 255)
-_DARK_PAGE = (0x12 / 255, 0x12 / 255, 0x12 / 255)
-_LIGHT_PAGE = (0xF4 / 255, 0xF6 / 255, 0xF8 / 255)
+_DARK_PAGE = (0x0E / 255, 0x10 / 255, 0x15 / 255)
+_LIGHT_PAGE = (0xF5 / 255, 0xF6 / 255, 0xF8 / 255)
 _MIN_TEXT = 4.5
 _MIN_CHROME = 3.0
 _SOFT_ALPHA = {"dark": 0.16, "light": 0.12}

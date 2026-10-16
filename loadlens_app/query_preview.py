@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -13,6 +14,7 @@ import requests
 from AI.data_sources import DataSourceConfigError, resolve_domain_source, source_accepts_language
 from AI.pipeline import (
     _convert_pd_offset_to_influx_interval,
+    _epoch_seconds,
     _http_error_text,
     _iso8601_utc,
     _render_influxql_template,
@@ -37,7 +39,7 @@ def parse_preview_ts(value: Any) -> float | None:
 
 PREVIEW_WINDOW_SEC = 15 * 60
 WINDOW_LABEL = "последние 15 минут"
-APP_DOMAINS = frozenset({"jvm", "database", "kafka", "microservices", "hard_resources"})
+APP_DOMAINS = frozenset({"jvm", "database", "kafka", "microservices", "hard_resources", "lt_generators"})
 LT_DOMAIN = "lt_framework"
 QUERY_LANGS = frozenset({"promql", "influxql", "flux"})
 _SAMPLE_LIMIT = 5
@@ -124,6 +126,104 @@ def preview_metric_query(
     elif result.message.startswith("За последние 15 минут") or result.message.startswith("За "):
         result.message = f"За окно {window} серий нет"
     return result
+
+
+Points = dict[str, list[tuple[float, float]]]
+
+
+def _epoch(raw: Any) -> float | None:
+    seconds = _epoch_seconds(raw)
+    if seconds is not None:
+        return seconds
+    try:
+        stamp = pd.Timestamp(raw)
+    except (ValueError, TypeError):
+        return None
+    if pd.isna(stamp):
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.tz_localize("UTC")
+    return float(stamp.timestamp())
+
+
+def _number(raw: Any) -> float | None:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value == value and value not in (float("inf"), float("-inf")) else None
+
+
+def fetch_points(
+    cfg: dict[str, Any],
+    *,
+    domain: str,
+    lang: str,
+    query: str,
+    start_ts: float,
+    end_ts: float,
+    step: str,
+    label_keys: list[str] | None = None,
+) -> Points:
+    """Series of one query as ``{name: [(unix seconds, value), ...]}``; raises on source and query errors."""
+    language = str(lang or "").strip().lower()
+    source = _source_for_domain(cfg, domain)
+    rejected = _language_rejection(str(source.get("type") or "").lower(), language)
+    if rejected:
+        raise ValueError(rejected)
+    keys = [str(item) for item in (label_keys or []) if str(item).strip()]
+    out: Points = {}
+    if language == "promql":
+        payload = fetch_metric_series(
+            "", start_ts, end_ts, query, step,
+            ef_config={"metrics_source": source, "default_params": cfg.get("default_params") or {}},
+        )
+        if not isinstance(payload, dict) or payload.get("status") != "success":
+            error = str((payload or {}).get("error") or "Prometheus вернул ошибку") if isinstance(payload, dict) else "Prometheus вернул ошибку"
+            raise RuntimeError(error)
+        for series in ((payload.get("data") or {}).get("result") or []):
+            metric = series.get("metric") if isinstance(series.get("metric"), dict) else {}
+            name = "|".join(f"{key}={metric.get(key, '')}" for key in keys) if keys else "series"
+            points = out.setdefault(name, [])
+            for item in series.get("values") or []:
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    ts, value = _epoch(item[0]), _number(item[1])
+                    if ts is not None and value is not None:
+                        points.append((ts, value))
+        return out
+    if language == "influxql":
+        if str(source.get("type") or "").lower() != "grafana_proxy":
+            raise ValueError("InfluxQL выполняется через источник Grafana proxy")
+        interval = step if re.fullmatch(r"\d+[smh]", str(step or "")) else _convert_pd_offset_to_influx_interval(step)
+        rendered = _render_influxql_template(query, start_ts, end_ts, interval)
+        influx = source.get("influxdb") if isinstance(source.get("influxdb"), dict) else {}
+        payload = fetch_influxql_via_grafana(source.get("grafana") or {}, rendered, influx.get("database"), start_ts=start_ts, end_ts=end_ts)
+        result = ((payload or {}).get("results") or [{}])[0] if isinstance(payload, dict) else {}
+        if isinstance(result, dict) and result.get("error"):
+            raise RuntimeError(str(result.get("error")))
+        for series in (result.get("series") if isinstance(result, dict) else None) or []:
+            tags = series.get("tags") if isinstance(series.get("tags"), dict) else {}
+            name = "|".join(f"{key}={tags.get(key, '')}" for key in keys) if keys else "series"
+            points = out.setdefault(name, [])
+            for row in series.get("values") or []:
+                if isinstance(row, (list, tuple)) and len(row) >= 2:
+                    ts, value = _epoch(row[0]), _number(row[1])
+                    if ts is not None and value is not None:
+                        points.append((ts, value))
+        return out
+    if language == "flux":
+        csv_text = _fetch_flux_csv(source, query, start_ts, end_ts)
+        frame = pd.read_csv(io.StringIO(csv_text), comment="#")
+        if "_time" not in frame.columns or "_value" not in frame.columns:
+            return out
+        for _, row in frame.dropna(subset=["_time", "_value"]).iterrows():
+            ts, value = _epoch(row["_time"]), _number(row["_value"])
+            if ts is None or value is None:
+                continue
+            name = _flux_series_name(row, keys) if keys else "series"
+            out.setdefault(name, []).append((ts, value))
+        return out
+    raise ValueError("Укажите язык запроса: promql, influxql или flux")
 
 
 def _window_label(start_ts: float, end_ts: float) -> str:

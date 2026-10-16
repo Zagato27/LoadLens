@@ -582,6 +582,9 @@ def _check_by_query_label(
             category=category,
         )
     frame = _labeled_frame(labeled, query)
+    # The configured query may be a unique part of the label; the chart is named by the full label.
+    matched = _find_section_by_label([item for item in labeled if isinstance(item, dict)], query) if isinstance(labeled, list) else None
+    source_label = str(matched.get("label") or query) if isinstance(matched, dict) else query
     if frame is None:
         return _make_check(
             name=name,
@@ -590,6 +593,7 @@ def _check_by_query_label(
             passed=None,
             message=f"Нет данных по запросу «{query}»",
             category=category,
+            query_label=source_label,
         )
     start = _as_utc(window.start) if window else None
     end = _as_utc(window.end) if window else None
@@ -612,6 +616,7 @@ def _check_by_query_label(
             passed=None,
             message=empty_message,
             category=category,
+            query_label=source_label,
         )
     passed = actual <= threshold
     series_note = f", серия «{series}»" if series else ""
@@ -625,6 +630,8 @@ def _check_by_query_label(
             f"({scope}, запрос «{query}»{series_note})"
         ),
         category=category,
+        query_label=source_label,
+        series=series,
     )
 
 
@@ -636,8 +643,13 @@ def _make_check(
     severity: str = "warning",
     message: str = "",
     category: str = "primary",
+    query_label: Optional[str] = None,
+    series: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return {
+    """One SLA check. ``query_label``/``series`` name the chart the value was measured on; they are
+    stored only when known (the report page draws the threshold on that chart). ``message`` keeps its
+    format: older readers still parse the query and the series out of it."""
+    check: Dict[str, Any] = {
         "name": name,
         "threshold": threshold,
         "actual": actual,
@@ -646,6 +658,11 @@ def _make_check(
         "message": message,
         "category": category,
     }
+    if query_label:
+        check["query_label"] = str(query_label)
+    if series:
+        check["series"] = str(series)
+    return check
 
 
 def _test_mode_from_profile(test_profile: Optional[Dict[str, Any]]) -> str:
@@ -683,6 +700,8 @@ def _capacity_target_check(
                 f"{'≥' if passed else '<'} целевой {target_rps:.0f}"
                 f"; label='{window.label}'; series='{window.series}'{degraded_note}"
             ),
+            query_label=window.label,
+            series=window.series,
         )
     rps_pick = extract_target_rps_from_pack(
         lt_pack,
@@ -713,6 +732,8 @@ def _capacity_target_check(
             + (f"; label='{source_label}'" if source_label else "")
             + (f"; series='{source_series}'" if source_series else "")
         ),
+        query_label=source_label,
+        series=source_series,
     )
 
 
@@ -746,12 +767,14 @@ def _stability_checks(
             checks.append(_make_check(
                 name="target_rps", threshold=target_rps, actual=None, passed=None, severity="critical",
                 message=f"Нет данных RPS для окна удержания (запрос «{query or 'не выбран'}»)",
+                query_label=query,
             ))
         else:
             result = hold_check(hold, target_rps)
             checks.append(_make_check(
                 name="target_rps", threshold=target_rps, actual=result["actual"], passed=result["passed"],
                 severity="critical", message=result["message"],
+                query_label=window.label if window else None, series=window.series if window else None,
             ))
     checks.extend(_checks_for_window(sla_config, PRIMARY_SPECS, lt_labeled, window, "primary"))
     checks.extend(_checks_for_window(sla_config, SECONDARY_SPECS, hr_labeled, window, "secondary"))
@@ -867,6 +890,7 @@ def _spike_checks(
                     f"Уровень всплеска «{top.title}» {top.level:.1f} RPS "
                     f"{'≥' if passed else '<'} целевой {target_rps:.0f}; label='{top.label}'"
                 ),
+                query_label=top.label, series=top.series,
             ))
     if windows:
         checks.extend(_checks_over_windows(sla_config, PRIMARY_SPECS, lt_labeled, windows, "primary"))

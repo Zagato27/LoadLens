@@ -75,6 +75,8 @@ services:
       LOADLENS_TRUSTED_PROXIES: ${LOADLENS_TRUSTED_PROXIES:-}
       # Gives ids to runs saved before ids existed, once, in the background (python -m loadlens_app.migrations).
       LOADLENS_RUN_MIGRATIONS: ${LOADLENS_RUN_MIGRATIONS:-1}
+      # Watches load tests started from the UI right after a restart (0 switches the watcher off).
+      LOADLENS_LOAD_TEST_WATCHER: ${LOADLENS_LOAD_TEST_WATCHER:-1}
     volumes:
       # Хранение рендеров/картинок между рестартами
       - ../data_collectors/temporary_files:/app/data_collectors/temporary_files

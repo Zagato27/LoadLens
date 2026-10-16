@@ -80,6 +80,25 @@ class PackQuery(BaseModel):
         return value
 
 
+RUN_TAG_VARIABLE = "run_tag"
+
+
+class RunFilter(BaseModel):
+    """How a run started from LoadLens is told apart in the tool's metrics.
+
+    LoadLens starts the tool with the run tag (k6 ``--tag testid=...``, JMeter ``-Japplication=...``,
+    the Gatling Graphite prefix). For the report of that run, the pack variable ``variable`` gets ``value``
+    with ``{{run_tag}}`` substituted. With ``join`` set, a non-empty installed value is kept and the filter
+    is appended after the separator (extra PromQL matchers); otherwise the filter replaces the value.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    variable: str
+    value: str
+    join: str = ""
+
+
 class QueryPack(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -92,6 +111,8 @@ class QueryPack(BaseModel):
     domain: str
     language: Language
     description: str
+    # Metric (Prometheus) or measurement (InfluxDB) names detection looks for; ``*`` matches any part,
+    # e.g. Graphite paths in VictoriaMetrics: "gatling.*.allRequests.all.count".
     requires_metrics: list[str] = Field(default_factory=list)
     prompt_addendum: str = ""
     # Title of the domain in reports when this pack fills it (Go and Python runtimes live in "jvm").
@@ -102,6 +123,8 @@ class QueryPack(BaseModel):
     queries: list[PackQuery] = Field(min_length=1)
     # SLA field -> "@role" of one of the pack queries; latency_unit / load_model -> value or template.
     sla: dict[str, str] = Field(default_factory=dict)
+    # Load tool packs only: the variable that selects one run started from LoadLens.
+    run_filter: Optional[RunFilter] = None
 
     @field_validator("id")
     @classmethod
@@ -159,6 +182,15 @@ class QueryPack(BaseModel):
         unused = set(self.variables) - used
         if unused:
             raise ValueError(f"unused variables: {', '.join(sorted(unused))}")
+        if self.run_filter is not None:
+            if self.category != "load_tool":
+                raise ValueError("run_filter is for load tool packs only")
+            if self.run_filter.variable not in self.variables:
+                raise ValueError(f"run_filter.variable «{self.run_filter.variable}» is not a variable of the pack")
+            if self.variables[self.run_filter.variable].choices:
+                raise ValueError("run_filter.variable cannot be a variable with choices")
+            if template_names(self.run_filter.value) != {RUN_TAG_VARIABLE}:
+                raise ValueError("run_filter.value must use {{run_tag}} and nothing else")
         return self
 
 
@@ -195,6 +227,8 @@ __all__ = [
     "PackQuery",
     "PackVariable",
     "QueryPack",
+    "RUN_TAG_VARIABLE",
+    "RunFilter",
     "TEMPLATE_RE",
     "template_names",
 ]

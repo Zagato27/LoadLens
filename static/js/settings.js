@@ -94,7 +94,7 @@
   }
   function requireArea(action) {
     if (state.area) return true;
-    ui.toast(`${action}: сначала выберите область в шапке страницы`, { tone: 'warn' });
+    ui.toast(`${action}: сначала выберите область в боковом меню`, { tone: 'warn' });
     return false;
   }
 
@@ -149,7 +149,7 @@
       note.textContent = 'Каталог источников данных общий. Привязка доменов, LLM, SLA, запросы, промпты и визуализации сохраняются как переопределения этой области. Хранилище и Confluence общие.';
     } else {
       label.textContent = 'Глобальные настройки';
-      note.textContent = 'Выберите область в шапке, чтобы задать переопределения для неё; без области редактируются значения по умолчанию для всех областей.';
+      note.textContent = 'Выберите область в боковом меню, чтобы задать переопределения для неё; без области редактируются значения по умолчанию для всех областей.';
     }
   }
 
@@ -257,6 +257,16 @@
           { path: 'gigachat.verify', label: 'Проверять TLS-сертификат API', type: 'checkbox', showIf: (m) => m.provider === 'gigachat' }
         ])
       ]
+    },
+    {
+      id: 'load_generators', section: 'load_generators', title: 'Генераторы нагрузки', scope: 'global', kind: 'kit', testable: false,
+      desc: 'Серверы, на которых страница «Запуск теста» запускает инструменты НТ по SSH, и ручной режим, где LoadLens только отмечает начало и конец прогона. Запускать тесты могут инженеры: выделите для LoadLens отдельного пользователя на генераторе.',
+      fields: []
+    },
+    {
+      id: 'load_tools', section: 'load_tools', title: 'Инструменты НТ', scope: 'global', kind: 'kit', testable: false,
+      desc: 'Шаблоны команд k6, JMeter, Locust и Gatling для страницы «Запуск теста». Сохраняются только отличия от встроенных шаблонов.',
+      fields: []
     }
   ];
 
@@ -272,7 +282,36 @@
   function coerce(field, raw, checked) {
     if (field.type === 'checkbox') return !!checked;
     if (field.type === 'number') { const t = String(raw).trim(); if (!t) return null; const n = Number(t); return Number.isFinite(n) ? n : null; }
+    if (field.type === 'list') return String(raw).split(',').map((s) => s.trim()).filter(Boolean);
+    if (field.type === 'intlist') return String(raw).split(',').map((s) => s.trim()).filter(Boolean).map(Number).filter((n) => Number.isInteger(n));
+    if (field.type === 'mounts') {
+      return String(raw).split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
+        const parts = line.split(':');
+        const mode = parts.length > 2 ? parts[parts.length - 1].toLowerCase() : 'ro';
+        return { source: parts[0] || '', target: parts[1] || '', read_only: mode !== 'rw' };
+      });
+    }
+    if (field.type === 'kv') {
+      const out = {};
+      String(raw).split('\n').forEach((line) => {
+        const text = line.trim();
+        const at = text.indexOf('=');
+        if (!text || text.startsWith('#') || at <= 0) return;
+        out[text.slice(0, at).trim()] = text.slice(at + 1);
+      });
+      return out;
+    }
     return String(raw);
+  }
+  // Text shown in an input for structured values (lists and NAME=value maps).
+  function fieldText(field, value) {
+    if (value === undefined || value === null) return '';
+    if ((field.type === 'list' || field.type === 'intlist') && Array.isArray(value)) return value.join(', ');
+    if (field.type === 'kv' && isPlainObject(value)) return Object.keys(value).map((k) => `${k}=${value[k]}`).join('\n');
+    if (field.type === 'mounts' && Array.isArray(value)) {
+      return value.map((m) => `${m.source || ''}:${m.target || ''}:${m.read_only === false ? 'rw' : 'ro'}`).join('\n');
+    }
+    return String(value);
   }
 
   function modelCombo(id, field, value) {
@@ -379,10 +418,13 @@
         input.type = show ? 'text' : 'password';
         e.currentTarget.textContent = show ? 'скрыть' : 'показать';
       });
+    } else if (field.type === 'textarea' || field.type === 'kv' || field.type === 'mounts') {
+      wrap.innerHTML = `<label for="${id}">${esc(field.label)}</label><textarea id="${id}" class="mono" rows="${field.rows || 3}" spellcheck="false" placeholder="${esc(field.placeholder || (field.type === 'kv' ? 'ИМЯ=значение' : ''))}"></textarea>${field.hint ? `<div class="field-hint">${esc(field.hint)}</div>` : ''}`;
+      wrap.querySelector('textarea').value = fieldText(field, value);
     } else {
-      wrap.innerHTML = `<label for="${id}">${esc(field.label)}</label><input type="${field.type === 'number' ? 'number' : 'text'}" id="${id}" ${field.step ? `step="${field.step}"` : ''} value="${esc(value === undefined || value === null ? '' : value)}" placeholder="${esc(field.placeholder || '')}" />${field.hint ? `<div class="field-hint">${esc(field.hint)}</div>` : ''}`;
+      wrap.innerHTML = `<label for="${id}">${esc(field.label)}</label><input type="${field.type === 'number' ? 'number' : 'text'}" id="${id}" ${field.step ? `step="${field.step}"` : ''} value="${esc(fieldText(field, value))}" placeholder="${esc(field.placeholder || '')}" />${field.hint ? `<div class="field-hint">${esc(field.hint)}</div>` : ''}`;
     }
-    const control = wrap.querySelector('input, select');
+    const control = wrap.querySelector('input, select, textarea');
     control.addEventListener(field.type === 'checkbox' || field.type === 'select' ? 'change' : 'input', () => {
       setPath(state.models[card.id], field.path, coerce(field, control.value, control.checked));
       setJson(state.editors[`ed_${card.id}`], state.models[card.id]);
@@ -404,6 +446,7 @@
 
   function refreshCardFields(card) {
     if (card.kind === 'catalog') { renderCatalogBody(card); return; }
+    if (card.kind === 'kit') { renderKitBody(card); return; }
     if (card.kind === 'bindings') { renderBindingsBody(card); return; }
     const grid = document.querySelector(`#card-${card.id} .form-grid`);
     if (!grid) return;
@@ -519,6 +562,7 @@
       if (data.ok && (!card.kind || card.kind === 'catalog' || (extra && extra.domain === 'default'))) state.checkOk[card.id] = true;
       else if (!card.kind) state.checkOk[card.id] = false;
       updateWizardNav();
+      return data;
     } catch (e) {
       result.className = 'conn-result error';
       result.textContent = `Не удалось выполнить проверку: ${e.message}`;
@@ -540,6 +584,11 @@
         state.grafanaDatasources = {};
         const bindings = CONNECTION_CARDS.find((item) => item.id === 'domain_sources');
         if (bindings) renderBindingsBody(bindings);
+      }
+      if (card.id === 'load_tools') {
+        // Generators list the tools by their saved templates.
+        const generators = CONNECTION_CARDS.find((item) => item.id === 'load_generators');
+        if (generators) renderKitBody(generators);
       }
       updateCardDirty(card);
       status.textContent = 'Сохранено';
@@ -781,6 +830,843 @@
     host.append(list, bar);
     updateFieldVisibility(card);
   }
+  // ---- load generators and load tool templates (Run test page) -----------------------------
+  const GENERATOR_TYPES = {
+    ssh: { label: 'SSH', baseId: 'gen', hint: 'LoadLens подключается по SSH, запускает инструмент в фоне и читает его журнал и код выхода. Нужны GNU timeout и nohup.' },
+    docker: { label: 'Docker', baseId: 'docker', hint: 'Контейнер на каждый инстанс через Docker Engine API: https://хост:2376 с клиентскими сертификатами или socket-proxy. Доступ к Docker API равен правам root на хосте.' },
+    kubernetes: { label: 'Kubernetes', baseId: 'k8s', hint: 'Job на каждый инстанс в пространстве имён. Токен сервисного аккаунта с правами на jobs, pods, pods/log и secrets этого пространства имён.' },
+    gitlab: { label: 'GitLab CI', baseId: 'gitlab', hint: 'Запускает ваш пайплайн как есть: инструмент, скрипт и их настройки задаёт пайплайн, а LoadLens выбирает ветку и значения его параметров (переменные с описанием и spec:inputs), следит за статусом и журналом и отменяет пайплайн при остановке. Нужен API-токен со scope api; без него — только запуск по токену триггера.' },
+    jenkins: { label: 'Jenkins', baseId: 'jenkins', hint: 'Запускает вашу задачу как есть: LoadLens читает её параметры (строки, выбор, флаги, пароли, Active Choices), ставит сборку с выбранными значениями, следит за ней и останавливает её. У multibranch-задачи ветка выбирается при запуске.' },
+    manual: { label: 'Вручную', baseId: 'manual', hint: 'LoadLens ничего не запускает: инженер стартует инструмент сам, а в LoadLens отмечает начало и конец прогона кнопками.' }
+  };
+  const KIT_GROUPS = { main: 'kit-form-grid', auth: 'kit-form-grid', dirs: 'kit-form-grid', codes: 'kit-form-grid', wide: 'kit-form-wide' };
+  const CONTAINER_TYPES = new Set(['docker', 'kubernetes']);
+  const CI_TYPES = new Set(['gitlab', 'jenkins']);
+  function blankGenerator(type, title) {
+    const common = { title, type, tools: {}, max_parallel: 0, env: {} };
+    if (type === 'manual') return { title, type: 'manual' };
+    if (type === 'docker') {
+      return { ...common, docker: { url: '', ca_cert: '', client_cert: '', client_key: '', verify: true }, network: '', mounts: [],
+        scripts_dir: '/scripts', work_dir: '/tmp', resources: { cpus: 0, memory_mb: 0 }, remove_finished: true };
+    }
+    if (type === 'kubernetes') {
+      return { ...common, kubernetes: { api_url: '', token: '', ca_cert: '', verify: true, in_cluster: false }, namespace: 'loadtest',
+        scripts: { config_map: '', pvc: '' }, scripts_dir: '/scripts', work_dir: '/tmp', node_selector: {}, resources: { cpu: '', memory: '' },
+        service_account: '', image_pull_secret: '', ttl_seconds: 3600 };
+    }
+    if (type === 'gitlab') {
+      return { title, type, max_parallel: 0, gitlab: { url: '', project: '', ref: '', api_token: '', trigger_token: '', verify: true, inputs: 'auto' },
+        loadlens_url: '', tags_metrics: false, param_options: {} };
+    }
+    if (type === 'jenkins') {
+      return { title, type, max_parallel: 0, jenkins: { url: '', job: '', ref: '', username: '', api_token: '', verify: true },
+        loadlens_url: '', tags_metrics: false, param_options: {} };
+    }
+    return { ...common, type: 'ssh', ssh: { host: '', port: 22, username: '', private_key: '', passphrase: '', password: '', host_key: '' },
+      work_dir: '/opt/loadlens/runs', scripts_dir: '' };
+  }
+  function generatorFields(id, type) {
+    const p = (suffix) => `${id}.${suffix}`;
+    const fields = [{ path: p('title'), label: 'Название', type: 'text', group: 'main' }];
+    const parallel = { path: p('max_parallel'), label: 'Инстансов одновременно', type: 'number', placeholder: '0 — без лимита', group: 'dirs' };
+    const env = { path: p('env'), label: 'Переменные окружения генератора', type: 'kv', rows: 2, hint: 'Для всех инструментов на этом генераторе, по одной ИМЯ=значение в строке.', group: 'wide' };
+    if (type === 'ssh') {
+      fields.push(
+        { path: p('ssh.host'), label: 'Адрес', type: 'text', placeholder: '10.0.0.5 или gen1.example.ru', group: 'main' },
+        { path: p('ssh.port'), label: 'Порт SSH', type: 'number', placeholder: '22', group: 'main' },
+        { path: p('ssh.username'), label: 'Пользователь', type: 'text', group: 'auth' },
+        { path: p('ssh.passphrase'), label: 'Парольная фраза ключа', type: 'password', group: 'auth' },
+        { path: p('ssh.password'), label: 'Пароль (вместо ключа)', type: 'password', group: 'auth' },
+        { path: p('ssh.private_key'), label: 'Приватный ключ', type: 'textarea', rows: 4, placeholder: '-----BEGIN OPENSSH PRIVATE KEY-----', hint: 'ed25519, ECDSA или RSA в формате OpenSSH или PEM. Заведите на генераторе отдельного пользователя для LoadLens.', group: 'wide' },
+        { path: p('ssh.host_key'), label: 'Ключ хоста', type: 'text', placeholder: 'заполнится при проверке', hint: 'Проверка показывает отпечаток ключа сервера; после подтверждения ключ закрепляется, затем сохраните генератор. Без ключа хоста LoadLens не подключится для запуска.', group: 'wide' },
+        { path: p('work_dir'), label: 'Рабочий каталог', type: 'text', placeholder: '/opt/loadlens/runs', hint: 'Каталоги инстансов: журнал, код выхода и служебные файлы.', group: 'dirs' },
+        { path: p('scripts_dir'), label: 'Каталог скриптов', type: 'text', placeholder: '/opt/loadlens/tests', hint: 'От него считаются относительные пути; форма запуска ищет здесь скрипты.', group: 'dirs' },
+        parallel, env
+      );
+    } else if (type === 'docker') {
+      fields.push(
+        { path: p('docker.url'), label: 'Адрес Docker API', type: 'text', placeholder: 'https://gen2.example.ru:2376', group: 'main' },
+        { path: p('network'), label: 'Сеть контейнеров', type: 'text', placeholder: 'пусто — сеть по умолчанию', group: 'main' },
+        { path: p('docker.verify'), label: 'Проверять TLS-сертификат', type: 'checkbox', group: 'auth' },
+        { path: p('remove_finished'), label: 'Удалять контейнер после завершения (журнал остаётся в прогоне)', type: 'checkbox', group: 'auth' },
+        { path: p('docker.ca_cert'), label: 'Сертификат CA', type: 'textarea', rows: 3, placeholder: '-----BEGIN CERTIFICATE-----', group: 'wide' },
+        { path: p('docker.client_cert'), label: 'Клиентский сертификат', type: 'textarea', rows: 3, placeholder: '-----BEGIN CERTIFICATE-----', group: 'wide' },
+        { path: p('docker.client_key'), label: 'Клиентский ключ', type: 'textarea', rows: 3, placeholder: '-----BEGIN PRIVATE KEY-----', group: 'wide' },
+        { path: p('mounts'), label: 'Монтирования', type: 'mounts', rows: 2, placeholder: 'loadlens-scripts:/scripts:ro', hint: 'По одному в строке: том или абсолютный путь на Docker-хосте, путь в контейнере и ro или rw.', group: 'wide' },
+        { path: p('scripts_dir'), label: 'Каталог скриптов в контейнере', type: 'text', placeholder: '/scripts', group: 'dirs' },
+        { path: p('work_dir'), label: 'Рабочий каталог в контейнере', type: 'text', placeholder: '/tmp', group: 'dirs' },
+        { path: p('resources.cpus'), label: 'CPU на контейнер', type: 'number', step: '0.5', placeholder: '0 — без лимита', group: 'dirs' },
+        { path: p('resources.memory_mb'), label: 'Память на контейнер, МБ', type: 'number', placeholder: '0 — без лимита', group: 'dirs' },
+        parallel, env
+      );
+    } else if (type === 'kubernetes') {
+      const outside = (m) => !getPath(m, p('kubernetes.in_cluster'));
+      fields.push(
+        { path: p('kubernetes.api_url'), label: 'Адрес Kubernetes API', type: 'text', placeholder: 'https://k8s.example.ru:6443', showIf: outside, group: 'main' },
+        { path: p('namespace'), label: 'Пространство имён', type: 'text', placeholder: 'loadtest', group: 'main' },
+        { path: p('kubernetes.in_cluster'), label: 'LoadLens работает в этом кластере (сервисный аккаунт пода)', type: 'checkbox', group: 'auth' },
+        { path: p('kubernetes.verify'), label: 'Проверять TLS-сертификат', type: 'checkbox', showIf: outside, group: 'auth' },
+        { path: p('kubernetes.token'), label: 'Токен сервисного аккаунта', type: 'password', showIf: outside, group: 'auth' },
+        { path: p('kubernetes.ca_cert'), label: 'Сертификат CA кластера', type: 'textarea', rows: 3, placeholder: '-----BEGIN CERTIFICATE-----', showIf: outside, group: 'wide' },
+        { path: p('scripts.config_map'), label: 'ConfigMap со скриптами', type: 'text', placeholder: 'loadtest-scripts', group: 'dirs' },
+        { path: p('scripts.pvc'), label: 'Или PVC со скриптами', type: 'text', group: 'dirs' },
+        { path: p('scripts_dir'), label: 'Каталог скриптов в контейнере', type: 'text', placeholder: '/scripts', group: 'dirs' },
+        { path: p('resources.cpu'), label: 'CPU пода', type: 'text', placeholder: '2', group: 'dirs' },
+        { path: p('resources.memory'), label: 'Память пода', type: 'text', placeholder: '2Gi', group: 'dirs' },
+        { path: p('service_account'), label: 'Сервисный аккаунт пода', type: 'text', group: 'dirs' },
+        { path: p('image_pull_secret'), label: 'Секрет реестра образов', type: 'text', group: 'dirs' },
+        { path: p('ttl_seconds'), label: 'Хранить завершённый Job, с', type: 'number', placeholder: '3600', group: 'dirs' },
+        { path: p('node_selector'), label: 'Узлы (nodeSelector)', type: 'kv', rows: 2, placeholder: 'role=loadgen', group: 'wide' },
+        parallel, env
+      );
+    } else if (type === 'gitlab' || type === 'jenkins') {
+      const ci = [
+        { path: p('loadlens_url'), label: 'Адрес LoadLens для событий пайплайна', type: 'text', placeholder: 'https://loadlens.example.ru', hint: 'Необязательно. Пайплайн может прислать по нему started и finished с переменными LOADLENS_EVENTS_URL и LOADLENS_TOKEN; без событий окно берётся из CI и сужается по RPS.', group: 'dirs' },
+        { path: p('tags_metrics'), label: 'Пайплайн передаёт LOADLENS_RUN_TAG инструменту (метрики помечены тегом прогона)', type: 'checkbox', hint: 'Тогда живые графики и отчёт отделяют метрики прогона от других тестов тегом; иначе — только окном времени.', group: 'wide' },
+        { path: p('param_options'), label: 'Варианты параметров', type: 'kv', rows: 2, placeholder: 'STAND=stage, preprod', hint: 'Для параметров, варианты которых CI не отдаёт (Active Choices со скриптом): ИМЯ=вариант1, вариант2. Поле станет выбором в форме запуска.', group: 'wide' },
+        parallel
+      ];
+      if (type === 'gitlab') {
+        fields.push(
+          { path: p('gitlab.url'), label: 'Адрес GitLab', type: 'text', placeholder: 'https://gitlab.example.ru', group: 'main' },
+          { path: p('gitlab.project'), label: 'Проект', type: 'text', placeholder: 'perf/load-tests или id', group: 'main' },
+          { path: p('gitlab.ref'), label: 'Ветка по умолчанию', type: 'text', placeholder: 'пусто — ветка проекта по умолчанию', group: 'main' },
+          { path: p('gitlab.api_token'), label: 'API-токен (scope api)', type: 'password', hint: 'Читает параметры и статус, запускает и отменяет пайплайн. С read_api LoadLens только читает.', group: 'auth' },
+          { path: p('gitlab.trigger_token'), label: 'Токен триггера (если API-токена нет)', type: 'password', group: 'auth' },
+          { path: p('gitlab.verify'), label: 'Проверять TLS-сертификат', type: 'checkbox', group: 'auth' },
+          { path: p('gitlab.inputs'), label: 'Входные параметры (spec:inputs) через API', type: 'select', options: [{ v: 'auto', l: 'по версии GitLab (17.11+)' }, { v: 'on', l: 'передавать' }, { v: 'off', l: 'не передавать' }], group: 'dirs' },
+          ...ci
+        );
+      } else {
+        fields.push(
+          { path: p('jenkins.url'), label: 'Адрес Jenkins', type: 'text', placeholder: 'https://jenkins.example.ru', group: 'main' },
+          { path: p('jenkins.job'), label: 'Задача', type: 'text', placeholder: 'perf/load-test', group: 'main' },
+          { path: p('jenkins.ref'), label: 'Ветка multibranch-задачи по умолчанию', type: 'text', placeholder: 'пусто — main или первая', group: 'main' },
+          { path: p('jenkins.username'), label: 'Пользователь', type: 'text', group: 'auth' },
+          { path: p('jenkins.api_token'), label: 'API-токен', type: 'password', group: 'auth' },
+          { path: p('jenkins.verify'), label: 'Проверять TLS-сертификат', type: 'checkbox', group: 'auth' },
+          ...ci
+        );
+      }
+    }
+    // wizardStep, not step: `step` is the HTML step of number inputs (CPU 0.5).
+    fields.forEach((field) => { field.wizardStep = generatorStep(field.path.slice(id.length + 1)); });
+    return fields;
+  }
+  // Wizard step of a generator field (path without the id): the connection fields are what a check vouches for.
+  function generatorStep(rel) {
+    if (rel === 'title') return 'type';
+    if (rel === 'gitlab.inputs') return 'setup';
+    if (/^(ssh|docker|kubernetes|gitlab|jenkins)\./.test(rel) || rel === 'namespace') return 'connect';
+    if (rel === 'max_parallel' || rel === 'env') return 'finish';
+    return 'setup';
+  }
+  function formatStamp(iso) {
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return String(iso || '');
+    return date.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+  function generatorStatus(entry) {
+    if (!isPlainObject(entry) || !entry.type || entry.type === 'manual') return null;
+    const verified = isPlainObject(entry.verified) && entry.verified.at ? entry.verified : null;
+    return verified ? { text: `проверен ${formatStamp(verified.at)}`, tone: 'ok' } : { text: 'не проверен', tone: 'warn' };
+  }
+  function hasPinnedKey(entry) {
+    return !isPlainObject(entry) || entry.type !== 'ssh' || (isPlainObject(entry.ssh) && !!entry.ssh.host_key);
+  }
+  // A change of the endpoint makes an earlier check say nothing about the generator.
+  function generatorFieldEdited(card, id, rel) {
+    const entry = state.models[card.id][id];
+    if (generatorStep(rel) !== 'connect' || !isPlainObject(entry) || !entry.verified) return;
+    delete entry.verified;
+    syncKit(card);
+  }
+  const VERSION_RE = /v?\d+(?:\.\d+)+/;
+  function toolBadge(info, toolId, type) {
+    if (!isPlainObject(info)) return null;
+    if (Array.isArray(info.tools_found) && info.tools_found.includes(toolId)) {
+      const full = isPlainObject(info.versions) && info.versions[toolId] ? String(info.versions[toolId]) : '';
+      // `k6 v0.54.0 (commit/…)` and `locust 2.31.8 from /opt/…` become the version number; the full line is the tooltip.
+      const short = full ? (full.match(VERSION_RE) || [full.slice(0, 24)])[0] : '';
+      const badge = makeEl('span', 'gen-tool-badge ok', short || ({ docker: 'образ есть', kubernetes: 'образ задан' }[type] || 'найден'));
+      if (full) badge.title = full;
+      return badge;
+    }
+    if (Array.isArray(info.tools_missing) && info.tools_missing.includes(toolId)) {
+      return makeEl('span', 'gen-tool-badge warn', type === 'docker' ? 'нет образа' : 'не найден');
+    }
+    return null;
+  }
+  function generatorSummary(id, entry) {
+    if (entry.type === 'manual') return `id ${id} · LoadLens только отмечает начало и конец прогона`;
+    const tools = isPlainObject(entry.tools) && Object.keys(entry.tools).length ? Object.keys(entry.tools).join(', ') : 'все инструменты';
+    if (entry.type === 'docker') return `id ${id} · ${getPath(entry, 'docker.url') || 'адрес не указан'} · ${tools}`;
+    if (entry.type === 'kubernetes') {
+      const where = getPath(entry, 'kubernetes.in_cluster') ? 'в кластере LoadLens' : (getPath(entry, 'kubernetes.api_url') || 'адрес не указан');
+      return `id ${id} · ${where} · ${entry.namespace || 'default'} · ${tools}`;
+    }
+    if (entry.type === 'gitlab') return `id ${id} · ${getPath(entry, 'gitlab.url') || 'адрес не указан'} · ${getPath(entry, 'gitlab.project') || 'проект не указан'} · ${getPath(entry, 'gitlab.ref') || 'ветка по умолчанию'}`;
+    if (entry.type === 'jenkins') return `id ${id} · ${getPath(entry, 'jenkins.url') || 'адрес не указан'} · ${getPath(entry, 'jenkins.job') || 'задача не указана'}${getPath(entry, 'jenkins.ref') ? ` · ${getPath(entry, 'jenkins.ref')}` : ''}`;
+    const ssh = isPlainObject(entry.ssh) ? entry.ssh : {};
+    const target = ssh.host ? `${ssh.username || '?'}@${ssh.host}${ssh.port && Number(ssh.port) !== 22 ? `:${ssh.port}` : ''}` : 'адрес не указан';
+    return `id ${id} · ${target} · ${tools} · ${ssh.host_key ? 'ключ хоста закреплён' : 'ключ хоста не закреплён'}`;
+  }
+  function toolFields(id) {
+    const p = (suffix) => `${id}.${suffix}`;
+    return [
+      { path: p('title'), label: 'Название', type: 'text', group: 'main' },
+      { path: p('executable'), label: 'Исполняемый файл', type: 'text', hint: 'Подставляется вместо {exe}; генератор может задать свой путь.', group: 'main' },
+      { path: p('cwd'), label: 'Рабочий каталог', type: 'text', placeholder: '{script_dir}', group: 'main' },
+      { path: p('image'), label: 'Образ для Docker и Kubernetes', type: 'text', placeholder: 'grafana/k6:0.54.0', group: 'main' },
+      { path: p('command'), label: 'Команда', type: 'textarea', rows: 2, hint: 'Подстановки: {exe} {exe_dir} {script} {script_dir} {scripts_dir} {run_name} {run_tag} {instance} {instance_tag} {instance_dir} {control_port}. {params} — параметры из формы запуска, отдельным словом.', group: 'wide' },
+      { path: p('env'), label: 'Переменные окружения', type: 'kv', rows: 2, hint: 'Значение из формы запуска с тем же именем дописывается через пробел (удобно для JAVA_OPTS).', group: 'wide' },
+      { path: p('script_kind'), label: 'Что выбирается как скрипт', type: 'select', options: [{ v: 'file', l: 'Файл' }, { v: 'class', l: 'Класс симуляции' }, { v: 'none', l: 'Ничего' }], group: 'codes' },
+      { path: p('scripts_glob'), label: 'Маски скриптов', type: 'list', placeholder: '*.js, *.ts', group: 'codes' },
+      { path: p('stop_signal'), label: 'Сигнал остановки', type: 'select', options: ['TERM', 'INT', 'HUP', 'QUIT'], group: 'codes' },
+      { path: p('success_exit_codes'), label: 'Коды успеха', type: 'intlist', placeholder: '0', group: 'codes' },
+      { path: p('failed_checks_exit_codes'), label: 'Коды «пороги не пройдены»', type: 'intlist', placeholder: '99', group: 'codes' },
+      { path: p('grace_seconds'), label: 'Ждать после сигнала, с', type: 'number', placeholder: '30', group: 'codes' },
+      { path: p('version_command'), label: 'Команда версии для проверки', type: 'text', placeholder: '{exe} --version', group: 'wide' },
+      { path: p('stop_command'), label: 'Команда мягкой остановки', type: 'text', placeholder: '{exe_dir}shutdown.sh {control_port}', hint: 'Выполняется рядом с инструментом вместо сигнала (SSH и Docker); при ошибке уходит сигнал. {control_port} — порт управления инстанса.', group: 'wide' },
+      { path: p('status_command'), label: 'Команда статуса', type: 'text', placeholder: '{exe} status --address 127.0.0.1:{control_port}', hint: 'Раз в 15 с, ответ показывается у инстанса (k6: число VU).', group: 'wide' },
+      { path: p('run_filter_packs'), label: 'Пакеты запросов, которые видят тег прогона', type: 'list', hint: 'Только если команда действительно помечает метрики тегом {run_tag}. Иначе метрики прогона отделяются окном.', group: 'wide' },
+      { path: p('help'), label: 'Подсказка в форме запуска', type: 'textarea', rows: 2, group: 'wide' }
+    ];
+  }
+  function toolSummary(id, entry) {
+    return `id ${id} · ${String(entry.command || 'команда не задана')}`;
+  }
+  const KITS = {
+    load_generators: {
+      title: (id, entry) => String(entry.title || id),
+      pill: (entry) => (GENERATOR_TYPES[entry.type] || {}).label || entry.type || 'тип не задан',
+      summary: generatorSummary,
+      fields: (id, entry) => generatorFields(id, entry.type),
+      hint: (entry) => (GENERATOR_TYPES[entry.type] || {}).hint || 'Неизвестный тип генератора.',
+      checkable: (entry) => !!entry.type && entry.type !== 'manual',
+      empty: 'Генераторов пока нет. Добавьте сервер, на котором установлены инструменты НТ, или ручной генератор.',
+      addLabel: 'Добавить генератор',
+      deleteLabel: 'Удалить генератор',
+      extra: generatorToolsEditor,
+      add: openGeneratorWizard,
+      status: generatorStatus,
+      onFieldEdit: generatorFieldEdited,
+      open: {},
+      checks: {},
+      checkData: {}
+    },
+    load_tools: {
+      title: (id, entry) => String(entry.title || id),
+      pill: (entry) => ({ file: 'файл', class: 'класс', none: 'без скрипта' }[entry.script_kind] || 'файл'),
+      summary: toolSummary,
+      fields: (id) => toolFields(id),
+      hint: () => 'Команда строится по шаблону: сначала делится на слова, затем в каждое слово подставляются значения, поэтому значение никогда не становится несколькими аргументами.',
+      checkable: () => false,
+      empty: 'Инструментов нет: добавьте шаблон команды.',
+      addLabel: 'Добавить инструмент',
+      deleteLabel: 'Удалить инструмент',
+      add: openAddTool,
+      open: {},
+      checks: {}
+    }
+  };
+  function kitFor(card) { return KITS[card.id]; }
+  function syncKit(card) {
+    setJson(state.editors[`ed_${card.id}`], state.models[card.id]);
+    updateCardDirty(card);
+  }
+  function generatorToolsEditor(card, id, entry, opts = {}) {
+    if (!entry.type || entry.type === 'manual' || CI_TYPES.has(entry.type)) return null;
+    const info = opts.info !== undefined ? opts.info : (KITS.load_generators.checkData[id] || null);
+    const rerender = opts.rerender || (() => renderKitBody(card));
+    const tools = isPlainObject(state.config.load_tools) ? state.config.load_tools : {};
+    const ids = Object.keys(tools);
+    const container = CONTAINER_TYPES.has(entry.type);
+    const ci = CI_TYPES.has(entry.type);
+    const box = makeEl('div', 'gen-tools');
+    box.appendChild(makeEl('label', '', 'Инструменты на генераторе'));
+    const own = isPlainObject(entry.tools) ? entry.tools : {};
+    const all = !Object.keys(own).length;
+    const note = container
+      ? 'Образ задаёт, где искать инструмент; пустой образ берётся из шаблона инструмента. Инструменты без образа в форме запуска не появятся.'
+      : (ci ? 'Задача CI запускает инструмент в своём образе: здесь только имя исполняемого файла, если оно отличается.'
+        : 'Укажите свой путь, если инструмент установлен не там, где ищет шаблон.');
+    box.appendChild(makeEl('div', 'field-hint', `${all ? 'Список не задан: форма запуска предлагает все инструменты. ' : 'Форма запуска предлагает только отмеченные инструменты. '}${note}`));
+    const columns = container ? ['image', 'executable'] : (ci ? ['executable'] : ['executable', 'scripts_dir']);
+    const placeholders = (tool) => ({
+      image: String(tool.image || 'образ не задан'),
+      executable: String(tool.executable || ''),
+      scripts_dir: entry.scripts_dir ? `скрипты: ${entry.scripts_dir}` : 'каталог скриптов инструмента'
+    });
+    const labels = { image: 'Образ', executable: 'Путь к', scripts_dir: 'Каталог скриптов' };
+    ids.forEach((toolId) => {
+      const tool = tools[toolId] || {};
+      const row = makeEl('div', `gen-tool-row cols-${columns.length}`);
+      const check = makeEl('input');
+      check.type = 'checkbox';
+      check.checked = all || hasOwn(own, toolId);
+      check.id = `gt-${id}-${toolId}`;
+      const label = makeEl('label', 'gen-tool-name', String(tool.title || toolId));
+      label.htmlFor = check.id;
+      const badge = toolBadge(info, toolId, entry.type);
+      if (badge) label.append(' ', badge);
+      const inputs = {};
+      columns.forEach((column) => {
+        const input = makeEl('input', 'mono');
+        input.type = 'text';
+        input.placeholder = placeholders(tool)[column];
+        input.setAttribute('aria-label', `${labels[column]} ${tool.title || toolId}`);
+        input.value = isPlainObject(own[toolId]) ? String(own[toolId][column] || '') : '';
+        inputs[column] = input;
+      });
+      const write = () => {
+        const current = state.models[card.id][id];
+        if (!isPlainObject(current.tools) || !Object.keys(current.tools).length) {
+          current.tools = {};
+          ids.forEach((other) => { current.tools[other] = {}; });
+        }
+        if (check.checked) {
+          const value = {};
+          columns.forEach((column) => { if (inputs[column].value.trim()) value[column] = inputs[column].value.trim(); });
+          current.tools[toolId] = value;
+        } else {
+          delete current.tools[toolId];
+        }
+        const everything = ids.every((other) => hasOwn(current.tools, other) && !Object.keys(current.tools[other]).length);
+        if (everything) current.tools = {};
+        syncKit(card);
+      };
+      check.addEventListener('change', () => { write(); rerender(); });
+      columns.forEach((column) => inputs[column].addEventListener('input', write));
+      row.append(check, label, ...columns.map((column) => inputs[column]));
+      box.appendChild(row);
+    });
+    return box;
+  }
+  function kitEditor(card, kit, id, entry) {
+    const body = makeEl('div', 'q-item-body');
+    body.appendChild(makeEl('p', 'dim', kit.hint(entry)));
+    const groups = {};
+    kit.fields(id, entry).forEach((field) => {
+      const group = field.group || 'main';
+      if (!groups[group]) groups[group] = makeEl('div', KIT_GROUPS[group] || 'kit-form-grid');
+      groups[group].appendChild(renderField(card, field));
+    });
+    ['main', 'auth', 'wide', 'dirs', 'codes'].forEach((name) => { if (groups[name]) body.appendChild(groups[name]); });
+    if (kit.onFieldEdit) {
+      const edited = (event) => {
+        const wrap = event.target.closest ? event.target.closest('[data-field-path]') : null;
+        if (wrap && wrap.dataset.fieldPath.startsWith(`${id}.`)) kit.onFieldEdit(card, id, wrap.dataset.fieldPath.slice(id.length + 1));
+      };
+      body.addEventListener('input', edited);
+      body.addEventListener('change', edited);
+    }
+    const extra = kit.extra ? kit.extra(card, id, entry) : null;
+    if (extra) body.appendChild(extra);
+    const actions = makeEl('div', 'q-item-actions');
+    actions.appendChild(makeBtn(kit.deleteLabel, () => deleteKitEntry(card, id), 'btn btn-sm btn-danger'));
+    body.appendChild(actions);
+    return body;
+  }
+  function hostKeyMessage(entry, details) {
+    const ssh = isPlainObject(entry.ssh) ? entry.ssh : {};
+    const where = `${ssh.host || '?'}${ssh.port && Number(ssh.port) !== 22 ? `:${ssh.port}` : ''}`;
+    return `Сервер ${where} предъявил ключ хоста ${details.host_key_fingerprint || details.host_key}. `
+      + 'Сверьте отпечаток с ключом на самом сервере, например командой ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub. '
+      + 'После подтверждения LoadLens будет подключаться только к серверу с этим ключом.';
+  }
+  async function checkGenerator(card, kit, id, result) {
+    const data = await testCard(card, { source: id }, result);
+    const entry = state.models[card.id][id];
+    kit.checks[id] = { className: result.className, html: result.innerHTML };
+    if (!data || !isPlainObject(entry)) return;
+    const details = isPlainObject(data.details) ? data.details : {};
+    kit.checkData[id] = details;
+    let changed = false;
+    if (details.host_key && isPlainObject(entry.ssh) && !entry.ssh.host_key) {
+      const trusted = await ui.confirm({ title: 'Ключ хоста SSH', message: hostKeyMessage(entry, details), confirmText: 'Доверяю этому ключу', cancelText: 'Не доверяю' });
+      if (trusted) {
+        entry.ssh.host_key = details.host_key;
+        changed = true;
+      }
+    }
+    if (data.ok && hasPinnedKey(entry) && details.target) {
+      entry.verified = { at: details.checked_at, target: details.target };
+      changed = true;
+    } else if (entry.verified) {
+      delete entry.verified;
+      changed = true;
+    }
+    if (changed) syncKit(card);
+    renderKitBody(card);
+    if (changed) ui.toast('Результат проверки записан в генератор: сохраните раздел', { tone: 'warn', timeout: 8000 });
+  }
+  function kitItem(card, kit, id, entry) {
+    const open = !!kit.open[id];
+    const item = makeEl('div', 'q-item source-item');
+    const head = makeEl('div', 'q-item-head');
+    head.setAttribute('role', 'button');
+    head.setAttribute('aria-expanded', String(open));
+    head.tabIndex = 0;
+    const toggle = () => { kit.open[id] = !open; renderKitBody(card); };
+    head.addEventListener('click', toggle);
+    head.addEventListener('keydown', (event) => {
+      if (event.target === head && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); toggle(); }
+    });
+    const main = makeEl('div', 'q-item-main');
+    const title = makeEl('div', 'q-item-title source-title');
+    const titleText = makeEl('span', '', kit.title(id, entry));
+    title.append(titleText, makeEl('span', 'pill na', kit.pill(entry)));
+    const statusPill = makeEl('span', 'pill');
+    const showStatus = (current) => {
+      const status = kit.status ? kit.status(current) : null;
+      statusPill.className = `pill ${status ? status.tone : ''}`;
+      statusPill.textContent = status ? status.text : '';
+      statusPill.style.display = status ? '' : 'none';
+    };
+    showStatus(entry);
+    title.appendChild(statusPill);
+    const meta = makeEl('div', 'q-item-meta', kit.summary(id, entry));
+    main.append(title, meta);
+    const result = makeEl('div', 'conn-result');
+    result.setAttribute('role', 'status');
+    head.appendChild(main);
+    if (kit.checkable(entry)) {
+      head.appendChild(makeBtn('Проверить', (event) => { event.stopPropagation(); checkGenerator(card, kit, id, result); }, 'btn btn-sm'));
+    }
+    head.appendChild(makeEl('span', 'q-item-caret', open ? '▾' : '▸'));
+    item.appendChild(head);
+    if (open) {
+      const editor = kitEditor(card, kit, id, entry);
+      const refreshHead = () => {
+        const current = state.models[card.id][id] || {};
+        titleText.textContent = kit.title(id, current);
+        meta.textContent = kit.summary(id, current);
+        showStatus(current);
+      };
+      editor.addEventListener('input', refreshHead);
+      editor.addEventListener('change', refreshHead);
+      item.appendChild(editor);
+    }
+    item.appendChild(result);
+    const saved = kit.checks[id];
+    if (saved) { result.className = saved.className; result.innerHTML = saved.html; }
+    return item;
+  }
+  function renderKitBody(card) {
+    const kit = kitFor(card);
+    const host = document.querySelector(`#card-${card.id} .card-body`);
+    if (!host || !kit) return;
+    const model = isPlainObject(state.models[card.id]) ? state.models[card.id] : {};
+    state.models[card.id] = model;
+    const ids = Object.keys(model);
+    card.fields = ids.flatMap((id) => kit.fields(id, isPlainObject(model[id]) ? model[id] : {}));
+    host.replaceChildren();
+    const list = makeEl('div', 'q-list source-list');
+    if (!ids.length) list.appendChild(makeEl('p', 'dim', kit.empty));
+    ids.forEach((id) => list.appendChild(kitItem(card, kit, id, isPlainObject(model[id]) ? model[id] : {})));
+    const bar = makeEl('div', 'struct-toolbar');
+    bar.appendChild(makeBtn(kit.addLabel, () => kit.add(card)));
+    host.append(list, bar);
+    updateFieldVisibility(card);
+  }
+  async function deleteKitEntry(card, id) {
+    const kit = kitFor(card);
+    const ok = await ui.confirm({
+      title: kit.deleteLabel,
+      message: `«${id}» пропадёт после сохранения. Идущие прогоны на нём продолжатся, но LoadLens перестанет за ними следить.`,
+      confirmText: 'Удалить',
+      danger: true
+    });
+    if (!ok) return;
+    delete state.models[card.id][id];
+    delete kit.open[id];
+    delete kit.checks[id];
+    syncKit(card);
+    renderKitBody(card);
+  }
+  function suggestKitId(base, used) {
+    if (!used.has(base)) return base;
+    let number = 2;
+    while (used.has(`${base}-${number}`)) number += 1;
+    return `${base}-${number}`;
+  }
+  const WIZARD_STEP_TITLES = { type: 'Тип и название', connect: 'Подключение', setup: 'Инструменты и каталоги', finish: 'Лимиты и сохранение' };
+  // New generator, step by step: type and title, connection with a check (SSH: also trust in the host key),
+  // tools and directories prefilled from the check, limits and saving. The identifier is assigned by LoadLens.
+  async function openGeneratorWizard(card) {
+    const kit = kitFor(card);
+    const model = state.models[card.id];
+    const otherEdits = stable(model) !== state.saved[card.id];
+    const w = { step: 0, type: 'ssh', id: '', title: '', check: null, view: null, toolsTouched: false, distrust: false, checking: false, saving: false, error: '' };
+    const entry = () => model[w.id];
+    const stepList = () => (w.type === 'manual' ? ['type', 'finish'] : ['type', 'connect', 'setup', 'finish']);
+    const details = () => (w.check && isPlainObject(w.check.details) ? w.check.details : {});
+    const connected = () => !!(w.check && details().connected);
+    const passed = () => !!(w.check && w.check.ok && hasPinnedKey(entry()));
+    const startDraft = (type) => {
+      if (w.id) delete model[w.id];
+      w.type = type;
+      w.id = suggestKitId(GENERATOR_TYPES[type].baseId, new Set(Object.keys(model)));
+      const title = type === 'manual' ? (w.title || 'Вручную') : (w.title === 'Вручную' ? '' : w.title);
+      model[w.id] = blankGenerator(type, title);
+      if (CI_TYPES.has(type)) model[w.id].loadlens_url = window.location.origin;
+      w.check = null;
+      w.view = null;
+      w.toolsTouched = false;
+      w.distrust = false;
+      syncKit(card);
+    };
+    startDraft('ssh');
+    let body = null;
+    let actions = null;
+    let close = null;
+
+    const fieldsBlock = (stepName) => {
+      const wrap = makeEl('div', 'gen-wizard-fields');
+      const groups = {};
+      generatorFields(w.id, w.type)
+        .filter((field) => field.wizardStep === stepName && field.path !== `${w.id}.ssh.host_key` && field.path !== `${w.id}.title`)
+        .forEach((field) => {
+          const group = field.group || 'main';
+          if (!groups[group]) groups[group] = makeEl('div', KIT_GROUPS[group] || 'kit-form-grid');
+          groups[group].appendChild(renderField(card, field));
+        });
+      ['main', 'auth', 'wide', 'dirs', 'codes'].forEach((name) => { if (groups[name]) wrap.appendChild(groups[name]); });
+      return wrap;
+    };
+    const applyVisibility = () => {
+      generatorFields(w.id, w.type).forEach((field) => {
+        if (typeof field.showIf !== 'function') return;
+        const el = body.querySelector(`[data-field-path="${field.path}"]`);
+        if (el) el.style.display = field.showIf(model) ? '' : 'none';
+      });
+    };
+    const focusFirst = () => {
+      const first = body.querySelector('input:not([type="checkbox"]), select, textarea');
+      if (first) first.focus();
+    };
+
+    const renderCheck = () => {
+      const host = body.querySelector('.gen-check-host');
+      if (!host) return;
+      host.replaceChildren();
+      const result = makeEl('div', w.view ? w.view.className : 'conn-result');
+      result.setAttribute('role', 'status');
+      if (w.view) result.innerHTML = w.view.html;
+      host.appendChild(result);
+      const d = details();
+      const current = entry();
+      if (w.type === 'ssh' && w.check && isPlainObject(current.ssh)) {
+        if (d.host_key && !current.ssh.host_key) {
+          const trust = makeEl('div', 'gen-trust');
+          trust.appendChild(makeEl('div', '', hostKeyMessage(current, d)));
+          if (w.distrust) {
+            trust.appendChild(makeEl('div', 'gen-trust-note', 'Без закреплённого ключа LoadLens не подключится к генератору. Проверьте адрес и порт: возможно, ответил не тот сервер.'));
+          }
+          const buttons = makeEl('div', 'gen-trust-actions');
+          buttons.append(
+            makeBtn('Доверяю этому ключу', () => { current.ssh.host_key = d.host_key; w.distrust = false; syncKit(card); renderCheck(); renderActions(); }, 'btn btn-sm btn-primary'),
+            makeBtn('Не доверяю', () => { w.distrust = true; renderCheck(); renderActions(); }, 'btn btn-sm')
+          );
+          trust.appendChild(buttons);
+          host.appendChild(trust);
+        } else if (current.ssh.host_key) {
+          host.appendChild(makeEl('div', 'gen-pinned', `Ключ хоста закреплён: ${d.host_key_fingerprint || `${String(current.ssh.host_key).slice(0, 40)}…`}`));
+        }
+      }
+      const problems = Array.isArray(d.problems) ? d.problems : [];
+      if (w.check && problems.length) {
+        const list = makeEl('ul', 'gen-problems');
+        problems.forEach((problem) => list.appendChild(makeEl('li', '', problem)));
+        host.appendChild(list);
+      }
+    };
+    const runCheck = async () => {
+      if (w.checking) return;
+      w.checking = true;
+      w.distrust = false;
+      w.error = '';
+      renderActions();
+      const host = body.querySelector('.gen-check-host');
+      const result = makeEl('div', 'conn-result');
+      result.setAttribute('role', 'status');
+      if (host) host.replaceChildren(result);
+      const data = await testCard(card, { source: w.id }, result);
+      w.checking = false;
+      w.check = data || null;
+      w.view = { className: result.className, html: result.innerHTML };
+      if (!body.isConnected) return;
+      if (stepList()[w.step] === 'setup') render();
+      else { renderCheck(); renderActions(); }
+    };
+    const checkBar = (label, note) => {
+      const bar = makeEl('div', 'gen-check-bar');
+      bar.appendChild(makeBtn(label, () => runCheck(), 'btn gen-check-btn'));
+      if (note) bar.appendChild(makeEl('span', 'dim', note));
+      return bar;
+    };
+    // Tools found by the check become the generator's list; untouched by the admin only.
+    const prefillTools = () => {
+      if (w.toolsTouched || !connected() || !['ssh', 'docker'].includes(w.type)) return;
+      const found = Array.isArray(details().tools_found) ? details().tools_found : [];
+      const all = Object.keys(isPlainObject(state.config.load_tools) ? state.config.load_tools : {});
+      entry().tools = !found.length || all.every((toolId) => found.includes(toolId)) ? {} : Object.fromEntries(found.map((toolId) => [toolId, {}]));
+      syncKit(card);
+    };
+
+    const renderTypeStep = () => {
+      const typeLabel = makeEl('label', '', 'Тип');
+      const select = makeEl('select');
+      Object.keys(GENERATOR_TYPES).forEach((type) => {
+        const option = makeEl('option', '', GENERATOR_TYPES[type].label);
+        option.value = type;
+        option.selected = type === w.type;
+        select.appendChild(option);
+      });
+      typeLabel.appendChild(select);
+      const titleLabel = makeEl('label', '', 'Название');
+      const title = makeEl('input');
+      title.type = 'text';
+      title.maxLength = 80;
+      title.placeholder = 'Например, «Генератор в ЦОД-2»';
+      title.value = String(entry().title || '');
+      titleLabel.appendChild(title);
+      select.addEventListener('change', () => { w.title = title.value.trim(); w.error = ''; startDraft(select.value); render(); });
+      title.addEventListener('input', () => { entry().title = title.value; w.title = title.value.trim(); syncKit(card); });
+      body.append(typeLabel, makeEl('p', 'dim', GENERATOR_TYPES[w.type].hint), titleLabel,
+        makeEl('p', 'dim', 'Название видят инженеры в форме запуска. Служебный идентификатор LoadLens назначит сам.'));
+    };
+    const renderConnectStep = () => {
+      body.appendChild(makeEl('p', 'dim', GENERATOR_TYPES[w.type].hint));
+      body.appendChild(fieldsBlock('connect'));
+      const note = w.type === 'ssh'
+        ? 'Для SSH проверка обязательна: она показывает ключ хоста, которому нужно доверять.'
+        : 'Без проверки генератор сохранится с пометкой «не проверен».';
+      body.appendChild(checkBar('Проверить подключение', note));
+      body.appendChild(makeEl('div', 'gen-check-host'));
+      renderCheck();
+    };
+    const renderCiSetupStep = () => {
+      const d = details();
+      const panel = makeEl('div', 'gen-check-panel');
+      const params = Array.isArray(d.params) ? d.params : [];
+      if (connected()) {
+        panel.appendChild(makeEl('div', '', `${d.system || ''}${d.ref ? ` · ветка ${d.ref}` : ''}`));
+        panel.appendChild(makeEl('div', '', params.length
+          ? `Параметры пайплайна: ${params.map((param) => `${param.name}${param.options && param.options.length ? ` (${param.options.length} вар.)` : ''}`).join(', ')}`
+          : 'Пайплайн не объявляет параметров: запуск пойдёт с его значениями по умолчанию.'));
+        if (Array.isArray(d.auto) && d.auto.length) panel.appendChild(makeEl('div', 'dim', `LoadLens заполнит сам: ${d.auto.join(', ')}`));
+      } else {
+        panel.appendChild(makeEl('div', 'warn-text', 'Подключение не проверено: параметры пайплайна не прочитаны.'));
+      }
+      body.appendChild(panel);
+      body.appendChild(fieldsBlock('setup'));
+      body.appendChild(checkBar(w.check ? 'Проверить ещё раз' : 'Проверить подключение', ''));
+      body.appendChild(makeEl('div', 'gen-check-host'));
+      renderCheck();
+    };
+    const renderSetupStep = () => {
+      if (CI_TYPES.has(w.type)) { renderCiSetupStep(); return; }
+      prefillTools();
+      const d = details();
+      const panel = makeEl('div', 'gen-check-panel');
+      if (connected()) {
+        panel.appendChild(makeEl('div', '', `Система: ${d.system || 'не определена'}`));
+        panel.appendChild(makeEl('div', 'dim', 'Отметки у инструментов и список ниже — по результату проверки. Поменяли каталоги — проверьте ещё раз.'));
+      } else {
+        panel.appendChild(makeEl('div', 'warn-text', 'Подключение не проверено: каталоги и инструменты не сверены с генератором.'));
+      }
+      body.appendChild(panel);
+      body.appendChild(fieldsBlock('setup'));
+      const tools = generatorToolsEditor(card, w.id, entry(), { info: connected() ? d : null, rerender: () => { w.toolsTouched = true; render(); } });
+      if (tools) body.appendChild(tools);
+      body.appendChild(checkBar(w.check ? 'Проверить ещё раз' : 'Проверить подключение', ''));
+      body.appendChild(makeEl('div', 'gen-check-host'));
+      renderCheck();
+    };
+    const renderFinishStep = () => {
+      const current = entry();
+      if (w.type !== 'manual') body.appendChild(fieldsBlock('finish'));
+      const summary = makeEl('div', 'gen-check-panel');
+      summary.appendChild(makeEl('div', 'gen-summary-title', `${GENERATOR_TYPES[w.type].label} · ${current.title || w.id}`));
+      summary.appendChild(makeEl('div', 'dim', generatorSummary(w.id, current)));
+      const problems = Array.isArray(details().problems) ? details().problems : [];
+      if (w.type === 'manual') summary.appendChild(makeEl('div', '', 'Ручной генератор проверять не нужно.'));
+      else if (passed()) summary.appendChild(makeEl('div', 'ok-text', `Проверка пройдена: ${w.check.message}`));
+      else if (connected()) summary.appendChild(makeEl('div', 'warn-text', `Генератор отвечает, но есть замечания: ${problems.join('; ') || w.check.message}. До успешной проверки он будет отмечен как непроверенный.`));
+      else summary.appendChild(makeEl('div', 'warn-text', 'Подключение не проверено: генератор будет отмечен как непроверенный, проверить его можно в карточке.'));
+      if (otherEdits) summary.appendChild(makeEl('div', 'dim', 'Сохраняется только новый генератор: другие несохранённые правки раздела останутся в форме.'));
+      body.appendChild(summary);
+    };
+
+    const renderActions = () => {
+      actions.replaceChildren();
+      const name = stepList()[w.step];
+      actions.appendChild(makeBtn('Отмена', () => close(null), 'btn'));
+      if (w.step > 0) actions.appendChild(makeBtn('Назад', () => { w.error = ''; w.step -= 1; render(); focusFirst(); }, 'btn'));
+      if (name === 'finish') {
+        const save = makeBtn(w.saving ? 'Сохранение…' : 'Сохранить генератор', () => saveDraft(), 'btn btn-primary');
+        save.disabled = w.saving || w.checking;
+        actions.appendChild(save);
+      } else {
+        let label = 'Далее';
+        let blocked = w.checking;
+        if (name === 'connect') {
+          if (w.type === 'ssh') blocked = blocked || !connected() || !hasPinnedKey(entry());
+          else if (!connected()) label = 'Продолжить без проверки';
+        }
+        const next = makeBtn(label, () => goNext(), 'btn btn-primary');
+        next.disabled = blocked;
+        if (blocked && !w.checking) next.title = 'Нужна успешная проверка подключения и подтверждённый ключ хоста';
+        actions.appendChild(next);
+      }
+      body.querySelectorAll('.gen-check-btn').forEach((btn) => { btn.disabled = w.checking; });
+    };
+    const render = () => {
+      const list = stepList();
+      if (w.step >= list.length) w.step = list.length - 1;
+      const name = list[w.step];
+      body.replaceChildren();
+      const progress = makeEl('ol', 'gen-wizard-steps');
+      const stepTitle = (step) => (step === 'setup' && CI_TYPES.has(w.type) ? 'Параметры пайплайна' : WIZARD_STEP_TITLES[step]);
+      list.forEach((step, index) => progress.appendChild(makeEl('li', index === w.step ? 'active' : (index < w.step ? 'done' : ''), `${index + 1}. ${stepTitle(step)}`)));
+      body.appendChild(progress);
+      if (name === 'type') renderTypeStep();
+      else if (name === 'connect') renderConnectStep();
+      else if (name === 'setup') renderSetupStep();
+      else renderFinishStep();
+      const error = makeEl('div', 'dialog-error', w.error);
+      error.setAttribute('role', 'alert');
+      body.appendChild(error);
+      applyVisibility();
+      renderActions();
+    };
+    const goNext = () => {
+      if (stepList()[w.step] === 'type') {
+        const title = String(entry().title || '').trim();
+        if (!title) { w.error = 'Укажите название'; render(); return; }
+        entry().title = title;
+        syncKit(card);
+      }
+      w.error = '';
+      w.step += 1;
+      render();
+      focusFirst();
+    };
+    // Only the new generator is saved: the saved section plus this entry, other edits stay in the form.
+    const saveDraft = async () => {
+      const current = entry();
+      const d = details();
+      if (w.type !== 'manual' && passed() && d.target) current.verified = { at: d.checked_at, target: d.target };
+      else delete current.verified;
+      let saved = {};
+      try { saved = JSON.parse(state.saved[card.id] || '{}'); } catch (e) { saved = {}; }
+      const next = { ...(isPlainObject(saved) ? saved : {}), [w.id]: clone(current) };
+      w.saving = true;
+      w.error = '';
+      renderActions();
+      try {
+        const data = await postConfig(configBody(card.section, next));
+        state.saved[card.id] = stable(next);
+        storeSectionData(card.section, clone(next));
+        if (w.view) kit.checks[w.id] = w.view;
+        if (w.check) kit.checkData[w.id] = d;
+        showWarnings(data.warnings);
+        close('saved');
+      } catch (e) {
+        w.saving = false;
+        w.error = `Не сохранилось: ${e.message}`;
+        render();
+      }
+    };
+    // Editing the connection after a check makes the check say nothing; a new host also needs a new key.
+    const edited = (event) => {
+      const wrap = event.target.closest ? event.target.closest('[data-field-path]') : null;
+      if (!wrap || !wrap.dataset.fieldPath.startsWith(`${w.id}.`)) return;
+      const rel = wrap.dataset.fieldPath.slice(w.id.length + 1);
+      applyVisibility();
+      if (generatorStep(rel) !== 'connect' || !w.check) return;
+      w.check = null;
+      w.view = { className: 'conn-result pending', html: 'Данные подключения изменились: проверьте снова.' };
+      w.distrust = false;
+      const current = entry();
+      if (w.type === 'ssh' && ['ssh.host', 'ssh.port'].includes(rel) && isPlainObject(current.ssh) && current.ssh.host_key) {
+        current.ssh.host_key = '';
+        syncKit(card);
+      }
+      renderCheck();
+      renderActions();
+    };
+
+    const outcome = await ui.dialog({
+      title: 'Новый генератор нагрузки',
+      wide: true,
+      actions: [],
+      onOpen: (el, closer) => {
+        body = el;
+        close = closer;
+        actions = el.parentElement.querySelector('.dialog-actions');
+        body.classList.add('gen-wizard');
+        body.addEventListener('input', edited);
+        body.addEventListener('change', edited);
+        render();
+        focusFirst();
+      }
+    });
+    if (outcome !== 'saved') {
+      delete model[w.id];
+      syncKit(card);
+      return;
+    }
+    kit.open[w.id] = false;
+    renderKitBody(card);
+    updateCardDirty(card);
+    ui.toast(`Генератор «${entry().title}» сохранён`, { tone: 'ok' });
+  }
+  async function openAddTool(card) {
+    const model = state.models[card.id];
+    const used = new Set(Object.keys(model));
+    const options = ['<option value="">Пустой шаблон</option>'].concat(Object.keys(model).map((id) => `<option value="${esc(id)}">${esc(String((model[id] || {}).title || id))}</option>`)).join('');
+    const created = await ui.dialog({
+      title: 'Новый инструмент',
+      bodyHtml: [
+        `<label>Скопировать шаблон<select id="ltFrom">${options}</select></label>`,
+        '<label>Название<input id="ltTitle" type="text" maxlength="80" /></label>',
+        '<label>Идентификатор<input id="ltId" type="text" maxlength="40" spellcheck="false" autocomplete="off" /></label>',
+        '<div class="dialog-error" id="ltError"></div>'
+      ].join(''),
+      onOpen: (body) => body.querySelector('#ltFrom').focus(),
+      actions: [
+        { label: 'Отмена' },
+        {
+          label: 'Добавить',
+          primary: true,
+          onClick: (close, body) => {
+            const from = body.querySelector('#ltFrom').value;
+            const title = body.querySelector('#ltTitle').value.trim();
+            const id = body.querySelector('#ltId').value.trim();
+            const error = body.querySelector('#ltError');
+            if (!title) { error.textContent = 'Укажите название'; return; }
+            if (!SOURCE_ID_RE.test(id)) { error.textContent = 'Идентификатор: латиница в нижнем регистре, цифры, дефис и подчёркивание, до 40 символов'; return; }
+            if (used.has(id)) { error.textContent = `Инструмент «${id}» уже есть`; return; }
+            close({ id, title, from });
+          }
+        }
+      ]
+    });
+    if (!created) return;
+    const base = created.from && isPlainObject(model[created.from]) ? clone(model[created.from]) : {
+      executable: '', command: '{exe} {params} {script}', env: {}, cwd: '{script_dir}', script_kind: 'file',
+      scripts_glob: [], success_exit_codes: [0], failed_checks_exit_codes: [], stop_signal: 'TERM', grace_seconds: 30,
+      version_command: '', run_filter_packs: [], help: ''
+    };
+    model[created.id] = { ...base, title: created.title };
+    KITS.load_tools.open[created.id] = true;
+    syncKit(card);
+    renderKitBody(card);
+  }
+
   function savedCatalog() {
     return isPlainObject(state.config.data_sources) ? state.config.data_sources : {};
   }
@@ -1246,7 +2132,7 @@
   }
 
   // ---- structured context and queries (JSON stays the stored shape) ------
-  const QUERY_DOMAINS = ['jvm', 'database', 'kafka', 'microservices', 'hard_resources', 'lt_framework'];
+  const QUERY_DOMAINS = ['jvm', 'database', 'kafka', 'microservices', 'hard_resources', 'lt_framework', 'lt_generators'];
   const LT_QUERY_PRIORITY = ['influxql', 'promql', 'flux'];
   const QUERY_LANG = {
     promql: { query: 'promql_queries', keys: 'label_keys_list', label: 'PromQL' },
@@ -1825,7 +2711,14 @@
     search.value = state.querySearch || '';
     search.addEventListener('input', () => { state.querySearch = search.value; renderQueryList(); });
     const toolbar = makeEl('div', 'struct-toolbar');
-    toolbar.append(search, makeBtn('Добавить запрос', addQueryRow), makeBtn('Добавить из пакета', () => openPackDialog(state.wizard ? '' : domain), 'btn btn-primary'));
+    const fromPack = makeBtn('Добавить из пакета', () => openPackDialog(state.wizard ? '' : domain), 'btn btn-primary');
+    fromPack.id = 'addFromPackBtn';  // target of the project readiness checklist (projects.js)
+    toolbar.append(search, makeBtn('Добавить запрос', addQueryRow), fromPack);
+    if (domain === 'lt_framework' && rpsRoleCount(queryBlock(domain)) >= 2) {
+      const sum = makeBtn('Суммарный RPS инструментов', () => addSummedRps(sum));
+      sum.title = 'Строка, складывающая общий RPS всех инструментов домена; ступени и SLA будут считаться по ней';
+      toolbar.appendChild(sum);
+    }
     host.appendChild(toolbar);
     const installed = installedPacksLine(domain);
     if (installed) host.appendChild(installed);
@@ -2083,6 +2976,28 @@
   };
   const packUi = { catalog: null, forms: {}, view: { name: 'list', domain: '' }, body: null };
 
+  function rpsRoleCount(block) {
+    const roles = isPlainObject(block && block.roles) ? block.roles : {};
+    const derived = isPlainObject(block && block.derived) ? block.derived : {};
+    return Object.keys(roles).filter((label) => roles[label] === 'lt.rps_total' && !hasOwn(derived, label)).length;
+  }
+  async function addSummedRps(button) {
+    const ok = await ui.confirm({
+      title: 'Суммарный RPS инструментов',
+      message: 'В домене появится строка, складывающая общий RPS всех инструментов (только PromQL), и она станет запросом производительности SLA: ступени будут считаться по всей нагрузке комплексного теста.',
+      confirmText: 'Добавить'
+    });
+    if (!ok) return;
+    button.disabled = true;
+    try {
+      const resp = await postPack('summed_rps', { ...packScope(), use_for_sla: true });
+      await refreshQueriesAndSla();
+      ui.toast(`Добавлена строка «${resp.label}»: ${resp.parts.join(' + ')}`, { tone: 'ok', timeout: 10000 });
+    } catch (e) {
+      ui.toast(`Не удалось добавить: ${e.message}`, { tone: 'error' });
+      button.disabled = false;
+    }
+  }
   function packScope() {
     const scope = {};
     if (state.area) scope.area = state.area;
@@ -2693,7 +3608,7 @@
   }
 
   // ---- prompts -------------------------------------------------------------
-  const PROMPT_DOMAINS = ['overall', 'jvm', 'database', 'kafka', 'microservices', 'hard_resources', 'lt_framework', 'application_logs'];
+  const PROMPT_DOMAINS = ['overall', 'jvm', 'database', 'kafka', 'microservices', 'hard_resources', 'lt_framework', 'lt_generators', 'application_logs'];
   const PLACEHOLDER_RE = /\{[a-z_]+\}/g;
   let promptMarkers = [];
 
@@ -2899,11 +3814,11 @@
     body.innerHTML = '';
     const ids = allServiceIds();
     if (!state.area) {
-      body.innerHTML = '<tr class="empty-row"><td colspan="4">Сервисы принадлежат областям: выберите область в шапке страницы или создайте новую.</td></tr>';
+      body.innerHTML = ui.emptyRow(4, 'Сервисы принадлежат областям: выберите область в боковом меню или создайте новую.');
       return;
     }
     if (!ids.length) {
-      body.innerHTML = '<tr class="empty-row"><td colspan="4">В этой области сервисов пока нет. Добавьте первый — идентификатор используется в имени отчёта и как ключ metrics_config.</td></tr>';
+      body.innerHTML = ui.emptyRow(4, 'В этой области сервисов пока нет. Добавьте первый — идентификатор используется в имени отчёта и как ключ metrics_config.');
       return;
     }
     ids.forEach((id) => {
@@ -3091,7 +4006,7 @@
   }
 
   const ACCENT_PRESETS = [
-    { label: 'Фиолетовый', color: '#6200ee' },
+    { label: 'Фиолетовый', color: '#6c5ce7' },
     { label: 'Синий', color: '#1d4ed8' },
     { label: 'Голубой', color: '#0284c7' },
     { label: 'Бирюзовый', color: '#0f766e' },
@@ -3101,7 +4016,7 @@
     { label: 'Розовый', color: '#be185d' },
     { label: 'Графитовый', color: '#64748b' }
   ];
-  const DEFAULT_ACCENT = '#6200ee';
+  const DEFAULT_ACCENT = '#6c5ce7';
 
   function initAppearance() {
     const stored = String((state.config.appearance || {}).accent || DEFAULT_ACCENT);
@@ -3250,6 +4165,8 @@
 
   document.addEventListener('DOMContentLoaded', async () => {
     try {
+      const servicesBody = $('servicesBody');
+      if (servicesBody) servicesBody.innerHTML = ui.skeletonRows(4, 3);
       await loadAll();
     } catch (e) {
       ui.toast(e.message, { tone: 'error', timeout: 0 });
@@ -3329,7 +4246,7 @@
         return map[state.metricsScope || ''] || (state.metricsScope ? {} : (state.config.metrics_config || {}));
       },
       save: async (data) => {
-        if (!state.area) throw new Error('Выберите область в шапке страницы');
+        if (!state.area) throw new Error('Выберите область в боковом меню');
         const r = await postConfig(configBody('metrics_config', data, state.metricsScope));
         state.config.metrics_config_map = state.config.metrics_config_map || {};
         state.config.metrics_config_map[state.metricsScope || ''] = clone(data);
@@ -3362,10 +4279,34 @@
     });
 
     initWizard();
+    // "#<section>:<element id>" (links of the project readiness checklist) also scrolls to the element and
+    // highlights its row for 2 s; elements rendered after the section loads are waited for up to 3 s.
+    const revealTarget = (id, attempt) => {
+      const target = document.getElementById(id);
+      if (!target) {
+        if ((attempt || 0) < 30) setTimeout(() => revealTarget(id, (attempt || 0) + 1), 100);
+        return;
+      }
+      for (let node = target.parentElement; node; node = node.parentElement) if (node.tagName === 'DETAILS') node.open = true;
+      const box = target.closest('.sla-row, .sla-field, .sla-check') || target;
+      const reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      box.scrollIntoView({ block: 'center', behavior: reduced ? 'auto' : 'smooth' });
+      if (!target.disabled && target.matches('input, select, textarea, button')) target.focus({ preventScroll: true });
+      document.querySelectorAll('.is-highlighted').forEach((node) => node.classList.remove('is-highlighted'));
+      void box.offsetWidth;  // restart the highlight animation on a repeated click
+      box.classList.add('is-highlighted');
+      clearTimeout(box.highlightTimer);
+      box.highlightTimer = setTimeout(() => box.classList.remove('is-highlighted'), 2000);
+    };
     const activateFromHash = () => {
       if (state.wizard) return;
-      const hash = (location.hash || '').replace('#', '');
-      if (hash && document.getElementById(`sec-${hash}`)) activateSection(hash);
+      let raw = (location.hash || '').replace('#', '');
+      try { raw = decodeURIComponent(raw); } catch (e) { /* malformed escape: use as is */ }
+      const [hash, targetId] = raw.split(':');
+      if (hash && document.getElementById(`sec-${hash}`)) {
+        activateSection(hash);
+        if (targetId) revealTarget(targetId, 0);
+      }
     };
     activateFromHash();
     window.addEventListener('hashchange', activateFromHash);

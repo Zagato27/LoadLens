@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% set active_nav = 'launch' %}
+{% block title %}Прогон теста{% endblock %}
+{% block head %}
+<script src="/static/vendor/chart.umd.js"></script>
+<style>
+  .run-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+  .run-head h2 { margin: 0 0 6px; }
+  .run-meta { color: var(--text-muted); font-size: 13px; line-height: 1.6; }
+  .run-message { margin-top: 6px; font-size: 14px; }
+  .run-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 16px 0 10px; }
+  .tile { border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev); padding: 10px 12px; }
+  .tile .label { font-size: 12px; color: var(--text-dim); }
+  .tile .value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .chart-card { border: 1px solid var(--border); border-radius: 12px; background: var(--bg-elev); padding: 12px 16px; }
+  /* Chart.js sizes the canvas to its parent: the parent needs a height of its own. */
+  .chart-box { position: relative; height: 280px; }
+  .chart-box.small { height: 200px; }
+  .chart-title { font-size: 13px; color: var(--text-muted); margin-bottom: 6px; }
+  .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .charts-grid .wide { grid-column: 1 / -1; }
+  @media (max-width: 900px) { .charts-grid { grid-template-columns: 1fr; } }
+  .live-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 8px; }
+  .live-window { display: flex; gap: 6px; flex-wrap: wrap; }
+  .live-window .btn.active { border-color: var(--accent); color: var(--accent); }
+  .live-fresh { font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  .live-fresh.stale { color: var(--warn-fg); }
+  .live-note { font-size: 12px; color: var(--text-dim); margin-top: 6px; min-height: 16px; }
+  .inst-table td { vertical-align: top; }
+  .inst-table .msg { font-size: 12px; color: var(--text-muted); max-width: 360px; }
+  .inst-table details pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px; padding: 8px; margin: 6px 0 0; }
+  .inst-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .log-card { border: 1px solid var(--border); border-radius: 12px; background: var(--bg-elev); padding: 12px 16px; margin-top: 16px; }
+  .log-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .log-card pre { white-space: pre-wrap; word-break: break-all; max-height: 420px; overflow: auto; background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-size: 12px; margin: 8px 0 0; }
+</style>
+{% endblock %}
+{% block content %}
+  <nav class="breadcrumbs" aria-label="Навигация по разделу"><a href="/launch">Запуск теста</a><span class="sep" aria-hidden="true">›</span><span class="current" id="runCrumb" aria-current="page">Прогон</span></nav>
+  <section id="runRoot" data-run-id="{{ run_id }}">
+    <div class="run-head page-header">
+      <div class="page-heading">
+        <h2 id="runTitle">Прогон</h2>
+        <div class="run-meta" id="runMeta"></div>
+        <div class="run-message" id="runMessage"></div>
+      </div>
+      <div class="run-actions page-actions">
+        <span class="pill pill-lg na" id="runStatus">…</span>
+        <a class="btn btn-primary" id="reportLink" href="#" style="display:none">Открыть отчёт</a>
+        <a class="btn" id="jobLink" href="#" style="display:none">Задача отчёта</a>
+        <a class="btn" id="repeatLink" href="#">Повторить</a>
+        <button type="button" class="btn btn-danger" id="stopAll" style="display:none">Остановить прогон</button>
+      </div>
+    </div>
+
+    <div class="tiles" id="tiles">
+      <div class="tile"><div class="label">RPS</div><div class="value" id="tileRps">—</div></div>
+      <div class="tile"><div class="label">Ошибки, %</div><div class="value" id="tileErr">—</div></div>
+      <div class="tile"><div class="label">p95, мс</div><div class="value" id="tileP95">—</div></div>
+      <div class="tile"><div class="label">Пользователи</div><div class="value" id="tileVus">—</div></div>
+    </div>
+    <div class="live-head">
+      <div class="live-window" id="liveWindow" role="group" aria-label="Окно графиков">
+        <button type="button" class="btn btn-sm active" data-window="0" aria-pressed="true">Весь прогон</button>
+        <button type="button" class="btn btn-sm" data-window="15" aria-pressed="false">15 мин</button>
+        <button type="button" class="btn btn-sm" data-window="30" aria-pressed="false">30 мин</button>
+        <button type="button" class="btn btn-sm" data-window="60" aria-pressed="false">60 мин</button>
+      </div>
+      <span class="live-fresh" id="liveFresh" aria-live="polite"></span>
+    </div>
+    <div class="charts-grid">
+      <div class="chart-card wide">
+        <div class="chart-title">RPS и доля ошибок</div>
+        <div class="chart-box"><canvas id="chartRps" aria-label="RPS и доля ошибок прогона"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">p95 времени ответа, мс</div>
+        <div class="chart-box small"><canvas id="chartP95" aria-label="p95 времени ответа прогона"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Пользователи</div>
+        <div class="chart-box small"><canvas id="chartVus" aria-label="Виртуальные пользователи прогона"></canvas></div>
+      </div>
+    </div>
+    <div class="live-note" id="liveNote"></div>
+
+    <h3 style="margin-top:20px">Инстансы</h3>
+    <div class="report-table-shell">
+      <table class="data-table inst-table">
+        <thead><tr><th>Инстанс</th><th>Генератор и инструмент</th><th>Статус</th><th>Время</th><th></th></tr></thead>
+        <tbody id="instancesBody"></tbody>
+      </table>
+    </div>
+
+    <section class="log-card" id="logCard" style="display:none">
+      <div class="log-head">
+        <strong id="logTitle">Журнал</strong>
+        <span class="run-actions">
+          <label class="dim" style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" id="logFollow" checked style="width:auto" /> обновлять</label>
+          <button type="button" class="btn btn-sm" id="logRefresh">Обновить</button>
+          <button type="button" class="btn btn-sm btn-ghost" id="logClose">Закрыть</button>
+        </span>
+      </div>
+      <pre id="logText"></pre>
+    </section>
+  </section>
+{% endblock %}
+{% block scripts %}
+<script defer src="/static/js/launch_run.js"></script>
+{% endblock %}

@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 from requests.auth import HTTPBasicAuth
 
 from AI.main import uploadFromLLM
+from AI.query_packs import apply_run_filter, strip_live_rows
 from confluence_manager.update_confluence_template import (
     copy_confluence_page,
     render_llm_markdown,
@@ -150,6 +151,7 @@ _PROMPT_DOMAIN_FILES = {
     'microservices': 'microservices_prompt.txt',
     'hard_resources': 'hard_resources_prompt.txt',
     'lt_framework': 'lt_framework_prompt.txt',
+    'lt_generators': 'lt_generators_prompt.txt',
     'application_logs': 'application_logs_prompt.txt',
 }
 
@@ -251,7 +253,7 @@ def _prompt_templates_for_scope(area_name: str | None, service_name: str | None)
 
 def _domain_keys_from_config(cfg: dict) -> list[str]:
     queries = (cfg.get('queries') or {})
-    preferred_order = ['jvm', 'database', 'kafka', 'microservices', 'hard_resources', 'lt_framework']
+    preferred_order = ['jvm', 'database', 'kafka', 'microservices', 'hard_resources', 'lt_framework', 'lt_generators']
     keys = [k for k in preferred_order if k in queries]
     logs_cfg = cfg.get('logs_source') if isinstance(cfg.get('logs_source'), dict) else {}
     if logs_cfg.get('enabled'):
@@ -469,7 +471,7 @@ def _prompts_override_for_area(area_name: str | None) -> dict:
     return prompts if isinstance(prompts, dict) else {}
 
 
-def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = False, web_only: bool = False, run_name: str | None = None, test_type: str | None = None, project_area: str | None = None, progress_callback=None):
+def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = False, web_only: bool = False, run_name: str | None = None, test_type: str | None = None, project_area: str | None = None, progress_callback=None, run_tag: str | None = None, run_filter_packs: list[str] | None = None):
     """Формирует отчёт по нагрузочному тесту (Confluence и/или веб-интерфейс).
 
     Параметры:
@@ -482,6 +484,8 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
         run_name (str | None): Пользовательское имя запуска.
         test_type (str | None): Профиль теста (step/soak/...).
         progress_callback (callable | None): Колбэк прогресса (msg, percent).
+        run_tag (str | None): Тег прогона, запущенного из LoadLens: запросы пакетов из
+            ``run_filter_packs`` читают только его метрики (см. RunFilter в AI/query_packs).
 
     Возвращает:
         dict: Информация о созданной странице (`page_id`, `page_url`, `run_name`).
@@ -515,6 +519,12 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
     if not service_config:
         raise ValueError(f"Конфигурация для сервиса '{service}' в области '{area_name}' не найдена.")
     ef_cfg = _effective_config_for_scope(area_name, service)
+    # Rows for the live charts of a running test (RPS by LoadLens instance) are not report data.
+    ef_cfg["queries"] = strip_live_rows(ef_cfg.get("queries") or {})
+    if run_tag:
+        ef_cfg["queries"], _filtered_packs = apply_run_filter(ef_cfg.get("queries") or {}, run_tag, run_filter_packs)
+        if _filtered_packs:
+            logger.info("Run tag %s applied to query packs: %s", run_tag, ", ".join(_filtered_packs))
     base_prompt_templates = _prompt_templates_for_scope(area_name, service)
     domain_keys = _domain_keys_from_config(ef_cfg)
     disabled_domains = _service_disabled_domains(area_name, service)

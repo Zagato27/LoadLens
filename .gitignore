@@ -70,3 +70,8 @@ loadlens_sber/
 
 # Wheels for the dev-stack FastAPI app, downloaded on the host (docker/dev-stack/README.md)
 docker/dev-stack/pyapp/wheels/
+# Gatling bundle of the dev stack, unpacked on the host (docker/dev-stack/README.md)
+docker/dev-stack/gatling/bundle/
+# SSH key pair of the dev-stack load generator, generated on the host (docker/dev-stack/README.md)
+docker/dev-stack/generator/keys/
+docker/dev-stack/generator/wheels/

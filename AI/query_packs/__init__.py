@@ -6,9 +6,16 @@ then points the SLA references at the pack queries. See ``docs/query-packs.md`` 
 """
 
 from .blocks import (
+    DERIVED_KEY,
+    SUMMED_RPS_LABEL,
     BlockConflictError,
+    DerivedRowError,
+    add_summed_rps,
+    derived_rows,
+    refresh_derived,
     MergePlan,
     SlaUpdate,
+    apply_run_filter,
     block_labels,
     block_roles,
     filled_languages,
@@ -22,8 +29,10 @@ from .blocks import (
     prune_queries,
     query_meta,
     resolve_sla_refs,
+    run_filter_variables,
     series_annotations,
     sla_update,
+    strip_live_rows,
     domain_title,
     domain_titles,
     update_selection,
@@ -31,9 +40,15 @@ from .blocks import (
 from .catalog import Catalog, PackCatalogError, load_catalog
 from .models import CATEGORY_TITLES, LANGUAGE_TITLES, Bundle, QueryPack
 from .render import PackRenderError, RenderedPack, RenderedQuery, render_pack, resolve_variables
-from .roles import READINESS_SLA_FIELDS, ROLES, SLA_FIELDS, UNIT_TITLES, Role, role_for_sla_field
+from .roles import LIVE_ONLY_ROLES, READINESS_SLA_FIELDS, ROLES, SLA_FIELDS, UNIT_TITLES, Role, role_for_sla_field
 
 __all__ = [
+    "DERIVED_KEY",
+    "DerivedRowError",
+    "SUMMED_RPS_LABEL",
+    "add_summed_rps",
+    "derived_rows",
+    "refresh_derived",
     "BlockConflictError",
     "Bundle",
     "CATEGORY_TITLES",
@@ -51,6 +66,9 @@ __all__ = [
     "SLA_FIELDS",
     "SlaUpdate",
     "UNIT_TITLES",
+    "apply_run_filter",
+    "strip_live_rows",
+    "LIVE_ONLY_ROLES",
     "block_labels",
     "block_roles",
     "filled_languages",
@@ -68,6 +86,7 @@ __all__ = [
     "resolve_variables",
     "role_for_sla_field",
     "resolve_sla_refs",
+    "run_filter_variables",
     "series_annotations",
     "sla_update",
     "domain_title",

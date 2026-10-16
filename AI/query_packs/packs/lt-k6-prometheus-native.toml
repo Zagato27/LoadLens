@@ -1,6 +1,6 @@
 schema_version = 1
 id = "lt-k6-prometheus-native"
-version = 1
+version = 2
 title = "k6 → Prometheus remote write (native histograms)"
 category = "load_tool"
 stack = ["k6", "prometheus"]
@@ -34,6 +34,11 @@ title = "Модель нагрузки сценария"
 default = "open"
 choices = ["open", "closed"]
 help = "open — executors constant/ramping-arrival-rate, closed — ramping-vus, constant-vus, per-vu-iterations."
+
+[run_filter]
+variable = "matchers"
+value = 'testid="{{run_tag}}"'
+join = ", "
 
 [sla]
 max_performance_query = "@lt.rps_total"
@@ -118,3 +123,12 @@ unit = "percent"
 query = '100 * avg by (check) (k6_checks_rate{ {{matchers}} })'
 keys = ["check"]
 description = "Доля успешных проверок k6, %."
+
+[[queries]]
+label = "LT (k6 native): RPS by LoadLens instance"
+role = "lt.rps_by_instance"
+unit = "per_second"
+query = 'sum by (lt_instance) (rate(k6_http_reqs_total{ {{matchers}} }[{{window}}]))'
+keys = ["lt_instance"]
+since = 2
+description = "RPS каждого инстанса прогона LoadLens (тег lt_instance) для живых графиков страницы прогона; в отчёт не входит."

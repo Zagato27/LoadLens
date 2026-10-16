@@ -61,6 +61,9 @@ OTHER_VALUES = {
     "write_period_sec": "2",
     "prefix": "tank_",
     "uuid": "8f1c.*",
+    "root_prefix": "perf_gatling",
+    "window_sec": "60",
+    "testid": "release-2.*",
 }
 
 

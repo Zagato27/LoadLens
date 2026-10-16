@@ -1,6 +1,6 @@
 schema_version = 1
 id = "lt-k6-influxql"
-version = 1
+version = 3
 title = "k6 → InfluxDB 1.x (InfluxQL)"
 category = "load_tool"
 stack = ["k6", "influxdb"]
@@ -19,11 +19,21 @@ http_req_failed — доля запросов с неожидаемым стат
 checks — результаты проверок k6. Серии group и name — группа сценария и имя запроса.
 """
 
+[variables.testid]
+title = "Тег testid (регулярное выражение)"
+default = ".*"
+pattern = '^[^/\n\r]*$'
+help = "Значение тега testid, с которым запущен k6 (--tag testid=...). По умолчанию — все прогоны; прогоны, запущенные из LoadLens, подставляют свой тег сами."
+
 [variables.load_model]
 title = "Модель нагрузки сценария"
 default = "open"
 choices = ["open", "closed"]
 help = "open — executors constant/ramping-arrival-rate, closed — ramping-vus, constant-vus, per-vu-iterations."
+
+[run_filter]
+variable = "testid"
+value = "{{run_tag}}"
 
 [sla]
 max_performance_query = "@lt.rps_total"
@@ -39,7 +49,7 @@ load_model = "{{load_model}}"
 label = "LT (InfluxQL): RPS by group & name"
 role = "lt.rps_by_request"
 unit = "per_second"
-query = '''SELECT sum("value") FROM "http_reqs" WHERE $timeFilter GROUP BY time(1s), "group"::tag, "name"::tag fill(null)'''
+query = '''SELECT sum("value") FROM "http_reqs" WHERE "testid" =~ /^{{testid}}$/ AND $timeFilter GROUP BY time(1s), "group"::tag, "name"::tag fill(null)'''
 keys = ["group", "name"]
 description = "Запросы в секунду по группе и имени запроса."
 
@@ -47,7 +57,7 @@ description = "Запросы в секунду по группе и имени 
 label = "LT (InfluxQL): checks per second by group & check"
 role = "lt.checks_rate"
 unit = "per_second"
-query = '''SELECT sum("value") FROM "checks" WHERE $timeFilter GROUP BY time(1s), "check", "group"::tag fill(none)'''
+query = '''SELECT sum("value") FROM "checks" WHERE "testid" =~ /^{{testid}}$/ AND $timeFilter GROUP BY time(1s), "check", "group"::tag fill(none)'''
 keys = ["group", "check"]
 description = "Успешные проверки k6 в секунду."
 
@@ -55,7 +65,7 @@ description = "Успешные проверки k6 в секунду."
 label = "LT (InfluxQL): http_req_duration p95(ms) by group & name"
 role = "lt.p95_by_request"
 unit = "ms"
-query = '''SELECT percentile("value", 95) FROM "http_req_duration" WHERE $timeFilter GROUP BY time($__interval), "group"::tag, "name"::tag fill(null)'''
+query = '''SELECT percentile("value", 95) FROM "http_req_duration" WHERE "testid" =~ /^{{testid}}$/ AND $timeFilter GROUP BY time($__interval), "group"::tag, "name"::tag fill(null)'''
 keys = ["group", "name"]
 description = "p95 времени ответа по запросам, мс."
 
@@ -64,7 +74,7 @@ label = "LT (InfluxQL): RPS sum by all groups"
 role = "lt.rps_total"
 unit = "per_second"
 required = true
-query = '''SELECT sum("value") as "all" FROM "http_reqs" WHERE $timeFilter GROUP BY "all", time(1s) fill(null)'''
+query = '''SELECT sum("value") as "all" FROM "http_reqs" WHERE "testid" =~ /^{{testid}}$/ AND $timeFilter GROUP BY "all", time(1s) fill(null)'''
 keys = ["all"]
 description = "Общий RPS теста. По нему ищутся ступени нагрузки и стабильный максимум."
 
@@ -72,14 +82,14 @@ description = "Общий RPS теста. По нему ищутся ступе�
 label = "LT (InfluxQL): http_req_duration p95(ms) total"
 role = "lt.p95_total"
 unit = "ms"
-query = '''SELECT percentile("value", 95) FROM "http_req_duration" WHERE $timeFilter GROUP BY time($__interval) fill(null)'''
+query = '''SELECT percentile("value", 95) FROM "http_req_duration" WHERE "testid" =~ /^{{testid}}$/ AND $timeFilter GROUP BY time($__interval) fill(null)'''
 description = "p95 времени ответа всех запросов, мс."
 
 [[queries]]
 label = "LT (InfluxQL): http_req_duration p99(ms) total"
 role = "lt.p99_total"
 unit = "ms"
-query = '''SELECT percentile("value", 99) FROM "http_req_duration" WHERE $timeFilter GROUP BY time($__interval) fill(null)'''
+query = '''SELECT percentile("value", 99) FROM "http_req_duration" WHERE "testid" =~ /^{{testid}}$/ AND $timeFilter GROUP BY time($__interval) fill(null)'''
 description = "p99 времени ответа всех запросов, мс."
 
 [[queries]]
@@ -87,21 +97,21 @@ label = "LT (InfluxQL): http_req_duration mean(ms)"
 role = "lt.mean_latency_total"
 unit = "ms"
 required = true
-query = '''SELECT mean("value") FROM "http_req_duration" WHERE $timeFilter GROUP BY time($__interval) fill(null)'''
+query = '''SELECT mean("value") FROM "http_req_duration" WHERE "testid" =~ /^{{testid}}$/ AND $timeFilter GROUP BY time($__interval) fill(null)'''
 description = "Среднее время ответа, мс. Нужно прогнозу мощностей."
 
 [[queries]]
 label = "LT (InfluxQL): error rate (%)"
 role = "lt.error_rate_pct"
 unit = "percent"
-query = '''SELECT mean("value") * 100 FROM "http_req_failed" WHERE $timeFilter GROUP BY time($__interval) fill(null)'''
+query = '''SELECT mean("value") * 100 FROM "http_req_failed" WHERE "testid" =~ /^{{testid}}$/ AND $timeFilter GROUP BY time($__interval) fill(null)'''
 description = "Доля неуспешных запросов (http_req_failed), %. Есть в k6 0.31 и новее."
 
 [[queries]]
 label = "LT (InfluxQL): failed requests per second by group & name"
 role = "lt.errors_by_request"
 unit = "per_second"
-query = '''SELECT sum("value") FROM "http_req_failed" WHERE $timeFilter GROUP BY time(1s), "group"::tag, "name"::tag fill(null)'''
+query = '''SELECT sum("value") FROM "http_req_failed" WHERE "testid" =~ /^{{testid}}$/ AND $timeFilter GROUP BY time(1s), "group"::tag, "name"::tag fill(null)'''
 keys = ["group", "name"]
 description = "Неуспешные запросы в секунду по запросам."
 
@@ -109,5 +119,14 @@ description = "Неуспешные запросы в секунду по зап
 label = "LT (InfluxQL): VUs"
 role = "lt.vus"
 unit = "count"
-query = '''SELECT max("value") FROM "vus" WHERE $timeFilter GROUP BY time(1s) fill(null)'''
+query = '''SELECT max("value") FROM "vus" WHERE "testid" =~ /^{{testid}}$/ AND $timeFilter GROUP BY time(1s) fill(null)'''
 description = "Активные виртуальные пользователи."
+
+[[queries]]
+label = "LT (InfluxQL): RPS by LoadLens instance"
+role = "lt.rps_by_instance"
+unit = "per_second"
+query = '''SELECT sum("value") FROM "http_reqs" WHERE "testid" =~ /^{{testid}}$/ AND $timeFilter GROUP BY "lt_instance", time(1s) fill(null)'''
+keys = ["lt_instance"]
+since = 3
+description = "RPS каждого инстанса прогона LoadLens (тег lt_instance) для живых графиков страницы прогона; в отчёт не входит."

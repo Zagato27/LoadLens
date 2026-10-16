@@ -3,7 +3,7 @@
 Модуль `AI/` собирает метрики по доменам, строит компактные “контекст‑пакеты” и выполняет многошаговый анализ LLM. Результаты возвращаются как текст (для отображения) и как строгие структуры (JSON) для программной обработки и сохранения.
 
 ## Возможности
-- Домены анализа: JVM, базы данных, Kafka, микросервисы, инфраструктурные ресурсы; опционально — `lt_framework` (метрики инструмента нагрузки) и `application_logs` (агрегированные ERROR‑логи из OpenSearch, включается `logs_source.enabled`).
+- Домены анализа: JVM, базы данных, Kafka, микросервисы, инфраструктурные ресурсы; опционально — `lt_framework` (метрики инструмента нагрузки), `lt_generators` (ресурсы генераторов нагрузки) и `application_logs` (агрегированные ERROR‑логи из OpenSearch, включается `logs_source.enabled`).
 - Контекст‑пакеты: резюме по сериям (средние/минимумы/максимумы/последние значения, время пиков, окна аномалий).
 - Двухпроходный вывод: k кандидатов → приведение к строгому JSON → выбор лучшего по G-Eval-lite judge и верификации на данных.
 - Вычисление “пиковой производительности” (peak_performance) в итоговом JSON при наличии соответствующих метрик; в остальных доменах `peak_performance` вырезается.
@@ -45,7 +45,7 @@ GigaChat подключается через `langchain_gigachat` с mTLS (`cert
 
 ## Judge Layer
 - Judge использует компактную form-filling схему: `scores[].rubric` плюс совместимые поля `factual`, `completeness`, `specificity`, `overall`.
-- Доменный `domain_key` выбирает статическую rubric file (`jvm`, `database`, `kafka`, `microservices`, `hard_resources`, `lt_framework`, `application_logs`, `final`).
+- Доменный `domain_key` выбирает статическую rubric file (`jvm`, `database`, `kafka`, `microservices`, `hard_resources`, `lt_framework`, `lt_generators`, `application_logs`, `final`).
 - Итоговый выбор остаётся гибридным: `0.6 * judge_overall + 0.35 * score_candidate_by_data() + 0.05 * confidence`.
 - При одном кандидате judge не вызывается (выбирать не из чего): в `scores` сохраняются `data_score`, `data_score_details` и `confidence`, `judge_meta.skipped = true`; отчёт показывает уровень достоверности по проверке данных.
 - Если judge упал или оценил не всех кандидатов, его отсутствие не считается нулём: кандидаты ранжируются по `(0.35 * data + 0.05 * confidence) / 0.4`, в `judge_meta` пишутся `unavailable = true` и `reason` (`error`, `no_scores`, `partial_scores`), а ключа `judge` нет. Разбор ответа judge принимает список в тексте или блоке кода, ключи `scores`/`results`/`candidates`, словарь по номерам и нумерацию с 1.
@@ -78,7 +78,7 @@ start_ts = 1740126600  # UNIX-время (сек)
 end_ts = 1740136200
 
 res = uploadFromLLM(start_ts, end_ts, save_to_db=False)
-print(res.keys())  # jvm, database, kafka, ms, hard_resources, lt_framework?, final, *_parsed, scores
+print(res.keys())  # jvm, database, kafka, ms, hard_resources, lt_framework?, lt_generators?, final, *_parsed, scores
 ```
 
 ## Отладка

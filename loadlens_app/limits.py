@@ -24,6 +24,12 @@ DEFAULTS: dict[str, Optional[int]] = {
     "llm_explanations_per_user_per_day": 50,
     # System context imported from a document (one model call each).
     "llm_context_imports_per_user_per_day": 20,
+    # Load test runs started from the UI that are still active (running, waiting for metrics, reporting).
+    "max_parallel_load_tests": 5,
+    "max_parallel_load_tests_per_user": 3,
+    # Instances in one run and the longest run: the generator stops the tool after this time anyway.
+    "max_load_test_instances": 20,
+    "max_load_test_hours": 24,
 }
 
 _STEP = re.compile(r"^\s*(\d+)\s*(s|sec|second|seconds|m|min|t|minute|minutes|h|hour|hours|d|day|days)\s*$", re.I)
@@ -94,6 +100,16 @@ def check_job_slot(running_total: int, running_for_owner: int, config: Optional[
         raise LimitError(f"У вас уже выполняется задач: {running_for_owner}, дождитесь их завершения")
 
 
+def check_load_test_slot(running_total: int, running_for_owner: int, config: Optional[dict] = None) -> None:
+    """Refuses a new load test run when too many runs are active on the server or for the user."""
+    total = limit("max_parallel_load_tests", config)
+    if total is not None and running_total >= total:
+        raise LimitError(f"Уже идёт прогонов: {running_total}, допустимо {total}. Дождитесь завершения или остановите один из них")
+    per_owner = limit("max_parallel_load_tests_per_user", config)
+    if per_owner is not None and running_for_owner >= per_owner:
+        raise LimitError(f"У вас уже идёт прогонов: {running_for_owner}, допустимо {per_owner}")
+
+
 class DailyBudget:
     """Counts uses per user and kind within the current calendar day."""
 
@@ -149,6 +165,7 @@ __all__ = [
     "DailyBudget",
     "LimitError",
     "check_job_slot",
+    "check_load_test_slot",
     "check_report_window",
     "consume_llm",
     "refund_llm",

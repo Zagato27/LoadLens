@@ -35,6 +35,7 @@
       <div id="pageTimeRange">Время теста: —</div>
     </div>
     <div class="page-actions">
+      <button type="button" id="printReport" class="btn" title="Все вкладки, графики в светлой теме; в диалоге печати можно выбрать «Сохранить как PDF»">Печать / PDF</button>
       <a id="forecastLink" class="btn" href="#" hidden>Прогноз мощностей</a>
       <button type="button" id="publishConfluence" class="btn" data-min-role="engineer">Добавить отчет в Confluence</button>
       <a id="confluencePageLink" href="#" target="_blank" rel="noopener noreferrer" style="display:none;">Открыть в Confluence</a>
@@ -76,5 +77,6 @@
   <div id="systemContextBox" class="editor-card" style="display:none;"></div>
 {% endblock %}
 {% block scripts %}
+<script defer src="/static/js/charts.js"></script>
 <script defer src="/static/js/reports.js"></script>
 {% endblock %}

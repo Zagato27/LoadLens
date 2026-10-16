@@ -52,6 +52,13 @@
 
   <form id="reportForm" novalidate>
     <fieldset class="form-section">
+      <legend>Сервис</legend>
+      <div id="serviceCombo" class="service-combo"></div>
+      <input type="hidden" id="service" name="service" />
+      <div class="field-hint" id="serviceHint">Список сервисов задаётся в настройках (раздел «Сервисы»).</div>
+    </fieldset>
+
+    <fieldset class="form-section">
       <legend>Период теста <span class="tz-label" id="tzLabel"></span></legend>
       <div class="presets seg-group" id="rangePresets" aria-label="Быстрый выбор периода">
         <button type="button" class="seg-btn" data-minutes="30" aria-pressed="false">Последние 30 мин</button>
@@ -70,14 +77,11 @@
         </div>
       </div>
       <div class="field-hint" id="rangeHint"></div>
-    </fieldset>
-
-    <fieldset class="form-section">
-      <legend>Сервис</legend>
-      <select id="service" name="service" required aria-describedby="serviceHint">
-        <option value="">Загрузка списка сервисов…</option>
-      </select>
-      <div class="field-hint" id="serviceHint">Список сервисов задаётся в настройках (раздел «Сервисы»).</div>
+      <div class="lt-windows" id="ltWindows" hidden>
+        <span class="lt-windows-label" id="ltWindowsLabel">Найденные прогоны:</span>
+        <div class="lt-windows-chips" id="ltWindowsChips" role="group" aria-labelledby="ltWindowsLabel"></div>
+      </div>
+      <div class="field-hint" id="ltWindowsHint" aria-live="polite"></div>
     </fieldset>
 
     <fieldset class="form-section">
@@ -147,6 +151,7 @@
       <div class="pct" id="progressPct">0%</div>
     </div>
     <div class="progressBarWrap"><div id="progressBarFill" class="progressBarFill"></div></div>
+    <div class="progress-timing"><span id="progressElapsed"></span><span id="progressTypical" hidden></span></div>
     <div id="progressMessage" class="progress-message">Инициализация…</div>
     <ol class="phase-list" id="phaseList">
       <li data-phase="prepare">Подготовка</li>
@@ -173,5 +178,6 @@
   </section>
 {% endblock %}
 {% block scripts %}
+<script defer src="/static/js/service_picker.js"></script>
 <script defer src="/static/js/new.js"></script>
 {% endblock %}

@@ -13,7 +13,8 @@ from dataclasses import dataclass
 from typing import Mapping
 
 SOURCE_TYPES: tuple[str, ...] = ("prometheus", "grafana_proxy", "influxdb")
-APP_DOMAINS: tuple[str, ...] = ("jvm", "database", "kafka", "microservices", "hard_resources")
+# lt_generators: resources of the load generator hosts (optional domain of the load test report).
+APP_DOMAINS: tuple[str, ...] = ("jvm", "database", "kafka", "microservices", "hard_resources", "lt_generators")
 LT_DOMAIN = "lt_framework"
 DEFAULT_BINDING = "default"
 BINDING_DOMAINS: tuple[str, ...] = APP_DOMAINS + (LT_DOMAIN,)

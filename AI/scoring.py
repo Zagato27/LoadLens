@@ -40,6 +40,7 @@ JUDGE_RUBRIC_FILES = {
     "microservices": os.path.join(JUDGE_RUBRIC_DIR, "microservices.txt"),
     "hard_resources": os.path.join(JUDGE_RUBRIC_DIR, "hard_resources.txt"),
     "lt_framework": os.path.join(JUDGE_RUBRIC_DIR, "lt_framework.txt"),
+    "lt_generators": os.path.join(JUDGE_RUBRIC_DIR, "lt_generators.txt"),
     "application_logs": os.path.join(JUDGE_RUBRIC_DIR, "application_logs.txt"),
     "final": os.path.join(JUDGE_RUBRIC_DIR, "final.txt"),
 }

@@ -64,9 +64,12 @@ DOMAIN_TITLES: Dict[str, str] = {
     "microservices": "Микросервисы",
     "hard_resources": "Ресурсы узлов",
     "lt_framework": "Нагрузочный инструмент",
+    "lt_generators": "Ресурсы генераторов нагрузки",
     APPLICATION_LOGS_DOMAIN: "Логи приложений",
     "final": "Итог",
 }
+# Optional domain: CPU, memory and network of the load generators (node_exporter on the generator hosts).
+GENERATORS_DOMAIN = "lt_generators"
 
 # Progress budget (percent) for each pipeline phase; update_page.py owns 0-5 and 98-100.
 PROGRESS_COLLECT_START = 10
@@ -2813,6 +2816,8 @@ def uploadFromLLM(
     domain_keys = ["jvm", "database", "kafka", "microservices", "hard_resources"]
     if isinstance(queries.get("lt_framework"), dict):
         domain_keys.append("lt_framework")
+    if isinstance(queries.get(GENERATORS_DOMAIN), dict):
+        domain_keys.append(GENERATORS_DOMAIN)
     logs_cfg = cfg.get("logs_source") or CONFIG.get("logs_source") or {}
     if isinstance(logs_cfg, dict) and bool(logs_cfg.get("enabled")):
         domain_keys.append(APPLICATION_LOGS_DOMAIN)
@@ -3071,6 +3076,8 @@ def uploadFromLLM(
     prompt_overall = read_prompt_from_file(os.path.join(prompt_dir, "overall_prompt.txt"))
     prompt_lt_framework = read_prompt_from_file(os.path.join(prompt_dir, "lt_framework_prompt.txt")) if os.path.exists(os.path.join(prompt_dir, "lt_framework_prompt.txt")) else "Проанализируйте метрики инструмента нагрузочного тестирования (lt_framework)."
     prompt_application_logs = read_prompt_from_file(os.path.join(prompt_dir, "application_logs_prompt.txt")) if os.path.exists(os.path.join(prompt_dir, "application_logs_prompt.txt")) else "Проанализируйте агрегированные ERROR-логи приложений из OpenSearch."
+    _generators_prompt_path = os.path.join(prompt_dir, f"{GENERATORS_DOMAIN}_prompt.txt")
+    prompt_generators = read_prompt_from_file(_generators_prompt_path) if os.path.exists(_generators_prompt_path) else "Проанализируйте ресурсы генераторов нагрузки: не упёрлись ли они в CPU, память или сеть."
     if isinstance(prompts_override, dict):
         prompt_jvm = prompts_override.get("jvm", prompt_jvm)
         prompt_database = prompts_override.get("database", prompt_database)
@@ -3080,6 +3087,7 @@ def uploadFromLLM(
         prompt_overall = prompts_override.get("overall", prompt_overall)
         prompt_lt_framework = prompts_override.get("lt_framework", prompt_lt_framework)
         prompt_application_logs = prompts_override.get(APPLICATION_LOGS_DOMAIN, prompt_application_logs)
+        prompt_generators = prompts_override.get(GENERATORS_DOMAIN) or prompt_generators
 
     context_guide = read_prompt_from_file(os.path.join(prompt_dir, "_context_guide.txt"))
     response_format = read_prompt_from_file(os.path.join(prompt_dir, "_response_format.txt"))
@@ -3103,6 +3111,7 @@ def uploadFromLLM(
     prompt_hard_resources = _domain_prompt(prompt_hard_resources, "hard_resources")
     prompt_lt_framework = _domain_prompt(prompt_lt_framework, "lt_framework")
     prompt_application_logs = _domain_prompt(prompt_application_logs, APPLICATION_LOGS_DOMAIN)
+    prompt_generators = _domain_prompt(prompt_generators, GENERATORS_DOMAIN)
 
     include_tables = bool(((CONFIG.get("llm", {}) or {}).get("include_markdown_tables_in_context", False)))
     jvm_full_data = domain_data["jvm"]["markdown"]; jvm_pack = domain_data["jvm"]["pack"]; jvm_ctx = domain_data["jvm"]["ctx"]
@@ -3112,6 +3121,8 @@ def uploadFromLLM(
     hr_full_data = domain_data["hard_resources"]["markdown"]; hr_pack = domain_data["hard_resources"]["pack"]; hr_ctx = domain_data["hard_resources"]["ctx"]
     lt_full_data = domain_data.get("lt_framework", {}).get("markdown", "")
     lt_pack = domain_data.get("lt_framework", {}).get("pack", {})
+    generators_full_data = domain_data.get(GENERATORS_DOMAIN, {}).get("markdown", "")
+    generators_pack = domain_data.get(GENERATORS_DOMAIN, {}).get("pack", {})
     application_logs_full_data = domain_data.get(APPLICATION_LOGS_DOMAIN, {}).get("markdown", "")
     application_logs_pack = domain_data.get(APPLICATION_LOGS_DOMAIN, {}).get("pack", {})
     application_logs_ctx = domain_data.get(APPLICATION_LOGS_DOMAIN, {}).get(
@@ -3149,6 +3160,9 @@ def uploadFromLLM(
     if "lt_framework" in domain_keys and _is_enabled("lt_framework"):
         lt_ctx = domain_data.get("lt_framework", {}).get("ctx", json.dumps({"domain":"lt_framework","sections":[]}, ensure_ascii=False))
         domains_jobs.append(("lt_framework", prompt_lt_framework, lt_ctx))
+    if GENERATORS_DOMAIN in domain_keys and _is_enabled(GENERATORS_DOMAIN):
+        generators_ctx = domain_data.get(GENERATORS_DOMAIN, {}).get("ctx", json.dumps({"domain": GENERATORS_DOMAIN, "sections": []}, ensure_ascii=False))
+        domains_jobs.append((GENERATORS_DOMAIN, prompt_generators, generators_ctx))
     if APPLICATION_LOGS_DOMAIN in domain_keys and _is_enabled(APPLICATION_LOGS_DOMAIN):
         domains_jobs.append((APPLICATION_LOGS_DOMAIN, prompt_application_logs, application_logs_ctx))
     results_map: dict[str, tuple[str, object, dict]] = {}
@@ -3265,6 +3279,10 @@ def uploadFromLLM(
         answer_application_logs, application_logs_parsed, application_logs_score = _result_or_blank(APPLICATION_LOGS_DOMAIN)
     else:
         answer_application_logs, application_logs_parsed, application_logs_score = ("", None, {})
+    if GENERATORS_DOMAIN in domain_keys:
+        answer_generators, generators_parsed, generators_score = _result_or_blank(GENERATORS_DOMAIN)
+    else:
+        answer_generators, generators_parsed, generators_score = ("", None, {})
 
     merged_prompt_overall = (
         prompt_overall
@@ -3275,6 +3293,7 @@ def uploadFromLLM(
         .replace("{answer_hard_resources}", answer_hr)
         .replace("{answer_lt_framework}", answer_lt)
         .replace("{answer_application_logs}", answer_application_logs)
+        .replace("{answer_lt_generators}", answer_generators)
         .replace("{system_context_brief}", system_context_brief)
     )
     if "{system_context_brief}" not in prompt_overall:
@@ -3330,6 +3349,8 @@ def uploadFromLLM(
         base_ctx["domains"]["lt_framework"] = lt_pack
     if APPLICATION_LOGS_DOMAIN in domain_keys:
         base_ctx["domains"][APPLICATION_LOGS_DOMAIN] = application_logs_pack
+    if GENERATORS_DOMAIN in domain_keys:
+        base_ctx["domains"][GENERATORS_DOMAIN] = generators_pack
     if include_tables:
         base_ctx["domains_tables_markdown"] = {
             "jvm": jvm_full_data,
@@ -3340,6 +3361,8 @@ def uploadFromLLM(
         }
         if "lt_framework" in domain_keys:
             base_ctx["domains_tables_markdown"]["lt_framework"] = lt_full_data
+        if GENERATORS_DOMAIN in domain_keys:
+            base_ctx["domains_tables_markdown"][GENERATORS_DOMAIN] = generators_full_data
     if APPLICATION_LOGS_DOMAIN in domain_keys:
         base_ctx["domains_tables_markdown"][APPLICATION_LOGS_DOMAIN] = application_logs_full_data
     overall_ctx = json.dumps(_compact_overall_context(base_ctx), ensure_ascii=False)
@@ -3464,6 +3487,10 @@ def uploadFromLLM(
         **({
             APPLICATION_LOGS_DOMAIN: _compose_text(application_logs_full_data, "Анализ логов приложений:", answer_application_logs),
         } if APPLICATION_LOGS_DOMAIN in domain_keys else {}),
+        **({
+            GENERATORS_DOMAIN: _compose_text(generators_full_data, "Анализ ресурсов генераторов нагрузки:", answer_generators),
+            f"{GENERATORS_DOMAIN}_parsed": _to_dict_maybe(generators_parsed),
+        } if GENERATORS_DOMAIN in domain_keys else {}),
         "final": final_answer,
         "jvm_parsed": _to_dict_maybe(jvm_parsed),
         "database_parsed": _to_dict_maybe(database_parsed),
@@ -3483,6 +3510,7 @@ def uploadFromLLM(
             "hard_resources": hr_score,
             **({"lt_framework": lt_score} if "lt_framework" in domain_keys else {}),
             **({APPLICATION_LOGS_DOMAIN: application_logs_score} if APPLICATION_LOGS_DOMAIN in domain_keys else {}),
+            **({GENERATORS_DOMAIN: generators_score} if GENERATORS_DOMAIN in domain_keys else {}),
             "final": final_score,
         }),
         "contexts": {

@@ -9,12 +9,27 @@
   .metric-row td.metric-label { font-weight: 600; }
   .metric-row.open td { background: var(--bg-elev2); }
   .chart-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
-  .series-legend { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
-  .series-legend th, .series-legend td { padding: 6px 8px; border-bottom: 1px solid var(--border-soft); text-align: left; }
-  .series-legend th { color: var(--text-muted); }
-  .series-legend tr.off { opacity: 0.45; }
-  .series-legend .swatch { display: inline-block; width: 14px; height: 4px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
-  .series-legend .swatch.dashed { background: repeating-linear-gradient(90deg, currentColor 0 4px, transparent 4px 7px); }
+  .chart-toolbar .chart-zoom-reset { margin-left: auto; }
+  /* A/B overlay: chart on the full width, legend chips (LL.charts.legendChips) under it. */
+  /* nowrap: a wrapping column container sizes its line by content and lets the chart overflow on phones. */
+  .cmp-chart-wrap.cmp-overlay { flex-direction: column; flex-wrap: nowrap; gap: 4px; margin-top: 0; }
+  .cmp-chart-wrap.cmp-overlay > * { min-width: 0; }
+  .cmp-overlay-canvas { position: relative; height: 260px; min-width: 0; }
+  .cmp-overlay-pending { position: absolute; inset: 0; padding: 12px; }
+  .cmp-overlay-pending.is-message { display: flex; align-items: center; justify-content: center; text-align: center; }
+  /* Swatches as line samples: A solid, B dashed like the chart lines. */
+  .cmp-legend .legend-chip-swatch { width: 16px; height: 4px; border: none; border-radius: 2px; background: var(--chip-color); }
+  .cmp-legend .legend-chip[data-name^="B · "] .legend-chip-swatch { background: repeating-linear-gradient(90deg, var(--chip-color) 0 5px, transparent 5px 8px); }
+  .cmp-legend .legend-chip[aria-pressed="false"] .legend-chip-swatch { background: transparent; box-shadow: inset 0 0 0 1px var(--chip-color); }
+  .series-table-wrap { overflow-x: auto; }
+  .compare-empty { margin-top: 16px; }
+  @media (max-width: 720px) {
+    .cmp-overlay-canvas { height: 220px; }
+    /* Three narrow columns instead of a grid wider than the screen. */
+    .verdict-grid { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1fr); font-size: 13px; }
+    .verdict-grid > div { min-width: 0; padding: 8px; overflow-wrap: anywhere; }
+    .verdict-grid .pill { white-space: normal; }
+  }
   .findings-list { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.5; }
   .findings-list li + li { margin-top: 6px; }
   .sev { font-size: 11px; font-weight: 700; text-transform: uppercase; margin-right: 6px; }
@@ -24,8 +39,12 @@
 </style>
 {% endblock %}
 {% block content %}
-  <h2>Сравнение тестов</h2>
-  <p class="muted" style="margin:0 0 12px">Выберите два прогона: для B можно автоматически подставить предыдущий успешный прогон того же сервиса. Сравниваются вердикты, находки итогового анализа и метрики по доменам.</p>
+  <div class="page-header">
+    <div class="page-heading">
+      <h2>Сравнение тестов</h2>
+      <p class="page-subtitle">Выберите два прогона: для B можно автоматически подставить предыдущий успешный прогон того же сервиса и типа теста. Сравниваются вердикты, находки итогового анализа и метрики по доменам.</p>
+    </div>
+  </div>
 
   <div class="compare-pickers">
     <div class="picker-card">
@@ -75,5 +94,6 @@
   </section>
 {% endblock %}
 {% block scripts %}
+<script defer src="/static/js/charts.js"></script>
 <script defer src="/static/js/compare.js"></script>
 {% endblock %}

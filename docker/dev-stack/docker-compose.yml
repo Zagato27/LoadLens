@@ -6,7 +6,11 @@
 #   docker compose --profile locust up -d     # + Locust and locust_exporter
 #   docker compose run --rm k6                # load: InfluxDB 1.x + Prometheus remote write (trend stats)
 #   docker compose run --rm k6-native         # load: Prometheus remote write with native histograms
+#   docker compose --profile gatling up -d victoriametrics && docker compose --profile gatling run --rm gatling
+#                                             # Gatling Graphite writer -> VictoriaMetrics (bundle: see README)
 #   python check_packs.py                     # runs the pack queries through LoadLens
+#   docker compose --profile generator up -d generator
+#                                             # SSH load generator for the Run test page (k6, Locust, Gatling)
 
 name: loadlens-dev-stack
 
@@ -185,6 +189,70 @@ services:
       - ./k6:/scripts:ro
     depends_on: [prometheus, influxdb, keycloak, pyapp]
 
+  victoriametrics:
+    <<: *restart
+    profiles: [gatling]
+    # Graphite plaintext on :2003 stores the whole Gatling path as the metric name.
+    image: victoriametrics/victoria-metrics:v1.106.1
+    command: ["-graphiteListenAddr=:2003", "-retentionPeriod=7d", "-search.latencyOffset=1s"]
+    ports: ["127.0.0.1:18428:8428"]
+
+  gatling:
+    profiles: [gatling]
+    # Gatling 3.10.5 bundle unpacked on the host into gatling/bundle (README); 3.11+ needs Maven at run time.
+    image: eclipse-temurin:21-jdk
+    working_dir: /opt/gatling
+    command: ["bash", "bin/gatling.sh", "-rm", "local", "-s", "devstack.CheckoutSimulation"]
+    volumes:
+      - ./gatling/bundle:/opt/gatling
+      - ./gatling/gatling.conf:/opt/gatling/conf/gatling.conf:ro
+      - ./gatling/simulations:/opt/gatling/user-files/simulations/devstack:ro
+    depends_on: [victoriametrics, pyapp]
+
+  generator:
+    <<: *restart
+    profiles: [generator]
+    # LoadLens starts k6, Locust and the Gatling bundle here over SSH (user loadlens, key from generator/keys).
+    build: ./generator
+    image: loadlens-dev-generator
+    ports: ["127.0.0.1:12222:2222"]
+    volumes:
+      - ./generator/keys:/keys:ro
+      # The host key survives rebuilds, so the key pinned in LoadLens stays valid.
+      - generator-hostkey:/etc/devsshd
+      - ./k6:/opt/loadlens/tests/k6:ro
+      - ./locust:/opt/loadlens/tests/locust:ro
+      - ./gatling/bundle:/opt/gatling
+      - ./gatling/gatling.conf:/opt/gatling/conf/gatling.conf:ro
+      - ./gatling/simulations:/opt/gatling/user-files/simulations/devstack:ro
+    depends_on: [prometheus, influxdb, pyapp]
+
+  # Docker generator of the Run test page: LoadLens talks to the engine through this filtering proxy only.
+  docker-proxy:
+    <<: *restart
+    profiles: [generator]
+    image: tecnativa/docker-socket-proxy:0.2.0
+    environment:
+      CONTAINERS: 1
+      IMAGES: 1
+      EXEC: 1
+      NETWORKS: 1
+      VOLUMES: 1
+      POST: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports: ["127.0.0.1:12375:2375"]
+
+  # Copies the stand's scripts into the volume the Docker generator mounts at /scripts.
+  scripts-volume:
+    profiles: [generator]
+    image: python:3.12-slim
+    command: ["sh", "-c", "mkdir -p /scripts/k6 /scripts/locust && cp -r /src/k6/. /scripts/k6/ && cp -r /src/locust/. /scripts/locust/ && chmod -R a+rX /scripts"]
+    volumes:
+      - ./k6:/src/k6:ro
+      - ./locust:/src/locust:ro
+      - loadlens-dev-scripts:/scripts
+
   k6-native:
     profiles: [load]
     image: grafana/k6:0.54.0
@@ -196,3 +264,8 @@ services:
     volumes:
       - ./k6:/scripts:ro
     depends_on: [prometheus, keycloak, pyapp]
+
+volumes:
+  generator-hostkey:
+  loadlens-dev-scripts:
+    name: loadlens-dev-scripts

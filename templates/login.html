@@ -5,11 +5,21 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Вход — LoadLens</title>
   <script nonce="{{ csp_nonce }}">
-    // Apply the saved theme before first paint to avoid a flash.
+    // Apply the saved theme and density before first paint to avoid a flash (same logic as base.html).
+    // ui.js is not loaded here, so "system" keeps following the OS setting from this script.
     (function () {
       try {
+        var root = document.documentElement;
         var saved = localStorage.getItem('loadlens.theme');
-        if (saved === 'light' || saved === 'dark') document.documentElement.setAttribute('data-theme', saved);
+        if (saved === 'system') {
+          var query = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null;
+          var follow = function () { root.setAttribute('data-theme', query && query.matches ? 'light' : 'dark'); };
+          follow();
+          if (query && query.addEventListener) query.addEventListener('change', follow);
+        } else if (saved === 'light' || saved === 'dark') {
+          root.setAttribute('data-theme', saved);
+        }
+        if (localStorage.getItem('loadlens.density') === '"compact"') root.setAttribute('data-density', 'compact');
       } catch (e) {}
     })();
   </script>

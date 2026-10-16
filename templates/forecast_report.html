@@ -6,11 +6,12 @@
 {% endblock %}
 {% block content %}
   <nav id="forecastBreadcrumbs" class="breadcrumbs" aria-label="Навигация по разделу">
-    <a href="/forecasting">Прогнозирование</a>
+    <a href="/forecasting">Прогнозирование</a><span class="sep" aria-hidden="true">›</span><span class="current" aria-current="page">Отчёт</span>
   </nav>
   <div class="page-header">
-    <div>
+    <div class="page-heading">
       <h1 id="forecastTitle">Прогноз мощностей</h1>
+      <p class="page-subtitle">Сколько нагрузки выдержит сервис по модели USL, построенной на ступенях теста.</p>
     </div>
     <div class="page-actions">
       <a id="forecastReportLink" class="btn" href="#" hidden>Открыть отчёт</a>

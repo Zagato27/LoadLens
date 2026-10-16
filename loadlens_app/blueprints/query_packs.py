@@ -7,16 +7,20 @@ the same code path as POST /config and returns the previous values so the page c
 
 from __future__ import annotations
 
+import copy
 from typing import Any, Mapping
 
 from flask import Blueprint, g, jsonify, request
 
+from AI.query_packs import DerivedRowError, add_summed_rps
 from loadlens_app.blueprints.config_api import has_own_section, scope_view, store_section
+from loadlens_app.config_schema import QueryConfigError, validate_queries
 from loadlens_app.core import _list_project_areas, _metrics_services_for_area, _services_map_for_area
 from loadlens_app.query_pack_service import PackRequestError, ScopeState, catalog_view, check_pack, detect_packs, plan_apply
 from loadlens_app.query_preview import parse_preview_ts
 
 query_packs_bp = Blueprint("query_packs", __name__)
+LT_DOMAIN = "lt_framework"
 
 
 @query_packs_bp.errorhandler(PackRequestError)
@@ -128,6 +132,32 @@ def apply_query_pack():
         "previous": previous,
         "stored": {"queries": result.queries, "sla": result.sla},
     })
+
+
+@query_packs_bp.route("/config/query_packs/summed_rps", methods=["POST"])
+def summed_rps():
+    """Adds a row summing the RPS of all load tools of the scope; ``use_for_sla`` makes it the steps series."""
+    body = _body()
+    area, service = _scope(body)
+    state = _state(area, service)
+    try:
+        block, label, parts = add_summed_rps(state.queries.get(LT_DOMAIN))
+    except DerivedRowError as exc:
+        raise PackRequestError(str(exc)) from exc
+    queries = copy.deepcopy(state.queries)
+    queries[LT_DOMAIN] = block
+    try:
+        validate_queries(queries)
+    except QueryConfigError as exc:
+        raise PackRequestError(str(exc)) from exc
+    previous = {"queries": state.queries, "sla": state.sla}
+    scope = store_section("queries", queries, area, service)
+    sla = state.sla
+    if bool(body.get("use_for_sla", True)):
+        sla = {**state.sla, "max_performance_query": label}
+        store_section("sla", sla, area, service)
+    g.audit_extra = {"domain": LT_DOMAIN, "parts": ", ".join(parts)[:200]}
+    return jsonify({"label": label, "parts": parts, **scope, "previous": previous, "stored": {"queries": queries, "sla": sla}})
 
 
 __all__ = ["query_packs_bp"]

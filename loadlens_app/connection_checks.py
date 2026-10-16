@@ -25,7 +25,7 @@ LLM_CHECK_TIMEOUT_SEC = 45
 
 CHECKABLE_SECTIONS = (
     "storage", "storage.timescale", "data_sources", "domain_sources",
-    "logs_source", "confluence", "confluence_template", "llm",
+    "logs_source", "confluence", "confluence_template", "llm", "load_generators",
 )
 
 

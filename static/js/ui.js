@@ -1,8 +1,7 @@
-// Shared UI components: toasts, dialogs, combobox, tabs, theme, glossary tooltips.
+// Shared UI components: preferences, toasts, dialogs, combobox, tabs, theme, glossary tooltips.
 (function () {
   const LL = window.LoadLens = window.LoadLens || {};
   const ui = LL.ui = LL.ui || {};
-  const THEME_KEY = 'loadlens.theme';
 
   function escapeHtml(value) {
     return String(value === undefined || value === null ? '' : value)
@@ -11,55 +10,243 @@
   }
   ui.escapeHtml = escapeHtml;
 
-  // ---- theme -------------------------------------------------------------
-  const themeListeners = [];
-  ui.theme = {
-    current() {
-      return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+  // ---- preferences -------------------------------------------------------
+  // localStorage under "loadlens.<key>", JSON-encoded. "theme" stays a plain string because the
+  // pre-paint script in base.html reads it raw. Known keys: theme, density, recentServices.
+  const PREFS_PREFIX = 'loadlens.';
+  const RAW_PREFS = new Set(['theme']);
+  const prefListeners = new Map();
+  function decodePref(key, raw, fallback) {
+    if (raw === null || raw === undefined) return fallback;
+    if (RAW_PREFS.has(key)) return raw;
+    try { return JSON.parse(raw); } catch (e) { return fallback; }
+  }
+  function notifyPref(key, value) {
+    (prefListeners.get(key) || []).slice().forEach((cb) => {
+      try { cb(value, key); } catch (e) { /* listener error must not break others */ }
+    });
+  }
+  LL.prefs = {
+    get(key, fallback) {
+      try { return decodePref(key, localStorage.getItem(PREFS_PREFIX + key), fallback); } catch (e) { return fallback; }
     },
-    set(name) {
-      const next = name === 'light' ? 'light' : 'dark';
-      document.documentElement.setAttribute('data-theme', next);
-      try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* storage unavailable */ }
-      syncThemeButton();
-      themeListeners.forEach((cb) => { try { cb(next); } catch (e) { /* listener error must not break others */ } });
+    // null or undefined removes the key.
+    set(key, value) {
+      try {
+        if (value === undefined || value === null) localStorage.removeItem(PREFS_PREFIX + key);
+        else localStorage.setItem(PREFS_PREFIX + key, RAW_PREFS.has(key) ? String(value) : JSON.stringify(value));
+      } catch (e) { /* storage unavailable or full */ }
+      notifyPref(key, value === undefined ? null : value);
     },
-    toggle() { ui.theme.set(ui.theme.current() === 'light' ? 'dark' : 'light'); },
-    onChange(cb) { if (typeof cb === 'function') themeListeners.push(cb); }
+    // cb(value, key) runs on set() in this tab and on changes made in other tabs; returns an unsubscribe function.
+    onChange(key, cb) {
+      if (typeof cb !== 'function') return () => {};
+      if (!prefListeners.has(key)) prefListeners.set(key, []);
+      prefListeners.get(key).push(cb);
+      return () => {
+        const list = prefListeners.get(key) || [];
+        const idx = list.indexOf(cb);
+        if (idx >= 0) list.splice(idx, 1);
+      };
+    }
   };
-  function syncThemeButton() {
-    const btn = document.getElementById('themeToggle');
-    if (!btn) return;
-    const light = ui.theme.current() === 'light';
-    btn.textContent = light ? '☾' : '☀';
-    btn.setAttribute('aria-label', light ? 'Включить тёмную тему' : 'Включить светлую тему');
-    btn.title = btn.getAttribute('aria-label');
+  try {
+    window.addEventListener('storage', (event) => {
+      if (!event || typeof event.key !== 'string' || !event.key.startsWith(PREFS_PREFIX)) return;
+      const key = event.key.slice(PREFS_PREFIX.length);
+      notifyPref(key, decodePref(key, event.newValue, null));
+    });
+  } catch (e) { /* no window events */ }
+
+  // ---- theme -------------------------------------------------------------
+  // The stored preference (mode) is 'system', 'light' or 'dark'; <html data-theme> always carries the
+  // resolved theme. The pre-paint scripts (base.html, login.html, recovery.html, storage_unavailable.html)
+  // resolve 'system' the same way before the first paint; here it keeps following the OS setting.
+  const THEME_MODES = ['system', 'light', 'dark'];
+  const THEME_LABELS = { system: 'Как в системе', light: 'Светлая', dark: 'Тёмная' };
+  const themeListeners = [];
+  let lightQuery = null;
+  try {
+    lightQuery = typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: light)') : null;
+  } catch (e) { lightQuery = null; }
+  function documentTheme() {
+    return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+  }
+  function resolveTheme(mode) {
+    if (mode === 'system') return lightQuery && lightQuery.matches ? 'light' : 'dark';
+    return mode === 'light' ? 'light' : 'dark';
+  }
+  const storedTheme = LL.prefs.get('theme', null);
+  // Without a stored choice the page keeps the theme it was rendered with (dark by default).
+  let themeMode = THEME_MODES.includes(storedTheme) ? storedTheme : documentTheme();
+  // Listeners get the resolved theme; `always` notifies even when it did not change (explicit set()).
+  function applyTheme(always) {
+    const before = documentTheme();
+    const next = resolveTheme(themeMode);
+    if (document.documentElement.getAttribute('data-theme') !== next) document.documentElement.setAttribute('data-theme', next);
+    syncViewMenu();
+    if (!always && before === next) return;
+    themeListeners.slice().forEach((cb) => { try { cb(next); } catch (e) { /* listener error must not break others */ } });
+  }
+  ui.theme = {
+    // Resolved theme of the document: 'light' or 'dark' (charts and editors depend on it).
+    current: documentTheme,
+    // Stored preference: 'system', 'light' or 'dark'.
+    mode() { return themeMode; },
+    set(name) {
+      themeMode = THEME_MODES.includes(name) ? name : 'dark';
+      LL.prefs.set('theme', themeMode);
+      applyTheme(true);
+    },
+    toggle() { ui.theme.set(documentTheme() === 'light' ? 'dark' : 'light'); },
+    // cb(resolvedTheme) runs on set() and whenever the resolved theme changes (OS switch while the mode
+    // is 'system', a choice made in another tab). Returns an unsubscribe function.
+    onChange(cb) {
+      if (typeof cb !== 'function') return () => {};
+      themeListeners.push(cb);
+      return () => {
+        const idx = themeListeners.indexOf(cb);
+        if (idx >= 0) themeListeners.splice(idx, 1);
+      };
+    }
+  };
+  // A choice made in another tab (storage event) applies here too; set() in this tab is already applied.
+  LL.prefs.onChange('theme', (value) => {
+    const mode = THEME_MODES.includes(value) ? value : 'dark';
+    if (mode === themeMode) return;
+    themeMode = mode;
+    applyTheme(false);
+  });
+  if (lightQuery) {
+    const onSystemTheme = () => { if (themeMode === 'system') applyTheme(false); };
+    try {
+      if (typeof lightQuery.addEventListener === 'function') lightQuery.addEventListener('change', onSystemTheme);
+      else if (typeof lightQuery.addListener === 'function') lightQuery.addListener(onSystemTheme);
+    } catch (e) { /* no media query events */ }
+  }
+  if (themeMode === 'system') applyTheme(false);
+
+  // ---- density -----------------------------------------------------------
+  // 'normal' or 'compact'; <html data-density="compact"> switches the compact CSS tokens.
+  function applyDensity(value) {
+    if (value === 'compact') document.documentElement.setAttribute('data-density', 'compact');
+    else document.documentElement.removeAttribute('data-density');
+    syncViewMenu();
+  }
+  ui.density = {
+    current() { return document.documentElement.getAttribute('data-density') === 'compact' ? 'compact' : 'normal'; },
+    set(value) {
+      const next = value === 'compact' ? 'compact' : 'normal';
+      LL.prefs.set('density', next);
+      applyDensity(next);
+    }
+  };
+  LL.prefs.onChange('density', (value) => applyDensity(value === 'compact' ? 'compact' : 'normal'));
+
+  // ---- view menu (sidebar foot) ---------------------------------------------
+  function syncViewMenu() {
+    const menu = document.getElementById('viewMenu');
+    if (!menu) return;
+    const density = ui.density ? ui.density.current() : 'normal';
+    menu.querySelectorAll('[data-view-pref]').forEach((item) => {
+      const current = item.dataset.viewPref === 'theme' ? themeMode : density;
+      item.setAttribute('aria-checked', item.dataset.value === current ? 'true' : 'false');
+    });
+    const value = document.getElementById('viewMenuValue');
+    if (value) value.textContent = THEME_LABELS[themeMode] || '';
+  }
+  function wireViewMenu() {
+    const menu = document.getElementById('viewMenu');
+    if (!menu) return;
+    const summary = menu.querySelector('summary');
+    const items = () => Array.from(menu.querySelectorAll('[data-view-pref]'));
+    syncViewMenu();
+    // Opening moves focus to the checked theme item, as in the menu button pattern.
+    menu.addEventListener('toggle', () => {
+      if (!menu.open) return;
+      const checked = items().find((item) => item.getAttribute('aria-checked') === 'true') || items()[0];
+      if (checked) checked.focus();
+    });
+    // The menu stays open after a choice so both groups can be adjusted while watching the page.
+    menu.addEventListener('click', (event) => {
+      const item = event.target.closest('[data-view-pref]');
+      if (!item || !menu.contains(item)) return;
+      if (item.dataset.viewPref === 'theme') ui.theme.set(item.dataset.value);
+      else ui.density.set(item.dataset.value);
+    });
+    menu.addEventListener('keydown', (event) => {
+      if (!menu.open) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        menu.open = false;
+        if (summary) summary.focus();
+        return;
+      }
+      const list = items();
+      const idx = list.indexOf(document.activeElement);
+      let next = null;
+      if (event.key === 'ArrowDown') next = list[(idx + 1) % list.length];
+      else if (event.key === 'ArrowUp') next = list[idx <= 0 ? list.length - 1 : idx - 1];
+      else if (event.key === 'Home') next = list[0];
+      else if (event.key === 'End') next = list[list.length - 1];
+      if (next) { event.preventDefault(); next.focus(); }
+    });
+    // Tabbing out of the open menu closes it.
+    menu.addEventListener('focusout', (event) => {
+      if (menu.open && event.relatedTarget && !menu.contains(event.relatedTarget)) menu.open = false;
+    });
   }
 
   // Chart.js colors follow the active theme.
   ui.chartColors = function chartColors() {
     const css = getComputedStyle(document.documentElement);
     return {
-      grid: css.getPropertyValue('--chart-grid').trim() || '#2f2f2f',
-      text: css.getPropertyValue('--chart-text').trim() || '#bbb',
-      background: css.getPropertyValue('--bg-chart').trim() || '#151515',
-      accent: css.getPropertyValue('--accent').trim() || '#6200ee',
-      accentSoft: css.getPropertyValue('--accent-soft').trim() || 'rgba(98, 0, 238, 0.16)'
+      grid: css.getPropertyValue('--chart-grid').trim() || 'rgba(255, 255, 255, 0.06)',
+      text: css.getPropertyValue('--chart-text').trim() || '#8b93a5',
+      background: css.getPropertyValue('--bg-chart').trim() || '#12151c',
+      accent: css.getPropertyValue('--accent').trim() || '#6c5ce7',
+      accentSoft: css.getPropertyValue('--accent-soft').trim() || 'rgba(108, 92, 231, 0.16)',
+      statusOk: css.getPropertyValue('--status-ok').trim() || '#22c55e',
+      statusWarn: css.getPropertyValue('--status-warn').trim() || '#f59e0b',
+      statusFail: css.getPropertyValue('--status-fail').trim() || '#ef4444',
+      statusNa: css.getPropertyValue('--status-na').trim() || '#94a3b8',
+      surface: css.getPropertyValue('--bg-elev').trim() || '#151821',
+      border: css.getPropertyValue('--border').trim() || 'rgba(255, 255, 255, 0.09)',
+      ink: css.getPropertyValue('--text').trim() || '#e8eaf0',
+      inkMuted: css.getPropertyValue('--text-muted').trim() || '#a3aab8'
     };
   };
   function applyChartDefaults() {
-    if (!window.Chart) return;
+    if (!window.Chart || !window.Chart.defaults) return;
     const colors = ui.chartColors();
-    window.Chart.defaults.color = colors.text;
-    window.Chart.defaults.borderColor = colors.grid;
-    window.Chart.defaults.font.family = "'Montserrat', Arial, sans-serif";
+    const defaults = window.Chart.defaults;
+    defaults.color = colors.text;
+    defaults.borderColor = colors.grid;
+    if (defaults.font) defaults.font.family = "'Inter', 'Segoe UI', system-ui, Arial, sans-serif";
+    const tooltip = defaults.plugins && defaults.plugins.tooltip;
+    if (tooltip) {
+      tooltip.backgroundColor = colors.surface;
+      tooltip.borderColor = colors.border;
+      tooltip.borderWidth = 1;
+      tooltip.titleColor = colors.ink;
+      tooltip.bodyColor = colors.ink;
+      tooltip.footerColor = colors.inkMuted;
+      tooltip.padding = 10;
+      tooltip.cornerRadius = 8;
+      tooltip.boxPadding = 4;
+      tooltip.usePointStyle = true;
+    }
   }
+  // Chart.js is loaded synchronously in <head> on chart pages, so defaults can be set right away.
+  applyChartDefaults();
   ui.restyleCharts = function restyleCharts() {
     if (!window.Chart) return;
     applyChartDefaults();
     const colors = ui.chartColors();
     Object.values(window.Chart.instances || {}).forEach((chart) => {
       try {
+        if (LL.charts && typeof LL.charts.recolor === 'function') LL.charts.recolor(chart);
         const scales = (chart.options && chart.options.scales) || {};
         Object.values(scales).forEach((scale) => {
           if (scale.ticks) scale.ticks.color = colors.text;
@@ -454,28 +641,165 @@
     for (let i = 0; i < n; i += 1) html += `<div class="skeleton skeleton-line ${ws[i % ws.length]}"></div>`;
     return html;
   };
+  // Table body placeholders while data loads: `rows` rows of `cols` shimmering cells.
+  ui.skeletonRows = function skeletonRows(cols, rows = 5) {
+    const nCols = Math.max(1, Math.floor(Number(cols)) || 1);
+    const nRows = Math.max(1, Math.floor(Number(rows)) || 1);
+    const widths = ['w-60', '', 'w-40'];
+    let html = '';
+    for (let r = 0; r < nRows; r += 1) {
+      html += '<tr class="skeleton-row" aria-hidden="true">';
+      for (let c = 0; c < nCols; c += 1) html += `<td><div class="skeleton skeleton-line ${widths[(r + c) % widths.length]}"></div></td>`;
+      html += '</tr>';
+    }
+    return html;
+  };
+
+  // ---- empty states ------------------------------------------------------
+  // <svg> referencing a symbol of the sprite in base.html (#i-<name>); '' for an empty name.
+  ui.icon = function icon(name, className) {
+    const id = String(name || '').replace(/[^a-z0-9-]/gi, '');
+    if (!id) return '';
+    const cls = String(className || '').replace(/[^\w\- ]/g, '').trim();
+    return `<svg class="icon${cls ? ` ${cls}` : ''}" aria-hidden="true"><use href="#i-${id}"/></svg>`;
+  };
+  // One table row spanning the table; `text` is escaped, `actionHtml` is trusted markup (a link or button).
+  // With `icon` (a sprite name) the row becomes a centered block: icon, text, action.
+  ui.emptyRow = function emptyRow(colspan, text, options) {
+    const { actionHtml, icon } = options || {};
+    const span = Math.max(1, Math.floor(Number(colspan)) || 1);
+    if (icon) {
+      const action = actionHtml ? `<span class="empty-row-action">${actionHtml}</span>` : '';
+      return `<tr class="empty-row"><td colspan="${span}"><div class="empty-row-body">${ui.icon(icon, 'empty-icon')}<span class="empty-row-text">${escapeHtml(text)}</span>${action}</div></td></tr>`;
+    }
+    const action = actionHtml ? ` ${actionHtml}` : '';
+    return `<tr class="empty-row"><td colspan="${span}">${escapeHtml(text)}${action}</td></tr>`;
+  };
+  // Block empty state: { icon, title, text, actionHtml } -> <div class="empty-state">; title and text are
+  // escaped, actionHtml is trusted markup.
+  ui.emptyState = function emptyState(options) {
+    const { icon, title, text, actionHtml } = options || {};
+    return [
+      '<div class="empty-state">',
+      ui.icon(icon, 'empty-icon'),
+      title ? `<h3>${escapeHtml(title)}</h3>` : '',
+      text ? `<p class="empty-state-text">${escapeHtml(text)}</p>` : '',
+      actionHtml ? `<div class="empty-state-action">${actionHtml}</div>` : '',
+      '</div>'
+    ].join('');
+  };
+
+  // ---- responsive tables -------------------------------------------------
+  // Below 720px a table.data-table that is a direct child of .table-wrap (unless .no-cards) shows its
+  // rows as cards; every cell shows its column title from data-label (td::before). labelTable copies the
+  // titles from the last <thead> row and marks special cells: data-cell="primary" (card title, first
+  // regular cell), "actions" (last cell with buttons or menus, full width) and "check" (a lone checkbox,
+  // kept compact). Cells spanning several columns (empty and loading rows) get no label.
+  const CARD_TABLES = '.table-wrap > table.data-table:not(.no-cards)';
+  function setAttr(el, name, value) {
+    if (value) { if (el.getAttribute(name) !== value) el.setAttribute(name, value); }
+    else if (el.hasAttribute(name)) el.removeAttribute(name);
+  }
+  function headerLabels(table) {
+    const head = table.tHead;
+    const row = head && head.rows && head.rows.length ? head.rows[head.rows.length - 1] : null;
+    if (!row) return null;
+    const labels = [];
+    Array.from(row.cells).forEach((th) => {
+      const text = String(th.getAttribute('data-label') || th.textContent || '').replace(/\s+/g, ' ').trim();
+      const span = Math.max(1, Number(th.colSpan) || 1);
+      for (let i = 0; i < span; i += 1) labels.push(text);
+    });
+    return labels;
+  }
+  function isCheckCell(td) {
+    const inputs = td.querySelectorAll('input');
+    if (inputs.length !== 1) return false;
+    const type = String(inputs[0].type || '').toLowerCase();
+    return (type === 'checkbox' || type === 'radio') && !String(td.textContent || '').trim();
+  }
+  function isActionsCell(td) {
+    return td.classList.contains('actions') || !!td.querySelector('button, a.btn, details.menu');
+  }
+  ui.labelTable = function labelTable(table) {
+    if (!table || !table.tBodies) return;
+    const labels = headerLabels(table);
+    if (!labels) return;
+    Array.from(table.tBodies).forEach((tbody) => {
+      Array.from(tbody.rows).forEach((tr) => {
+        const special = tr.classList.contains('empty-row') || tr.classList.contains('skeleton-row');
+        const cells = Array.from(tr.cells);
+        let col = 0;
+        let primaryDone = false;
+        let hasCheck = false;
+        cells.forEach((td, i) => {
+          const span = Math.max(1, Number(td.colSpan) || 1);
+          const plain = !special && span === 1;
+          let kind = '';
+          if (plain && isCheckCell(td)) kind = 'check';
+          else if (plain && i > 0 && i === cells.length - 1 && isActionsCell(td)) kind = 'actions';
+          else if (plain && !primaryDone) { kind = 'primary'; primaryDone = true; }
+          if (kind === 'check') hasCheck = true;
+          setAttr(td, 'data-cell', kind);
+          setAttr(td, 'data-label', plain && kind !== 'check' && kind !== 'actions' ? (labels[col] || '') : '');
+          col += span;
+        });
+        setAttr(tr, 'data-has-check', hasCheck ? '1' : '');
+      });
+    });
+  };
+  function tablesIn(node, found) {
+    if (!node || node.nodeType !== 1) return;
+    if (node.matches('table.data-table')) found.add(node);
+    else if (node.getElementsByTagName('table').length) node.querySelectorAll('table.data-table').forEach((t) => found.add(t));
+  }
+  // Labels the tables already on the page and every row that page scripts render later. Only child list
+  // changes are observed, so setting the attributes does not re-trigger the observer.
+  function watchCardTables() {
+    document.querySelectorAll(CARD_TABLES).forEach((table) => ui.labelTable(table));
+    if (typeof MutationObserver !== 'function' || !document.body) return;
+    const observer = new MutationObserver((records) => {
+      const found = new Set();
+      records.forEach((rec) => {
+        const target = rec.target;
+        if (!target || target.nodeType !== 1) return;
+        const own = target.closest('table.data-table');
+        if (own) found.add(own);
+        // Added subtrees may hold their own tables, also inside a cell of another table.
+        rec.addedNodes.forEach((node) => tablesIn(node, found));
+      });
+      found.forEach((table) => { if (table.matches(CARD_TABLES)) ui.labelTable(table); });
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
 
   // ---- header wiring -----------------------------------------------------
   document.addEventListener('DOMContentLoaded', () => {
-    syncThemeButton();
-    const themeBtn = document.getElementById('themeToggle');
-    if (themeBtn) themeBtn.addEventListener('click', () => ui.theme.toggle());
+    wireViewMenu();
+    // On narrow screens the sidebar is an off-canvas drawer toggled from the top bar.
     const navToggle = document.getElementById('navToggle');
-    const nav = document.getElementById('appNav');
-    if (navToggle && nav) {
-      navToggle.addEventListener('click', () => {
-        const open = nav.classList.toggle('open');
+    const sidebar = document.getElementById('appSidebar');
+    if (navToggle && sidebar) {
+      const setOpen = (open) => {
+        document.body.classList.toggle('nav-open', open);
         navToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
         navToggle.setAttribute('aria-label', open ? 'Закрыть меню' : 'Открыть меню');
-      });
+      };
+      navToggle.addEventListener('click', () => setOpen(!document.body.classList.contains('nav-open')));
+      const navClose = document.getElementById('navClose');
+      if (navClose) navClose.addEventListener('click', () => setOpen(false));
+      const backdrop = document.getElementById('navBackdrop');
+      if (backdrop) backdrop.addEventListener('click', () => setOpen(false));
+      document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && document.body.classList.contains('nav-open')) setOpen(false); });
     }
-    // The header user menu closes on an outside click or Escape.
-    const closeUserMenus = (except) => document.querySelectorAll('details.user-menu[open]').forEach((m) => { if (!except || !m.contains(except)) m.removeAttribute('open'); });
+    // The sidebar user and view menus close on an outside click or Escape.
+    const closeUserMenus = (except) => document.querySelectorAll('details.user-menu[open], details.view-menu[open]').forEach((m) => { if (!except || !m.contains(except)) m.removeAttribute('open'); });
     document.addEventListener('click', (event) => closeUserMenus(event.target));
     document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeUserMenus(null); });
     applyChartDefaults();
     ui.theme.onChange(() => ui.restyleCharts());
     ui.applyTerms(document);
+    watchCardTables();
     if (typeof LL.initProjectArea === 'function') LL.initProjectArea();
   });
 })();

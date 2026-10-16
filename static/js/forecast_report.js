@@ -17,10 +17,10 @@
     zoneUnstable: 'rgba(239, 68, 68, 0.10)'
   };
   function accentColor() {
-    return LL.ui.chartColors().accent || '#6200ee';
+    return LL.ui.chartColors().accent || '#6c5ce7';
   }
   function accentZone() {
-    return LL.ui.chartColors().accentSoft || 'rgba(98, 0, 238, 0.16)';
+    return LL.ui.chartColors().accentSoft || 'rgba(108, 92, 231, 0.16)';
   }
   const CONFIDENCE = {
     high: { text: 'высокая', pill: 'ok' },
@@ -113,7 +113,7 @@
       chart.data.datasets.forEach((dataset, index) => {
         if (!dataset.stepNumbers || !chart.isDatasetVisible(index)) return;
         ctx.save();
-        ctx.font = "700 11px 'Montserrat', Arial, sans-serif";
+        ctx.font = "700 11px 'Inter', 'Segoe UI', Arial, sans-serif";
         ctx.fillStyle = '#1a1f24';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';

@@ -20,13 +20,20 @@ MASK = "***"
 
 # Keys whose string values are credentials. ``password_env`` is included because the OpenSearch
 # config stores the password itself under that (misleading) name; ``credentials`` is GigaChat's key.
-SECRET_KEYS = frozenset({"password", "token", "grafana_pass", "api_key", "password_env", "credentials"})
+SECRET_KEYS = frozenset({
+    "password", "token", "grafana_pass", "api_key", "password_env", "credentials",
+    # Load generators: SSH key, Docker client key, CI trigger and API tokens.
+    "private_key", "passphrase", "client_key", "trigger_token", "api_token",
+})
 
 # Fields that decide where the secrets on the same level, or nested below it, are sent.
 DESTINATION_KEYS = frozenset({
-    "url", "base_url", "api_base_url", "url_basic", "host", "port",
-    "proxies", "verify", "verify_ssl", "sslmode", "ca_bundle",
+    "url", "base_url", "api_base_url", "api_url", "url_basic", "host", "port",
+    "proxies", "verify", "verify_ssl", "sslmode", "ca_bundle", "ca_cert", "in_cluster", "host_key",
 })
+# Destination fields where filling an empty value only makes the check stricter (pinning the SSH host key
+# found by the first check); changing or clearing a stored value still counts as a new destination.
+PINNED_KEYS = frozenset({"host_key"})
 # Secrets of the flat legacy section that belong to one specific address instead.
 SPECIFIC_DESTINATIONS = {"grafana_pass": frozenset({"grafana_base_url"})}
 
@@ -159,8 +166,12 @@ def _restore_url_password(incoming: str, current: Any, path: str) -> str:
 def _destination_changed(incoming: dict, stored: dict, keys: Optional[Iterable[str]]) -> bool:
     """Whether any destination field present in ``incoming`` differs from the stored one."""
     for key in keys or ():
-        if key in incoming and _normalized(incoming[key]) != _normalized(stored.get(key)):
-            return True
+        if key not in incoming:
+            continue
+        new, old = _normalized(incoming[key]), _normalized(stored.get(key))
+        if new == old or (key in PINNED_KEYS and old == ""):
+            continue
+        return True
     return False
 
 

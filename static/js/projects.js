@@ -26,17 +26,20 @@
   }
   const switchProject = (id) => api('POST', '/project_area', { project_area: id || '' });
 
-  function chip(ok, okText, badText) {
-    return `<span class="pill ${ok ? 'ok' : 'warn'}">${esc(ok ? okText : badText)}</span>`;
-  }
   const SLA_FIELD_TITLES = {
     max_performance_query: 'макс. RPS', mean_latency_query: 'среднее время',
     service_cpu_query: 'CPU сервисов', cpu_query: 'CPU узлов'
   };
-  function featureChip(missing, okText, title) {
-    const fields = Array.isArray(missing) ? missing : [];
-    return chip(!fields.length, okText, `${title}: не заданы ${fields.map((f) => SLA_FIELD_TITLES[f] || f).join(', ')}`);
-  }
+  // Settings links of the checklist: "<section>:<element id>" (activateFromHash in settings.js
+  // opens the section, scrolls to the element and highlights it).
+  const SLA_FIELD_LINKS = {
+    max_performance_query: 'sla:sla-query-target_rps', mean_latency_query: 'sla:sla-peak-mean_latency_query',
+    service_cpu_query: 'sla:sla-peak-service_cpu_query', cpu_query: 'sla:sla-query-max_cpu_pct'
+  };
+  const CHECK_ICONS = {
+    ok: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.5 2.5L16 9.5"/></svg>',
+    todo: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/></svg>'
+  };
   function packsChip(packs) {
     if (!Array.isArray(packs) || !packs.length) return '';
     const outdated = packs.filter((p) => p.outdated).length;
@@ -44,19 +47,58 @@
     const text = outdated ? `Пакетов запросов: ${packs.length}, есть обновления: ${outdated}` : `Пакетов запросов: ${packs.length}`;
     return `<span class="pill ${outdated ? 'warn' : 'na'}" title="${esc(names)}">${esc(text)}</span>`;
   }
-  function readinessChips(r) {
+  function featureItem(key, missing, okText, title, fallbackLink) {
+    const fields = Array.isArray(missing) ? missing : [];
+    return {
+      key,
+      ok: !fields.length,
+      text: fields.length ? `${title}: не заданы ${fields.map((f) => SLA_FIELD_TITLES[f] || f).join(', ')}` : okText,
+      link: (fields.length && SLA_FIELD_LINKS[fields[0]]) || fallbackLink
+    };
+  }
+  // The six readiness points of a project: {key, ok, text, link}.
+  function readinessItems(readiness) {
+    const r = readiness || {};
     const counts = r.query_counts || {};
-    const total = Object.values(counts).reduce((sum, n) => sum + n, 0);
+    const total = Object.values(counts).reduce((sum, n) => sum + (Number(n) || 0), 0);
     const missing = r.missing_sla || {};
+    const hasTarget = r.target_rps !== null && r.target_rps !== undefined;
     return [
-      chip(r.target_rps !== null, `Целевой RPS: ${r.target_rps}`, 'Целевой RPS не задан'),
-      chip(!!r.performance_query, 'Запрос производительности выбран', 'Запрос производительности не выбран'),
-      chip(r.has_system_context, 'Контекст системы заполнен', 'Контекст системы пуст'),
-      chip(total > 0, `Запросов: ${total}, доменов: ${Object.keys(counts).length}`, 'Запросов нет'),
-      featureChip(missing.forecast, 'Прогноз: ссылки SLA заданы', 'Прогноз'),
-      featureChip(missing.resource_plan, 'План ресурсов: ссылки SLA заданы', 'План ресурсов'),
-      packsChip(r.query_packs)
-    ].filter(Boolean).join(' ');
+      { key: 'target_rps', ok: hasTarget, text: hasTarget ? `Целевой RPS: ${r.target_rps}` : 'Целевой RPS не задан', link: 'sla:sla-val-target_rps' },
+      { key: 'performance_query', ok: !!r.performance_query, text: r.performance_query ? 'Запрос производительности выбран' : 'Запрос производительности не выбран', link: 'sla:sla-query-target_rps' },
+      { key: 'system_context', ok: !!r.has_system_context, text: r.has_system_context ? 'Контекст системы заполнен' : 'Контекст системы пуст', link: 'context:contextForm' },
+      { key: 'queries', ok: total > 0, text: total > 0 ? `Запросов: ${total}, доменов: ${Object.keys(counts).length}` : 'Запросов нет', link: 'queries:addFromPackBtn' },
+      featureItem('forecast', missing.forecast, 'Прогноз: ссылки SLA заданы', 'Прогноз', 'sla:sla-peak-mean_latency_query'),
+      featureItem('resource_plan', missing.resource_plan, 'План ресурсов: ссылки SLA заданы', 'План ресурсов', 'sla:sla-peak-service_cpu_query')
+    ];
+  }
+  function readinessList(p) {
+    const items = readinessItems(p.readiness);
+    const done = items.filter((item) => item.ok).length;
+    const pct = Math.round((done / items.length) * 100);
+    const label = `Настроено ${done} из ${items.length}`;
+    const rows = items.map((item) => `<li class="readiness-item ${item.ok ? 'is-ok' : 'is-todo'}">
+        <a href="#${esc(item.link)}" data-action="goto" data-project="${esc(p.id)}" data-link="${esc(item.link)}">${item.ok ? CHECK_ICONS.ok : CHECK_ICONS.todo}<span>${esc(item.text)}</span></a></li>`).join('');
+    return `<div class="readiness${done === items.length ? ' is-complete' : ''}">
+      <div class="readiness-head">
+        <span class="readiness-count">${esc(label)}</span>
+        <span class="readiness-bar" role="progressbar" aria-label="${esc(label)}" aria-valuemin="0" aria-valuemax="${items.length}" aria-valuenow="${done}"><span style="width:${pct}%"></span></span>
+        ${packsChip((p.readiness || {}).query_packs)}
+      </div>
+      <ul class="readiness-list">${rows}</ul>
+    </div>`;
+  }
+  // Opens a settings field of the checklist; another project is selected first (settings edit the active one).
+  async function gotoSetting(p, link) {
+    if (!link) return;
+    if (p.id !== overview.active_project) {
+      await switchProject(p.id);
+      try { history.replaceState(null, '', `#${link}`); } catch (e) { /* history API unavailable */ }
+      location.reload();
+      return;
+    }
+    if (location.hash === `#${link}`) window.dispatchEvent(new HashChangeEvent('hashchange'));
+    else location.hash = link;
   }
   function lastReport(p) {
     if (!p.last_report_at) return 'нет';
@@ -102,7 +144,7 @@
         </div>
       </div>
       <div class="dim">Сервисов: ${p.services.length} · Отчётов: ${p.reports === null ? '—' : p.reports} · Последний: ${lastReport(p)}</div>
-      <div class="project-chips">${readinessChips(p.readiness)}</div>
+      ${readinessList(p)}
       ${servicesTable(p, attrs)}
       ${overridesBlock(p, attrs)}
     </article>`;
@@ -208,6 +250,7 @@
 
   const ACTIONS = {
     select: async (p) => { await switchProject(p.id); location.reload(); },
+    goto: (p, btn) => gotoSetting(p, btn.dataset.link),
     edit: (p) => openProjectForm('edit', p, ''),
     copy: (p) => openProjectForm('create', null, p.id),
     delete: (p) => openDeleteDialog(p),
@@ -221,8 +264,11 @@
     const project = overview.projects.find((p) => p.id === btn.dataset.project);
     const handler = ACTIONS[btn.dataset.action];
     if (!project || !handler) return;
+    if (btn.tagName === 'A') event.preventDefault();
     try { await handler(project, btn); } catch (e) { ui.toast(e.message, { tone: 'error' }); }
   }
+
+  LL.projects = { _internals: { readinessItems, readinessList } };
 
   document.addEventListener('DOMContentLoaded', () => {
     const list = $('projectsList');

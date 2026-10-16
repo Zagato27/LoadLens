@@ -2,8 +2,12 @@
 {% set active_nav = 'forecasting' %}
 {% block title %}Прогнозирование{% endblock %}
 {% block content %}
-  <h2>Прогнозирование</h2>
-  <p class="dim">Прогноз мощностей по модели USL строится для тестов на максимальную производительность, в данных которых есть ряд среднего времени отклика (и число VU для закрытой модели). Выберите отчёт.</p>
+  <div class="page-header">
+    <div class="page-heading">
+      <h2>Прогнозирование</h2>
+      <p class="page-subtitle">Прогноз мощностей по модели USL строится для тестов на максимальную производительность, в данных которых есть ряд среднего времени отклика (и число VU для закрытой модели). Выберите отчёт.</p>
+    </div>
+  </div>
   <div id="forecastHint" class="report-note" hidden></div>
   <div class="table-wrap" style="margin-top:12px;">
     <table class="data-table">

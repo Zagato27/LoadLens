@@ -6,6 +6,10 @@
   const $ = (id) => document.getElementById(id);
   const fmt = (value) => (value ? LL.formatDateTime(value) : '—');
   let state = { users: [], roles: [], currentUserId: null };
+  // Skeleton rows only while a table has no data rows yet; a reload after an action keeps the old rows.
+  function showLoading(body, cols) {
+    if (!body.querySelector('tr:not(.empty-row):not(.skeleton-row)')) body.innerHTML = ui.skeletonRows(cols, 3);
+  }
 
   const ACTION_LABELS = {
     login: 'Вход', 'login.failed': 'Неудачный вход', logout: 'Выход',
@@ -69,13 +73,14 @@
   }
   async function loadUsers() {
     const body = $('usersBody');
+    showLoading(body, 7);
     try {
       const data = await api('GET', '/auth/users');
       state = { users: data.users, roles: data.roles, currentUserId: data.current_user_id };
-      body.innerHTML = state.users.length ? state.users.map(userRow).join('') : '<tr class="empty-row"><td colspan="7">Пользователей нет</td></tr>';
+      body.innerHTML = state.users.length ? state.users.map(userRow).join('') : ui.emptyRow(7, 'Пользователей нет');
       $('usersStatus').textContent = '';
     } catch (e) {
-      body.innerHTML = `<tr class="empty-row"><td colspan="7">Не удалось загрузить пользователей: ${esc(e.message)}</td></tr>`;
+      body.innerHTML = ui.emptyRow(7, `Не удалось загрузить пользователей: ${e.message}`);
     }
   }
 
@@ -218,11 +223,12 @@
   }
   async function loadAllTokens() {
     const body = $('allTokensBody');
+    showLoading(body, 8);
     try {
       const data = await api('GET', '/auth/tokens?all=1');
-      body.innerHTML = data.tokens.length ? data.tokens.map(tokenRow).join('') : '<tr class="empty-row"><td colspan="8">Токенов нет</td></tr>';
+      body.innerHTML = data.tokens.length ? data.tokens.map(tokenRow).join('') : ui.emptyRow(8, 'Токенов нет');
     } catch (e) {
-      body.innerHTML = `<tr class="empty-row"><td colspan="8">${esc(e.message)}</td></tr>`;
+      body.innerHTML = ui.emptyRow(8, `Не удалось загрузить токены: ${e.message}`);
     }
   }
   async function onTokensClick(event) {
@@ -249,9 +255,10 @@
   async function loadAudit() {
     const body = $('auditBody');
     $('auditStatus').textContent = 'Загрузка…';
+    showLoading(body, 6);
     try {
       const data = await api('GET', '/auth/audit?limit=100');
-      body.innerHTML = data.events.length ? data.events.map(auditRow).join('') : '<tr class="empty-row"><td colspan="6">Записей нет</td></tr>';
+      body.innerHTML = data.events.length ? data.events.map(auditRow).join('') : ui.emptyRow(6, 'Записей нет');
       $('auditStatus').textContent = `Последние ${data.events.length}`;
     } catch (e) {
       body.innerHTML = '';

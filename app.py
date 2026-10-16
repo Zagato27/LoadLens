@@ -24,6 +24,11 @@ def create_app(auth_repository: UserRepository | None = None) -> Flask:
         from loadlens_app.migrations import start_background_migrations
 
         start_background_migrations()
+    if os.getenv("LOADLENS_LOAD_TEST_WATCHER", "").strip() == "1":
+        # Runs started before a restart are picked up at once, not when someone opens the launch page.
+        from loadlens_app.load_tests.watcher import ensure_watcher
+
+        ensure_watcher()
     return flask_app
 
 

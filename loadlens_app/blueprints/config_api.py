@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 import json
+import time
+from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from flask import Blueprint, g, jsonify, request
@@ -38,6 +40,15 @@ from loadlens_app.connection_checks import (
     check_resolved_source,
     list_grafana_datasources,
     run_check,
+)
+from loadlens_app.load_tests.executors import check_generator
+from loadlens_app.load_tests.generators import GeneratorConfigError, parse_generator, validate_generators_section
+from loadlens_app.load_tests.tools import (
+    ToolConfigError,
+    effective_tools,
+    merged_tool_configs,
+    tools_overrides,
+    validate_tools_section,
 )
 from loadlens_app.core import (
     AREA_OVERRIDABLE_SECTIONS,
@@ -214,6 +225,9 @@ def get_config():
             "queries": _area_section(area, "queries"),
             "confluence": copy.deepcopy(CONFIG.get("confluence", {}) or {}),
             "appearance": copy.deepcopy(CONFIG.get("appearance", {}) or {}),
+            "load_generators": copy.deepcopy(CONFIG.get("load_generators") or {}),
+            # Effective templates: defaults with the saved overrides applied.
+            "load_tools": merged_tool_configs(CONFIG),
             CONFLUENCE_TEMPLATE_SECTION: _confluence_template_node(),
             "metrics_config": area_metrics_cfg,
         }
@@ -384,6 +398,18 @@ def update_config():
         rejected = _reject_domain_sources(payload)
         if rejected is not None:
             return rejected
+    if section == "load_generators":
+        try:
+            validate_generators_section(payload)
+        except GeneratorConfigError as exc:
+            return jsonify({"error": str(exc)}), 400
+    if section == "load_tools":
+        try:
+            validate_tools_section(payload)
+        except ToolConfigError as exc:
+            return jsonify({"error": str(exc)}), 400
+        # Only what differs from the built-in templates is stored, so later default fixes still apply.
+        payload = tools_overrides(payload)
     warnings = warnings_for(section, payload)
     _audit_addresses(payload)
     try:
@@ -537,6 +563,29 @@ def _check_domain_binding(payload: dict, domain: str, area: str):
     return jsonify(check_resolved_source(resolved, language).to_dict()), 200
 
 
+def _check_generator(payload: dict, generator_id: str):
+    entry = payload.get(generator_id)
+    if not generator_id or not isinstance(entry, dict):
+        return jsonify({"error": f"Генератор «{generator_id or '—'}» не найден"}), 400
+    try:
+        generator = parse_generator(generator_id, entry)
+    except GeneratorConfigError as exc:
+        return jsonify({"ok": False, "message": str(exc), "details": {}, "elapsed_ms": 0}), 200
+    started = time.perf_counter()
+    report = check_generator(generator, effective_tools(CONFIG))
+    details = report.to_details()
+    # The settings page stores {"at", "target"} as the generator's "verified" mark after a successful check;
+    # the mark counts while the generator's endpoint stays the same.
+    details["target"] = generator.check_target()
+    details["checked_at"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return jsonify({
+        "ok": report.ok,
+        "message": report.message,
+        "details": details,
+        "elapsed_ms": int((time.perf_counter() - started) * 1000),
+    }), 200
+
+
 @config_bp.route("/config/test_connection", methods=["POST"])
 def test_connection():
     """Проверяет соединение по данным раздела из формы (ещё не сохранённым)."""
@@ -554,6 +603,10 @@ def test_connection():
         source_id = str(data.get("source") or "").strip()
         _audit_addresses(restored.get(source_id))
         return _check_catalog_source(restored, source_id)
+    if section == "load_generators":
+        generator_id = str(data.get("source") or "").strip()
+        _audit_addresses(restored.get(generator_id))
+        return _check_generator(restored, generator_id)
     _audit_addresses(restored)
     if section == "domain_sources":
         return _check_domain_binding(restored, str(data.get("domain") or "").strip(), area)
