@@ -505,9 +505,15 @@ def setup_stubs(args: argparse.Namespace) -> int:
         raise SystemExit(f"{path.parent} is a git working tree, not a sandbox copy: its runtime file is not touched")
     if not path.parent.is_dir():
         raise SystemExit(f"{path.parent} not found: run make_sandbox.py first")
+    ports = {}
+    for name, url in (("llm", args.llm_stub), ("confluence", args.confluence_stub), ("prometheus", args.prom_stub)):
+        parts = urlsplit(url or "")
+        if parts.hostname not in LOCAL_HOSTS or not parts.port:
+            raise SystemExit(f"--{name.replace('prometheus', 'prom')}-stub must be http://127.0.0.1:<port>, got {url!r}")
+        ports[name] = parts.port
     existing = json.loads(path.read_text(encoding="utf-8-sig") or "{}") if path.exists() else {}
     try:
-        data = stub_settings_runtime(existing, args.area, app_url=args.base)
+        data = stub_settings_runtime(existing, args.area, app_url=args.base, ports=ports)
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
     size = _write_json_atomic(path, data)
@@ -1128,6 +1134,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     stubs = parser.add_argument_group("--setup-stubs: wire a sandbox to tools/stubs")
     stubs.add_argument("--setup-stubs", action="store_true", help="write the LLM/Confluence/Prometheus stub keys into the sandbox settings_runtime.json and exit")
     stubs.add_argument("--runtime-json", help="settings_runtime.json to change (default %%TEMP%%/ll_ui_s<N>/app/settings_runtime.json)")
+    stubs.add_argument("--llm-stub", default=f"http://{STUB_HOST}:{STUB_PORTS['llm']}",
+                       help="LLM stub: where --setup-stubs points the sandbox, where --during-job counts calls ('' to skip counting)")
+    stubs.add_argument("--confluence-stub", default=f"http://{STUB_HOST}:{STUB_PORTS['confluence']}", help="Confluence stub for --setup-stubs")
+    stubs.add_argument("--prom-stub", default=f"http://{STUB_HOST}:{STUB_PORTS['prometheus']}",
+                       help="Prometheus stub: where --setup-stubs points the sandbox, where --during-job counts queries ('' to skip counting)")
     job = parser.add_argument_group("--during-job: latency while a report is being built")
     job.add_argument("--during-job", action="store_true", help="idle round, then POST /create_report and the same requests until the job ends")
     job.add_argument("--service", default="svc01", help="service of the report (a seeded bench service)")
@@ -1141,8 +1152,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                      help="pause of every client after each request, ms (default 50 x --concurrency: the same request rate for any number of clients)")
     job.add_argument("--poll-sec", type=float, default=1.0, help="interval of the /job_status polls")
     job.add_argument("--job-timeout", type=float, default=900.0, help="give up waiting for the job after this many seconds")
-    job.add_argument("--llm-stub", default=f"http://{STUB_HOST}:{STUB_PORTS['llm']}", help="LLM stub to count calls on ('' to skip)")
-    job.add_argument("--prom-stub", default=f"http://{STUB_HOST}:{STUB_PORTS['prometheus']}", help="Prometheus stub to count queries on ('' to skip)")
     job.add_argument("--compare-table", type=int, default=1, help="with --compare FILE.md: which during-job table of the file (1-based)")
     args = parser.parse_args(argv)
     if args.sandbox is not None:

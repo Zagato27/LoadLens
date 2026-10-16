@@ -691,6 +691,13 @@ def test_setup_stubs_writes_a_sandbox_file_and_refuses_a_working_tree(tmp_path, 
     assert bench.main(["--setup-stubs", "--runtime-json", str(runtime), "--base", "http://127.0.0.1:5079"]) == 0
     written = json.loads(runtime.read_text(encoding="utf-8"))
     assert written["confluence"]["app_url"] == "http://127.0.0.1:5079" and "Restart" in capsys.readouterr().out
+    moved = ["--setup-stubs", "--runtime-json", str(runtime), "--llm-stub", "http://127.0.0.1:6090", "--confluence-stub", "http://localhost:6091", "--prom-stub", "http://127.0.0.1:6092"]
+    assert bench.main(moved) == 0  # a second set of stubs on other ports
+    written = json.loads(runtime.read_text(encoding="utf-8"))
+    assert written["llm"]["openai"]["api_base_url"] == "http://127.0.0.1:6090/v1" and written["confluence"]["base_url"] == "http://127.0.0.1:6091"
+    assert written["data_sources"]["prometheus"]["prometheus"]["url"] == "http://127.0.0.1:6092"
+    with pytest.raises(SystemExit, match="prom-stub"):
+        bench.main(["--setup-stubs", "--runtime-json", str(runtime), "--prom-stub", "http://prometheus.example.org:9090"])
     with pytest.raises(SystemExit, match="working tree"):
         bench.main(["--setup-stubs", "--runtime-json", str(ROOT_DIR / "settings_runtime.json")])
     with pytest.raises(SystemExit, match="runtime-only"):
@@ -729,6 +736,15 @@ def test_during_job_table_renders_and_parses_back():
     assert compared.splitlines()[0].endswith("| было job p50 | было job p95 | было/стало job p95 |")
     assert compared.splitlines()[2].endswith("| 0 | — | — | — |")
     assert compared.splitlines()[3].endswith("| 2 | 260.0 | 800.0 | 2.00× |")
+
+
+def test_the_thread_baseline_of_the_docs_is_a_compare_source():
+    """docs/perf-baseline.md, "Этап 3": the first during-job table is the thread-mode baseline B6 compares with."""
+    tables = bench.parse_during_tables((ROOT_DIR / "docs" / "perf-baseline.md").read_text(encoding="utf-8"))
+    assert len(tables) >= 3
+    first = bench.load_during_baseline(str(ROOT_DIR / "docs" / "perf-baseline.md"), 1)
+    assert [row["path"] for row in first] == [*bench.DURING_JOB_ENDPOINTS, bench.JOB_STATUS_ROW]
+    assert all(row["job_p95"] and row["job_count"] > 0 for row in first)
 
 
 def test_during_baseline_comes_from_json_or_markdown(tmp_path):
