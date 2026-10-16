@@ -312,6 +312,7 @@ def explain_endpoints(args: argparse.Namespace) -> int:
         app_dir = Path(os.environ.get("TEMP") or tempfile.gettempdir()) / f"ll_ui_s{args.sandbox}" / "app"
     else:
         raise SystemExit("--explain needs --sandbox N or --app-dir")
+    json_path = os.path.abspath(args.json_path) if args.json_path else None  # the app import changes the cwd
     flask_app, core = _load_sandbox_app(app_dir.resolve(), args.allow_remote)
     original = core._ts_conn
     log: list[str] = []
@@ -369,8 +370,8 @@ def explain_endpoints(args: argparse.Namespace) -> int:
                 print(f"{path} #{number}\n```\n{item['sql']}\n\n" + "\n".join(item["plan"]) + "\n```\n")
         report.append({"path": path, "status": status, "statements": plans})
     explain_conn.close()
-    if args.json_path:
-        with open(args.json_path, "w", encoding="utf-8") as handle:
+    if json_path:
+        with open(json_path, "w", encoding="utf-8") as handle:
             json.dump({"connect_ms": connect_ms, "round_trip_ms": round_trip, "endpoints": report}, handle, ensure_ascii=False, indent=2)
     return 0
 
