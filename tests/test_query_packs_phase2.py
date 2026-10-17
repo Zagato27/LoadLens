@@ -289,3 +289,32 @@ def test_detect_matches_graphite_paths_with_wildcards():
     assert packs["lt-gatling-graphite-victoriametrics"]["found"] == ["gatling.*.allRequests.all.count", "gatling.*.users.allUsers.active"]
     assert packs["lt-gatling-influxql"]["score"] == 0.0  # another language
     assert packs["lt-k6-prometheus-rw"]["score"] == 0.0
+
+
+def test_detect_tells_relabeled_gatling_series_from_graphite_paths():
+    from loadlens_app.metric_discovery import DomainNames
+    from loadlens_app.query_pack_service import ScopeState, detect_packs
+
+    relabeled = frozenset({"gatling_request_count", "gatling_request_percentiles95", "gatling_request_mean", "gatling_users_active"})
+
+    def discover(cfg, domains):
+        return {domain: DomainNames(domain, "VictoriaMetrics", "promql", relabeled if domain == "lt_framework" else frozenset()) for domain in domains}
+
+    packs = detect_packs(ScopeState(queries={}, sla={}, effective_cfg={}), discover)["packs"]
+    assert packs["lt-gatling-graphite-victoriametrics-labels"]["score"] == 1.0
+    assert packs["lt-gatling-graphite-victoriametrics"]["score"] == 0.0
+
+
+def test_relabeled_gatling_pack_filters_by_simulation_and_reads_users_either_way():
+    from AI.query_packs import load_catalog, render_pack, run_filter_variables
+    from tests.promql_lint import check_promql
+
+    pack = load_catalog().pack("lt-gatling-graphite-victoriametrics-labels")
+    rendered = {query.role: query.query for query in render_pack(pack, run_filter_variables(pack, {"simulation": "checkoutsimulation"}, "nightly-1")).queries}
+    for text in rendered.values():
+        check_promql(text)
+        assert 'simulation=~"nightly-1"' in text and "checkoutsimulation" not in text
+    # gatling_users_active with the users rule, gatling_request_active{request="users"} when the rule never matched.
+    assert 'gatling_users_active{simulation=~"nightly-1", request="allUsers"}' in rendered["lt.vus"]
+    assert 'gatling_request_active{simulation=~"nightly-1", request="users", status="allUsers"}' in rendered["lt.vus"]
+    assert 'request!="allRequests"' in rendered["lt.rps_by_request"] and 'request="allRequests"' in rendered["lt.rps_total"]

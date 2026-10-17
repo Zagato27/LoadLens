@@ -197,6 +197,18 @@ services:
     command: ["-graphiteListenAddr=:2003", "-retentionPeriod=7d", "-search.latencyOffset=1s"]
     ports: ["127.0.0.1:18428:8428"]
 
+  victoriametrics-labels:
+    <<: *restart
+    profiles: [gatling]
+    # The same Graphite input renamed by gatling/vm-relabel.yml into gatling_request_* / gatling_users_* with
+    # labels simulation, request, status (pack lt-gatling-graphite-victoriametrics-labels). Gatling writes here
+    # with JAVA_OPTS=-Dgatling.data.graphite.host=victoriametrics-labels.
+    image: victoriametrics/victoria-metrics:v1.106.1
+    command: ["-graphiteListenAddr=:2003", "-relabelConfig=/etc/vm/gatling-relabel.yml", "-retentionPeriod=7d", "-search.latencyOffset=1s"]
+    volumes:
+      - ./gatling/vm-relabel.yml:/etc/vm/gatling-relabel.yml:ro
+    ports: ["127.0.0.1:18429:8428"]
+
   gatling:
     profiles: [gatling]
     # Gatling 3.10.5 bundle unpacked on the host into gatling/bundle (README); 3.11+ needs Maven at run time.

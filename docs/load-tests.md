@@ -224,12 +224,46 @@ Maven:   {exe} gatling:test -Dgatling.simulationClass={script} {params}
 |---|---|---|
 | k6 | `--tag testid=<тег>` во все выводы | `lt-k6-prometheus-rw`, `lt-k6-prometheus-native`, `lt-k6-influxql` |
 | JMeter | `-Japplication=<тег>`, если Backend Listener читает `${__P(application,…)}` | `lt-jmeter-influxql` |
-| Gatling, Locust | не помечаются по умолчанию | отделяются окном прогона |
+| Gatling | не помечается по умолчанию; тегом можно заменить префикс Graphite или имя симуляции (ниже) | `lt-gatling-graphite-victoriametrics`, `lt-gatling-graphite-victoriametrics-labels` |
+| Locust | не помечается | отделяется окном прогона |
 | Пайплайн CI | своей командой из `LOADLENS_RUN_TAG`, у генератора включён `tags_metrics` | установленные пакеты с фильтром прогона |
 
 Если запрос с тегом ничего не нашёл, а без тега данные есть, инструмент не пометил метрики — так бывает у тест-плана JMeter с фиксированным `application`. Тогда отчёт и графики читают все метрики окна и пишут об этом в сообщении прогона. Метрики инструментов без тега, которые одновременно писали в то же хранилище, попадут в отчёт; форма предупреждает об этом, если в прогоне несколько инстансов. Если в прогоне есть CI-инстанс без `tags_metrics`, фильтр по тегу для всего прогона выключается: иначе он спрятал бы метрики пайплайна.
 
 **Gatling в VictoriaMetrics с тегом.** Префикс Graphite можно заменить тегом прогона: в шаблоне `gatling` задайте `"env": {"JAVA_OPTS": "-Dgatling.data.graphite.rootPathPrefix={run_tag}"}` и `"run_filter_packs": ["lt-gatling-graphite-victoriametrics"]`. Для InfluxDB с graphite-шаблоном `gatling.*` так делать нельзя: метрики с другим префиксом не пройдут шаблон.
+
+**Gatling в VictoriaMetrics с relabeling.** Если VictoriaMetrics переименовывает пути Graphite в ряды с метками, ставьте пакет `lt-gatling-graphite-victoriametrics-labels`. Он ждёт такие правила `-relabelConfig` (они же — `docker/dev-stack/gatling/vm-relabel.yml`):
+
+```yaml
+# Пользователи: gatling.<симуляция>.users.<сценарий|allUsers>.<active|waiting|done>. Правило — первым:
+# эти пути тоже из пяти частей и иначе попадут под правило запросов.
+- action: graphite
+  match: 'gatling.*.users.*.*'
+  labels:
+    __name__: 'gatling_users_${3}'
+    simulation: '$1'
+    request: '$2'
+# Запросы в группе: gatling.<симуляция>.<группа>.<запрос>.<статус>.<метрика>
+- action: graphite
+  match: 'gatling.*.*.*.*.*'
+  labels:
+    __name__: 'gatling_request_${5}'
+    simulation: '$1'
+    request: '${2}.${3}'
+    status: '$4'
+# Запросы и сводка allRequests: gatling.<симуляция>.<запрос>.<ok|ko|all>.<count|mean|percentiles95|…>
+- action: graphite
+  match: 'gatling.*.*.*.*'
+  labels:
+    __name__: 'gatling_request_${4}'
+    simulation: '$1'
+    request: '$2'
+    status: '$3'
+```
+
+В `match` каждая `*` — одна часть пути без точек, `$N` — N-я звёздочка. Частая ошибка — правило `gatling.users.*.*.*`: Gatling пишет пользователей после имени симуляции, поэтому оно не срабатывает, и пользователи попадают под правило запросов как `gatling_request_active{request="users", status="allUsers"}`. Пакет читает и такой ряд. Без правила для групп запросы внутри `group(...)` остаются путями Graphite и не видны в разбивке по запросам; общие цифры `allRequests` это не задевает. Вложенные группы дают пути длиннее шести частей: на каждый уровень нужно своё правило.
+
+Тег прогона здесь подставляется вместо имени симуляции, а не префикса: префикс `gatling` нужен правилам. В шаблоне `gatling` задайте `"env": {"JAVA_OPTS": "-Dgatling.core.outputDirectoryBaseName={run_tag}"}` и `"run_filter_packs": ["lt-gatling-graphite-victoriametrics-labels"]`: Gatling пишет тег в путь Graphite вместо имени симуляции, он попадает в метку `simulation`, а пакет фильтрует по ней. Каталог результатов Gatling тоже получит имя тега. Пайплайн CI делает то же своей командой из `LOADLENS_RUN_TAG` и включённым `tags_metrics` у генератора. Проверено на бандле Gatling 3.10.5.
 
 ## Комплексный прогон и суммарный RPS
 

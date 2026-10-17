@@ -73,6 +73,30 @@ Graphite-вывод Gatling (gatling.data.writers = [graphite]) в VictoriaMetri
 | LT (Gatling VM): errors per second by request | Ошибки в секунду по запросам | в секунду |  |
 | LT (Gatling VM): active users | Виртуальные пользователи | шт. | VU (прогноз) |
 
+### Gatling Graphite → VictoriaMetrics с relabeling (PromQL)
+
+`lt-gatling-graphite-victoriametrics-labels` v1 · домен «Нагрузочный инструмент» · PromQL · проверен на стенде `docker/dev-stack`
+
+Graphite-вывод Gatling в VictoriaMetrics, где правила relabeling (-relabelConfig, action: graphite) превращают пути в ряды с метками: gatling.<симуляция>.<запрос>.<статус>.<метрика> → gatling_request_<метрика>{simulation, request, status}, gatling.<симуляция>.users.<сценарий>.<метрика> → gatling_users_<метрика>{simulation, request}. Правила — в docs/load-tests.md. Пользователи читаются и из gatling_request_active{request="users"}: туда они попадают, если правило пользователей не сработало. Запросы внутри групп Gatling видны по запросам, только если есть правило для путей из шести частей. Если VictoriaMetrics хранит пути целиком, нужен пакет «Gatling Graphite → VictoriaMetrics (PromQL)». count — запросы за writePeriod (по умолчанию 1 с), время в мс. По умолчанию VictoriaMetrics не отдаёт последние 30 с (-search.latencyOffset): отчёт по только что закончившемуся тесту строите через минуту.
+
+| Переменная | По умолчанию | Описание |
+|---|---|---|
+| `simulation` | `.+` | Симуляция (регулярное выражение). Значение метки simulation: имя симуляции в нижнем регистре, например checkoutsimulation. По умолчанию — любая |
+| `window_sec` | `30` | Окно усреднения, с. За это окно суммируются счётчики и усредняются задержки. Должно быть не меньше периода записи (writePeriod) |
+| `load_model` | `open` | Модель нагрузки сценария. open — constantUsersPerSec, rampUsersPerSec; closed — constantConcurrentUsers, rampConcurrentUsers. Варианты: open, closed |
+
+| Запрос | Роль | Единица | SLA |
+|---|---|---|---|
+| LT (Gatling VM labels): RPS total | Общий RPS теста (обязательный) | в секунду | запрос производительности |
+| LT (Gatling VM labels): RPS by request | RPS по запросам | в секунду |  |
+| LT (Gatling VM labels): p95(ms) total | p95 времени ответа, весь тест | мс | p95 |
+| LT (Gatling VM labels): p99(ms) total | p99 времени ответа, весь тест | мс | p99 |
+| LT (Gatling VM labels): p95(ms) by request | p95 времени ответа по запросам | мс |  |
+| LT (Gatling VM labels): mean response time(ms) | Среднее время ответа, весь тест (обязательный) | мс | среднее время (прогноз) |
+| LT (Gatling VM labels): error rate (%) | Доля ошибок, весь тест | % | доля ошибок |
+| LT (Gatling VM labels): errors per second by request | Ошибки в секунду по запросам | в секунду |  |
+| LT (Gatling VM labels): active users | Виртуальные пользователи | шт. | VU (прогноз) |
+
 ### JMeter Backend Listener → InfluxDB (InfluxQL)
 
 `lt-jmeter-influxql` v2 · домен «Нагрузочный инструмент» · InfluxQL

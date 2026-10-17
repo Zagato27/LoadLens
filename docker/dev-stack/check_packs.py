@@ -35,12 +35,14 @@ SOURCES = {
     },
     "influx": {"title": "dev InfluxDB", "type": "influxdb", "influxdb": {"url": "http://127.0.0.1:18086", "org": "devstack", "token": "devstack:devstack"}},
     "vm": {"title": "dev VictoriaMetrics", "type": "prometheus", "prometheus": {"url": "http://127.0.0.1:18428"}},
+    "vm-labels": {"title": "dev VictoriaMetrics, relabeled", "type": "prometheus", "prometheus": {"url": "http://127.0.0.1:18429"}},
 }
 BINDINGS = {
     "prom": {"source": "prom"},
     "graf-influxql": {"source": "graf", "datasource_uid": "devstack-influx-k6", "database": "k6"},
     "influx-flux": {"source": "influx", "bucket": "k6/autogen"},
     "vm": {"source": "vm"},
+    "vm-labels": {"source": "vm-labels"},
 }
 # pack -> (binding, variables, compose profile that produces its metrics)
 PLAN: dict[str, tuple[str, dict[str, str], str]] = {
@@ -50,6 +52,7 @@ PLAN: dict[str, tuple[str, dict[str, str], str]] = {
     "lt-k6-prometheus-native": ("prom", {"matchers": 'testid="devstack-native"'}, "load"),
     "lt-locust-prometheus": ("prom", {}, "locust"),
     "lt-gatling-graphite-victoriametrics": ("vm", {"simulation": "checkoutsimulation"}, "gatling"),
+    "lt-gatling-graphite-victoriametrics-labels": ("vm-labels", {}, "gatling"),
     "jvm-micrometer": ("prom", {"service_label": "job", "matchers": 'job="keycloak"'}, "core"),
     "http-micrometer": ("prom", {"service_label": "job", "matchers": 'job="keycloak"'}, "core"),
     "runtime-go": ("prom", {"matchers": 'job=~"prometheus|node|postgres|pgbouncer|redis"'}, "core"),

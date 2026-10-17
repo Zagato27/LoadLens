@@ -19,6 +19,7 @@
 | Locust + locust_exporter (профиль `locust`) | метрики Locust | — |
 | k6 0.54 (профиль `load`) | ступенчатая нагрузка: InfluxDB, Prometheus RW (trend stats и native histograms) | — |
 | Gatling 3.10.5 + VictoriaMetrics 1.106 (профиль `gatling`) | Graphite-вывод Gatling, ступени 10 → 20 → 30 пользователей/с | 18428 |
+| VictoriaMetrics с relabeling (профиль `gatling`) | те же метрики как `gatling_request_*` / `gatling_users_*` с метками (`gatling/vm-relabel.yml`) | 18429 |
 | Генератор нагрузки (профиль `generator`) | SSH для страницы «Запуск теста»: k6, Locust и бандл Gatling | 12222 |
 | docker-socket-proxy (профиль `generator`) | Docker API для Docker-генератора: контейнеры, образы, exec, сети, тома | 12375 |
 
@@ -41,6 +42,9 @@ docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-s
 # Gatling → Graphite → VictoriaMetrics (~6 минут; бандл Gatling — см. ниже)
 docker compose --profile gatling up -d victoriametrics
 docker compose --profile gatling run --rm gatling
+# то же в VictoriaMetrics с relabeling; outputDirectoryBaseName — тег прогона вместо имени симуляции
+docker compose --profile gatling up -d victoriametrics-labels
+docker compose --profile gatling run --rm -e JAVA_OPTS="-Dgatling.data.graphite.host=victoriametrics-labels -Dgatling.core.outputDirectoryBaseName=devstack-labels" gatling
 
 # Проверка пакетов (из корня репозитория; окно — последние 15 минут)
 python docker/dev-stack/check_packs.py --json dev-stack-results.json
@@ -194,6 +198,15 @@ Kubernetes + k6 (InfluxDB)» первым: подходят 6 из 9 пакет�
 заменяются на «_», группа — отдельный сегмент пути (`Catalog.Item_page`), счётчики `count` приходят каждую
 секунду и в простое (нулями), а перцентили — только в секунды с ответами; у запроса без ошибок есть
 `ko.count`, но нет перцентилей `ko`.
+
+## Результат прогона 2026-10-17: Gatling → VictoriaMetrics с relabeling
+
+`lt-gatling-graphite-victoriametrics-labels` вернул данные по всем девяти запросам на прогоне Gatling 3.10.5 со ступенями по
+40 с (`-DstepSeconds=40`) в `victoriametrics-labels`. Общий RPS — 46 → 76 → 106, доля ошибок — 22 → 26 → 28 %, пользователи —
+16 → 26 → 37, как у пакета без relabeling. С `-Dgatling.core.outputDirectoryBaseName=<тег>` метка `simulation` равна тегу:
+фильтр прогона находит его ряды, а с чужим тегом рядов нет. Правило для групп даёт запросы `Catalog.Item_page`; без него
+пути из шести частей остаются как есть. С правилом пользователей вида `gatling.users.*.*.*` (оно не срабатывает) пользователи
+лежат в `gatling_request_active{request="users"}`, и пакет читает их оттуда.
 
 ## Что стенд не покрывает
 

@@ -97,6 +97,11 @@ def output_hint(cfg: dict, tool_id: str, installed_packs: list[str]) -> Hint:
                 f"-Dgatling.data.graphite.host={host} -Dgatling.data.graphite.port=2003"
             )
             hint.notes.append("Порт 2003 — Graphite-приёмник VictoriaMetrics (-graphiteListenAddr); у Prometheus его нет.")
+            if "lt-gatling-graphite-victoriametrics-labels" in packs:
+                hint.notes.append(
+                    "Пакет с relabeling ждёт правил -relabelConfig в VictoriaMetrics (docs/load-tests.md); тег прогона — "
+                    "-Dgatling.core.outputDirectoryBaseName в шаблоне Gatling."
+                )
         elif family == "locust":
             hint.notes.append("Метрики Locust собирает locust_exporter: добавьте его в scrape Prometheus, флаги запуска не нужны.")
         elif family == "jmeter":

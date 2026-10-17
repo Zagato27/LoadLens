@@ -1,0 +1,29 @@
+# Graphite relabeling of Gatling metrics for the victoriametrics-labels service (pack
+# lt-gatling-graphite-victoriametrics-labels). In `match` every `*` is one path part, `$N` the N-th `*`.
+# The users rule goes first: its paths also have five parts and would match the request rule.
+
+# gatling.<simulation>.users.<scenario|allUsers>.<active|waiting|done>
+- action: graphite
+  match: 'gatling.*.users.*.*'
+  labels:
+    __name__: 'gatling_users_${3}'
+    simulation: '$1'
+    request: '$2'
+
+# gatling.<simulation>.<group>.<request>.<ok|ko|all>.<metric>: requests inside a group (one level)
+- action: graphite
+  match: 'gatling.*.*.*.*.*'
+  labels:
+    __name__: 'gatling_request_${5}'
+    simulation: '$1'
+    request: '${2}.${3}'
+    status: '$4'
+
+# gatling.<simulation>.<request|allRequests>.<ok|ko|all>.<count|mean|percentiles95|...>
+- action: graphite
+  match: 'gatling.*.*.*.*'
+  labels:
+    __name__: 'gatling_request_${4}'
+    simulation: '$1'
+    request: '$2'
+    status: '$3'

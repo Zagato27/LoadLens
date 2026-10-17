@@ -827,6 +827,9 @@ def test_output_hints_follow_the_domain_source():
     assert hint.params == "--out experimental-prometheus-rw" and hint.env["K6_PROMETHEUS_RW_SERVER_URL"] == "http://vm:8428/api/v1/write"
     gatling = output_hint(prom, "gatling", [])
     assert "graphite.host=vm" in gatling.env["JAVA_OPTS"]
+    assert not any("relabel" in note for note in gatling.notes)
+    labels = output_hint(prom, "gatling", ["lt-gatling-graphite-victoriametrics-labels"])
+    assert any("relabelConfig" in note and "outputDirectoryBaseName" in note for note in labels.notes)
     native = output_hint(prom, "k6", ["lt-k6-prometheus-native"])
     assert native.env.get("K6_PROMETHEUS_RW_TREND_AS_NATIVE_HISTOGRAM") == "true"
     influx = {"data_sources": {"i2": {"title": "Influx", "type": "influxdb", "influxdb": {"url": "http://influx:8086", "org": "perf", "token": "SECRET"}}},
