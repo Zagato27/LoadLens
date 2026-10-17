@@ -24,10 +24,11 @@ def create_app(auth_repository: UserRepository | None = None) -> Flask:
     flask_app.add_template_global(static_url)
     register_blueprints(flask_app)
     init_auth(flask_app, repository=auth_repository)
-    if os.getenv("LOADLENS_RUN_MIGRATIONS", "").strip() == "1":
-        # Data migrations (run ids for old runs) belong to start-up, not to GET requests.
-        from loadlens_app.migrations import start_background_migrations
+    # Data migrations belong to start-up, not to GET requests: the registry table says which ones this
+    # database still lacks, so an update of the application brings them along. LOADLENS_RUN_MIGRATIONS=0 skips.
+    from loadlens_app.migrations import enabled_by_env, start_background_migrations
 
+    if enabled_by_env():
         start_background_migrations()
     if os.getenv("LOADLENS_LOAD_TEST_WATCHER", "").strip() == "1":
         # Runs started before a restart are picked up at once, not when someone opens the launch page.

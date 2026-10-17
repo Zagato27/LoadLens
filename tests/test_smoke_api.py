@@ -792,17 +792,21 @@ def test_run_id_backfill_reuses_existing_ids_and_skips_when_locked():
     assert not [sql for sql, _params in busy.log if "UPDATE" in sql]
 
 
-def test_migrations_start_with_the_app_only_when_asked(monkeypatch):
+def test_migrations_start_with_the_app_unless_switched_off(monkeypatch):
     from app import create_app
     from loadlens_app import migrations
 
     started = []
     monkeypatch.setattr(migrations, "start_background_migrations", lambda: started.append(True))
+    monkeypatch.setenv("LOADLENS_RUN_MIGRATIONS", "0")  # conftest's default for every test
     create_app()
     assert started == []
+    monkeypatch.delenv("LOADLENS_RUN_MIGRATIONS")
+    create_app()
+    assert started == [True]  # the default: check the registry at every start
     monkeypatch.setenv("LOADLENS_RUN_MIGRATIONS", "1")
     create_app()
-    assert started == [True]
+    assert started == [True, True]
 
 
 def test_runs_restricts_to_project_area_services(client, monkeypatch):

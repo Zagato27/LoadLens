@@ -32,7 +32,8 @@ def _fresh_llm_budget(monkeypatch):
     from loadlens_app import limits
 
     monkeypatch.setattr(limits, "llm_budget", limits.DailyBudget())
-    monkeypatch.delenv("LOADLENS_RUN_MIGRATIONS", raising=False)
+    # Start-up migrations are on by default; a test app must not start a thread against the storage database.
+    monkeypatch.setenv("LOADLENS_RUN_MIGRATIONS", "0")
 
 
 @pytest.fixture(autouse=True)

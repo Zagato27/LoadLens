@@ -3,6 +3,7 @@
 DDL (column plus partial indexes of the final rows). Offline: fake connections and cursors only."""
 
 import sys
+import types
 from decimal import Decimal
 from pathlib import Path
 
@@ -442,6 +443,21 @@ def test_run_all_includes_the_max_rps_backfill(monkeypatch):
         monkeypatch.setattr(migrations, name, lambda: 0)
     monkeypatch.setattr(migrations, "backfill_run_ids", lambda: 2)
     monkeypatch.setattr(migrations, "backfill_max_rps", lambda: 7)
-    result = migrations.run_all()
+    # The registry has no rows yet: the fake answers the SELECT with nothing and accepts the INSERTs.
+    class RegistryCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def execute(self, query, params=None):
+            pass
+
+        def fetchall(self):
+            return []
+
+    registry = types.SimpleNamespace(cursor=RegistryCursor, commit=lambda: None, rollback=lambda: None, close=lambda: None, autocommit=False)
+    result = migrations.run_all(connect=lambda: registry)
     assert result["backfill_run_ids"] == 2
     assert result["backfill_max_rps"] == 7

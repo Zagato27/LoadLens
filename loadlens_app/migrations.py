@@ -1,21 +1,31 @@
-"""One-off data migrations that must not run inside ordinary GET requests.
+"""Data migrations that must not run inside ordinary GET requests.
 
-Run them with ``python -m loadlens_app.migrations``. The app container starts them in the background
-when ``LOADLENS_RUN_MIGRATIONS=1`` (docker-compose sets it). Each migration is idempotent, and a
-PostgreSQL advisory lock keeps several processes from running the same one at once.
+The application checks them at every start (unless ``LOADLENS_RUN_MIGRATIONS=0``) in a background thread:
+one-off migrations are recorded in the table ``app_migrations`` of the storage database and skipped once
+applied, catch-up migrations are cheap and run every time. So a database that an older version of the
+application wrote gets the missing migrations right after the update, whoever deploys it. While the
+database is unavailable the thread waits and tries again. ``python -m loadlens_app.migrations`` runs the
+same thing by hand (``--status`` only lists, ``--force`` repeats the one-off migrations). Each migration is
+idempotent, and a PostgreSQL advisory lock keeps several processes from running the same one at once.
 """
 
 from __future__ import annotations
 
+import argparse
 import logging
+import os
 import sys
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Callable, Optional
 
+import psycopg2
 from psycopg2 import sql
+
+from AI import storage_state
 
 logger = logging.getLogger(__name__)
 
@@ -270,38 +280,214 @@ def ensure_metrics_run_name_index(connect: Optional[Callable[[], Any]] = None, s
         conn.close()
 
 
-def run_all() -> dict[str, int]:
-    # run_index after the run ids (it copies them) and before the slow index build, so /runs is ready early.
-    return {
-        "backfill_run_ids": backfill_run_ids(),
-        "backfill_run_index": backfill_run_index(),
-        "backfill_max_rps": backfill_max_rps(),
-        "metrics_run_name_index": ensure_metrics_run_name_index(),
-    }
+# ---- registry: which migrations this database already has -------------------------------------------------
 
 
-def start_background_migrations() -> None:
-    """Runs the migrations once per process in a daemon thread; failures are logged, not raised."""
+@dataclass(frozen=True)
+class Migration:
+    """One entry of :data:`MIGRATIONS`.
+
+    ``key`` names the migration in the registry table, the logs and the CLI output; ``func`` is the module
+    function that runs it (looked up by name at run time). ``once`` migrations are recorded after a successful
+    run and skipped from then on; the others are cheap catch-ups that run at every start.
+    """
+
+    key: str
+    func: str
+    once: bool
+    title: str
+
+
+# In this order: run_index copies the run ids, and it fills before the slow index build so /runs is ready early.
+MIGRATIONS: tuple[Migration, ...] = (
+    Migration("backfill_run_ids", "backfill_run_ids", True, "идентификаторы прогонов, сохранённых до появления run_id"),
+    Migration("backfill_run_index", "backfill_run_index", False, "таблица run_index по metrics (полный проход один раз, затем досчёт)"),
+    Migration("backfill_max_rps", "backfill_max_rps", True, "колонка max_rps итоговых отчётов, сохранённых до её появления"),
+    Migration("metrics_run_name_index", "ensure_metrics_run_name_index", False, "индекс idx_metrics_run_name на таблице metrics"),
+)
+REGISTRY_TABLE = "app_migrations"
+# Waits between attempts while the storage database is unavailable at start-up; the last one repeats.
+RETRY_DELAYS_SEC: tuple[int, ...] = (30, 60, 120, 300, 600)
+
+
+def enabled_by_env(env: Optional[dict] = None) -> bool:
+    """Start-up migrations run unless ``LOADLENS_RUN_MIGRATIONS`` says 0, false, no or off."""
+    value = (env if env is not None else os.environ).get("LOADLENS_RUN_MIGRATIONS", "")
+    return str(value).strip().lower() not in ("0", "false", "no", "off")
+
+
+def _default_connect() -> Callable[[], Any]:
+    from loadlens_app import core
+
+    return core._ts_conn
+
+
+def _registry_ref() -> sql.Composed:
+    schema, _llm_table = _storage_names()
+    return sql.Identifier(schema, REGISTRY_TABLE)
+
+
+def _ensure_registry(conn) -> bool:
+    """Creates the registry table; False when this role cannot, then nothing is skipped or recorded."""
+    previous = getattr(conn, "autocommit", False)
+    try:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    "CREATE TABLE IF NOT EXISTS {} (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+                    " result INTEGER, runs INTEGER NOT NULL DEFAULT 1)"
+                ).format(_registry_ref())
+            )
+        return True
+    except Exception as exc:
+        logger.warning("Migration registry %s is not available (%s): every migration runs at every start", REGISTRY_TABLE, exc)
+        return False
+    finally:
+        try:
+            conn.autocommit = previous
+        except Exception:
+            pass
+
+
+def applied_migrations(conn) -> set[str]:
+    """Keys recorded in the registry table (the table must exist)."""
+    with conn.cursor() as cur:
+        cur.execute(sql.SQL("SELECT name FROM {}").format(_registry_ref()))
+        rows = cur.fetchall() or []
+    conn.commit()
+    return {str(row[0]) for row in rows}
+
+
+def _record(conn, key: str, result: int) -> None:
+    ref = _registry_ref()
+    with conn.cursor() as cur:
+        cur.execute(
+            sql.SQL(
+                "INSERT INTO {} (name, result) VALUES (%s, %s)"
+                " ON CONFLICT (name) DO UPDATE SET applied_at = now(), result = EXCLUDED.result, runs = {}.runs + 1"
+            ).format(ref, ref),
+            (key, int(result or 0)),
+        )
+    conn.commit()
+
+
+def pending_migrations(connect: Optional[Callable[[], Any]] = None) -> list[str]:
+    """Keys of the one-off migrations this database has not recorded yet (all of them without a registry)."""
+    conn = (connect or _default_connect())()
+    try:
+        if not _ensure_registry(conn):
+            return [m.key for m in MIGRATIONS if m.once]
+        applied = applied_migrations(conn)
+        return [m.key for m in MIGRATIONS if m.once and m.key not in applied]
+    finally:
+        conn.close()
+
+
+def run_all(force: bool = False, connect: Optional[Callable[[], Any]] = None) -> dict[str, Optional[int]]:
+    """Runs the migrations in order; a one-off migration already in the registry is skipped and reported as None.
+
+    ``connect`` opens the registry connection (the migrations open their own); ``force`` runs the recorded
+    one-off migrations again. Each migration is recorded right after it ran, so a failure in a later one does
+    not repeat the earlier ones at the next start.
+    """
+    registry = (connect or _default_connect())()
+    results: dict[str, Optional[int]] = {}
+    try:
+        tracked = _ensure_registry(registry)
+        applied = applied_migrations(registry) if tracked else set()
+        for migration in MIGRATIONS:
+            if migration.once and migration.key in applied and not force:
+                results[migration.key] = None
+                continue
+            count = int(globals()[migration.func]() or 0)  # by name, so tests can replace a migration
+            results[migration.key] = count
+            if tracked:
+                try:
+                    _record(registry, migration.key, count)
+                except Exception:
+                    logger.warning("Migration %s ran but could not be recorded in %s", migration.key, REGISTRY_TABLE, exc_info=True)
+                    try:
+                        registry.rollback()
+                    except Exception:
+                        pass
+        return results
+    finally:
+        registry.close()
+
+
+def _retryable(exc: BaseException) -> bool:
+    return storage_state.is_storage_error(exc) or isinstance(exc, psycopg2.OperationalError)
+
+
+def run_with_retries(
+    run: Callable[[], dict[str, Optional[int]]] = run_all,
+    sleep: Callable[[float], None] = time.sleep,
+    max_attempts: Optional[int] = None,
+) -> Optional[dict[str, Optional[int]]]:
+    """``run()`` until it succeeds; waits :data:`RETRY_DELAYS_SEC` while the storage database is unavailable.
+
+    Any other failure is logged once and ends the attempts (a bug does not deserve a retry loop). Returns the
+    results, or None when the attempts ran out or the failure was not about the database.
+    """
+    attempt = 0
+    while True:
+        try:
+            results = run()
+        except Exception as exc:
+            if not _retryable(exc):
+                logger.exception("Migrations failed; run `python -m loadlens_app.migrations` manually")
+                return None
+            attempt += 1
+            if max_attempts is not None and attempt >= max_attempts:
+                logger.error("Migrations postponed %d times, the storage database is still unavailable: %s", attempt, exc)
+                return None
+            delay = RETRY_DELAYS_SEC[min(attempt - 1, len(RETRY_DELAYS_SEC) - 1)]
+            logger.warning("Migrations postponed: the storage database is unavailable (%s); next try in %d s", exc, delay)
+            sleep(delay)
+            continue
+        once_keys = {m.key for m in MIGRATIONS if m.once}
+        applied = [f"{key}={count}" for key, count in results.items() if count is not None and key in once_keys]
+        catch_ups = [f"{key}={count}" for key, count in results.items() if count is not None and key not in once_keys]
+        skipped = [key for key, count in results.items() if count is None]
+        tail = (f"; catch-ups: {', '.join(catch_ups)}" if catch_ups else "") + (f"; already applied: {', '.join(skipped)}" if skipped else "")
+        if applied:
+            # A one-off migration changed this database: worth a line even where INFO is not shown.
+            logger.warning("Migrations applied: %s%s", ", ".join(applied), tail)
+        else:
+            logger.info("Migrations checked: nothing new to apply%s", tail)
+        return results
+
+
+def start_background_migrations() -> bool:
+    """Checks and runs the migrations once per process in a daemon thread; False when it already started."""
     global _started
     with _start_lock:
         if _started:
-            return
+            return False
         _started = True
-
-    def _run() -> None:
-        try:
-            run_all()
-        except Exception:
-            logger.exception("Background migrations failed; run `python -m loadlens_app.migrations` manually")
-
-    threading.Thread(target=_run, name="loadlens-migrations", daemon=True).start()
+    threading.Thread(target=run_with_retries, name="loadlens-migrations", daemon=True).start()
+    return True
 
 
-def main() -> int:
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Миграции данных LoadLens: проверяет реестр app_migrations и выполняет недостающие.")
+    parser.add_argument("--status", action="store_true", help="только показать, какие миграции выполнены, а какие ожидают")
+    parser.add_argument("--force", action="store_true", help="выполнить одноразовые миграции повторно, даже если они записаны как выполненные")
+    args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     try:
-        for name, count in run_all().items():
-            print(f"{name}: {count}")
+        if args.status:
+            pending = set(pending_migrations())
+            for migration in MIGRATIONS:
+                if not migration.once:
+                    state = "выполняется при каждом старте"
+                else:
+                    state = "ожидает" if migration.key in pending else "выполнена"
+                print(f"{migration.key}: {state} — {migration.title}")
+            return 2 if pending else 0
+        for key, count in run_all(force=args.force).items():
+            print(f"{key}: {'пропущена (уже выполнена)' if count is None else count}")
     except Exception as exc:  # database unreachable, bad settings, ...
         print(f"Ошибка миграции: {exc}", file=sys.stderr)
         return 1

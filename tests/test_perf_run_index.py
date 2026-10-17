@@ -565,15 +565,14 @@ def test_metrics_run_name_index_skips_a_missing_table_and_a_held_lock(migrations
 
 
 def test_run_all_indexes_runs_after_their_ids_and_before_the_index_build():
-    import inspect
-
     from loadlens_app import migrations
 
-    # Read from the source: calling run_all would also run migrations of other features against a database.
-    source = inspect.getsource(migrations.run_all)
-    ids, run_index, index = (source.index(f": {name}()") for name in
-                             ("backfill_run_ids", "backfill_run_index", "ensure_metrics_run_name_index"))
+    order = [migration.func for migration in migrations.MIGRATIONS]
+    ids, run_index, index = (order.index(name) for name in ("backfill_run_ids", "backfill_run_index", "ensure_metrics_run_name_index"))
     assert ids < run_index < index
+    by_func = {migration.func: migration for migration in migrations.MIGRATIONS}
+    # The index build and the run_index catch-up are cheap checks that repeat at every start.
+    assert not by_func["ensure_metrics_run_name_index"].once and not by_func["backfill_run_index"].once
 
 
 # ---- deployment schema --------------------------------------------------------------------------------------
