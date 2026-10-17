@@ -38,7 +38,7 @@ ROUTES = (
     ("runs_total", "COUNT(*) FROM public.run_index"),
     ("services", "PARTITION BY service"),
     ("weeks", "date_trunc('week'"),
-    ("recent", "start_ms, end_ms, run_id FROM latest"),
+    ("recent", "l.start_ms, l.end_ms, l.run_id, mv.verdict AS recent_manual"),
 )
 
 
@@ -188,8 +188,8 @@ def test_runs_are_deduplicated_by_name(app_client, monkeypatch):
     weeks_sql = db.call("weeks")[1]
     for text in (services_sql, recent_sql, weeks_sql):
         assert "ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC)" in text
-    assert "FROM latest WHERE run_rn = 1" in services_sql
-    assert "FROM latest WHERE rn = 1 ORDER BY created_at DESC LIMIT %s" in recent_sql
+    assert "FROM latest l LEFT JOIN manual_verdicts mv ON mv.run_name = l.run_name WHERE l.run_rn = 1" in services_sql
+    assert "WHERE l.rn = 1 ORDER BY l.created_at DESC LIMIT %s" in recent_sql
     assert "COALESCE(run_id, '')" in services_sql
 
 

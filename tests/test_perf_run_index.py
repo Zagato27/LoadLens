@@ -374,14 +374,15 @@ def test_runs_is_one_statement_over_run_index_with_the_total_in_a_column(client,
     body = resp.get_json()
     assert [item["run_name"] for item in body] == ["b-run", "a-run"]  # the database order is kept
     assert set(body[0]) == {"run_name", "start_time", "end_time", "service", "verdict", "llm_verdict", "sla_verdict",
-                            "report_created_at", "test_type", "test_type_key", "run_id", "project_area", "max_rps"}
+                            "report_created_at", "test_type", "test_type_key", "run_id", "project_area", "max_rps",
+                            "manual_verdict"}
     assert body[0]["max_rps"] == 120.0 and body[1]["max_rps"] is None and body[0]["run_id"] == "id-b-run"
     assert ensured == [conn]
 
     (text, params, _), = conn.log
     assert "FROM public.run_index WHERE run_name <> '' AND (run_name ILIKE %s" in text
     assert "public.metrics" not in text and "GROUP BY" not in text
-    assert "COUNT(*) OVER () AS total FROM joined" in text
+    assert "COUNT(*) OVER () AS total," in text and "manual_changed_at FROM joined" in text
     assert text.endswith("ORDER BY max_rps DESC NULLS LAST, run_name ASC OFFSET %s LIMIT %s")
     assert params == ("%run%", "%run%", 20, 2)
 

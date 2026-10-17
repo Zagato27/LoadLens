@@ -423,6 +423,24 @@ canvas.ll-zoomable { cursor: crosshair; }
 .hero-verdict-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .hero-verdict-row .report-verdict-pill { font-size: 18px; padding: 10px 18px; }
 .hero-sub { color: var(--text-muted); font-size: 13px; line-height: 1.5; }
+/* Manual verdict: a tag next to the pill, the reason under it, the change and reset buttons. */
+.verdict-manual-tag { display: inline-flex; align-items: center; margin-left: 8px; padding: 2px 8px; border: 1px dashed var(--border); border-radius: 999px; color: var(--text-muted); font-size: 12px; font-weight: 600; vertical-align: middle; }
+.hero-manual-reason { white-space: pre-line; overflow-wrap: anywhere; }
+.hero-verdict-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.verdict-manual-mark { margin-left: 6px; color: var(--text-dim); font-size: 11px; font-weight: 600; white-space: nowrap; cursor: help; }
+.verdict-dialog .verdict-choices { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; padding: 0; border: 0; }
+.verdict-dialog .verdict-choices legend { margin-bottom: 6px; padding: 0; color: var(--text); font-size: 13px; font-weight: 600; }
+.verdict-choice { display: inline-flex; align-items: center; gap: 6px; padding: 4px 6px; border: 1px solid transparent; border-radius: var(--radius-sm); cursor: pointer; }
+.verdict-choice:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.verdict-choice.is-current { cursor: default; opacity: 0.6; }
+.verdict-choice input { margin: 0; }
+.verdict-choice .report-verdict-pill { padding: 3px 10px; font-size: 13px; }
+.verdict-reason { display: flex; flex-direction: column; gap: 6px; font-size: 13px; font-weight: 600; }
+.verdict-reason textarea { width: 100%; min-height: 72px; resize: vertical; font-weight: 400; }
+.verdict-history { margin-top: 12px; font-size: 13px; }
+.verdict-history summary { cursor: pointer; color: var(--text-muted); }
+.verdict-history ul { margin: 8px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.verdict-history-reason { color: var(--text-muted); white-space: pre-line; overflow-wrap: anywhere; }
 .hero-usage { color: var(--text-dim); font-size: 13px; }
 .feedback-votes { display: inline-flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; align-items: center; }
 .feedback-vote.is-agree { border-color: var(--ok-border); background: var(--ok-bg); color: var(--ok-fg); }
@@ -999,7 +1017,7 @@ textarea.mono, input.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Co
   }
   html, body { background: #ffffff !important; }
   .app-sidebar, .app-topbar, .sidebar-backdrop, .skip-link, .toast-host, .breadcrumbs, .page-actions,
-  #renameReport, .report-rename-form, .feedback-votes, .hero-card-foot, .legend-chips-tools, .legend-chips-search,
+  #renameReport, .report-rename-form, .feedback-votes, .hero-card-foot, .hero-verdict-actions, .legend-chips-tools, .legend-chips-search,
   .report-tabs-bar, .tabs-sticky-sentinel, .chart-zoom-reset, .report-chart-hint, .chart-pending,
   #rep-llm-tabs > .tabs, #editEngineer, #engineerToolbar, .editor-actions { display: none !important; }
   .app-main, .container { display: block; max-width: none; padding: 0; margin: 0; }

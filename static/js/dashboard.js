@@ -345,9 +345,12 @@
   }
 
   // ---- rendering ----------------------------------------------------------------------------
-  function pill(verdict, extra) {
+  // ``manual`` ({verdict, reason, author, changed_at}) marks a verdict set by hand.
+  function pill(verdict, extra, manual) {
     const v = verdict || NA_VERDICT;
-    return `<span class="pill ${LL.verdictClass(v)}${extra ? ` ${extra}` : ''}">${esc(v)}</span>`;
+    const title = LL.manualVerdictTitle(manual);
+    const mark = title ? `<span class="verdict-manual-mark" title="${esc(title)}">вручную</span>` : '';
+    return `<span class="pill ${LL.verdictClass(v)}${extra ? ` ${extra}` : ''}"${title ? ` title="${esc(title)}"` : ''}>${esc(v)}</span>${mark}`;
   }
   function deltaHtml(delta, title) {
     if (!delta) return '';
@@ -392,7 +395,7 @@
     setText('lastTitle', last.run_name, last.run_name);
     setText('lastMeta', [last.service || '—', last.created_at ? `отчёт создан ${LL.relativeTime(last.created_at)}` : ''].filter(Boolean).join(' · '));
     const sla = slaBadge(last.sla);
-    $('lastBadges').innerHTML = `${pill(last.verdict, 'pill-lg')}<span class="pill pill-lg ${sla.tone}" title="${esc(sla.title)}">${esc(sla.text)}</span>`;
+    $('lastBadges').innerHTML = `${pill(last.verdict, 'pill-lg', last.manual_verdict)}<span class="pill pill-lg ${sla.tone}" title="${esc(sla.title)}">${esc(sla.text)}</span>`;
     $('lastKpis').innerHTML = heroKpis(last, kpi).map((t) => `
       <div class="dash-kpi dash-kpi-${t.key}"${t.title ? ` title="${esc(t.title)}"` : ''}>
         <div class="dash-kpi-label">${esc(t.label)}</div>
@@ -530,7 +533,7 @@
         <td class="run-name" title="${esc(r.run_name)}"><a href="${esc(href)}">${esc(r.run_name)}</a></td>
         <td>${esc(r.service || '—')}</td>
         <td class="muted">${esc(LL.testTypeLabel(r.test_type))}</td>
-        <td>${pill(r.verdict)}</td>
+        <td>${pill(r.verdict, '', r.manual_verdict)}</td>
         <td class="muted nowrap" title="${esc(r.created_at ? LL.formatDateTime(r.created_at) : '')}">${esc(r.created_at ? LL.relativeTime(r.created_at) : '—')}</td>`;
       tr.addEventListener('click', (ev) => {
         if (ev.target && ev.target.closest && ev.target.closest('a')) return;
@@ -718,6 +721,7 @@
       heroKpis,
       kpiTiles,
       jobsTile,
+      verdictPill: pill,
       serviceHistory,
       elapsedText,
       errorsText,

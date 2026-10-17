@@ -182,6 +182,16 @@ window.LoadLens.jobDismissButton = function jobDismissButton(job, onDone) {
   });
 })();
 
+// «Изменён вручную: ivanov, 17.10.2026 15:20. Причина: …» for a manual verdict ({verdict, reason, author,
+// changed_at}); '' without one.
+window.LoadLens.manualVerdictTitle = function manualVerdictTitle(manual) {
+  if (!manual || !manual.verdict) return '';
+  const LL = window.LoadLens;
+  const who = [String(manual.author || '').trim(), manual.changed_at ? LL.formatDateTime(manual.changed_at) : ''].filter(Boolean).join(', ');
+  const reason = String(manual.reason || '').trim();
+  return `Изменён вручную${who ? `: ${who}` : ''}.${reason ? ` Причина: ${reason}` : ''}`;
+};
+
 // Project area selector in the header. The chosen area is stored in a cookie that
 // every data endpoint reads, so a change reloads the page. Idempotent: the same
 // promise is returned to every caller, and it resolves to the active area id.

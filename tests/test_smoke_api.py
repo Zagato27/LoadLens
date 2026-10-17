@@ -889,8 +889,8 @@ def test_rename_run_data_updates_tables(monkeypatch):
     result = core._rename_run_data("old-run", "new-run")
     assert result["run_name"] == "new-run"
     assert store["names"] == {"new-run"}
-    # metrics, llm_reports, engineer_reports, confluence_publications, llm_feedback and run_index.
-    assert store["updates"] == [("old-run", "new-run")] * 6
+    # metrics, llm_reports, engineer_reports, confluence_publications, llm_feedback, report_verdicts and run_index.
+    assert store["updates"] == [("old-run", "new-run")] * 7
 
 
 def test_rename_run_data_conflict(monkeypatch):

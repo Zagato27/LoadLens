@@ -588,6 +588,170 @@
     if (text === 'Провал') return { text, className: 'report-verdict-fail' };
     return { text, className: 'report-verdict-na' };
   }
+  // ---- manual verdict ----------------------------------------------------------------------------
+  const VERDICT_CHOICES = ['Успешно', 'Есть риски', 'Провал', 'Недостаточно данных'];
+  function manualOf(row) {
+    const manual = row && row.manual_verdict;
+    return manual && manual.verdict ? manual : null;
+  }
+  // The line under the verdict pill: who set the verdict and from what.
+  function verdictSourceText(finalRow) {
+    const row = finalRow || {};
+    const manual = manualOf(row);
+    if (manual) {
+      const who = [safeStr(manual.author), manual.changed_at ? LL.formatDateTime(manual.changed_at) : ''].filter(Boolean).join(', ');
+      const auto = standardizeVerdict(row.auto_verdict || row.sla_verdict || row.llm_verdict);
+      return `Изменён вручную${who ? `: ${who}` : ''}. Автоматически: ${auto}.`;
+    }
+    const sla = safeStr(row.sla_verdict);
+    const llm = safeStr(row.llm_verdict);
+    if (sla) {
+      // Reports built before the SLA verdict replaced the model's one keep a different model verdict.
+      return llm && standardizeVerdict(llm) !== standardizeVerdict(sla)
+        ? `Определён по SLA-критериям. Оценка ИИ: ${standardizeVerdict(llm)}.`
+        : 'Определён по SLA-критериям.';
+    }
+    return standardizeVerdict(row.auto_verdict || row.verdict) === 'Недостаточно данных'
+      ? 'SLA-критерии не заданы, поэтому автоматический вердикт — «Недостаточно данных». Задайте SLA сервиса или поставьте вердикт вручную.'
+      : 'SLA-критерии не заданы: вердикт определён оценкой ИИ.';
+  }
+  function verdictHistoryItem(entry) {
+    const e = entry || {};
+    const head = [e.changed_at ? LL.formatDateTime(e.changed_at) : '', safeStr(e.author)].filter(Boolean).join(' · ');
+    const change = e.verdict
+      ? `${standardizeVerdict(e.previous_verdict)} → ${standardizeVerdict(e.verdict)}`
+      : `возвращён автоматический: ${standardizeVerdict(e.auto_verdict)}`;
+    const reason = safeStr(e.reason);
+    return `<li>${head ? `<span class="dim">${escapeHtml(head)}</span> ` : ''}${escapeHtml(change)}`
+      + `${reason ? `<div class="verdict-history-reason">${escapeHtml(reason)}</div>` : ''}</li>`;
+  }
+  function verdictHistoryHtml(history) {
+    const items = Array.isArray(history) ? history : [];
+    if (!items.length) return '';
+    return `<details class="verdict-history"><summary>История изменений (${items.length})</summary>`
+      + `<ul>${items.map(verdictHistoryItem).join('')}</ul></details>`;
+  }
+  // Body of the «Изменить вердикт» dialog from GET /runs/<run>/verdict.
+  function verdictDialogHtml(state) {
+    const s = state || {};
+    const current = standardizeVerdict(s.verdict);
+    const auto = standardizeVerdict(s.automatic);
+    const max = Number(s.reason_max) || 1000;
+    const choices = (Array.isArray(s.choices) && s.choices.length ? s.choices : VERDICT_CHOICES).map((v) => {
+      const same = v === current;
+      return `<label class="verdict-choice${same ? ' is-current' : ''}"><input type="radio" name="verdictChoice" value="${escapeHtml(v)}"${same ? ' disabled' : ''}>`
+        + `<span class="report-verdict-pill ${verdictTone(v).className}">${escapeHtml(v)}</span>${same ? '<span class="dim">сейчас</span>' : ''}</label>`;
+    }).join('');
+    const now = s.manual
+      ? `Сейчас «${current}», изменён вручную; автоматический — «${auto}».`
+      : `Сейчас «${current}», определён автоматически.`;
+    return [
+      '<div class="verdict-dialog">',
+      `<p class="muted">${escapeHtml(now)} Ручной вердикт действует на дашборде, в архиве, сравнении и при выборе базового прогона; анализ отчёта не меняется.</p>`,
+      `<fieldset class="verdict-choices"><legend>Новый вердикт</legend>${choices}</fieldset>`,
+      `<label class="verdict-reason"><span>Причина</span><textarea name="verdictReason" rows="3" maxlength="${max}" placeholder="Например: провал из-за сбоя генератора, сервис держал целевую нагрузку"></textarea></label>`,
+      '<div class="dialog-error" data-verdict-error role="alert"></div>',
+      verdictHistoryHtml(s.history),
+      '</div>'
+    ].join('');
+  }
+  function verdictFormProblem(verdict, reason, state) {
+    if (!verdict) return 'Выберите новый вердикт';
+    if (!reason) return 'Укажите причину: её увидят в отчёте, архиве и Confluence';
+    const max = Number(state && state.reason_max) || 1000;
+    if (reason.length > max) return `Причина — не длиннее ${max} символов`;
+    return '';
+  }
+  async function verdictRequest(method, body) {
+    const url = `/runs/${encodeURIComponent(getRunFromPath())}/verdict`;
+    const init = method === 'GET' ? {} : { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) };
+    const resp = await fetch(url, init);
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    return data;
+  }
+  // A changed verdict redraws the hero; a published page keeps the old one until it is updated.
+  function applyVerdictState(state, doneText) {
+    const row = reportState.finalRow;
+    if (!row) return;
+    row.manual_verdict = state.manual || null;
+    row.verdict = state.verdict;
+    row.auto_verdict = state.automatic;
+    renderHero(row, reportState.rows || [row]);
+    const link = document.getElementById('confluencePageLink');
+    const published = !!(link && link.style.display !== 'none' && link.getAttribute('href') && link.getAttribute('href') !== '#');
+    if (published) {
+      LL.ui.toast(`${doneText}. Страница в Confluence показывает прежний вердикт — нажмите «Обновить отчет в Confluence».`, { tone: 'info', timeout: 10000 });
+    } else {
+      LL.ui.toast(doneText, { tone: 'ok' });
+    }
+  }
+  async function openVerdictDialog() {
+    let state;
+    try {
+      state = await verdictRequest('GET');
+    } catch (e) {
+      LL.ui.toast(`Вердикт не загрузился: ${e.message}`, { tone: 'error' });
+      return;
+    }
+    let busy = false;
+    await LL.ui.dialog({
+      title: 'Изменить вердикт',
+      bodyHtml: verdictDialogHtml(state),
+      // A message about a missing choice or reason goes away as soon as the form changes.
+      onOpen: (body) => {
+        const error = body.querySelector('[data-verdict-error]');
+        body.addEventListener('input', () => { error.textContent = ''; });
+        body.addEventListener('change', () => { error.textContent = ''; });
+      },
+      actions: [
+        { label: 'Отмена' },
+        {
+          label: 'Сохранить',
+          primary: true,
+          onClick: async (close, body) => {
+            if (busy) return;
+            const picked = body.querySelector('input[name="verdictChoice"]:checked');
+            const reason = (body.querySelector('textarea[name="verdictReason"]').value || '').trim();
+            const error = body.querySelector('[data-verdict-error]');
+            const problem = verdictFormProblem(picked ? picked.value : '', reason, state);
+            error.textContent = problem;
+            if (problem) return;
+            busy = true;
+            try {
+              const next = await verdictRequest('PUT', { verdict: picked.value, reason });
+              close(next);
+              applyVerdictState(next, 'Вердикт изменён');
+            } catch (e) {
+              error.textContent = e.message;
+            } finally {
+              busy = false;
+            }
+          }
+        }
+      ]
+    });
+  }
+  async function resetVerdict() {
+    const row = reportState.finalRow || {};
+    const ok = await LL.ui.confirm({
+      title: 'Вернуть автоматический вердикт',
+      message: `Отчёт снова покажет «${standardizeVerdict(row.auto_verdict)}» — вердикт по SLA. История изменений сохранится.`,
+      confirmText: 'Вернуть'
+    });
+    if (!ok) return;
+    try {
+      applyVerdictState(await verdictRequest('DELETE', {}), 'Возвращён автоматический вердикт');
+    } catch (e) {
+      LL.ui.toast(`Не удалось вернуть вердикт: ${e.message}`, { tone: 'error' });
+    }
+  }
+  function bindVerdictActions(root) {
+    root.querySelectorAll('[data-verdict-action]').forEach((btn) => {
+      btn.addEventListener('click', () => (btn.dataset.verdictAction === 'reset' ? resetVerdict() : openVerdictDialog()));
+    });
+  }
+
   function renderListCell(items, emptyText, formatter) {
     const values = (Array.isArray(items) ? items : [])
       .map((item) => {
@@ -2135,8 +2299,6 @@
       return;
     }
     const effective = verdictTone(finalRow.verdict);
-    const llmVerdict = safeStr(finalRow.llm_verdict);
-    const slaVerdict = safeStr(finalRow.sla_verdict);
     const parsed = parseJsonish(finalRow.parsed) || {};
     const peak = (parsed.peak_performance && typeof parsed.peak_performance === 'object') ? parsed.peak_performance : {};
     const service = safeStr(finalRow.service) || getServiceFromPath();
@@ -2146,17 +2308,21 @@
       ? `${LL.formatDateTime(startMs)} — ${LL.formatDateTime(endMs)}`
       : '';
     const durationMin = (Number.isFinite(startMs) && Number.isFinite(endMs)) ? Math.round((endMs - startMs) / 60000) : null;
-    const verdictSource = slaVerdict
-      ? `Определён по SLA-критериям. Оценка ИИ: ${llmVerdict || '—'}.`
-      : 'Определён оценкой ИИ: SLA-критерии не заданы.';
+    const manual = manualOf(finalRow);
+    const verdictSource = verdictSourceText(finalRow);
     const verdictTermKey = { 'Успешно': 'verdict_success', 'Есть риски': 'verdict_risk', 'Провал': 'verdict_fail' }[effective.text] || 'verdict_na';
     const testType = normalizedTestType(parsed, finalRow.test_type);
     const typeTermKey = LL.GLOSSARY['test_type_' + testType] ? 'test_type_' + testType : 'step_profile';
     hero.innerHTML = [
       '<div class="hero-card">',
       `<div class="hero-label">${LL.ui.term('sla_first', 'Вердикт по тесту')}</div>`,
-      `<div class="hero-verdict-row"><abbr class="term" data-term="${verdictTermKey}" data-tip="${escapeHtml(LL.GLOSSARY[verdictTermKey] || '')}" title="${escapeHtml(LL.GLOSSARY[verdictTermKey] || '')}" tabindex="0" style="text-decoration:none"><span class="report-verdict-pill ${effective.className}">${escapeHtml(effective.text)}</span></abbr></div>`,
+      `<div class="hero-verdict-row"><abbr class="term" data-term="${verdictTermKey}" data-tip="${escapeHtml(LL.GLOSSARY[verdictTermKey] || '')}" title="${escapeHtml(LL.GLOSSARY[verdictTermKey] || '')}" tabindex="0" style="text-decoration:none"><span class="report-verdict-pill ${effective.className}">${escapeHtml(effective.text)}</span></abbr>${manual ? '<span class="verdict-manual-tag">вручную</span>' : ''}</div>`,
       `<div class="hero-sub">${escapeHtml(verdictSource)}</div>`,
+      manual && safeStr(manual.reason) ? `<div class="hero-sub hero-manual-reason">Причина: ${escapeHtml(safeStr(manual.reason))}</div>` : '',
+      '<div class="hero-verdict-actions" data-min-role="engineer">'
+        + '<button type="button" class="btn btn-sm" data-verdict-action="change">Изменить вердикт</button>'
+        + (manual ? '<button type="button" class="btn btn-sm" data-verdict-action="reset">Вернуть автоматический</button>' : '')
+        + '</div>',
       (function () {
         const verification = (parsed.verification_summary && typeof parsed.verification_summary === 'object') ? parsed.verification_summary : null;
         const unverifiedCount = verification ? Number(verification.unverified) : 0;
@@ -2183,6 +2349,7 @@
       `<div class="hero-card">${renderSlaChecklist(finalRow)}</div>`
     ].join('');
     bindFeedbackVotes(hero);
+    bindVerdictActions(hero);
   }
 
   async function reportsLoadLlm() {
@@ -2229,6 +2396,8 @@
       if (range) range.textContent = `Время теста: ${startStr} — ${endStr} · ${LL.timeZoneLabel()}`;
     } catch (e) {}
     const finalRow = arr.find((x) => x.domain === 'final') || null;
+    reportState.finalRow = finalRow;
+    reportState.rows = arr;
     renderHero(finalRow, arr);
     // Charts read the markers and thresholds, so the step table is resolved before they are drawn.
     const stepTable = await renderLoadSteps(finalRow);
@@ -2717,6 +2886,10 @@
     slaBarModel: slaBarModel,
     heroKpis: heroKpis,
     heroTypeEntries: heroTypeEntries,
+    verdictSourceText: verdictSourceText,
+    verdictHistoryHtml: verdictHistoryHtml,
+    verdictDialogHtml: verdictDialogHtml,
+    verdictFormProblem: verdictFormProblem,
     reportState: reportState
   };
 

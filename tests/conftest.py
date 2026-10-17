@@ -65,6 +65,16 @@ def _response_cache_off_by_default(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _manual_verdicts_table_known(monkeypatch):
+    """As in a running app, where the request path creates it, the report_verdicts table of the public schema is
+    known to exist, so fake connections see no extra probe. Tests of an older database clear the set."""
+    from AI import db_store
+
+    monkeypatch.setattr(db_store, "_MANUAL_VERDICTS_READY", {"public"})
+    monkeypatch.setattr(db_store, "_ENSURED_TABLES", {key for key in db_store._ENSURED_TABLES if key[1] != db_store.REPORT_VERDICTS_TABLE})
+
+
+@pytest.fixture(autouse=True)
 def _storage_breaker_closed():
     """The storage breaker is process state: every test starts and ends with it closed."""
     from AI import storage_state

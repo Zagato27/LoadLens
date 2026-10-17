@@ -11,7 +11,7 @@ from typing import Optional
 import psycopg2
 from psycopg2 import sql
 
-from AI.db_store import _ensure_llm_reports_table
+from AI.db_store import _ensure_llm_reports_table, manual_verdicts_cte, manual_verdicts_ready
 from AI.pipeline import _has_meaningful_system_context
 from AI.query_packs import READINESS_SLA_FIELDS, installed_packs, load_catalog, missing_sla_references, resolve_sla_refs
 from loadlens_app.errors import log_failure
@@ -45,11 +45,15 @@ AREA_META_KEYS = frozenset({"title", "description", "services"})
 STATUS_INHERITED = "inherited"
 STATUS_SAME = "same"
 STATUS_OWN = "own"
+# The verdict in force: a manual one (report_verdicts) before the automatic one.
 REPORT_ROWS_SQL = sql.SQL(
-    "SELECT service, created_at, COALESCE(sla_verdict, verdict, 'Недостаточно данных') FROM ("
-    "SELECT service, created_at, sla_verdict, verdict, "
+    "WITH {manual_cte} "
+    "SELECT latest.service, latest.created_at, "
+    "COALESCE(mv.verdict, latest.sla_verdict, latest.verdict, 'Недостаточно данных') FROM ("
+    "SELECT run_name, service, created_at, sla_verdict, verdict, "
     "ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC) AS rn "
-    "FROM {table} WHERE domain = 'final' AND service = ANY(%s)) latest WHERE rn = 1"
+    "FROM {table} WHERE domain = 'final' AND service = ANY(%s)) latest "
+    "LEFT JOIN manual_verdicts mv ON mv.run_name = latest.run_name WHERE latest.rn = 1"
 )
 SET_REPORTS_AREA_SQL = sql.SQL("UPDATE {table} SET project_area = %s WHERE service = ANY(%s)")
 
@@ -163,9 +167,12 @@ def _report_stats(service_ids: list[str]) -> dict[str, ReportStats]:
         return {}
     conn = _ts_conn()
     try:
-        with conn, conn.cursor() as cur:
-            cur.execute(REPORT_ROWS_SQL.format(table=_llm_table()), (service_ids,))
-            rows = cur.fetchall()
+        schema = str(((CONFIG.get("storage", {}) or {}).get("timescale", {}) or {}).get("schema", "public"))
+        with conn:
+            manual_cte = sql.SQL(manual_verdicts_cte(schema, manual_verdicts_ready(conn, schema)))
+            with conn.cursor() as cur:
+                cur.execute(REPORT_ROWS_SQL.format(manual_cte=manual_cte, table=_llm_table()), (service_ids,))
+                rows = cur.fetchall()
     finally:
         conn.close()
     stats: dict[str, ReportStats] = {}

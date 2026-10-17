@@ -94,6 +94,9 @@ POLICY: dict[str, Rule] = {
     "dashboard.dismiss_jobs": _write(E, "jobs.dismiss"),  # hides finished jobs from the shared list
     "dashboard.delete_run": _write(A, "run.delete", session_only=True),
     "dashboard.rename_run": _write(E, "run.rename"),
+    "dashboard.get_run_verdict": _read(),
+    "dashboard.set_run_verdict": _write(E, "report.verdict"),
+    "dashboard.reset_run_verdict": _write(E, "report.verdict_reset"),
     "dashboard.project_areas": _read(),
     "dashboard.current_project_area": _read(),
     "dashboard.set_project_area": _write(V),  # a UI preference stored in a cookie

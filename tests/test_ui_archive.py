@@ -115,7 +115,7 @@ def test_runs_rows_carry_project_area_max_rps_and_type_key(client, monkeypatch):
     assert first["test_type"] == "Stability" and first["test_type_key"] == "soak"
     assert second["max_rps"] is None and second["project_area"] == "" and second["test_type_key"] == ""
     page_sql, _ = conn.log[0]
-    assert "project_area, max_rps, COUNT(*) OVER () AS total FROM joined" in page_sql
+    assert "project_area, max_rps, COUNT(*) OVER () AS total, manual_verdict, manual_reason, manual_author, manual_changed_at FROM joined" in page_sql
     assert "->'peak_performance'->>'max_rps'" in page_sql
     assert "->'stability_under_load'->>'actual_rps'" in page_sql
     assert "->'spike_analysis'->>'max_spike_rps'" in page_sql

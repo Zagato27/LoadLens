@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from urllib.parse import quote
 
 from flask import (
@@ -15,13 +16,19 @@ from flask import (
 )
 
 from AI.db_store import (
+    MANUAL_VERDICT_REASON_MAX,
+    MANUAL_VERDICTS,
     MAX_RPS_FIELDS,
     RUN_INDEX_TABLE,
     _ensure_engineer_reports_table,
     _ensure_llm_reports_table,
     _ensure_run_index_table,
     list_llm_feedback,
+    load_verdict_state,
+    manual_verdicts_cte,
+    manual_verdicts_ready,
     max_rps_select_sql,
+    save_manual_verdict,
     upsert_llm_feedback,
 )
 from AI.scoring import parse_llm_analysis_strict
@@ -62,6 +69,8 @@ from loadlens_app.jobs import (
     job_store,
 )
 from loadlens_app import response_cache
+
+logger = logging.getLogger(__name__)
 
 dashboard_bp = Blueprint("dashboard", __name__)
 
@@ -287,6 +296,19 @@ def get_services():
     return jsonify({"area": area, "services": payload, "domains": _available_domain_keys()}), 200
 
 
+def _manual_verdict_view(cols) -> dict | None:
+    """``{verdict, reason, author, changed_at}`` of joined manual-verdict columns, None without a manual verdict."""
+    verdict, reason, author, changed_at = (list(cols) + [None] * 4)[:4]
+    if not verdict:
+        return None
+    return {
+        "verdict": verdict,
+        "reason": str(reason or ""),
+        "author": str(author or ""),
+        "changed_at": changed_at.isoformat() if hasattr(changed_at, "isoformat") else (str(changed_at) if changed_at else None),
+    }
+
+
 def _group_service_rows(rows: list) -> list[dict]:
     """Groups (service, run_name, verdict, created_at, max_rps, test_type[, run_id]) rows, newest first per service.
 
@@ -497,6 +519,8 @@ def dashboard_data():
         services_filter = _resolve_services_filter(_active_project_area())
         svc_where, svc_params = _services_clause(services_filter)
         periods = _dashboard_periods(_dashboard_now())
+        # The manual verdict of a run replaces its automatic one everywhere on the dashboard.
+        manual_cte = manual_verdicts_cte(schema, manual_verdicts_ready(conn, schema))
         last_run = None
         last_created_at = None
         verdict_counts = {v: 0 for v in DASHBOARD_VERDICTS}
@@ -508,15 +532,22 @@ def dashboard_data():
         with conn, conn.cursor() as cur:
             cur.execute(
                 f"""
-                SELECT run_name, service, start_ms, end_ms,
-                       COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS effective_verdict,
-                       verdict AS llm_verdict, sla_verdict, created_at, COALESCE(run_id, ''),
-                       COALESCE(test_type, ''), {DASHBOARD_MAX_RPS_SQL} AS max_rps,
-                       sla_details, parsed->'deterministic_sla'->'checks'
-                FROM {schema}.{table}
-                WHERE domain = 'final'{svc_where}
-                ORDER BY created_at DESC
-                LIMIT 1
+                WITH last AS (
+                  SELECT run_name, service, start_ms, end_ms,
+                         COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS effective_verdict,
+                         verdict AS llm_verdict, sla_verdict, created_at, COALESCE(run_id, '') AS run_id,
+                         COALESCE(test_type, '') AS test_type, {DASHBOARD_MAX_RPS_SQL} AS max_rps,
+                         sla_details, parsed->'deterministic_sla'->'checks' AS sla_checks
+                  FROM {schema}.{table}
+                  WHERE domain = 'final'{svc_where}
+                  ORDER BY created_at DESC
+                  LIMIT 1
+                ), {manual_cte}
+                SELECT l.run_name, l.service, l.start_ms, l.end_ms,
+                       COALESCE(mv.verdict, l.effective_verdict), l.llm_verdict, l.sla_verdict, l.created_at,
+                       l.run_id, l.test_type, l.max_rps, l.sla_details, l.sla_checks,
+                       mv.verdict, mv.reason, mv.author, mv.changed_at, l.effective_verdict
+                FROM last l LEFT JOIN manual_verdicts mv ON mv.run_name = l.run_name
                 """,
                 tuple(svc_params),
             )
@@ -536,6 +567,8 @@ def dashboard_data():
                     "test_type": str(r[9] or "") if len(r) > 9 else "",
                     "max_rps": _dashboard_number(r[10]) if len(r) > 10 else None,
                     "sla": _dashboard_sla_summary(r[11] if len(r) > 11 else None, r[12] if len(r) > 12 else None),
+                    "manual_verdict": _manual_verdict_view(r[13:17]) if len(r) > 16 else None,
+                    "auto_verdict": r[17] if len(r) > 17 else r[4],
                 }
             cur.execute(
                 f"""
@@ -545,8 +578,10 @@ def dashboard_data():
                          ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC) AS rn
                   FROM {schema}.{table}
                   WHERE domain = 'final'{svc_where}
-                )
-                SELECT effective_verdict AS v, COUNT(*) AS cnt FROM ranked WHERE rn = 1 GROUP BY v
+                ), {manual_cte}
+                SELECT COALESCE(mv.verdict, r.effective_verdict) AS v, COUNT(*) AS cnt
+                FROM ranked r LEFT JOIN manual_verdicts mv ON mv.run_name = r.run_name
+                WHERE r.rn = 1 GROUP BY 1
                 """,
                 tuple(svc_params),
             )
@@ -573,10 +608,15 @@ def dashboard_data():
                          ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC) AS run_rn
                   FROM {schema}.{table}
                   WHERE domain = 'final' AND service IS NOT NULL AND service <> ''{svc_where}
+                ), {manual_cte}, effective AS (
+                  SELECT l.service, l.run_name, l.run_id, COALESCE(mv.verdict, l.verdict) AS verdict, l.created_at,
+                         l.max_rps, l.test_type
+                  FROM latest l LEFT JOIN manual_verdicts mv ON mv.run_name = l.run_name
+                  WHERE l.run_rn = 1
                 ), ranked AS (
                   SELECT service, run_name, run_id, verdict, created_at, max_rps, test_type,
                          ROW_NUMBER() OVER (PARTITION BY service ORDER BY created_at DESC) AS rn
-                  FROM latest WHERE run_rn = 1
+                  FROM effective
                 )
                 SELECT service, run_name, verdict, created_at, max_rps, test_type, run_id
                 FROM ranked WHERE rn <= %s
@@ -594,10 +634,12 @@ def dashboard_data():
                          ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC) AS rn
                   FROM {schema}.{table}
                   WHERE domain = 'final'{svc_where}
-                )
-                SELECT run_name, service, verdict, created_at, test_type, start_ms, end_ms, run_id
-                FROM latest WHERE rn = 1
-                ORDER BY created_at DESC
+                ), {manual_cte}
+                SELECT l.run_name, l.service, COALESCE(mv.verdict, l.verdict), l.created_at, l.test_type,
+                       l.start_ms, l.end_ms, l.run_id, mv.verdict AS recent_manual, mv.reason, mv.author, mv.changed_at
+                FROM latest l LEFT JOIN manual_verdicts mv ON mv.run_name = l.run_name
+                WHERE l.rn = 1
+                ORDER BY l.created_at DESC
                 LIMIT %s
                 """,
                 (*svc_params, DASHBOARD_RECENT_RUNS),
@@ -614,21 +656,24 @@ def dashboard_data():
                     "start_ms": int(start_ms) if start_ms is not None else None,
                     "end_ms": int(end_ms) if end_ms is not None else None,
                     "run_id": run_id,
+                    "manual_verdict": _manual_verdict_view(row[8:12]) if len(row) > 11 else None,
                 })
             cur.execute(
                 f"""
                 WITH latest AS (
-                  SELECT created_at,
+                  SELECT run_name, created_at,
                          COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS verdict,
                          ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC) AS rn
                   FROM {schema}.{table}
                   WHERE domain = 'final' AND created_at >= %s{svc_where}
-                )
-                SELECT (date_trunc('week', created_at AT TIME ZONE 'UTC'))::date AS week_start, verdict,
+                ), {manual_cte}
+                SELECT (date_trunc('week', l.created_at AT TIME ZONE 'UTC'))::date AS week_start,
+                       COALESCE(mv.verdict, l.verdict) AS verdict,
                        COUNT(*) AS runs,
-                       COUNT(*) FILTER (WHERE created_at >= %s) AS runs_7d,
-                       COUNT(*) FILTER (WHERE created_at >= %s) AS runs_30d
-                FROM latest WHERE rn = 1
+                       COUNT(*) FILTER (WHERE l.created_at >= %s) AS runs_7d,
+                       COUNT(*) FILTER (WHERE l.created_at >= %s) AS runs_30d
+                FROM latest l LEFT JOIN manual_verdicts mv ON mv.run_name = l.run_name
+                WHERE l.rn = 1
                 GROUP BY 1, 2
                 """,
                 (periods["since"], *svc_params, periods["since_7d"], periods["since_30d"]),
@@ -718,6 +763,13 @@ def llm_reports():
             if not rows:
                 cur.execute(select_sql.format(svc_where=""), (run_name,))
                 rows = cur.fetchall()
+            state = None
+            if any(r[4] == "final" for r in rows):
+                try:
+                    state = load_verdict_state(conn, schema, table, run_name)
+                except Exception as exc:  # the report still opens with its automatic verdict
+                    logger.warning("llm_reports: manual verdict of %s not read: %s", run_name, exc)
+                    conn.rollback()
         conn.close()
         data = []
         for r in rows:
@@ -748,6 +800,13 @@ def llm_reports():
                     "test_type": r[13] or "",
                 }
             )
+            if r[4] == "final":
+                item = data[-1]
+                item["auto_verdict"] = item["verdict"]
+                item["manual_verdict"] = None
+                if state is not None and state["manual"] is not None:
+                    item["verdict"] = state["manual"]["verdict"]
+                    item["manual_verdict"] = state["manual"]
         return jsonify(data)
     except Exception as e:  # pragma: no cover
         return internal_error(e)
@@ -914,7 +973,7 @@ def _runs_item(row) -> dict:
     sla_verdict, report_created_at, test_type, run_id, project_area, max_rps)."""
     from AI.test_profile import normalize_test_type
 
-    cols = list(row) + [None] * max(0, 12 - len(row))
+    cols = list(row) + [None] * max(0, 17 - len(row))
     test_type = str(cols[8] or "")
     return {
         "run_name": cols[0],
@@ -930,6 +989,8 @@ def _runs_item(row) -> dict:
         "run_id": str(cols[9] or "").strip(),
         "project_area": str(cols[10] or ""),
         "max_rps": _runs_float(cols[11]) if cols[11] is not None else None,
+        # cols[12] is the total of the page query.
+        "manual_verdict": _manual_verdict_view(cols[13:17]),
     }
 
 
@@ -1013,9 +1074,11 @@ def list_runs():
               FROM {schema}.{llm_table}
               WHERE domain = 'final'{svc_where}
               ORDER BY run_name, created_at DESC
-            ), joined AS (
+            ), {{manual_cte}}, joined AS (
               SELECT b.run_name, b.start_time, b.end_time, b.service,
-                     COALESCE(f.verdict, 'Недостаточно данных') AS verdict,
+                     COALESCE(CASE WHEN f.run_name IS NOT NULL THEN mv.verdict END, f.verdict, 'Недостаточно данных') AS verdict,
+                     CASE WHEN f.run_name IS NOT NULL THEN mv.verdict END AS manual_verdict,
+                     mv.reason AS manual_reason, mv.author AS manual_author, mv.changed_at AS manual_changed_at,
                      f.llm_verdict, f.sla_verdict,
                      f.created_at AS report_created_at,
                      COALESCE(f.test_type, '') AS test_type_raw,
@@ -1025,6 +1088,7 @@ def list_runs():
                      f.max_rps
               FROM base b
               LEFT JOIN final f ON f.run_name = b.run_name
+              LEFT JOIN manual_verdicts mv ON mv.run_name = b.run_name
             )
         """
 
@@ -1037,6 +1101,7 @@ def list_runs():
             _ensure_run_index_table(conn, cfg)
         except Exception:
             pass
+        runs_cte = runs_cte.replace("{manual_cte}", manual_verdicts_cte(schema, manual_verdicts_ready(conn, schema)))
         with conn, conn.cursor() as cur:
             # One statement: the page plus the number of matching runs (the window runs before OFFSET/LIMIT).
             cur.execute(
@@ -1044,7 +1109,8 @@ def list_runs():
                 {runs_cte}
                 SELECT run_name, start_time, end_time, service,
                        verdict, llm_verdict, sla_verdict, report_created_at, test_type_raw, run_id,
-                       project_area, max_rps, COUNT(*) OVER () AS total
+                       project_area, max_rps, COUNT(*) OVER () AS total,
+                       manual_verdict, manual_reason, manual_author, manual_changed_at
                 FROM joined
                 {where_filters}
                 ORDER BY {sort_sql} {dir_sql}{nulls_sql}{tiebreak_sql}
@@ -1350,6 +1416,91 @@ def rename_run(run_name: str):
         f"/reports/{service}/{renamed}" if service else f"/reports/{renamed}"
     )
     return jsonify(result), 200
+
+
+def _verdict_author() -> str:
+    """Who changed a verdict: the signed-in user; empty when sign-in is off."""
+    user = current_auth().user
+    return user.username if user is not None else ""
+
+
+def _verdict_change(run_name: str, verdict: str | None, reason: str):
+    cfg = _storage_cfg()
+    schema = cfg.get("schema", "public")
+    table = cfg.get("llm_table", "llm_reports")
+    try:
+        conn = _ts_conn()
+    except Exception as e:  # pragma: no cover
+        return internal_error(e)
+    try:
+        try:
+            _ensure_llm_reports_table(conn, cfg)
+        except Exception:
+            pass
+        with conn:
+            state = save_manual_verdict(conn, schema, table, run_name, verdict, reason, _verdict_author())
+    except LookupError as e:
+        return jsonify({"error": str(e)}), 404
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:  # pragma: no cover
+        return internal_error(e)
+    finally:
+        conn.close()
+    response_cache.invalidate(response_cache.DASHBOARD)
+    history = state.get("history") or []
+    previous = history[0]["previous_verdict"] if history else ""
+    g.audit_extra = {"run_name": run_name, "verdict": state["verdict"], "previous_verdict": previous,
+                     "manual": state["manual"] is not None, "reason": reason[:200]}
+    return jsonify(state), 200
+
+
+@dashboard_bp.route("/runs/<run_name>/verdict", methods=["GET"])
+def get_run_verdict(run_name: str):
+    """Вердикт прогона: автоматический, действующий и история ручных изменений (новые первыми)."""
+    try:
+        cfg = _storage_cfg()
+        conn = _ts_conn()
+        try:
+            try:
+                _ensure_llm_reports_table(conn, cfg)
+            except Exception:
+                pass
+            with conn:
+                state = load_verdict_state(conn, cfg.get("schema", "public"), cfg.get("llm_table", "llm_reports"), run_name)
+        finally:
+            conn.close()
+    except Exception as e:  # pragma: no cover
+        return internal_error(e)
+    if state is None:
+        return jsonify({"error": f"Итоговый отчёт '{run_name}' не найден"}), 404
+    state["choices"] = list(MANUAL_VERDICTS)
+    state["reason_max"] = MANUAL_VERDICT_REASON_MAX
+    return jsonify(state), 200
+
+
+@dashboard_bp.route("/runs/<run_name>/verdict", methods=["PUT"])
+def set_run_verdict(run_name: str):
+    """Ставит вердикт прогона вручную: ``{"verdict": "Провал", "reason": "..."}``; причина обязательна."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Ожидается JSON-объект"}), 400
+    verdict = data.get("verdict")
+    reason = data.get("reason")
+    if not isinstance(verdict, str) or not isinstance(reason, str):
+        return jsonify({"error": "verdict и reason — строки"}), 400
+    return _verdict_change(run_name, verdict.strip(), reason)
+
+
+@dashboard_bp.route("/runs/<run_name>/verdict", methods=["DELETE"])
+def reset_run_verdict(run_name: str):
+    """Возвращает автоматический вердикт; ``{"reason": "..."}`` по желанию."""
+    data = request.get_json(silent=True)
+    reason = data.get("reason") if isinstance(data, dict) else None
+    reason = "" if reason is None else reason
+    if not isinstance(reason, str):
+        return jsonify({"error": "reason — строка"}), 400
+    return _verdict_change(run_name, None, reason)
 
 
 @dashboard_bp.route("/project_areas", methods=["GET"])

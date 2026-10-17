@@ -226,3 +226,55 @@ def test_sticky_tabs_sit_under_the_topbar_on_narrow_screens():
     section = _stage1_css()
     assert re.search(r"\.report-tabs-bar \{[^}]*position: sticky; top: 0;", section)
     assert re.search(r"@media \(max-width: 1023px\) \{ \.report-tabs-bar \{ top: var\(--topbar-h\); \} \}", section)
+
+
+# ---- manual verdict ---------------------------------------------------------------------------------
+
+MANUAL = {"verdict": "Успешно", "reason": "сбой <генератора>", "author": "ivanov", "changed_at": "2026-10-17T12:00:00+00:00"}
+
+
+def test_verdict_source_names_the_manual_change_and_the_sla():
+    calls = [
+        {"manual_verdict": MANUAL, "auto_verdict": "Провал", "sla_verdict": "Провал"},
+        {"sla_verdict": "Провал", "llm_verdict": "Провал", "verdict": "Провал"},
+        {"sla_verdict": "Есть риски", "llm_verdict": "Провал", "verdict": "Есть риски"},
+        {"sla_verdict": None, "llm_verdict": "Недостаточно данных", "verdict": "Недостаточно данных"},
+        {"sla_verdict": None, "llm_verdict": "Успешно", "verdict": "Успешно"},
+    ]
+    texts = run_js(REPORT_JS, f"{js(calls)}.map((row) => {I}.verdictSourceText(row))")
+    assert texts[0] == "Изменён вручную: ivanov, 2026-10-17 12:00. Автоматически: Провал."
+    assert texts[1] == "Определён по SLA-критериям."  # the stored model verdict equals the SLA one
+    assert texts[2] == "Определён по SLA-критериям. Оценка ИИ: Провал."  # a report built before the SLA replaced it
+    assert texts[3].startswith("SLA-критерии не заданы, поэтому автоматический вердикт — «Недостаточно данных»")
+    assert texts[4] == "SLA-критерии не заданы: вердикт определён оценкой ИИ."
+
+
+def test_verdict_dialog_and_history_markup():
+    state = {
+        "verdict": "Успешно", "automatic": "Провал", "manual": MANUAL, "reason_max": 1000,
+        "choices": ["Успешно", "Есть риски", "Провал", "Недостаточно данных"],
+        "history": [
+            {"verdict": None, "previous_verdict": "Есть риски", "auto_verdict": "Провал", "reason": "", "author": "petrov",
+             "changed_at": "2026-10-17T13:00:00+00:00"},
+            {**MANUAL, "previous_verdict": "Провал", "auto_verdict": "Провал"},
+        ],
+    }
+    html = run_js(REPORT_JS, f"{I}.verdictDialogHtml({js(state)})")
+    assert 'value="Успешно" disabled' in html and 'value="Провал">' in html  # the verdict in force cannot be picked
+    assert "изменён вручную; автоматический — «Провал»" in html and 'maxlength="1000"' in html
+    assert "История изменений (2)" in html and "возвращён автоматический: Провал" in html and "Провал → Успешно" in html
+    assert "сбой &lt;генератора&gt;" in html and "<генератора>" not in html
+    assert run_js(REPORT_JS, f"{I}.verdictHistoryHtml([])") == ""
+    problems = run_js(REPORT_JS, f"""[
+      {I}.verdictFormProblem('', 'x', {{}}),
+      {I}.verdictFormProblem('Провал', '', {{}}),
+      {I}.verdictFormProblem('Провал', 'xxxx', {{ reason_max: 3 }}),
+      {I}.verdictFormProblem('Провал', 'ok', {{}})
+    ]""")
+    assert problems[0] == "Выберите новый вердикт" and problems[1].startswith("Укажите причину")
+    assert problems[2] == "Причина — не длиннее 3 символов" and problems[3] == ""
+
+
+def test_manual_verdict_tooltip_for_the_archive_and_the_dashboard():
+    titles = run_js(REPORT_JS, f"[LL.manualVerdictTitle({js(MANUAL)}), LL.manualVerdictTitle(null), LL.manualVerdictTitle({{ verdict: 'Провал' }})]")
+    assert titles == ["Изменён вручную: ivanov, 2026-10-17 12:00. Причина: сбой <генератора>", "", "Изменён вручную."]

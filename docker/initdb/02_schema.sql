@@ -95,6 +95,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_feedback_unique_target
 CREATE INDEX IF NOT EXISTS idx_llm_feedback_run_created
     ON public.llm_feedback (run_name, created_at DESC);
 
+-- Вердикты, изменённые вручную (AI.db_store.save_manual_verdict): строка на каждое изменение, действует
+-- последняя; строка без вердикта возвращает автоматический. llm_reports при этом не меняется.
+CREATE TABLE IF NOT EXISTS public.report_verdicts (
+    id               BIGSERIAL   PRIMARY KEY,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    run_name         TEXT        NOT NULL,
+    run_id           TEXT        NOT NULL DEFAULT '',
+    verdict          TEXT,
+    previous_verdict TEXT        NOT NULL DEFAULT '',
+    auto_verdict     TEXT        NOT NULL DEFAULT '',
+    reason           TEXT        NOT NULL DEFAULT '',
+    author           TEXT        NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_report_verdicts_run_created
+    ON public.report_verdicts (run_name, created_at DESC, id DESC);
+
 -- ============================================================
 -- Итоги инженера
 -- ============================================================

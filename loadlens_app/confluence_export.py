@@ -239,6 +239,17 @@ def li_list(items: Iterable[str]) -> str:
     return f"<ul>{rows}</ul>" if rows else "<p>—</p>"
 
 
+def _iso_to_text(value: object) -> str:
+    """``2026-10-17 15:20 UTC`` of an ISO timestamp, '' when it does not parse."""
+    try:
+        dt = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
 def kv_table(rows: list[tuple[str, str]]) -> str:
     body = "".join(
         f"<tr><th>{xml_text(label)}</th><td>{xml_text(value)}</td></tr>"
@@ -424,7 +435,7 @@ def sla_criteria_block(final_row: dict[str, Any], step_table: dict[str, Any] | N
     """SLA criteria with status, threshold and actual value, the SLA summary and the checked window."""
     checks = sla_checks_of(final_row)
     if not checks:
-        return p("SLA-критерии для этого сервиса не заданы, поэтому вердикт определён оценкой ИИ.")
+        return p("SLA-критерии для этого сервиса не заданы, поэтому автоматический вердикт — «Недостаточно данных».")
     rows = []
     for check in checks:
         name = str(check.get("name") or "")
@@ -739,10 +750,21 @@ def render_llm_domain_body(row: dict[str, Any]) -> str:
         return f"<pre>{xml_text(text[:12000])}</pre>" if text else p("Нет данных.")
 
     verdict = _standardize_verdict(row.get("sla_verdict") or parsed.get("verdict") or row.get("verdict"))
-    rows = [("Вердикт", verdict)]
-    if row.get("domain") == "final" and row.get("llm_verdict") and row.get("sla_verdict"):
-        rows.append(("Вердикт LLM", _standardize_verdict(row.get("llm_verdict") or parsed.get("verdict"))))
-        rows.append(("SLA", _standardize_verdict(row.get("sla_verdict"))))
+    manual = row.get("manual_verdict") if row.get("domain") == "final" else None
+    if isinstance(manual, dict) and manual.get("verdict"):
+        # Set by hand: the page names who, when and why, and keeps the automatic verdict next to it.
+        who = ", ".join(part for part in (str(manual.get("author") or ""), _iso_to_text(manual.get("changed_at"))) if part)
+        reason = str(manual.get("reason") or "").strip()
+        rows = [("Вердикт", _standardize_verdict(manual["verdict"]))]
+        rows.append(("Изменён вручную", f"{who}. Причина: {reason}" if who else f"Причина: {reason}"))
+        rows.append(("Автоматический вердикт", verdict))
+    else:
+        rows = [("Вердикт", verdict)]
+        llm = _standardize_verdict(row.get("llm_verdict") or parsed.get("verdict"))
+        # Rows saved before the SLA verdict replaced the model's one keep a different model verdict.
+        if row.get("domain") == "final" and row.get("llm_verdict") and row.get("sla_verdict") and llm != verdict:
+            rows.append(("Вердикт LLM", llm))
+            rows.append(("SLA", _standardize_verdict(row.get("sla_verdict"))))
     parts = [kv_table(rows)]
 
     rationale = _cell_text(
@@ -1143,11 +1165,21 @@ def load_llm_rows(run_name: str) -> list[dict[str, Any]]:
                 (run_name,),
             )
             rows = cur.fetchall()
+        manual = None
+        if any(row[4] == "final" for row in rows):
+            from AI.db_store import load_verdict_state
+
+            try:
+                state = load_verdict_state(conn, schema, table, run_name)
+                manual = state["manual"] if state else None
+            except Exception as exc:  # the page is published with the automatic verdict
+                logger.warning("confluence: manual verdict of %s not read: %s", run_name, exc)
     finally:
         conn.close()
     data: list[dict[str, Any]] = []
     for row in rows:
         data.append({
+            "manual_verdict": manual if row[4] == "final" else None,
             "run_name": row[0],
             "service": row[1],
             "start_ms": int(row[2]) if row[2] is not None else None,

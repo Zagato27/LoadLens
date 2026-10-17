@@ -822,7 +822,7 @@ def _run_tables(cfg: dict) -> tuple[str, tuple[str, ...]]:
     ``metrics``; a rename to a name that any of these tables already has is refused before the UPDATEs,
     so the run_index primary key cannot collide.
     """
-    from AI.db_store import RUN_INDEX_TABLE
+    from AI.db_store import REPORT_VERDICTS_TABLE, RUN_INDEX_TABLE
 
     schema = cfg.get("schema", "public")
     tables = (
@@ -831,6 +831,7 @@ def _run_tables(cfg: dict) -> tuple[str, tuple[str, ...]]:
         cfg.get("engineer_table", "engineer_reports"),
         cfg.get("confluence_table", "confluence_publications"),
         cfg.get("llm_feedback_table", "llm_feedback"),
+        REPORT_VERDICTS_TABLE,
         RUN_INDEX_TABLE,
     )
     return schema, tables

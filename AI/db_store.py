@@ -415,6 +415,10 @@ def _ensure_llm_reports_table(conn, storage_cfg: Dict[str, object]) -> None:
     key = (schema, table)
     if key in _ENSURED_TABLES:
         return
+    try:
+        ensure_report_verdicts_table(conn, str(schema))
+    except Exception as e:
+        logger.warning("Не удалось подготовить таблицу ручных вердиктов: %s", e)
     prev_autocommit = getattr(conn, "autocommit", False)
     conn.autocommit = True
     try:
@@ -617,6 +621,209 @@ def _standardize_verdict(raw: Optional[str]) -> Optional[str]:
     return "Недостаточно данных"
 
 
+# ---- manual verdicts ------------------------------------------------------------------------------------
+
+# Verdicts an engineer set by hand, with a reason. Every change is a row: the newest row of a run wins, and a row
+# without a verdict returns the automatic one. llm_reports is never changed, so the analysis stays as it was built.
+REPORT_VERDICTS_TABLE = "report_verdicts"
+MANUAL_VERDICTS = ("Успешно", "Есть риски", "Провал", "Недостаточно данных")
+MANUAL_VERDICT_REASON_MAX = 1000
+MANUAL_VERDICT_HISTORY_LIMIT = 50
+_MANUAL_VERDICTS_READY: set[str] = set()
+
+
+def _quoted_ident(name: str) -> str:
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _report_verdicts_ref(schema: str) -> sql.Identifier:
+    return sql.Identifier(str(schema or "public"), REPORT_VERDICTS_TABLE)
+
+
+def ensure_report_verdicts_table(conn, schema: str) -> None:
+    """Creates ``<schema>.report_verdicts`` and its (run_name, created_at) index once per process."""
+    schema = str(schema or "public")
+    key = (schema, REPORT_VERDICTS_TABLE)
+    if key in _ENSURED_TABLES:
+        return
+    created = False
+    prev_autocommit = getattr(conn, "autocommit", False)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            try:
+                cur.execute(
+                    sql.SQL(
+                        """
+                        CREATE TABLE IF NOT EXISTS {} (
+                            id               BIGSERIAL   PRIMARY KEY,
+                            created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+                            run_name         TEXT        NOT NULL,
+                            run_id           TEXT        NOT NULL DEFAULT '',
+                            verdict          TEXT,
+                            previous_verdict TEXT        NOT NULL DEFAULT '',
+                            auto_verdict     TEXT        NOT NULL DEFAULT '',
+                            reason           TEXT        NOT NULL DEFAULT '',
+                            author           TEXT        NOT NULL DEFAULT ''
+                        );
+                        """
+                    ).format(_report_verdicts_ref(schema))
+                )
+                created = True
+            except Exception as e:
+                logger.warning("Не удалось создать таблицу %s.%s: %s", schema, REPORT_VERDICTS_TABLE, e)
+            try:
+                cur.execute(
+                    sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {} (run_name, created_at DESC, id DESC);").format(
+                        sql.Identifier(f"idx_{REPORT_VERDICTS_TABLE}_run_created"), _report_verdicts_ref(schema)
+                    )
+                )
+            except Exception as e:
+                logger.debug("create index skipped: %s", e)
+    finally:
+        try:
+            conn.autocommit = prev_autocommit
+        except Exception:
+            pass
+    _ENSURED_TABLES.add(key)
+    if created:
+        _MANUAL_VERDICTS_READY.add(schema)
+
+
+def manual_verdicts_ready(conn, schema: str) -> bool:
+    """True when ``<schema>.report_verdicts`` exists: without the table no run has a manual verdict.
+
+    A read-only probe that is safe inside a transaction; a found table is remembered for the process.
+    """
+    schema = str(schema or "public")
+    if schema in _MANUAL_VERDICTS_READY:
+        return True
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass(%s)", (f"{_quoted_ident(schema)}.{REPORT_VERDICTS_TABLE}",))
+        row = cur.fetchone()
+    ready = bool(row and row[0])
+    if ready:
+        _MANUAL_VERDICTS_READY.add(schema)
+    return ready
+
+
+def manual_verdicts_cte(schema: str, ready: bool) -> str:
+    """SQL of ``manual_verdicts AS (...)``: the current manual verdict of each run with its reason, author and
+    time (columns run_name, verdict, reason, author, changed_at). Empty when the table does not exist yet.
+
+    Readers join it as ``LEFT JOIN manual_verdicts mv ON mv.run_name = ...`` and take ``effective_verdict_sql``.
+    """
+    if not ready:
+        return (
+            "manual_verdicts AS (SELECT NULL::text AS run_name, NULL::text AS verdict, NULL::text AS reason,"
+            " NULL::text AS author, NULL::timestamptz AS changed_at WHERE FALSE)"
+        )
+    table = f"{_quoted_ident(schema or 'public')}.{REPORT_VERDICTS_TABLE}"
+    return (
+        "manual_verdicts AS (SELECT run_name, verdict, reason, author, changed_at FROM ("
+        "SELECT DISTINCT ON (run_name) run_name, verdict, reason, author, created_at AS changed_at"
+        f" FROM {table} ORDER BY run_name, created_at DESC, id DESC) latest_manual WHERE verdict IS NOT NULL)"
+    )
+
+
+def effective_verdict_sql(alias: str = "", fallback: bool = True) -> str:
+    """The verdict a run shows: the manual one, else the SLA verdict, else the stored verdict of the final row."""
+    prefix = f"{alias}." if alias else ""
+    tail = ", 'Недостаточно данных'" if fallback else ""
+    return f"COALESCE(mv.verdict, {prefix}sla_verdict, {prefix}verdict{tail})"
+
+
+def _manual_entry(row: Sequence[Any]) -> Dict[str, Any]:
+    changed_at, verdict, previous, automatic, reason, author = row[:6]
+    return {
+        "verdict": verdict,
+        "previous_verdict": str(previous or ""),
+        "auto_verdict": str(automatic or ""),
+        "reason": str(reason or ""),
+        "author": str(author or ""),
+        "changed_at": changed_at.isoformat() if isinstance(changed_at, datetime) else (str(changed_at) if changed_at else None),
+    }
+
+
+def load_verdict_state(conn, schema: str, llm_table: str, run_name: str) -> Optional[Dict[str, Any]]:
+    """Automatic and current verdict of a run with its manual changes (newest first), or None without a final report.
+
+    ``manual`` is the change in force: None when the run shows its automatic verdict.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            sql.SQL(
+                "SELECT COALESCE(sla_verdict, verdict, 'Недостаточно данных'), COALESCE(run_id, '') FROM {} "
+                "WHERE run_name = %s AND domain = 'final' ORDER BY created_at DESC LIMIT 1"
+            ).format(sql.Identifier(str(schema or "public"), llm_table)),
+            (run_name,),
+        )
+        final = cur.fetchone()
+    if not final:
+        return None
+    automatic = str(final[0] or "Недостаточно данных")
+    history: List[Dict[str, Any]] = []
+    if manual_verdicts_ready(conn, schema):
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL(
+                    "SELECT created_at, verdict, previous_verdict, auto_verdict, reason, author FROM {} "
+                    "WHERE run_name = %s ORDER BY created_at DESC, id DESC LIMIT %s"
+                ).format(_report_verdicts_ref(schema)),
+                (run_name, MANUAL_VERDICT_HISTORY_LIMIT),
+            )
+            history = [_manual_entry(row) for row in cur.fetchall()]
+    manual = history[0] if history and history[0]["verdict"] else None
+    return {
+        "run_name": run_name,
+        "run_id": str(final[1] or ""),
+        "automatic": automatic,
+        "verdict": manual["verdict"] if manual else automatic,
+        "manual": manual,
+        "history": history,
+    }
+
+
+def save_manual_verdict(
+    conn,
+    schema: str,
+    llm_table: str,
+    run_name: str,
+    verdict: Optional[str],
+    reason: str,
+    author: str,
+) -> Dict[str, Any]:
+    """Sets the verdict of a run by hand (``verdict`` None returns the automatic one) and returns the new state.
+
+    Raises LookupError without a final report and ValueError for a verdict outside ``MANUAL_VERDICTS``, a missing
+    or too long reason, or a change that changes nothing. Runs in the caller's transaction and does not commit.
+    """
+    reason = str(reason or "").strip()
+    if verdict is not None and verdict not in MANUAL_VERDICTS:
+        raise ValueError("Вердикт должен быть одним из: " + ", ".join(MANUAL_VERDICTS))
+    if verdict is not None and not reason:
+        raise ValueError("Укажите причину изменения вердикта")
+    if len(reason) > MANUAL_VERDICT_REASON_MAX:
+        raise ValueError(f"Причина — не длиннее {MANUAL_VERDICT_REASON_MAX} символов")
+    ensure_report_verdicts_table(conn, schema)
+    state = load_verdict_state(conn, schema, llm_table, run_name)
+    if state is None:
+        raise LookupError(f"Итоговый отчёт '{run_name}' не найден")
+    if verdict is None and state["manual"] is None:
+        raise ValueError("Вердикт и так определён автоматически")
+    if verdict is not None and verdict == state["verdict"]:
+        raise ValueError(f"Вердикт уже «{verdict}»")
+    with conn.cursor() as cur:
+        cur.execute(
+            sql.SQL(
+                "INSERT INTO {} (run_name, run_id, verdict, previous_verdict, auto_verdict, reason, author) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)"
+            ).format(_report_verdicts_ref(schema)),
+            (run_name, state["run_id"], verdict, state["verdict"], state["automatic"], reason, str(author or "")),
+        )
+    return load_verdict_state(conn, schema, llm_table, run_name) or state
+
+
 BASELINE_MODE_PREVIOUS_SUCCESS = "previous_success"
 BASELINE_MODE_PREVIOUS = "previous"
 BASELINE_MODES = (BASELINE_MODE_PREVIOUS_SUCCESS, BASELINE_MODE_PREVIOUS)
@@ -679,8 +886,13 @@ def find_previous_run(
     """
     if mode not in BASELINE_MODES:
         raise ValueError(f"Unknown baseline mode '{mode}', expected one of {BASELINE_MODES}")
-    success_filter = sql.SQL("AND COALESCE(r.sla_verdict, r.verdict) = 'Успешно'") if mode == BASELINE_MODE_PREVIOUS_SUCCESS else sql.SQL("")
-    columns = sql.SQL("r.run_name, r.service, COALESCE(r.sla_verdict, r.verdict, 'Недостаточно данных'), r.created_at")
+    manual_cte = sql.SQL(manual_verdicts_cte(schema, manual_verdicts_ready(conn, schema)))
+    success_filter = (
+        sql.SQL(f"AND {effective_verdict_sql('r', fallback=False)} = 'Успешно'")
+        if mode == BASELINE_MODE_PREVIOUS_SUCCESS
+        else sql.SQL("")
+    )
+    columns = sql.SQL(f"r.run_name, r.service, {effective_verdict_sql('r')}, r.created_at")
     table_ref = sql.SQL("{}.{}").format(sql.Identifier(schema), sql.Identifier(llm_table))
     area = str(project_area or "").strip()
     area_sql = sql.SQL("AND (COALESCE(r.project_area, '') = '' OR r.project_area = %s)") if area else sql.SQL("")
@@ -697,36 +909,50 @@ def find_previous_run(
               SELECT service, created_at FROM {table}
               WHERE run_name = %s AND domain = 'final'
               ORDER BY created_at DESC LIMIT 1
-            )
+            ), {manual_cte}
             SELECT {columns}
-            FROM {table} r, current c
+            FROM {table} r CROSS JOIN current c
+            LEFT JOIN manual_verdicts mv ON mv.run_name = r.run_name
             WHERE r.domain = 'final' AND r.service = c.service AND r.run_name <> %s AND r.created_at < c.created_at
             {success_filter} {type_sql} {area_sql}
             ORDER BY r.created_at DESC LIMIT 1
             """
-        ).format(table=table_ref, columns=columns, success_filter=success_filter, type_sql=type_sql, area_sql=area_sql)
+        ).format(
+            table=table_ref, manual_cte=manual_cte, columns=columns, success_filter=success_filter,
+            type_sql=type_sql, area_sql=area_sql,
+        )
         params: tuple = (exclude_run_name, exclude_run_name) + tail
     elif len(allowed) > 1:
         query = sql.SQL(
             """
+            WITH {manual_cte}
             SELECT {columns}
             FROM {table} r
+            LEFT JOIN manual_verdicts mv ON mv.run_name = r.run_name
             WHERE r.domain = 'final' AND r.service = ANY(%s) AND r.run_name <> %s AND r.created_at < %s
             {success_filter} {type_sql} {area_sql}
             ORDER BY r.created_at DESC LIMIT 1
             """
-        ).format(table=table_ref, columns=columns, success_filter=success_filter, type_sql=type_sql, area_sql=area_sql)
+        ).format(
+            table=table_ref, manual_cte=manual_cte, columns=columns, success_filter=success_filter,
+            type_sql=type_sql, area_sql=area_sql,
+        )
         params = (allowed, exclude_run_name, before) + tail
     else:
         query = sql.SQL(
             """
+            WITH {manual_cte}
             SELECT {columns}
             FROM {table} r
+            LEFT JOIN manual_verdicts mv ON mv.run_name = r.run_name
             WHERE r.domain = 'final' AND r.service = %s AND r.run_name <> %s AND r.created_at < %s
             {success_filter} {type_sql} {area_sql}
             ORDER BY r.created_at DESC LIMIT 1
             """
-        ).format(table=table_ref, columns=columns, success_filter=success_filter, type_sql=type_sql, area_sql=area_sql)
+        ).format(
+            table=table_ref, manual_cte=manual_cte, columns=columns, success_filter=success_filter,
+            type_sql=type_sql, area_sql=area_sql,
+        )
         params = (service, exclude_run_name, before) + tail
     with conn.cursor() as cur:
         cur.execute(query, params)
@@ -844,22 +1070,29 @@ class FinalReportRow:
 def list_final_reports(conn, schema: str, llm_table: str, services: Sequence[str]) -> List[FinalReportRow]:
     """Latest final row per run with an id, newest first; ``services`` restricts to a project area."""
     service_sql = sql.SQL(" AND service = ANY(%s)") if services else sql.SQL("")
+    manual_cte = sql.SQL(manual_verdicts_cte(schema, manual_verdicts_ready(conn, schema)))
     query = sql.SQL(
         """
-        SELECT run_id, run_name, service, test_type, project_area, created_at, verdict, lt_series_labels
+        WITH {manual_cte}
+        SELECT latest.run_id, latest.run_name, latest.service, latest.test_type, latest.project_area,
+               latest.created_at, {verdict} AS verdict, latest.lt_series_labels
         FROM (
           SELECT COALESCE(run_id, '') AS run_id, run_name, COALESCE(service, '') AS service,
                  COALESCE(test_type, '') AS test_type, COALESCE(project_area, '') AS project_area,
-                 created_at, COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS verdict,
+                 created_at, sla_verdict, verdict,
                  context -> 'lt_series_labels' AS lt_series_labels,
                  ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC) AS rn
           FROM {table}
           WHERE domain = 'final'{service_sql}
         ) latest
-        WHERE rn = 1 AND run_id <> ''
-        ORDER BY created_at DESC
+        LEFT JOIN manual_verdicts mv ON mv.run_name = latest.run_name
+        WHERE latest.rn = 1 AND latest.run_id <> ''
+        ORDER BY latest.created_at DESC
         """
-    ).format(table=sql.Identifier(schema, llm_table), service_sql=service_sql)
+    ).format(
+        manual_cte=manual_cte, verdict=sql.SQL(effective_verdict_sql("latest")),
+        table=sql.Identifier(schema, llm_table), service_sql=service_sql,
+    )
     params: tuple = (list(services),) if services else ()
     with conn.cursor() as cur:
         cur.execute(query, params)

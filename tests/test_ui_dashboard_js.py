@@ -289,3 +289,10 @@ def test_menu_badge_counts_running_tests():
     )
     assert shown[0] == {"hidden": False, "textContent": "3", "title": "Идут прогоны: 3"}
     assert shown[1]["hidden"] and shown[2]["textContent"] == "99+" and shown[3]["hidden"]
+
+
+def test_manual_verdict_pill_is_marked():
+    manual = {"verdict": "Есть риски", "reason": "деградация <стенда>", "author": "ivanov", "changed_at": "2026-10-17T12:00:00Z"}
+    html = call(f"LL.dashboard._internals.verdictPill('Есть риски', '', {js(manual)})")
+    assert 'class="pill warn"' in html and "verdict-manual-mark" in html and "&lt;стенда&gt;" in html
+    assert "verdict-manual-mark" not in call("LL.dashboard._internals.verdictPill('Провал')")

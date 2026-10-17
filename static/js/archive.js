@@ -541,10 +541,19 @@
       const pill = document.createElement('span');
       pill.className = `pill ${LL.verdictClass(verdict)}`;
       pill.textContent = verdict;
-      if (r.sla_verdict && r.llm_verdict && r.sla_verdict !== r.llm_verdict) {
+      if (r.manual_verdict && r.manual_verdict.verdict) {
+        pill.title = LL.manualVerdictTitle(r.manual_verdict);
+      } else if (r.sla_verdict && r.llm_verdict && r.sla_verdict !== r.llm_verdict) {
         pill.title = `По SLA: ${r.sla_verdict}; оценка ИИ: ${r.llm_verdict}`;
       }
       verdictTd.appendChild(pill);
+      if (r.manual_verdict && r.manual_verdict.verdict) {
+        const mark = document.createElement('span');
+        mark.className = 'verdict-manual-mark';
+        mark.textContent = 'вручную';
+        mark.title = pill.title;
+        verdictTd.appendChild(mark);
+      }
       tr.appendChild(verdictTd);
       tr.appendChild(cell(formatRps(r.max_rps), 'num'));
       tr.appendChild(buildActionsCell(r));
