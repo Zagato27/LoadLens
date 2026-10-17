@@ -27,6 +27,12 @@
   .live-fresh { font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
   .live-fresh.stale { color: var(--warn-fg); }
   .live-note { font-size: 12px; color: var(--text-dim); margin-top: 6px; min-height: 16px; }
+  /* First read of a window: a spinner over every chart until its points arrive (or the read fails). */
+  .charts-grid.is-loading .chart-box canvas { opacity: 0.15; }
+  .charts-grid.is-loading .chart-box::before { content: ''; position: absolute; left: 50%; top: 50%; width: 28px; height: 28px; margin: -24px 0 0 -14px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: live-spin 0.9s linear infinite; }
+  .charts-grid.is-loading .chart-box::after { content: 'Загружаем метрики…'; position: absolute; left: 0; right: 0; top: 50%; margin-top: 12px; text-align: center; font-size: 12px; color: var(--text-dim); }
+  @keyframes live-spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .charts-grid.is-loading .chart-box::before { animation: none; border-top-color: var(--border); } }
   .live-query { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
   .live-query pre { white-space: pre-wrap; word-break: break-all; background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px; padding: 8px; margin: 6px 0 0; }
   .inst-table td { vertical-align: top; }
@@ -71,7 +77,7 @@
       </div>
       <span class="live-fresh" id="liveFresh" aria-live="polite"></span>
     </div>
-    <div class="charts-grid">
+    <div class="charts-grid is-loading" id="liveCharts" aria-busy="true">
       <div class="chart-card wide">
         <div class="chart-title">RPS и доля ошибок</div>
         <div class="chart-box"><canvas id="chartRps" aria-label="RPS и доля ошибок прогона"></canvas></div>

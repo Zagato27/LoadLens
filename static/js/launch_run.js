@@ -160,6 +160,10 @@
       if (!state.liveLoaded || (wasActive && !run.loading)) loadLive(true);
     } catch (e) {
       $('runMessage').textContent = `Прогон не загрузился: ${e.message}`;
+      if (!state.liveLoaded) {
+        setLiveLoading(false);
+        $('liveFresh').textContent = '';
+      }
       state.runTimer = setTimeout(loadRun, RUN_POLL_MS * 3);
     }
   }
@@ -415,6 +419,20 @@
     if (data.rps_query || !incremental) live.rpsQuery = data.rps_query || null;
   }
 
+  // Spinner over the charts while a window is read for the first time. Every live row is a query to the
+  // metrics source, so the first read takes seconds; without the spinner the page looked like it had no charts.
+  // Reads of new points (every few seconds) keep the charts as they are and show nothing.
+  function setLiveLoading(on) {
+    const grid = $('liveCharts');
+    if (!grid) return;
+    grid.classList.toggle('is-loading', on);
+    grid.setAttribute('aria-busy', String(on));
+    if (on) {
+      $('liveFresh').textContent = 'загружаем метрики…';
+      $('liveFresh').classList.remove('stale');
+    }
+  }
+
   async function loadLive(full) {
     clearTimeout(state.liveTimer);
     const live = state.live;
@@ -428,6 +446,8 @@
       params.set('since', String(live.lastMs));
       if (live.mode) params.set('mode', live.mode);
     }
+    const firstRead = !incremental && !Object.keys(live.series).length;
+    if (firstRead) setLiveLoading(true);
     try {
       const data = await fetchJson(`/load_tests/runs/${encodeURIComponent(runId)}/live?${params}`);
       if (live !== state.live) return;  // the window changed meanwhile
@@ -440,7 +460,11 @@
       applyLive(data, incremental);
       state.liveLoaded = true;
       renderLive(data.ok ? data.message : (data.message || 'Метрики не загрузились'));
+      setLiveLoading(false);
     } catch (e) {
+      if (live !== state.live) return;
+      setLiveLoading(false);
+      $('liveFresh').textContent = '';
       $('liveNote').textContent = `Метрики не загрузились: ${e.message}`;
     }
     if (state.run && state.run.loading) state.liveTimer = setTimeout(() => loadLive(false), LIVE_POLL_MS);
@@ -490,6 +514,7 @@
     $('logFollow').addEventListener('change', loadLog);
     $('logClose').addEventListener('click', () => { state.logIndex = null; clearTimeout(state.logTimer); $('logCard').style.display = 'none'; });
     document.querySelectorAll('#liveWindow [data-window]').forEach((btn) => btn.addEventListener('click', () => setWindow(Number(btn.dataset.window))));
+    setLiveLoading(true);  // the charts wait for the run itself and then for its first read
     loadRun();
   }
 

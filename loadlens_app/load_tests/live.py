@@ -12,13 +12,15 @@ import math
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from .store import INSTANCE_STATUS_TITLES, RUN_CANCELLED, RUN_DONE, RUN_FAILED, RunRecord
 from .tools import ToolTemplate
 
 LT_DOMAIN = "lt_framework"
 LIVE_ROLES = ("lt.rps_total", "lt.error_rate_pct", "lt.p95_total", "lt.vus")
+# Live rows of one snapshot read at the same time (four roles plus the instances row).
+LIVE_FETCH_WORKERS = 5
 SUMMED_ROLES = frozenset({"lt.rps_total"})
 INSTANCE_ROLE = "lt.rps_by_instance"
 # Windows of the live charts in minutes; 0 is the whole run.
@@ -154,6 +156,30 @@ def _downsample(points: list[tuple[float, float]], step: int) -> list[tuple[floa
     return [(float(ts), sum(values) / len(values)) for ts, values in sorted(buckets.items())]
 
 
+def _run_all(jobs: Iterable[Callable[[], Any]]) -> list[Any]:
+    """Results of the jobs in their order, an exception object where a job raised; the jobs run at once.
+
+    The live rows are independent HTTP queries to the metrics source (Prometheus or Grafana proxy), each of
+    them 0.2–3 s: read one after another they made the first charts wait for their sum.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    pending = list(jobs)
+    if not pending:
+        return []
+
+    def call(job: Callable[[], Any]) -> Any:
+        try:
+            return job()
+        except Exception as exc:  # reported per row, the other rows still arrive
+            return exc
+
+    if len(pending) == 1:
+        return [call(pending[0])]
+    with ThreadPoolExecutor(max_workers=min(len(pending), LIVE_FETCH_WORKERS), thread_name_prefix="live-fetch") as pool:
+        return list(pool.map(call, pending))
+
+
 def _fetch(cfg: dict, lang: str, row: tuple[str, str, list[str]], start: float, end: float, step: int, summed: bool):
     from loadlens_app.query_preview import fetch_points
 
@@ -273,24 +299,26 @@ def live_snapshot(run: RunRecord, tools: dict[str, ToolTemplate], now: Optional[
         return {**base, "message": "В домене «Нагрузка» сервиса нет запросов RPS, ошибок, p95 и пользователей: установите пакет запросов инструмента"}
 
     def read(rows_: dict, lang_: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
-        series: dict[str, Any] = {}
-        errors: list[str] = []
+        """Reads every live row at once: each is one HTTP query to the source, and the page waits for all."""
+        jobs: list[tuple[str, tuple[str, str, list[str]], Callable[[], Any]]] = []
         for role in wanted:
             row = rows_.get(role)
-            if row is None:
-                continue
-            try:
-                points = _fetch(cfg, lang_, row, fetch_start, end, step, role in SUMMED_ROLES)
-            except Exception as exc:
-                errors.append(f"{row[0]}: {exc}")
-                continue
-            series[role] = {"label": row[0], "points": _points(points)}
-        instances: list[dict[str, Any]] = []
+            if row is not None:
+                jobs.append((role, row, lambda row=row, role=role: _fetch(cfg, lang_, row, fetch_start, end, step, role in SUMMED_ROLES)))
         if INSTANCE_ROLE in rows_ and len(run.instances) > 1:
-            try:
-                instances = _instance_series(run, cfg, lang_, rows_[INSTANCE_ROLE], fetch_start, end, step)
-            except Exception as exc:
-                errors.append(f"{rows_[INSTANCE_ROLE][0]}: {exc}")
+            row = rows_[INSTANCE_ROLE]
+            jobs.append((INSTANCE_ROLE, row, lambda row=row: _instance_series(run, cfg, lang_, row, fetch_start, end, step)))
+        series: dict[str, Any] = {}
+        instances: list[dict[str, Any]] = []
+        errors: list[str] = []
+        outcomes = _run_all(job for _role, _row, job in jobs)
+        for (role, row, _job), outcome in zip(jobs, outcomes):
+            if isinstance(outcome, BaseException):
+                errors.append(f"{row[0]}: {outcome}")
+            elif role == INSTANCE_ROLE:
+                instances = outcome
+            else:
+                series[role] = {"label": row[0], "points": _points(outcome)}
         return series, instances, errors
 
     series, instances, errors = read(rows, lang)

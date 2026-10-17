@@ -196,6 +196,45 @@ def test_far_thresholds_do_not_flatten_the_curve():
     assert kept["suggestedMax"] == 5
 
 
+def test_live_rows_are_read_at_the_same_time(monkeypatch):
+    """The four live rows are independent queries; read one after another they made the first charts slow."""
+    import threading
+
+    from loadlens_app import query_preview
+
+    monkeypatch.setattr(live, "_scope_config", lambda run: _cfg())
+    # Every read waits until all four are in flight: a sequential snapshot would break the barrier (timeout).
+    barrier = threading.Barrier(4, timeout=5)
+    seen = []
+
+    def fetch(cfg_, *, domain, lang, query, start_ts, end_ts, step, label_keys=None):
+        seen.append(threading.current_thread().name)
+        barrier.wait()
+        if "p95" in query or "p(95)" in query or "0.95" in query:
+            raise RuntimeError("p95 source timed out")
+        return {"series": [(ts, 5.0) for ts in range(int(start_ts) + 10, int(end_ts), 30)]}
+
+    monkeypatch.setattr(query_preview, "fetch_points", fetch)
+    run = _run([_inst(0, launched_at=T0, started_at=T0)])  # one instance: no instances row
+    snapshot = live.live_snapshot(run, effective_tools({}), now=T0.timestamp() + 600)
+
+    assert snapshot["ok"] and len(seen) == 4 and len(set(seen)) == 4
+    assert set(snapshot["series"]) == {"lt.rps_total", "lt.error_rate_pct", "lt.vus"}
+    assert "p95 source timed out" in snapshot["message"]  # the failed row is reported, the others arrive
+
+
+def test_run_page_shows_a_spinner_until_the_first_live_read():
+    page = (ROOT_DIR / "templates" / "launch_run.html").read_text(encoding="utf-8")
+    script = (ROOT_DIR / "static" / "js" / "launch_run.js").read_text(encoding="utf-8")
+    assert 'class="charts-grid is-loading" id="liveCharts" aria-busy="true"' in page
+    assert ".charts-grid.is-loading .chart-box::before" in page and "Загружаем метрики…" in page
+    assert "prefers-reduced-motion" in page
+    # The spinner is shown for the first read of a window and removed after a render or a failure.
+    assert "if (firstRead) setLiveLoading(true);" in script
+    assert script.count("setLiveLoading(false);") >= 3
+    assert "setLiveLoading(true);  // the charts wait for the run itself" in script
+
+
 def test_empty_results_are_explained(monkeypatch):
     from loadlens_app import query_preview
 
