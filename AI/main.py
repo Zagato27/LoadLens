@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Совместимостьный модуль для вызова LLM‑pipeline.
 
 Все реальное поведение находится в `AI.pipeline.uploadFromLLM`, а здесь
@@ -22,6 +23,7 @@ def uploadFromLLM(
     active_domains: Optional[List[str]] = None,
     system_context: Optional[dict] = None,
     progress_callback: Optional[ProgressCallback] = None,
+    report_language: Optional[str] = None,
 ) -> Dict[str, object]:
     """Запускает полный цикл подготовки LLM‑отчёта.
 
@@ -47,6 +49,8 @@ def uploadFromLLM(
             который нужно передать в LLM-pipeline.
         progress_callback (callable | None): Принимает `(message, percent)`
             на каждой фазе pipeline для отображения прогресса пользователю.
+        report_language (str | None): Язык отчёта и промптов (``ru``/``en``); без него —
+            ``run_meta["report_language"]``, затем текущая локаль.
 
     Возвращаемое значение:
         dict: агрегат с текстовыми блоками, структурированными ответами
@@ -73,4 +77,5 @@ def uploadFromLLM(
         active_domains=active_domains,
         system_context=system_context,
         progress_callback=progress_callback,
+        report_language=report_language,
     )

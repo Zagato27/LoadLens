@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Where a report or publication job runs: a thread of the web process or the Celery worker.
 
 The routes register a job with :func:`create_job` and start it with :func:`submit`; the tasks themselves
@@ -20,6 +21,7 @@ import logging
 import threading
 from typing import Any, Union
 
+from AI.i18n import t as translate
 from loadlens_app import celery_app as celery_module
 from loadlens_app import jobs
 from loadlens_app.jobs import JOB_RUNNER_CELERY, JOB_RUNNER_THREAD, JOB_STATUS_ERROR, JobRecord
@@ -48,8 +50,9 @@ def _broker_errors() -> tuple[type[BaseException], ...]:
 
 BROKER_ERRORS = _broker_errors()
 
-#: Message of a Celery row left behind when its job was registered again as a thread job (see create_job).
-REPLACED_MESSAGE = "Задача перезапущена в веб-процессе"
+#: Message key of a Celery row left behind when its job was registered again as a thread job (see create_job);
+#: REPLACED_MESSAGE gives its text.
+REPLACED_KEY = "job.replaced"
 REPLACED_ERROR = "The job row could not be read back after it was written; the job runs as {job_id} in the web process"
 
 
@@ -61,8 +64,10 @@ def mode() -> str:
     return JOB_RUNNER_CELERY if celery_module.celery_mode_enabled() else JOB_RUNNER_THREAD
 
 
-def create_job(kind: str, *, run_name: str = "", service: str = "", message: str = "", owner: str = "") -> JobRecord:
+def create_job(kind: str, *, run_name: str = "", service: str = "", message: Any = "", owner: str = "") -> JobRecord:
     """Registers a running job for the runner :func:`mode` picks and returns its record.
+
+    ``message`` may be an :class:`AI.i18n.Msg`: the job keeps its ref (see ``loadlens_app.jobs``).
 
     A Celery job is only a row of the job table, and ``JobStore.create`` logs instead of raising when that
     write fails. So the row is read back (one indexed query); when it is not there the job is registered
@@ -81,7 +86,10 @@ def create_job(kind: str, *, run_name: str = "", service: str = "", message: str
     )
     # Should the row exist after all (only reading it failed), it must not hold a job slot while it waits
     # for a worker that never gets the task. Fails quietly when the table is unreachable.
-    store.update(job.job_id, status=JOB_STATUS_ERROR, message=REPLACED_MESSAGE, error=REPLACED_ERROR.format(job_id=replacement.job_id))
+    store.update(
+        job.job_id, status=JOB_STATUS_ERROR, message=jobs.job_message(REPLACED_KEY),
+        error=REPLACED_ERROR.format(job_id=replacement.job_id),
+    )
     return replacement
 
 
@@ -112,6 +120,7 @@ def submit(task: Any, job: Union[JobRecord, str], **kwargs: Any) -> str:
             )
             if not _take_over(job_id):
                 return JOB_RUNNER_CELERY
+    # A new thread starts with an empty context (no request, no locale): the task opens the job's own locale.
     threading.Thread(target=lambda: task.run(job_id=job_id, **kwargs), daemon=True).start()
     return JOB_RUNNER_THREAD
 
@@ -127,6 +136,13 @@ def _take_over(job_id: str) -> bool:
     if store.adopt_thread(job_id) is None:
         logger.warning("Job %s is not in the job table; it runs in a thread, but its progress is not visible", job_id)
     return True
+
+
+def __getattr__(name: str) -> str:
+    """``REPLACED_MESSAGE``: the text of :data:`REPLACED_KEY` in the installation language."""
+    if name == "REPLACED_MESSAGE":
+        return translate(REPLACED_KEY, locale=jobs.stored_locale())
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = ["BROKER_ERRORS", "create_job", "mode", "submit"]

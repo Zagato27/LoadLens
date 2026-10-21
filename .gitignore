@@ -65,8 +65,20 @@ AI/GigaChat/
 # Session signing key generated on first start
 .loadlens_secret_key
 
-# Локальные копии/форки проекта
-loadlens_sber/
+# UI/e2e sandboxes live in %TEMP%/ll_ui_s<N> (tools/bench_endpoints.py); a copy made here stays local
+/sandbox/
+/sandbox-*/
+
+# Local copies and forks of the project kept next to it
+/loadlens-fork*/
+/loadlens_fork*/
+
+# Results of tools/bench_endpoints.py --json written at the repository root (plans/perf-baseline.md)
+/before*.json
+/after*.json
+/thread*.json
+/celery*.json
+/bench*.json
 
 # Wheels for the dev-stack FastAPI app, downloaded on the host (docker/dev-stack/README.md)
 docker/dev-stack/pyapp/wheels/
@@ -75,3 +87,9 @@ docker/dev-stack/gatling/bundle/
 # SSH key pair of the dev-stack load generator, generated on the host (docker/dev-stack/README.md)
 docker/dev-stack/generator/keys/
 docker/dev-stack/generator/wheels/
+
+# Maintainer-only design plans and measurements (Russian); not part of the published repository
+/plans/
+
+# Local Claude Code settings, locks and worktrees
+/.claude/

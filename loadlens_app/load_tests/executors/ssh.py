@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Starting, watching and stopping one instance on a load generator.
 
 SSH generators get a small runner script per instance in ``<work_dir>/<run_id>/<NN-tag>/`` (mode 0700). The
@@ -21,6 +22,7 @@ import threading
 from typing import Any, Mapping, Optional, Protocol
 
 from ..generators import Generator, SshSettings
+from ..messages import t
 from ..tools import CommandLine, ToolTemplate, class_name_from_path, render_version_command
 from .base import (
     LOG_TAIL_BYTES,
@@ -243,7 +245,7 @@ def _paramiko():
     try:
         import paramiko
     except ModuleNotFoundError as exc:  # pragma: no cover - paramiko is in requirements.txt
-        raise GeneratorError("Для генераторов по SSH нужен пакет paramiko (pip install paramiko)") from exc
+        raise GeneratorError("lt.ssh.no_paramiko") from exc
     return paramiko
 
 
@@ -255,11 +257,11 @@ def parse_host_key(text: str):
     paramiko = _paramiko()
     parts = str(text or "").split()
     if len(parts) < 2:
-        raise GeneratorError("Ключ хоста задан неверно: ожидается «тип base64», например ssh-ed25519 AAAA…")
+        raise GeneratorError("lt.ssh.bad_host_key")
     try:
         return paramiko.PKey.from_type_string(parts[0], base64.b64decode(parts[1]))
     except Exception as exc:
-        raise GeneratorError(f"Ключ хоста не разбирается: {exc}") from exc
+        raise GeneratorError("lt.ssh.host_key_unparsable", error=str(exc)) from exc
 
 
 def load_private_key(text: str, passphrase: str = ""):
@@ -268,10 +270,10 @@ def load_private_key(text: str, passphrase: str = ""):
         try:
             return key_class.from_private_key(io.StringIO(text.strip() + "\n"), password=passphrase or None)
         except paramiko.PasswordRequiredException as exc:
-            raise GeneratorError("Приватный ключ зашифрован: укажите парольную фразу") from exc
+            raise GeneratorError("lt.ssh.key_encrypted") from exc
         except Exception:  # another key type or a wrong passphrase: try the next class
             continue
-    raise GeneratorError("Приватный ключ не распознан: нужен ключ OpenSSH или PEM (ed25519, ECDSA или RSA)")
+    raise GeneratorError("lt.ssh.key_unknown")
 
 
 def key_fingerprint(key) -> str:
@@ -298,9 +300,7 @@ class SshShell:
         client = paramiko.SSHClient()
         if self._pin:
             if not cfg.host_key:
-                raise GeneratorError(
-                    "Ключ хоста генератора не закреплён: откройте генератор в настройках и нажмите «Проверить»"
-                )
+                raise GeneratorError("lt.ssh.host_key_not_pinned")
             key = parse_host_key(cfg.host_key)
             client.get_host_keys().add(host_entry(cfg.host, cfg.port), key.get_name(), key)
             client.set_missing_host_key_policy(paramiko.RejectPolicy())
@@ -322,20 +322,17 @@ class SshShell:
             )
         except paramiko.BadHostKeyException as exc:
             client.close()
-            raise GeneratorError(
-                f"Ключ хоста изменился: сервер предъявил {key_fingerprint(exc.key)}, закреплён {key_fingerprint(exc.expected_key)}. "
-                "Если сервер переустановлен, очистите «Ключ хоста» в настройках генератора, введите пароль или ключ заново "
-                "и проверьте подключение"
-            ) from exc
+            raise GeneratorError("lt.ssh.host_key_changed", presented=key_fingerprint(exc.key),
+                                 pinned=key_fingerprint(exc.expected_key)) from exc
         except paramiko.AuthenticationException as exc:
             client.close()
-            raise GeneratorError("SSH отказал во входе: проверьте пользователя, ключ или пароль") from exc
+            raise GeneratorError("lt.ssh.auth_failed") from exc
         except paramiko.SSHException as exc:
             client.close()
-            raise GeneratorError(f"Ошибка SSH: {exc}") from exc
+            raise GeneratorError("lt.ssh.error", error=str(exc)) from exc
         except OSError as exc:
             client.close()
-            raise GeneratorError(f"Не удалось подключиться к {cfg.host}:{cfg.port}: {exc}") from exc
+            raise GeneratorError("lt.ssh.connect_failed", host=cfg.host, port=cfg.port, error=str(exc)) from exc
         transport = client.get_transport()
         if transport is not None:
             transport.set_keepalive(30)
@@ -375,8 +372,8 @@ class SshShell:
                 except Exception as exc:
                     self.close_locked()
                     if attempt == 2:
-                        raise GeneratorError(f"Связь с генератором прервалась: {exc}") from exc
-            raise GeneratorError("Связь с генератором прервалась")  # pragma: no cover
+                        raise GeneratorError("lt.ssh.connection_lost", error=str(exc)) from exc
+            raise GeneratorError("lt.ssh.connection_lost_plain")  # pragma: no cover
 
     def close_locked(self) -> None:
         if self._client is not None:
@@ -404,7 +401,9 @@ class SshExecutor:
         status, out, err = self.shell.run(script, stdin=stdin, timeout=timeout)
         if status != 0:
             detail = (err or out).strip()[-500:]
-            raise GeneratorError(f"Команда на генераторе завершилась с кодом {status}{': ' + detail if detail else ''}")
+            if detail:
+                raise GeneratorError("lt.ssh.command_failed_detail", code=status, detail=detail)
+            raise GeneratorError("lt.ssh.command_failed", code=status)
         return out
 
     def launch(self, plan: LaunchPlan) -> LaunchResult:
@@ -412,7 +411,7 @@ class SshExecutor:
         out = self._run(launch_script(ref), stdin=runner_script(ref, plan.command, plan.max_seconds).encode("utf-8"))
         word = out.strip().splitlines()[-1:] or [""]
         if word[0] not in ("launched", "already"):
-            raise GeneratorError(f"Генератор не подтвердил запуск: {out.strip()[:200]}")
+            raise GeneratorError("lt.ssh.launch_unconfirmed", output=out.strip()[:200])
         return LaunchResult(ref=ref, already_running=word[0] == "already")
 
     def probe(self, ref: str) -> Probe:
@@ -447,7 +446,7 @@ _SHELLS_LOCK = threading.Lock()
 def shell_for(generator: Generator) -> SshShell:
     """Cached connection per generator; a settings change opens a new one."""
     if generator.ssh is None:
-        raise GeneratorError(f"Генератор «{generator.title}» не подключается по SSH")
+        raise GeneratorError("lt.ssh.not_ssh", generator=generator.title)
     identity = generator.ssh.identity()
     with _SHELLS_LOCK:
         cached = _SHELLS.get(generator.id)
@@ -464,20 +463,20 @@ def _check_message(values: dict[str, str], generator: Generator, tools: Mapping[
     """(usable, problems, found tool ids) from the answers of the check script."""
     problems: list[str] = []
     if values.get("timeout") == "missing":
-        problems.append("нет утилиты timeout (GNU coreutils)")
+        problems.append(t("lt.ssh.check.no_timeout"))
     elif values.get("timeout") == "other":
-        problems.append("timeout не из GNU coreutils: остановка может не дойти до дочерних процессов")
+        problems.append(t("lt.ssh.check.timeout_other"))
     if values.get("nohup") == "missing":
-        problems.append("нет утилиты nohup")
+        problems.append(t("lt.ssh.check.no_nohup"))
     if values.get("work_dir") != "ok":
-        problems.append(f"рабочий каталог {generator.work_dir} не создаётся или недоступен для записи")
+        problems.append(t("lt.ssh.check.work_dir", dir=generator.work_dir))
     if generator.scripts_dir and values.get("scripts_dir") != "ok":
-        problems.append(f"каталога скриптов {generator.scripts_dir} нет")
+        problems.append(t("lt.ssh.check.scripts_dir", dir=generator.scripts_dir))
     found = [tool_id for tool_id in tools if values.get(f"tool:{tool_id}") == "found"]
     missing = [tool_id for tool_id in tools if values.get(f"tool:{tool_id}") == "missing"]
     # Only tools the generator lists explicitly are expected; with an empty list every tool is optional.
     problems.extend(
-        f"не найден {tools[tool_id].title} ({generator.executable(tools[tool_id])})"
+        t("lt.ssh.check.tool_missing", tool=tools[tool_id].display_title, executable=generator.executable(tools[tool_id]))
         for tool_id in missing
         if tool_id in generator.tools
     )
@@ -486,7 +485,7 @@ def _check_message(values: dict[str, str], generator: Generator, tools: Mapping[
 
 
 def check_ssh_generator(generator: Generator, tools: Mapping[str, ToolTemplate]) -> CheckReport:
-    """Connects (pinning the host key when none is set), checks utilities, directories and tools."""
+    """Connects (pinning the host key when none is set), checks utilities, directories and tools (request language)."""
     assert generator.ssh is not None
     pin = bool(generator.ssh.host_key)
     shell = SshShell(generator.ssh, pin_host_key=pin)
@@ -498,7 +497,7 @@ def check_ssh_generator(generator: Generator, tools: Mapping[str, ToolTemplate])
         shell.close()
     values = parse_key_values(out)
     ok, problems, found = _check_message(values, generator, tools)
-    titles = [tools[tool_id].title for tool_id in found]
+    titles = [tools[tool_id].display_title for tool_id in found]
     versions = {tool_id: values[f"version:{tool_id}"] for tool_id in found if values.get(f"version:{tool_id}")}
     details: dict[str, Any] = {
         "system": values.get("uname", ""),
@@ -509,14 +508,14 @@ def check_ssh_generator(generator: Generator, tools: Mapping[str, ToolTemplate])
         "host_key_fingerprint": shell.server_fingerprint,
         "host_key_pinned": pin,
     }
-    parts = [f"Подключение есть ({values.get('uname') or 'система не определена'})"]
-    parts.append(f"инструменты: {', '.join(titles)}" if titles else "инструменты не найдены")
+    parts = [t("lt.ssh.check.connected", system=values.get("uname") or t("lt.ssh.check.system_unknown"))]
+    parts.append(t("lt.ssh.check.tools", tools=", ".join(titles)) if titles else t("lt.ssh.check.no_tools"))
     if not pin and shell.server_key:
-        parts.append(f"ключ хоста {shell.server_fingerprint} ещё не закреплён: подтвердите, что доверяете ему, и сохраните генератор")
+        parts.append(t("lt.ssh.check.key_not_pinned", fingerprint=shell.server_fingerprint))
     if problems:
-        parts.append(f"проблемы: {'; '.join(problems)}")
+        parts.append(t("lt.check.problems", problems="; ".join(problems)))
     if status != 0 and not out:
-        failure = f"Проверка на генераторе не выполнилась: {(err or '').strip()[:300]}"
+        failure = t("lt.ssh.check.failed", error=(err or "").strip()[:300])
         return CheckReport(ok=False, message=failure, details=details, connected=True, problems=[failure])
     return CheckReport(ok=ok, message="; ".join(parts), details=details, connected=True, problems=problems)
 

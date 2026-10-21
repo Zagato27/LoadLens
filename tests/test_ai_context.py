@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for the step-aware LLM context, baseline lookup, prompt assembly and finding verification."""
 
 import json
@@ -43,7 +44,7 @@ from AI.sla_evaluator import evaluate_sla, format_sla_rationale
 from AI.verification import build_reference_catalog, unverified_findings, verify_analysis
 from tests.test_smoke_api import RecordingConnection
 
-PROMPTS_DIR = ROOT_DIR / "AI" / "prompts"
+PROMPTS_DIR = ROOT_DIR / "AI" / "prompts" / "ru"
 START_TS = 1704103200.0  # 2024-01-01T10:00:00Z
 END_TS = START_TS + 40 * 60
 
@@ -333,9 +334,11 @@ def test_find_previous_run_and_metric_stats_with_scripted_connection():
         conn, "public", "llm_reports", exclude_run_name="nightly-2", service="demo",
         before=datetime(2024, 11, 1, tzinfo=timezone.utc),
     )
-    assert previous == BaselineRun(run_name="release-2.4", service="demo", verdict="Успешно", created_at=created)
+    assert previous == BaselineRun(run_name="release-2.4", service="demo", verdict="pass", created_at=created)
     sql_text, params = conn.log[0]
-    assert "r.service = %s" in sql_text and "= 'Успешно'" in sql_text and "WITH current" not in sql_text
+    # previous_success compares the code; the CASE maps rows saved with «Успешно» to it.
+    assert "r.service = %s" in sql_text and "= 'pass'" in sql_text and "WHEN 'Успешно' THEN 'pass'" in sql_text
+    assert "WITH current" not in sql_text
     assert params[0] == "demo" and params[1] == "nightly-2"
 
     stats = load_run_metric_stats(conn, "public", "metrics", "release-2.4")
@@ -435,7 +438,7 @@ def test_sla_step_context_and_domain_verdict_guard():
         source="time_buckets", shift_hours=3,
     )
     sla_result = {
-        "verdict": "Есть риски",
+        "verdict": "risk",
         "stable_window": {
             "start": "2026-10-01T20:06:30+00:00",
             "end": "2026-10-01T20:46:37+00:00",
@@ -450,6 +453,8 @@ def test_sla_step_context_and_domain_verdict_guard():
     sla_step = _sla_step_context(sla_result, [step5, step6], 3)
     assert sla_step["step_index"] == 5
     assert sla_step["primary_passed"] is True
+    # The prompts ask for verdict codes, so the model context carries the code only (no ru label).
+    assert sla_step["verdict"] == "risk" and "verdict_label" not in sla_step
 
     original = {
         "verdict": "Провал",
@@ -459,9 +464,14 @@ def test_sla_step_context_and_domain_verdict_guard():
     aligned = _align_domain_verdict_with_sla(json.dumps(original, ensure_ascii=False), original, sla_step)
     assert aligned is not None
     assert original["verdict"] == "Провал"
-    assert json.loads(aligned[0])["verdict"] == "Есть риски"
-    assert aligned[1]["verdict"] == "Есть риски"
+    assert json.loads(aligned[0])["verdict"] == "risk" and json.loads(aligned[0])["verdict_adjusted_from"] == "fail"
+    assert aligned[1]["verdict"] == "risk" and aligned[1]["verdict_adjusted_from"] == "fail"
     assert aligned[1]["verdict_rationale"].startswith("Статус скорректирован по ступени SLA")
+    assert "Исходная оценка модели — «Провал»." in aligned[1]["verdict_rationale"]
+    # The model's text is kept as written (no surgery on the LLM rationale).
+    assert aligned[1]["verdict_rationale"].endswith("\n\nСтатус «Провал»: латентность выросла.")
+    coded = {**original, "verdict": "fail"}
+    assert _align_domain_verdict_with_sla(json.dumps(coded, ensure_ascii=False), coded, sla_step)[1]["verdict"] == "risk"
     inside = {
         "verdict": "Провал",
         "verdict_rationale": "рано",
@@ -514,6 +524,20 @@ def test_reference_catalog_includes_timeline_sla_and_designated_peak():
     analysis = _analysis([{"id": "f1", "summary": "Достигнуто 226.5 RPS при целевых 200", "component": "lt"}])
     verified, _ = verify_analysis(analysis, ctx)
     assert verified.findings[0].verification.status == "verified"
+
+
+def test_reference_stems_match_english_and_russian_answers():
+    """The stems that tie a quoted number to a reference are one RU+EN table: an English finding
+    «at step 3 …» matches the load_steps reference as the Russian «на ступени 3 …» does."""
+    refs = scoring_module._extra_numeric_references({"load_steps": [{"label": "интервал 3", "rps_level": 300.0}]})
+    english = scoring_module._matching_numeric_references("Throughput held at step 3 with 300 requests per second", refs)
+    russian = scoring_module._matching_numeric_references("На ступени 3 держалось 300 запросов в секунду", refs)
+    assert [ref["value"] for ref in english] == [300.0] and [ref["value"] for ref in russian] == [300.0]
+    assert scoring_module._matching_numeric_references("Heap used is flat", refs) == []
+    assert {"step", "ступен", "previous", "предыдущ", "target", "целев", "hold", "spike", "recover", "saturat"} <= {
+        stem for stems in scoring_module._REF_STEMS.values() for stem in stems
+    }
+    assert not hasattr(scoring_module, "_choose_best_candidate")  # dead code of the language heuristic is gone
 
 
 def test_old_reports_without_verification_still_parse():
@@ -583,7 +607,7 @@ def test_ask_llm_structured_returns_schema_instance(monkeypatch):
     monkeypatch.setattr(providers_module, "_get_gigachat_client", lambda *_a, **_k: FakeClient())
     monkeypatch.setattr(providers_module, "_wait_llm_slot", lambda gcfg: None)
     result = providers_module.ask_llm_structured("prompt", "{}", LLMAnalysis)
-    assert isinstance(result, LLMAnalysis) and result.verdict == "Успешно"
+    assert isinstance(result, LLMAnalysis) and result.verdict == "pass"
 
 
 def test_self_consistency_uses_structured_path_when_enabled(monkeypatch):
@@ -599,7 +623,7 @@ def test_self_consistency_uses_structured_path_when_enabled(monkeypatch):
     monkeypatch.setattr(scoring_module, "judge_candidates_with_llm", lambda *a, **k: ({0: {"overall": 1.0}}, {}))
     text, parsed, scores = scoring_module.llm_two_pass_self_consistency("prompt", json.dumps({"sections": []}), k=1, return_scores=True, domain_key="jvm")
     assert calls == {"structured": 1, "text": 0}
-    assert isinstance(parsed, LLMAnalysis) and json.loads(text)["verdict"] == "Успешно"
+    assert isinstance(parsed, LLMAnalysis) and json.loads(text)["verdict"] == "pass"
 
 
 VALID_ANALYSIS = json.dumps({"verdict": "Успешно", "findings": [], "recommended_actions": []}, ensure_ascii=False)
@@ -743,6 +767,9 @@ def test_save_llm_results_writes_context(monkeypatch):
     context_json = final_row[10]
     payload = context_json.adapted if hasattr(context_json, "adapted") else context_json
     assert payload == {"domain": "final", "x": 1}
+    # A new run stores codes: the verdict column and parsed.verdict (the model's label is mapped).
+    parsed_json = final_row[8]
+    assert final_row[12] == "pass" and (parsed_json.adapted if hasattr(parsed_json, "adapted") else parsed_json)["verdict"] == "pass"
 
 
 class _HttpResp:
@@ -959,7 +986,7 @@ def test_sla_window_falls_back_to_last_stable_step_where_latency_holds():
     sla = {"target_rps": 1000, "max_p95_ms": 5000, "p95_query": "p95", "max_performance_query": "LT RPS"}
     result = evaluate_sla(domain_data, sla, test_profile={"mode": "capacity"})
     by_name = {check["name"]: check for check in result["checks"]}
-    assert result["verdict"] == "Успешно"
+    assert result["verdict"] == "pass"
     assert by_name["target_rps"]["passed"] is True
     assert by_name["target_rps"]["actual"] == pytest.approx(1198.4)
     assert "≈1416 RPS нарушены: p95_latency" in by_name["target_rps"]["message"]
@@ -1231,7 +1258,7 @@ def test_sla_window_skips_recovered_dip_steps():
     by_steps = evaluate_sla({"lt_framework": {"pack": {"load_steps": steps}, "labeled": labeled}}, sla, test_profile={"mode": "capacity"})
     assert by_steps["stable_window"]["level"] == pytest.approx(300.0)
     assert by_steps["stable_window"]["degraded_level"] == pytest.approx(400.0)
-    assert by_steps["verdict"] == "Успешно"
+    assert by_steps["verdict"] == "pass"
 
     segments = [
         {"start": str(st), "end": str(en), "level": level, "stable": True, "dip": level == 180.0}

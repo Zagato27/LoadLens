@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Job state for background tasks (report generation, Confluence publishing).
 
 The ``report_jobs`` table is the source of truth. A job runs either in a thread of the web process
@@ -20,10 +21,17 @@ Jobs that stopped without finishing:
 
 When the role cannot add the ``owner``/``runner``/``started_at`` columns to an older table, the store works as
 before them: the job limits count the jobs of this process only, and nothing is swept.
+
+The job list is shared by users with different UI languages, so a message is stored twice: ``message`` holds the
+text in the language of the job, ``message_ref`` (JSONB) the dictionary key with its parameters
+(:meth:`AI.i18n.Msg.ref`); readers render the ref in their own language (:func:`message_text`). A message without
+a key (plain text) stores no ref. Without the ``message_ref`` column (an older table the role may not ALTER)
+only the text is kept, as before.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -32,11 +40,12 @@ import time
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
 import psycopg2
 from psycopg2 import sql
 
+from AI.i18n import LocalizedError, Msg, is_ref, msg, render_ref, t
 from AI.storage_state import is_storage_error
 from loadlens_app import response_cache
 from loadlens_app.core import _ts_conn
@@ -68,15 +77,17 @@ JOB_RUNNERS = (JOB_RUNNER_THREAD, JOB_RUNNER_CELERY)
 
 DEFAULT_JOBS_TABLE = "report_jobs"
 
+# Message keys (locales/<lang>/job.json); INTERRUPTED_MESSAGE, STALE_MESSAGE and QUEUED_MESSAGE give their texts.
 # Shown for jobs that were running when the previous application process stopped.
-INTERRUPTED_MESSAGE = "Задача прервана: сервер перезапустился во время выполнения"
+INTERRUPTED_KEY = "job.interrupted"
 INTERRUPTED_ERROR = "The application process stopped before the job finished"
 # Shown for Celery jobs whose worker went silent (killed, out of memory, host lost).
-STALE_MESSAGE = "Задача прервана: воркер не отвечает"
+STALE_KEY = "job.stale"
 STALE_ERROR = "No progress or heartbeat from the Celery worker for {minutes:g} min; the job was abandoned"
 # Shown for Celery jobs that no worker took from the queue (no worker running, queue blocked).
-QUEUED_MESSAGE = "Задача прервана: воркер не взял её из очереди"
+QUEUED_KEY = "job.queued_too_long"
 QUEUED_ERROR = "No Celery worker took the job from the queue within {minutes:g} min; the job was abandoned"
+_MESSAGE_CONSTANTS = {"INTERRUPTED_MESSAGE": INTERRUPTED_KEY, "STALE_MESSAGE": STALE_KEY, "QUEUED_MESSAGE": QUEUED_KEY}
 # A started job without progress or heartbeat for this many minutes counts as stuck.
 STALE_MIN_ENV = "LOADLENS_JOB_STALE_MIN"
 DEFAULT_STALE_MIN = 15.0
@@ -96,10 +107,12 @@ _BASE_COLUMNS = (
 # Added after the table: an older table gets them through ALTER TABLE when the role may do it.
 _TRACKING_COLUMNS = ("owner", "runner", "started_at")
 _JOB_COLUMNS = _BASE_COLUMNS + _TRACKING_COLUMNS
-_OPTIONAL_COLUMNS = ("dismissed_at",) + _TRACKING_COLUMNS
+# The dictionary ref of ``message`` (JSONB); read and written only when the table has it, always last.
+_REF_COLUMN = "message_ref"
+_OPTIONAL_COLUMNS = ("dismissed_at",) + _TRACKING_COLUMNS + (_REF_COLUMN,)
 # What update() may change in the row of a job that is not in memory.
 _UPDATABLE_COLUMNS = frozenset(
-    ("run_name", "service", "status", "progress", "message", "error", "report_url", "page_url", "page_id")
+    ("run_name", "service", "status", "progress", "message", _REF_COLUMN, "error", "report_url", "page_url", "page_id")
 )
 # The upsert of a known job keeps these as first written.
 _INSERT_ONLY_COLUMNS = frozenset(("job_id", "kind", "created_at"))
@@ -148,6 +161,75 @@ def _invalidate_caches(previous_status: Optional[str], status: Optional[str]) ->
         response_cache.invalidate(response_cache.DASHBOARD)
 
 
+# ---- messages ---------------------------------------------------------------------------------------------
+
+
+def stored_locale() -> str:
+    """Language of a text written outside a job (the sweeps, the first message of a new job): the installation
+    setting ``appearance.language``. Inside a job, messages are rendered in the job's language (``tasks._run_job``)."""
+    from loadlens_app.i18n import report_language
+
+    return report_language()
+
+
+def job_message(key: str, /, *, locale: Optional[str] = None, **params: Any) -> Msg:
+    """:class:`~AI.i18n.Msg` of ``key`` rendered in ``locale`` (default :func:`stored_locale`), for a job row."""
+    return Msg(t(key, locale=locale or stored_locale(), **params), key, params)
+
+
+def _ref(value: Any) -> Optional[Dict[str, Any]]:
+    """A stored ``{"key", "params"}`` (JSON text when the driver does not decode jsonb); anything else is no ref."""
+    if isinstance(value, (bytes, bytearray)):
+        value = bytes(value).decode("utf-8", "replace")
+    if isinstance(value, str) and value:
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    return dict(value) if is_ref(value) else None
+
+
+def _ref_json(ref: Optional[Dict[str, Any]]) -> Optional[str]:
+    return json.dumps(ref, ensure_ascii=False) if ref else None
+
+
+def _placeholder(column: str) -> sql.Composable:
+    return sql.SQL("%s::jsonb") if column == _REF_COLUMN else sql.Placeholder()
+
+
+def _column_value(record: "JobRecord", column: str) -> Any:
+    if column == "progress":
+        return int(record.progress)
+    if column == _REF_COLUMN:
+        return _ref_json(record.message_ref)
+    return getattr(record, column)
+
+
+def message_fields(message: Any) -> Dict[str, Any]:
+    """``message`` and ``message_ref`` of a job row: a :class:`~AI.i18n.Msg` or a localized error keeps its ref,
+    plain text has none (so it also clears the ref of the previous message)."""
+    if isinstance(message, (Msg, LocalizedError)) and message.key:
+        return {"message": str(message), _REF_COLUMN: message.ref()}
+    return {"message": "" if message is None else str(message), _REF_COLUMN: None}
+
+
+def message_text(record: "JobRecord", locale: Optional[str] = None) -> str:
+    """The message of a job in ``locale`` (default: the current one): its ref rendered again, else the stored text."""
+    text = record.message or ""
+    ref = getattr(record, "message_ref", None)
+    return render_ref(ref, fallback=text, locale=locale) if ref else text
+
+
+def failure_message(record: Optional["JobRecord"], default_key: str) -> Msg:
+    """Message of a failed job in the current locale: ``job.failed_at_stage`` naming the stage the job was in
+    (as its ref when there is one, so a reader sees the stage in their language too), else ``default_key``."""
+    if record is not None:
+        stage: Any = getattr(record, "message_ref", None) or (record.message or "").strip()
+        if stage:
+            return msg("job.failed_at_stage", stage=stage)
+    return msg(default_key)
+
+
 @dataclass
 class JobRecord:
     """Snapshot of one background job."""
@@ -173,6 +255,8 @@ class JobRecord:
     started_at: Optional[datetime] = None
     # Hidden from the job list (in-memory copy of the dismissed_at column).
     dismissed: bool = False
+    # Dictionary ref of ``message`` ({"key", "params"}), rendered in the reader's language; None for plain text.
+    message_ref: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> dict:
         return {
@@ -192,9 +276,9 @@ class JobRecord:
         }
 
     @classmethod
-    def from_row(cls, row: tuple) -> "JobRecord":
-        """A row in ``_JOB_COLUMNS`` order; a shorter one (no owner/runner/started_at columns) gets their defaults."""
-        values = dict(zip(_JOB_COLUMNS, row))
+    def from_row(cls, row: tuple, columns: Optional[Sequence[str]] = None) -> "JobRecord":
+        """A row in ``columns`` order (default ``_JOB_COLUMNS``); missing optional columns get their defaults."""
+        values = dict(zip(columns or _JOB_COLUMNS, row))
         return cls(
             job_id=str(values["job_id"]),
             kind=str(values["kind"] or ""),
@@ -212,6 +296,7 @@ class JobRecord:
             owner=str(values.get("owner") or ""),
             runner=str(values.get("runner") or JOB_RUNNER_THREAD),
             started_at=values.get("started_at"),
+            message_ref=_ref(values.get(_REF_COLUMN)),
         )
 
 
@@ -224,9 +309,7 @@ def _abandoned(record: JobRecord) -> bool:
     return record.updated_at < _utcnow() - stale_after()
 
 
-_DISMISS_UNSUPPORTED = (
-    "Очистка списка задач недоступна: в таблице задач нет колонки dismissed_at, а у приложения нет прав её добавить"
-)
+_DISMISS_UNSUPPORTED = "job.dismiss_unsupported"
 
 
 def _jobs_table_ref() -> tuple[str, str]:
@@ -234,8 +317,8 @@ def _jobs_table_ref() -> tuple[str, str]:
     return str(cfg.get("schema", "public")), str(cfg.get("jobs_table", DEFAULT_JOBS_TABLE))
 
 
-class JobStoreError(RuntimeError):
-    """The job table cannot do what was asked; the message is safe to show to the user."""
+class JobStoreError(LocalizedError, RuntimeError):
+    """The job table cannot do what was asked; the message (a dictionary key) is safe to show to the user."""
 
 
 class JobStore:
@@ -258,6 +341,8 @@ class JobStore:
         self._dismiss_supported = True
         # False when the table has no owner/runner/started_at columns and this role cannot add them.
         self._columns_supported = True
+        # False when the table has no message_ref column and this role cannot add it: only texts are stored.
+        self._refs_supported = True
         self._untracked_runner_logged = False
         # The first sweep waits one interval: the start-up recovery has just run, and a Celery row has to stay
         # silent for stale_after() before it is swept anyway.
@@ -271,7 +356,7 @@ class JobStore:
         *,
         run_name: str = "",
         service: str = "",
-        message: str = "",
+        message: Any = "",
         owner: str = "",
         runner: str = JOB_RUNNER_THREAD,
     ) -> JobRecord:
@@ -279,17 +364,19 @@ class JobStore:
 
         ``runner="thread"``: the job starts now in a thread of this process and is kept in memory as well.
         ``runner="celery"``: only the row exists, queued until the worker calls mark_started(); when that write
-        fails the job cannot be followed (logged).
+        fails the job cannot be followed (logged). ``message`` may be a :class:`~AI.i18n.Msg` (its ref is kept).
         """
         if runner not in JOB_RUNNERS:
             raise ValueError(f"Unknown job runner {runner!r}; expected one of: {', '.join(JOB_RUNNERS)}")
         now = _utcnow()
+        text = message_fields(message)
         record = JobRecord(
             job_id=uuid.uuid4().hex,
             kind=kind,
             run_name=run_name,
             service=service,
-            message=message,
+            message=text["message"],
+            message_ref=text[_REF_COLUMN],
             created_at=now,
             updated_at=now,
             owner=owner,
@@ -313,7 +400,17 @@ class JobStore:
         (a Celery job, changed by the worker or by the web process) is changed in the table by one UPDATE and
         is not kept in memory; fields other than the row's data columns raise TypeError there. Returns the new
         state, or ``None`` when the job is unknown or the table cannot be reached (logged).
+
+        ``message`` may be a :class:`~AI.i18n.Msg` or a localized error: its ref goes to ``message_ref`` unless that
+        is given too; a plain text message clears the ref (see :func:`message_fields`).
         """
+        if "message" in fields:
+            if _REF_COLUMN in fields:
+                fields["message"] = "" if fields["message"] is None else str(fields["message"])
+            else:
+                fields.update(message_fields(fields["message"]))
+        if _REF_COLUMN in fields:
+            fields[_REF_COLUMN] = _ref(fields[_REF_COLUMN])
         with self._lock:
             current = self._jobs.get(job_id)
             if current is not None:
@@ -426,14 +523,14 @@ class JobStore:
                         cur, schema, table,
                         sql.SQL(" AND runner = %s AND started_at IS NOT NULL AND updated_at < %s"),
                         [JOB_RUNNER_CELERY, now - age],
-                        message=STALE_MESSAGE,
+                        message_key=STALE_KEY,
                         error=STALE_ERROR.format(minutes=round(age.total_seconds() / 60, 1)),
                     )
                     queued = self._fail_running(
                         cur, schema, table,
                         sql.SQL(" AND runner = %s AND started_at IS NULL AND created_at < %s"),
                         [JOB_RUNNER_CELERY, now - queue_age],
-                        message=QUEUED_MESSAGE,
+                        message_key=QUEUED_KEY,
                         error=QUEUED_ERROR.format(minutes=round(queue_age.total_seconds() / 60, 1)),
                     )
             finally:
@@ -550,7 +647,8 @@ class JobStore:
 
     def _columns(self) -> Tuple[str, ...]:
         """The job columns this table has; known once _ensure_table() ran."""
-        return _JOB_COLUMNS if self._columns_supported else _BASE_COLUMNS
+        columns = _JOB_COLUMNS if self._columns_supported else _BASE_COLUMNS
+        return columns + (_REF_COLUMN,) if self._refs_supported else columns
 
     def _columns_sql(self) -> sql.Composable:
         return sql.SQL(", ").join(sql.Identifier(c) for c in self._columns())
@@ -574,6 +672,7 @@ class JobStore:
                     present = self._present_columns(cur, schema, table)
                     self._ensure_dismissed_column(cur, schema, table, present)
                     self._ensure_tracking_columns(cur, schema, table, present)
+                    self._ensure_ref_column(cur, schema, table, present)
                     self._table_ensured = True
                 if recover and not self._recovered:
                     self._mark_interrupted(cur, schema, table)
@@ -604,7 +703,8 @@ class JobStore:
                         dismissed_at TIMESTAMPTZ,
                         owner        TEXT NOT NULL DEFAULT '',
                         runner       TEXT NOT NULL DEFAULT 'thread',
-                        started_at   TIMESTAMPTZ
+                        started_at   TIMESTAMPTZ,
+                        message_ref  JSONB
                     );
                     """
                 ).format(sql.Identifier(schema), sql.Identifier(table))
@@ -680,6 +780,25 @@ class JobStore:
                 schema, table, exc_info=True,
             )
 
+    def _ensure_ref_column(self, cur, schema: str, table: str, present: Set[str]) -> None:
+        if _REF_COLUMN in present:
+            self._refs_supported = True
+            return
+        try:
+            cur.execute(
+                sql.SQL("ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS message_ref JSONB").format(
+                    sql.Identifier(schema), sql.Identifier(table)
+                )
+            )
+            self._refs_supported = True
+        except psycopg2.Error:
+            self._refs_supported = False
+            logger.warning(
+                "Cannot add message_ref to %s.%s (the table belongs to another role?): job messages are shown in the"
+                " language they were written in",
+                schema, table, exc_info=True,
+            )
+
     def _mark_interrupted(self, cur, schema: str, table: str) -> None:
         """Thread jobs left "running" by a process that stopped become errors, so nothing polls them forever.
 
@@ -691,22 +810,30 @@ class JobStore:
         else:
             condition, params = sql.SQL(" AND updated_at < %s"), [self._started_at]
         interrupted = self._fail_running(
-            cur, schema, table, condition, params, message=INTERRUPTED_MESSAGE, error=INTERRUPTED_ERROR,
+            cur, schema, table, condition, params, message_key=INTERRUPTED_KEY, error=INTERRUPTED_ERROR,
         )
         if interrupted:
             logger.warning("Marked %d job(s) interrupted by a restart: %s", len(interrupted), ", ".join(interrupted[:20]))
 
-    @staticmethod
     def _fail_running(
-        cur, schema: str, table: str, condition: sql.Composable, condition_params: list, *, message: str, error: str,
+        self, cur, schema: str, table: str, condition: sql.Composable, condition_params: list, *,
+        message_key: str, error: str,
     ) -> List[str]:
-        """Turns running rows that also match ``condition`` into errors; returns their ids."""
+        """Turns running rows that also match ``condition`` into errors; returns their ids.
+
+        The message is ``message_key`` in the installation language, plus its ref when the table has the column.
+        The ref is a constant of this module, written as a literal so the statement keeps its parameters.
+        """
+        text = job_message(message_key)
+        ref_sql: sql.Composable = sql.SQL("")
+        if self._refs_supported:
+            ref_sql = sql.SQL(", message_ref = {}::jsonb").format(sql.Literal(_ref_json(text.ref())))
         cur.execute(
             sql.SQL(
-                "UPDATE {}.{} SET status = %s, message = %s, error = %s, updated_at = %s"
+                "UPDATE {}.{} SET status = %s, message = %s, error = %s, updated_at = %s{}"
                 " WHERE status = %s{} RETURNING job_id"
-            ).format(sql.Identifier(schema), sql.Identifier(table), condition),
-            [JOB_STATUS_ERROR, message, error, _utcnow(), JOB_STATUS_RUNNING, *condition_params],
+            ).format(sql.Identifier(schema), sql.Identifier(table), ref_sql, condition),
+            [JOB_STATUS_ERROR, str(text), error, _utcnow(), JOB_STATUS_RUNNING, *condition_params],
         )
         return [str(row[0]) for row in (cur.fetchall() or [])]
 
@@ -755,10 +882,10 @@ class JobStore:
                             sql.Identifier(schema),
                             sql.Identifier(table),
                             sql.SQL(", ").join(sql.Identifier(c) for c in columns),
-                            sql.SQL(", ").join([sql.Placeholder()] * len(columns)),
+                            sql.SQL(", ").join(_placeholder(c) for c in columns),
                             sql.SQL(", ").join(sql.SQL("{0} = EXCLUDED.{0}").format(sql.Identifier(c)) for c in overwritten),
                         ),
-                        tuple(int(record.progress) if c == "progress" else getattr(record, c) for c in columns),
+                        tuple(_column_value(record, c) for c in columns),
                     )
             finally:
                 conn.close()
@@ -772,24 +899,29 @@ class JobStore:
         unknown = sorted(set(fields) - _UPDATABLE_COLUMNS)
         if unknown:
             raise TypeError(f"Cannot update job fields in the table: {', '.join(unknown)}")
-        assignments: List[sql.Composable] = []
-        params: list = []
-        for name, value in fields.items():
-            if name == "progress":
-                if value is None:
-                    continue
-                assignments.append(sql.SQL("progress = GREATEST(progress, %s)"))
-                params.append(int(value))
-            else:
-                assignments.append(sql.SQL("{} = %s").format(sql.Identifier(name)))
-                params.append(value)
-        assignments.append(sql.SQL("updated_at = %s"))
-        params.extend((_utcnow(), job_id))
         schema, table = _jobs_table_ref()
         try:
             conn = _ts_conn()
             try:
                 self._ensure_table(conn)
+                assignments: List[sql.Composable] = []
+                params: list = []
+                for name, value in fields.items():
+                    if name == "progress":
+                        if value is None:
+                            continue
+                        assignments.append(sql.SQL("progress = GREATEST(progress, %s)"))
+                        params.append(int(value))
+                    elif name == _REF_COLUMN:
+                        if not self._refs_supported:
+                            continue  # an older table keeps the text only
+                        assignments.append(sql.SQL("message_ref = %s::jsonb"))
+                        params.append(_ref_json(value))
+                    else:
+                        assignments.append(sql.SQL("{} = %s").format(sql.Identifier(name)))
+                        params.append(value)
+                assignments.append(sql.SQL("updated_at = %s"))
+                params.extend((_utcnow(), job_id))
                 with conn, conn.cursor() as cur:
                     cur.execute(
                         sql.SQL("UPDATE {}.{} SET {} WHERE job_id = %s RETURNING {}").format(
@@ -809,7 +941,7 @@ class JobStore:
         if not row:
             return None
         _invalidate_caches(None, fields.get("status"))
-        return JobRecord.from_row(row)
+        return JobRecord.from_row(row, self._columns())
 
     def _touch_running(self, job_id: str, now: datetime, *, started: bool) -> Optional[bool]:
         """Sets ``updated_at`` (and ``started_at`` when ``started``) of a running row: heartbeat(), mark_started()."""
@@ -886,7 +1018,7 @@ class JobStore:
         except Exception as exc:
             _log_store_failure(exc, "Failed to load job %s from %s.%s", job_id, schema, table)
             return None
-        return JobRecord.from_row(row) if row else None
+        return JobRecord.from_row(row, self._columns()) if row else None
 
     def _load_many(self, statuses: List[str], limit: int) -> List[JobRecord]:
         schema, table = _jobs_table_ref()
@@ -914,14 +1046,25 @@ class JobStore:
         except Exception as exc:
             _log_store_failure(exc, "Failed to list jobs from %s.%s", schema, table)
             return []
-        return [JobRecord.from_row(row) for row in rows]
+        return [JobRecord.from_row(row, self._columns()) for row in rows]
 
 
 job_store = JobStore()
 
+
+def __getattr__(name: str) -> str:
+    """``INTERRUPTED_MESSAGE``, ``STALE_MESSAGE``, ``QUEUED_MESSAGE``: the text a row ended by the store gets
+    (its message key in :func:`stored_locale`); quoted by docs/jobs-runner.md."""
+    key = _MESSAGE_CONSTANTS.get(name)
+    if key is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return t(key, locale=stored_locale())
+
+
 __all__ = [
     "DEFAULT_QUEUE_MAX_MIN",
     "DEFAULT_STALE_MIN",
+    "INTERRUPTED_KEY",
     "INTERRUPTED_MESSAGE",
     "JOB_KIND_CONFLUENCE",
     "JOB_KIND_FORECAST_CONFLUENCE",
@@ -936,12 +1079,19 @@ __all__ = [
     "JobRecord",
     "JobStore",
     "JobStoreError",
+    "QUEUED_KEY",
     "QUEUED_MESSAGE",
     "QUEUE_MAX_MIN_ENV",
+    "STALE_KEY",
     "STALE_MESSAGE",
     "STALE_MIN_ENV",
     "SWEEP_INTERVAL_SEC",
+    "failure_message",
+    "job_message",
     "job_store",
+    "message_fields",
+    "message_text",
     "queue_max_wait",
     "stale_after",
+    "stored_locale",
 ]

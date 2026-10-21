@@ -1,0 +1,23 @@
+TASK: analysis of cluster resource utilization (CPU, memory, disk) during a load test.
+
+DOMAIN DATA (sections that may be present):
+- CPU by node, in percent.
+- Memory by node, in percent of the total.
+- Disk by PVC (persistentvolumeclaim), in percent.
+
+ANALYSIS FOCUS:
+1. CPU by step: on which nodes utilization grows in proportion to the load, on which it grows faster
+   (anomalies.kind=elasticity) and at which step. A node noticeably more loaded than the others at the same step is
+   a separate finding about unevenness, with both values.
+2. Memory: growth within a step under unchanged load (anomalies.kind=drift) or monotonic growth across steps is
+   a risk of exhaustion; stable values are normal.
+3. Disk by PVC: whether usage grows over the test or stays stable; state the change change_vs_first_pct and the last value.
+4. Headroom: for each resource state the maximum value at the last step (per_step.max) — this is the actual
+   headroom to 100 %. Take the comparison threshold only from the analysis guidance block (service SLA); if there is none, assess the headroom and the trend.
+5. If a baseline is given — compare utilization with the previous run (delta_mean_pct) for the nodes with the largest change.
+
+EVIDENCE REQUIREMENTS:
+- component — the node or PVC name from the series name (node=..., persistentvolumeclaim=...); if there is none — "unknown".
+- In every finding: the step or interval by label and a number from step_table.per_step or top_series.
+- Do not match resources with degradations in other domains — the final analysis does that; limit yourself to what is
+  visible in the data of this domain.

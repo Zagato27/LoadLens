@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Phase 2 of the Run test page: Docker, Kubernetes and CI generators, soft stop, presets, hints, summed RPS."""
 
 import copy
@@ -872,7 +873,7 @@ def test_generators_domain_is_a_known_binding_and_pack_domain():
     assert "lt_generators" in BINDING_DOMAINS
     pack = load_catalog().pack("lt-generators-node-exporter")
     assert pack.domain == "lt_generators" and {q.role for q in pack.queries} >= {"generator.cpu_pct", "generator.mem_pct"}
-    prompt = (ROOT_DIR / "AI" / "prompts" / "lt_generators_prompt.txt").read_text(encoding="utf-8")
+    prompt = (ROOT_DIR / "AI" / "prompts" / "ru" / "lt_generators_prompt.txt").read_text(encoding="utf-8")
     assert "ступен" in prompt and "генератор" in prompt
-    overall = (ROOT_DIR / "AI" / "prompts" / "overall_prompt.txt").read_text(encoding="utf-8")
+    overall = (ROOT_DIR / "AI" / "prompts" / "ru" / "overall_prompt.txt").read_text(encoding="utf-8")
     assert "{answer_lt_generators}" in overall

@@ -13,13 +13,13 @@ numpy==1.26.4
 tabulate==0.10.0
 # Charts for the Confluence publication of web reports
 matplotlib==3.10.9
-pillow==12.3.0
+pillow==13.0.0
 celery[redis]==5.4.0
 atlassian-python-api==3.41.21
 beautifulsoup4==4.15.0
 pydantic==2.14.0
 # Text of PDF and Word documents for filling the system context (Settings → Context)
-pypdf==6.7.0
+pypdf==6.21.1
 python-docx==1.2.0
 # GigaChat LLM provider (llm.provider = "gigachat")
 langchain-core==1.6.8

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Converts legacy ``metrics_source`` / ``lt_metrics_source`` into the catalog.
 
 The conversion itself is pure. ``migrate_legacy_data_sources`` reads the runtime

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Stress test result: saturation point, character of degradation and limiting resource.
 
 Stress runs keep the capacity semantics: the saturation point is the last load step where
@@ -16,6 +17,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 import pandas as pd
 
 from AI.context_pack import LoadStep, _utc_numeric, format_iso, to_utc
+from AI.i18n import get_locale, t
+from AI.report_texts import LanguageTable, LocaleTable, text_lang
 from AI.sla_evaluator import _labeled_frame, _worst_series_p95
 
 SATURATION_GROWTH_MIN_PCT = 15.0
@@ -57,13 +60,40 @@ def failure_mode(degraded_checks: Sequence[str], rps_drop: Optional[pd.Timestamp
     return "none"
 
 
-FAILURE_MODE_TITLES = {
-    "latency+errors": "рост задержек и ошибок",
-    "latency": "рост задержек",
-    "errors": "рост ошибок",
-    "throughput_drop": "падение пропускной способности",
-    "none": "деградация не зафиксирована",
-}
+# Visible names of ``failure_mode`` (report.failure_mode.*, code 'latency+errors' -> key segment 'latency_errors')
+# and texts of ``note_code`` (report.saturation_note.*); readers build them at read time and fall back to the stored
+# ``failure_mode_title`` / ``note`` of reports saved before.
+FAILURE_MODES = ("latency+errors", "latency", "errors", "throughput_drop", "none")
+SATURATION_NOTE_CODES = ("limit_not_reached", "no_sla_step")
+
+
+def _failure_mode_key(mode: str) -> str:
+    return "latency_errors" if mode == "latency+errors" else mode
+
+
+def _failure_mode_text(mode: str, lang: Optional[str] = None) -> str:
+    return t(f"report.failure_mode.{_failure_mode_key(mode)}", locale=lang)
+
+
+FAILURE_MODE_TEXTS = LanguageTable(FAILURE_MODES, _failure_mode_text)
+# Names of the failure modes in the language of the report being built.
+FAILURE_MODE_TITLES = LocaleTable(FAILURE_MODES, _failure_mode_text)
+SATURATION_NOTE_TEXTS = LanguageTable(SATURATION_NOTE_CODES, lambda code, lang: t(f"report.saturation_note.{code}", locale=lang))
+
+
+def failure_mode_title(mode: Optional[str], lang: str = "ru") -> str:
+    """Visible name of a ``failure_mode`` code in ``lang``; '' for an unknown code."""
+    code = str(mode or "")
+    return _failure_mode_text(code, text_lang(lang)) if code in FAILURE_MODES else ""
+
+
+def saturation_note_text(code: Optional[str], lang: str = "ru") -> str:
+    """Text of a saturation ``note_code`` in ``lang``; '' without a code."""
+    if not code:
+        return ""
+    if str(code) not in SATURATION_NOTE_CODES:
+        return str(code)
+    return t(f"report.saturation_note.{code}", locale=text_lang(lang))
 
 
 def _mean_between(frame: pd.DataFrame, column: str, start: pd.Timestamp, end: pd.Timestamp) -> Optional[float]:
@@ -153,11 +183,11 @@ def build_saturation(
     first_window = (to_utc(steps[0].start), to_utc(steps[0].end)) if steps else None
     resource = limiting_resource(hr_labeled, sla_cfg, probe, first_window) if probe is not None else None
     if not limit_reached:
-        note = "Предел не достигнут: ни одна ступень не нарушила SLA по задержкам и ошибкам, RPS не падал."
+        note_code = "limit_not_reached"
     elif window is None:
-        note = "Ступень, на которой выполнялись пороги SLA, не найдена; точка насыщения — пиковый уровень RPS."
+        note_code = "no_sla_step"
     else:
-        note = ""
+        note_code = ""
     return {
         "saturation_rps": round(saturation_rps, 2) if saturation_rps is not None else None,
         "saturation_step_label": saturation_step.label if saturation_step else None,
@@ -169,18 +199,25 @@ def build_saturation(
         "degraded_step_label": degraded_step.label if degraded_step else None,
         "degraded_checks": degraded_checks or failed_now,
         "failure_mode": mode,
-        "failure_mode_title": FAILURE_MODE_TITLES[mode],
+        "failure_mode_title": failure_mode_title(mode, get_locale()),
         "rps_drop_iso": format_iso(rps_drop, shift_hours) if rps_drop is not None else None,
         "limiting_resource": resource,
         "limit_reached": limit_reached,
-        "note": note,
+        "note": saturation_note_text(note_code, get_locale()),
+        "note_code": note_code or None,
     }
 
 
 __all__ = [
+    "FAILURE_MODES",
+    "FAILURE_MODE_TEXTS",
     "FAILURE_MODE_TITLES",
     "SATURATION_GROWTH_MIN_PCT",
+    "SATURATION_NOTE_CODES",
+    "SATURATION_NOTE_TEXTS",
     "build_saturation",
     "failure_mode",
+    "failure_mode_title",
     "limiting_resource",
+    "saturation_note_text",
 ]

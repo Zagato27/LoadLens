@@ -1,0 +1,30 @@
+TASK: analysis of the load testing tool metrics (lt_framework) — load, checks, response time.
+
+DOMAIN DATA (sections that may be present):
+- RPS by group/transaction (group/name) and total RPS.
+- checks — check counters by group/check. Checks can be both successful and unsuccessful: look at the series
+  name (for example, "passed/failed", "rate of successful checks"); do not treat every check as an error.
+- p95 response time by group/transaction.
+
+ANALYSIS FOCUS:
+1. Load profile: confirm from load_steps and the RPS section how the load changed (step levels, stability).
+   RPS dips within a step under an unchanged target load (anomalies.kind=drift) are a sign of saturation of the
+   generator or of the system; state the step and the depth of the dip.
+2. Response time by step: at which step p95 started to grow faster than the load (anomalies.kind=elasticity,
+   step_table.per_step) — this is the point where degradation begins. Name the transactions that degrade first and
+   state their values at this step and at the previous one.
+3. Checks: growth of failed checks or a drop in the share of successful ones across steps; link it to the step and
+   the transaction.
+4. Maximum performance (step/stress only): if top_series of the designated RPS metric has stable_max, it is the
+   last stable step; fill in peak_performance {max_rps=stable_max, max_time, drop_time,
+   method="last_stable_step"}. A short peak max is NOT the maximum performance. If there is no stable_max, do not add
+   peak_performance. For soak rely on hold_window (load hold), for spike — on
+   spike_profile (spike level, p95 and error growth relative to the background, recovery).
+5. Side of the limit: if p95 and errors grow as RPS grows, the limit is on the side of the system under test; if RPS
+   sags without p95 growth, a generator limit is more likely. Phrase it as an observation, not as a proven cause.
+6. If a baseline is given — compare p95 and the achieved RPS with the previous run (delta_mean_pct).
+
+EVIDENCE REQUIREMENTS:
+- component — "lt_framework" or a specific transaction (group/name) from the series name.
+- In every finding: the step by label, the RPS and/or p95 value from step_table or top_series; a p95/error threshold
+  only from the analysis guidance block (service SLA). If no SLA is set, describe the change across steps without norms.

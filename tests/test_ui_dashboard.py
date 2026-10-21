@@ -1,7 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
 """/dashboard_data of the second UI wave: service history, KPI, verdicts per week, SLA of the last run, dedup.
 
 The database is a fake that answers each statement of the endpoint by a recognizable fragment of its SQL,
-so the order of the statements does not matter to the tests.
+so the order of the statements does not matter to the tests. Its rows mostly hold the Russian labels a database
+written before the verdict codes keeps; the endpoint answers with codes (AI/verdicts.py).
 """
 
 import json
@@ -169,10 +171,10 @@ def test_services_carry_history_newest_first(app_client, monkeypatch):
     assert [h["run_name"] for h in checkout["history"]] == ["nightly-3", "soak-1", "nightly-2"]
     assert checkout["history"][0] == {
         "run_name": "nightly-3", "run_id": "rid-3", "created_at": LAST_CREATED.isoformat(),
-        "verdict": "Есть риски", "max_rps": pytest.approx(240.5), "test_type": "step",
+        "verdict": "risk", "max_rps": pytest.approx(240.5), "test_type": "step",
     }
     assert checkout["history"][1]["max_rps"] == pytest.approx(120.0)
-    assert checkout["recent_verdicts"] == ["Есть риски", "Успешно", "Успешно"]
+    assert checkout["recent_verdicts"] == ["risk", "pass", "pass"]
     assert checkout["run_id"] == "rid-3" and checkout["last_run"] == "nightly-3"
     # Text the LLM wrote instead of a number is no RPS, not a server error.
     assert services["billing"]["max_rps"] is None and services["billing"]["history"][0]["max_rps"] is None
@@ -204,11 +206,11 @@ def test_kpi_counts_and_verdict_weeks(app_client, monkeypatch):
     weeks = data["verdict_weeks"]
     assert [w["week_start"] for w in weeks] == WEEKS
     by_week = {w["week_start"]: w for w in weeks}
-    assert by_week["2026-10-12"]["counts"] == {"Успешно": 0, "Есть риски": 1, "Провал": 0, "Недостаточно данных": 0}
-    assert by_week["2026-10-05"]["counts"]["Успешно"] == 2 and by_week["2026-10-05"]["total"] == 2
-    assert by_week["2026-09-28"]["counts"]["Провал"] == 1
-    # An unknown verdict counts as «Недостаточно данных»; a week outside the range is dropped.
-    assert by_week["2026-09-07"]["counts"]["Недостаточно данных"] == 1
+    assert by_week["2026-10-12"]["counts"] == {"pass": 0, "risk": 1, "fail": 0, "no_data": 0}
+    assert by_week["2026-10-05"]["counts"]["pass"] == 2 and by_week["2026-10-05"]["total"] == 2
+    assert by_week["2026-09-28"]["counts"]["fail"] == 1
+    # An unknown verdict counts as no_data; a week outside the range is dropped.
+    assert by_week["2026-09-07"]["counts"]["no_data"] == 1
     assert sum(w["total"] for w in weeks) == 5
     # The statement gets the period bounds: first week start (UTC), then 7 and 30 days back.
     params = db.call("weeks")[2]
@@ -216,7 +218,7 @@ def test_kpi_counts_and_verdict_weeks(app_client, monkeypatch):
     assert params[-2] == datetime(2026, 10, 8, 12, 0, tzinfo=timezone.utc)
     assert params[-1] == datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
     # Compatibility: the latest-slice counts stay.
-    assert data["verdict_counts"]["Успешно"] == 2 and data["runs_total"] == 4
+    assert data["verdict_counts"]["pass"] == 2 and data["runs_total"] == 4
 
 
 def test_last_run_sla_and_kpi_last(app_client, monkeypatch):
@@ -225,7 +227,7 @@ def test_last_run_sla_and_kpi_last(app_client, monkeypatch):
     assert last["sla"] == {"passed": 2, "failed": 1, "total": 3}
     assert last["run_id"] == "rid-3" and last["test_type"] == "step"
     assert last["max_rps"] == pytest.approx(240.5)
-    assert last["verdict"] == "Есть риски" and last["llm_verdict"] == "Успешно" and last["sla_verdict"] == "Есть риски"
+    assert last["verdict"] == "risk" and last["llm_verdict"] == "pass" and last["sla_verdict"] == "risk"
     assert data["kpi"]["last"] == {"run_name": "nightly-3", "max_rps": pytest.approx(240.5), "test_type": "step"}
 
 
@@ -244,11 +246,11 @@ def test_previous_run_of_the_same_service_and_type(app_client, monkeypatch):
     data = fetch(app_client, monkeypatch, db, cookie_area="shop")
     assert data["kpi"]["previous"] == {
         "run_name": "nightly-2", "run_id": "rid-2", "max_rps": pytest.approx(200.0),
-        "verdict": "Успешно", "created_at": "2026-10-01T00:00:00+00:00",
+        "verdict": "pass", "created_at": "2026-10-01T00:00:00+00:00",
     }
     _, text, params = db.call("previous")
     # Any earlier run (not only a successful one), same service, same normalized type, same area.
-    assert "'Успешно'" not in text
+    assert "= 'pass'" not in text
     assert "LOWER(TRIM(COALESCE(r.test_type, ''))) = ANY(%s)" in text
     assert "r.project_area = %s" in text
     assert params[0] == "checkout" and params[1] == "nightly-3" and params[2] == LAST_CREATED
@@ -327,3 +329,37 @@ def test_periods_are_utc_mondays():
     assert [w.isoformat() for w in periods["weeks"]][-1] == "2026-10-12"
     assert all(w.weekday() == 0 for w in periods["weeks"]) and len(periods["weeks"]) == dashboard.DASHBOARD_VERDICT_WEEKS
     assert periods["since"] <= periods["since_30d"] < periods["since_7d"]
+
+
+def test_mixed_database_counts_labels_and_codes_together(app_client, monkeypatch):
+    """Rows written before the codes (labels) and after (codes) count under the same keys everywhere."""
+    from AI.verdicts import code_sql
+
+    db = full_db(
+        last_run=[last_row(verdict="fail", llm_verdict="Провал", sla_verdict="fail")],
+        verdict_counts=[("pass", 1), ("Успешно", 2), ("Есть риски", 1), ("risk", 1), ("no_data", 1)],
+        services=[
+            ("checkout", "nightly-3", "fail", LAST_CREATED, "240.5", "step", "rid-3"),
+            ("checkout", "nightly-2", "Успешно", datetime(2026, 10, 1, tzinfo=timezone.utc), "200", "step", "rid-2"),
+        ],
+        recent=[("nightly-3", "checkout", "Провал", LAST_CREATED, "step", 1_000, 3_601_000, "rid-3")],
+        weeks=[
+            (date(2026, 10, 12), "fail", 1, 1, 1),
+            (date(2026, 10, 12), "Провал", 2, 1, 2),
+            (date(2026, 10, 5), "Есть риски", 1, 0, 1),
+            (date(2026, 10, 5), "pass", 3, 0, 3),
+        ],
+    )
+    data = fetch(app_client, monkeypatch, db)
+    assert data["verdict_counts"] == {"pass": 3, "risk": 2, "fail": 0, "no_data": 1}
+    assert data["last_run"]["verdict"] == "fail" and data["last_run"]["llm_verdict"] == "fail"
+    assert [h["verdict"] for h in data["services"][0]["history"]] == ["fail", "pass"]
+    assert data["recent_runs"][0]["verdict"] == "fail"
+    by_week = {w["week_start"]: w["counts"] for w in data["verdict_weeks"]}
+    assert by_week["2026-10-12"] == {"pass": 0, "risk": 0, "fail": 3, "no_data": 0}
+    assert by_week["2026-10-05"] == {"pass": 3, "risk": 1, "fail": 0, "no_data": 0}
+    assert data["kpi"]["risky_30d"] == 4 and data["kpi"]["runs_30d"] == 7
+    # The SQL maps old labels too, so the database groups them under their code.
+    for key in ("verdict_counts", "services", "recent", "weeks", "last_run"):
+        assert code_sql("COALESCE(sla_verdict, verdict)") in db.call(key)[1], key
+    assert "'Недостаточно данных'" in code_sql("x") and "COALESCE(sla_verdict, verdict, 'Недостаточно данных')" not in db.call("weeks")[1]

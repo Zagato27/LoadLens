@@ -1,0 +1,89 @@
+{
+  "domain": "final",
+  "report_language": "en",
+  "context": {
+    "domain": "final",
+    "time_range": {"start_iso": "2024-01-01T10:00:00+03:00", "end_iso": "2024-01-01T10:40:00+03:00"},
+    "load_steps": [
+      {"label": "step 1 · ≈100 RPS", "minute_from": 0, "minute_to": 20, "rps_level": 100},
+      {"label": "step 2 · ≈200 RPS", "minute_from": 20, "minute_to": 40, "rps_level": 200}
+    ],
+    "domains": {
+      "lt_framework": {
+        "sections": [
+          {
+            "label": "LT (InfluxQL): RPS sum by all groups",
+            "top_series": [
+              {"series": "sum_all", "max": 226.5, "mean": 180.0, "p95": 220.0}
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "parsed": {
+    "report_language": "en",
+    "verdict": "risk",
+    "verdict_rationale": "Status \"Risks found\": the RPS holds, but the p95 on the second step is not confirmed by the data.",
+    "findings": [
+      {
+        "id": "f1",
+        "summary": "RPS on the second step is 226.5 rps",
+        "severity": "low",
+        "component": "lt_framework",
+        "evidence_items": [
+          {"metric": "sum_all", "observed_value": "226.5 rps", "threshold": "200 rps", "note": "step 2"}
+        ],
+        "verification": {"status": "verified", "matched": ["226.5"], "unmatched": []}
+      },
+      {
+        "id": "f2",
+        "summary": "p95 grew to 999 ms",
+        "severity": "high",
+        "component": "lt_framework",
+        "evidence_items": [
+          {"metric": "p95", "observed_value": "999 ms", "threshold": null, "note": ""}
+        ],
+        "verification": {"status": "unverified", "matched": [], "unmatched": ["999"]}
+      },
+      {
+        "id": "f3",
+        "summary": "The charts show the stepped shape of the load",
+        "severity": "low",
+        "component": "lt_framework",
+        "verification": {"status": "qualitative", "matched": [], "unmatched": []}
+      }
+    ],
+    "recommended_actions": [
+      {
+        "summary": "Check the pool limits",
+        "details": "Compare the max pool size with the RPS of 226.5 and repeat the run.",
+        "priority": "high",
+        "for_finding_ids": ["f2"]
+      },
+      {
+        "summary": "An empty action without details",
+        "details": "",
+        "for_finding_ids": ["f1"]
+      },
+      {
+        "summary": "An action not linked to a finding",
+        "details": "Take a JVM thread dump.",
+        "for_finding_ids": []
+      }
+    ]
+  },
+  "scores": {
+    "run_usage": {
+      "calls": 3,
+      "prompt_tokens": 1500,
+      "completion_tokens": 400,
+      "elapsed_ms": 1200,
+      "cost": null
+    }
+  },
+  "feedback": [
+    {"domain": "final", "target": "verdict", "finding_id": "", "vote": "agree", "comment": ""},
+    {"domain": "final", "target": "finding", "finding_id": "f2", "vote": "disagree", "comment": "the p95 in the report is made up"}
+  ]
+}

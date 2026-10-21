@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Substitutes pack variables into labels, queries, series keys and SLA values."""
 
 from __future__ import annotations
@@ -6,7 +7,9 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
-from .models import TEMPLATE_RE, QueryPack
+from AI.i18n import t
+
+from .models import TEMPLATE_RE, QueryPack, localized
 from .roles import SLA_FIELDS, SLA_VALUE_CHOICES
 
 _LEFTOVER_RE = re.compile(r"\{\{|\}\}")
@@ -26,6 +29,11 @@ class RenderedQuery:
     required: bool
     description: str
     since: int = 1
+    description_en: str = ""
+
+    def text(self, lang: Optional[str] = None) -> str:
+        """The description in ``lang`` (default: the current locale)."""
+        return localized(self, "description", lang)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -35,7 +43,7 @@ class RenderedQuery:
             "role": self.role,
             "unit": self.unit,
             "required": self.required,
-            "description": self.description,
+            "description": self.text(),
             "since": self.since,
         }
 
@@ -71,15 +79,15 @@ def resolve_variables(pack: QueryPack, given: Optional[Mapping[str, Any]] = None
     supplied = dict(given or {})
     unknown = sorted(set(supplied) - set(pack.variables))
     if unknown:
-        raise PackRenderError(f"Неизвестные переменные пакета: {', '.join(unknown)}")
+        raise PackRenderError(t("packs.error.unknown_variables", names=", ".join(unknown)))
     values: dict[str, str] = {}
     for name, var in pack.variables.items():
         raw = supplied.get(name, var.default)
         value = "" if raw is None else str(raw).strip()
         if var.choices and value not in var.choices:
-            raise PackRenderError(f"«{var.title}»: допустимо {', '.join(var.choices)}, получено «{value}»")
+            raise PackRenderError(t("packs.error.variable_choice", title=localized(var, "title"), choices=", ".join(var.choices), value=value))
         if "\n" in value or "\r" in value or not re.fullmatch(var.pattern, value):
-            raise PackRenderError(f"«{var.title}»: значение «{value}» не подходит для этого поля")
+            raise PackRenderError(t("packs.error.variable_value", title=localized(var, "title"), value=value))
         values[name] = value
     return values
 
@@ -90,7 +98,7 @@ def _substitute(text: str, values: Mapping[str, str], where: str) -> str:
 
     rendered = TEMPLATE_RE.sub(replace, text)
     if _LEFTOVER_RE.search(rendered):
-        raise PackRenderError(f"{where}: после подстановки остались фигурные скобки {{{{ }}}}")
+        raise PackRenderError(t("packs.error.leftover_braces", where=where))
     return rendered
 
 
@@ -115,6 +123,7 @@ def render_pack(
             required=query.required,
             description=query.description.strip(),
             since=query.since,
+            description_en=query.description_en.strip(),
         ))
     by_role = {}
     for query in queries:
@@ -130,7 +139,7 @@ def render_pack(
         else:
             value = _substitute(ref, values, f"sla.{field}")
             if value not in SLA_VALUE_CHOICES.get(field, (value,)):
-                raise PackRenderError(f"sla.{field}: допустимо {', '.join(SLA_VALUE_CHOICES[field])}, получено «{value}»")
+                raise PackRenderError(t("packs.error.sla_value_choice", field=field, choices=", ".join(SLA_VALUE_CHOICES[field]), value=value))
             sla_values[field] = value
     return RenderedPack(pack=pack, variables=values, queries=tuple(queries), sla_refs=sla_refs, sla_values=sla_values)
 

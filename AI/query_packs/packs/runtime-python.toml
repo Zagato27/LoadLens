@@ -14,6 +14,12 @@ description = """
 В multiprocess-режиме (gunicorn с PROMETHEUS_MULTIPROC_DIR) метрик process_* нет — тогда CPU и память \
 берите из пакета «Контейнеры: CPU и память от лимита».
 """
+description_en = """
+Standard prometheus_client collectors: process_* and python_gc_*. The series go to the "JVM" domain with the \
+"Python runtime" prefix because the resource plan takes service CPU from there. Process CPU comes in cores. In \
+multiprocess mode (gunicorn with PROMETHEUS_MULTIPROC_DIR) there are no process_* metrics; then take CPU and \
+memory from the "Containers: CPU and memory against the limit" pack.
+"""
 requires_metrics = ["python_info", "process_cpu_seconds_total", "python_gc_collections_total"]
 prompt_addendum = """
 Это сервис на Python, а не JVM: из-за GIL один процесс редко использует больше одного ядра, \
@@ -21,24 +27,35 @@ prompt_addendum = """
 RSS процесса, python_gc_collections_total — сборки по поколениям (generation 2 — полные), \
 process_open_fds — файлы и сокеты.
 """
+prompt_addendum_en = """
+This is a Python service, not a JVM: because of the GIL one process rarely uses more than one core, \
+parallelism comes from workers (gunicorn, uvicorn), each a separate process. process_resident_memory_bytes is \
+the process RSS, python_gc_collections_total are collections by generation (generation 2 means full ones), \
+process_open_fds are files and sockets.
+"""
 
 [variables.service_label]
 title = "Лейбл с именем сервиса"
+title_en = "Label with the service name"
 default = "job"
 pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
 
 [variables.matchers]
 title = "Дополнительные матчеры"
+title_en = "Extra matchers"
 default = ""
 
 [variables.cpu_limit_cores]
 title = "Ядер на экземпляр"
+title_en = "Cores per instance"
 default = "1"
 pattern = '^[0-9]+(\.[0-9]+)?$'
 help = "Для одного процесса Python обычно 1: GIL не даёт занять больше ядра."
+help_en = "Usually 1 for a single Python process: the GIL does not let it use more than one core."
 
 [variables.window]
 title = "Окно rate()"
+title_en = "rate() window"
 default = "2m"
 pattern = '^[1-9][0-9]*[smh]$'
 
@@ -53,6 +70,7 @@ required = true
 query = '(sum by ({{service_label}}, instance) (rate(process_cpu_seconds_total{ {{service_label}}!="", {{matchers}} }[{{window}}])) / {{cpu_limit_cores}}) and on ({{service_label}}, instance) python_info{ {{service_label}}!="", {{matchers}} }'
 keys = ["{{service_label}}", "instance"]
 description = "CPU процесса как доля 0..1 от заданного числа ядер."
+description_en = "Process CPU as a 0..1 fraction of the given number of cores."
 
 [[queries]]
 label = "Python runtime: resident memory (bytes) by ({{service_label}}, instance)"
@@ -62,6 +80,7 @@ required = true
 query = 'sum by ({{service_label}}, instance) (process_resident_memory_bytes{ {{service_label}}!="", {{matchers}} }) and on ({{service_label}}, instance) python_info{ {{service_label}}!="", {{matchers}} }'
 keys = ["{{service_label}}", "instance"]
 description = "RSS процесса."
+description_en = "Process RSS."
 
 [[queries]]
 label = "Python runtime: GC collections per second by ({{service_label}}, instance, generation)"
@@ -70,6 +89,7 @@ unit = "per_second"
 query = 'sum by ({{service_label}}, instance, generation) (rate(python_gc_collections_total{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}", "instance", "generation"]
 description = "Сборки мусора по поколениям."
+description_en = "Garbage collections by generation."
 
 [[queries]]
 label = "Python runtime: GC objects collected per second by ({{service_label}}, instance)"
@@ -78,6 +98,7 @@ unit = "per_second"
 query = 'sum by ({{service_label}}, instance) (rate(python_gc_objects_collected_total{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}", "instance"]
 description = "Объекты, собранные GC, в секунду."
+description_en = "Objects collected by GC per second."
 
 [[queries]]
 label = "Python runtime: open file descriptors by ({{service_label}}, instance)"
@@ -86,3 +107,4 @@ unit = "count"
 query = 'sum by ({{service_label}}, instance) (process_open_fds{ {{service_label}}!="", {{matchers}} }) and on ({{service_label}}, instance) python_info{ {{service_label}}!="", {{matchers}} }'
 keys = ["{{service_label}}", "instance"]
 description = "Открытые файловые дескрипторы и сокеты."
+description_en = "Open file descriptors and sockets."

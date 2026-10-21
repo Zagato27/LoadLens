@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Shared pytest setup."""
 
 import os
@@ -48,6 +49,30 @@ def _runtime_config_cache_cleared():
     core = sys.modules.get("loadlens_app.core")
     if core is not None:
         core._clear_runtime_cache()
+
+
+@pytest.fixture(autouse=True)
+def _locale_ru_by_default(monkeypatch):
+    """Every test starts in ru: settings_runtime.json of a working tree may choose another report language.
+
+    The dictionaries are reloaded, no with_locale scope leaks between tests and a missing key raises KeyError
+    (strict mode). en in a test: ``client.set_cookie("loadlens.lang", "en")`` (UI),
+    ``monkeypatch.setitem(CONFIG["appearance"], "language", "en")`` (reports) or ``with with_locale("en"):``.
+    """
+    from AI import i18n
+    from loadlens_app import core
+
+    appearance = core.CONFIG.get("appearance")
+    monkeypatch.setitem(core.CONFIG, "appearance", {**(appearance if isinstance(appearance, dict) else {}), "language": "ru"})
+    monkeypatch.setenv(i18n.STRICT_ENV, "1")
+    i18n.reload_catalogs()
+    token = i18n._LOCALE.set(None)
+    yield
+    try:
+        i18n._LOCALE.reset(token)
+    except ValueError:  # the test body ran in another context
+        i18n._LOCALE.set(None)
+    i18n.reload_catalogs()
 
 
 @pytest.fixture(autouse=True)

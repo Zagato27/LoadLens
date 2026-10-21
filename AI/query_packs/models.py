@@ -1,15 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
 """Shape of a query pack file (``packs/<id>.toml``) and of a bundle (``bundles.toml``)."""
 
 from __future__ import annotations
 
 import re
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from AI.data_sources import BINDING_DOMAINS
+from AI.i18n import DEFAULT, get_locale, normalize_lang, t
 
-from .roles import ROLES, SLA_FIELDS, SLA_VALUE_CHOICES, UNITS
+from .roles import ROLES, SLA_FIELDS, SLA_VALUE_CHOICES, UNITS, LocalizedTitles
 
 PACK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,63}$")
 VAR_NAME_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
@@ -20,14 +22,14 @@ DEFAULT_VALUE_PATTERN = r"^[^\n\r{}]*$"
 
 Category = Literal["infrastructure", "runtime", "http", "database", "messaging", "load_tool"]
 Language = Literal["promql", "influxql", "flux"]
-CATEGORY_TITLES: dict[str, str] = {
-    "load_tool": "Нагрузочный инструмент",
-    "runtime": "Рантайм приложения",
-    "http": "HTTP и gRPC",
-    "database": "Базы данных",
-    "messaging": "Kafka",
-    "infrastructure": "Узлы и Kubernetes",
-}
+
+
+def category_title(category: str) -> str:
+    return t("packs.category." + category)
+
+
+# In catalog order: packs are sorted by category in this order, the settings page groups them the same way.
+CATEGORY_TITLES = LocalizedTitles(("load_tool", "runtime", "http", "database", "messaging", "infrastructure"), category_title)
 LANGUAGE_TITLES: dict[str, str] = {"promql": "PromQL", "influxql": "InfluxQL", "flux": "Flux"}
 
 
@@ -35,14 +37,31 @@ def template_names(text: str) -> set[str]:
     return set(TEMPLATE_RE.findall(text or ""))
 
 
+def localized(obj: Any, name: str, lang: Optional[str] = None) -> str:
+    """Text field ``name`` of a pack object in ``lang`` (default: the current locale).
+
+    Russian is the original; another language reads the twin ``<name>_<lang>`` (``title_en``) and falls
+    back to the original while the twin is empty. Labels and queries have no twins: they are identifiers.
+    """
+    code = normalize_lang(lang) or get_locale()
+    original = getattr(obj, name)
+    if code != DEFAULT:
+        twin = getattr(obj, f"{name}_{code}", "")
+        if isinstance(twin, str) and twin.strip():
+            return twin
+    return original
+
+
 class PackVariable(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     title: str
+    title_en: str = ""
     default: str = ""
     pattern: str = DEFAULT_VALUE_PATTERN
     choices: list[str] = Field(default_factory=list)
     help: str = ""
+    help_en: str = ""
 
     @field_validator("pattern")
     @classmethod
@@ -69,6 +88,7 @@ class PackQuery(BaseModel):
     unit: str
     required: bool = False
     description: str = ""
+    description_en: str = ""
     # Pack version that introduced the query: an update offers queries newer than the installed version.
     since: int = Field(default=1, ge=1)
 
@@ -106,17 +126,22 @@ class QueryPack(BaseModel):
     id: str
     version: int = Field(ge=1)
     title: str
+    title_en: str = ""
     category: Category
     stack: list[str] = Field(default_factory=list)
     domain: str
     language: Language
     description: str
+    description_en: str = ""
     # Metric (Prometheus) or measurement (InfluxDB) names detection looks for; ``*`` matches any part,
     # e.g. Graphite paths in VictoriaMetrics: "gatling.*.allRequests.all.count".
     requires_metrics: list[str] = Field(default_factory=list)
+    # Notes on the stack's metrics for the model, in the report language (prompt_addendum_en for en reports).
     prompt_addendum: str = ""
+    prompt_addendum_en: str = ""
     # Title of the domain in reports when this pack fills it (Go and Python runtimes live in "jvm").
     domain_title: str = Field(default="", max_length=40)
+    domain_title_en: str = Field(default="", max_length=40)
     # Every query returned data on docker/dev-stack (real exporters); see docker/dev-stack/README.md.
     verified: bool = False
     variables: dict[str, PackVariable] = Field(default_factory=dict)
@@ -199,7 +224,9 @@ class Bundle(BaseModel):
 
     id: str
     title: str
+    title_en: str = ""
     description: str
+    description_en: str = ""
     packs: list[str] = Field(min_length=1)
 
     @field_validator("id")
@@ -230,5 +257,7 @@ __all__ = [
     "RUN_TAG_VARIABLE",
     "RunFilter",
     "TEMPLATE_RE",
+    "category_title",
+    "localized",
     "template_names",
 ]

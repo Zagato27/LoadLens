@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Query packs: catalog contract, query syntax, merging into a domain block, SLA references."""
 
 import copy

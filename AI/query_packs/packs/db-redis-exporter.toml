@@ -11,19 +11,30 @@ description = """
 Метрики oliver006/redis_exporter: команды в секунду и их среднее время, клиенты, память и её доля от \
 maxmemory, попадания в keyspace и вытеснения ключей.
 """
+description_en = """
+oliver006/redis_exporter metrics: commands per second and their average time, clients, memory and its share of \
+maxmemory, keyspace hits and key evictions.
+"""
 requires_metrics = ["redis_commands_processed_total", "redis_memory_used_bytes", "redis_connected_clients"]
 prompt_addendum = """
 Метрики Redis: Redis выполняет команды в одном потоке, поэтому рост среднего времени команды сразу \
 увеличивает задержки всех клиентов. Вытеснения при памяти около maxmemory означают, что кэш не вмещает \
 рабочий набор, и hit ratio падает.
 """
+prompt_addendum_en = """
+Redis metrics: Redis runs commands in a single thread, so a growing average command time immediately raises \
+the latency of every client. Evictions with memory near maxmemory mean the cache does not hold the working \
+set, and the hit ratio drops.
+"""
 
 [variables.matchers]
 title = "Дополнительные матчеры"
+title_en = "Extra matchers"
 default = ""
 
 [variables.window]
 title = "Окно rate()"
+title_en = "rate() window"
 default = "2m"
 pattern = '^[1-9][0-9]*[smh]$'
 
@@ -35,6 +46,7 @@ required = true
 query = 'label_replace(sum by (instance) (rate(redis_commands_processed_total{ {{matchers}} }[{{window}}])), "server", "$1", "instance", "(.*)")'
 keys = ["server"]
 description = "Выполненные команды в секунду."
+description_en = "Executed commands per second."
 
 [[queries]]
 label = "DB (Redis): average command time (sec) by server"
@@ -43,6 +55,7 @@ unit = "seconds"
 query = 'label_replace(sum by (instance) (rate(redis_commands_duration_seconds_total{ {{matchers}} }[{{window}}])) / sum by (instance) (rate(redis_commands_total{ {{matchers}} }[{{window}}])), "server", "$1", "instance", "(.*)")'
 keys = ["server"]
 description = "Среднее время выполнения команды, с."
+description_en = "Average command execution time, s."
 
 [[queries]]
 label = "DB (Redis): connected clients by server"
@@ -51,6 +64,7 @@ unit = "count"
 query = 'label_replace(sum by (instance) (redis_connected_clients{ {{matchers}} }), "server", "$1", "instance", "(.*)")'
 keys = ["server"]
 description = "Подключённые клиенты."
+description_en = "Connected clients."
 
 [[queries]]
 label = "DB (Redis): memory used (bytes) by server"
@@ -60,6 +74,7 @@ required = true
 query = 'label_replace(sum by (instance) (redis_memory_used_bytes{ {{matchers}} }), "server", "$1", "instance", "(.*)")'
 keys = ["server"]
 description = "Память Redis."
+description_en = "Redis memory."
 
 [[queries]]
 label = "DB (Redis): memory used (% of maxmemory) by server"
@@ -68,6 +83,7 @@ unit = "percent"
 query = 'label_replace(100 * max by (instance) (redis_memory_used_bytes{ {{matchers}} }) / max by (instance) (redis_memory_max_bytes{ {{matchers}} } > 0), "server", "$1", "instance", "(.*)")'
 keys = ["server"]
 description = "Доля памяти от maxmemory, % (без лимита ряда нет)."
+description_en = "Memory share of maxmemory, % (no series without a limit)."
 
 [[queries]]
 label = "DB (Redis): keyspace hit ratio (%) by server"
@@ -76,6 +92,7 @@ unit = "percent"
 query = 'label_replace(100 * sum by (instance) (rate(redis_keyspace_hits_total{ {{matchers}} }[{{window}}])) / (sum by (instance) (rate(redis_keyspace_hits_total{ {{matchers}} }[{{window}}])) + sum by (instance) (rate(redis_keyspace_misses_total{ {{matchers}} }[{{window}}]))), "server", "$1", "instance", "(.*)")'
 keys = ["server"]
 description = "Попадания при чтении ключей, %."
+description_en = "Hits on key reads, %."
 
 [[queries]]
 label = "DB (Redis): evicted keys per second by server"
@@ -84,6 +101,7 @@ unit = "per_second"
 query = 'label_replace(sum by (instance) (rate(redis_evicted_keys_total{ {{matchers}} }[{{window}}])), "server", "$1", "instance", "(.*)")'
 keys = ["server"]
 description = "Ключи, вытесненные из-за maxmemory."
+description_en = "Keys evicted because of maxmemory."
 
 [[queries]]
 label = "DB (Redis): slowest commands average time (sec) by command (top 10)"
@@ -92,3 +110,4 @@ unit = "seconds"
 query = 'topk(10, sum by (cmd) (rate(redis_commands_duration_seconds_total{ {{matchers}} }[{{window}}])) / sum by (cmd) (rate(redis_commands_total{ {{matchers}} }[{{window}}])))'
 keys = ["cmd"]
 description = "Команды с наибольшим средним временем."
+description_en = "Commands with the highest average time."

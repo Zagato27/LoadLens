@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Chart hover in static/js/charts.js: the HTML tooltip next to the cursor, the crosshair plugin and
 live legend values, run under Node (tests/js_harness.py)."""
 

@@ -1,8 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
 // Recovery page: check and save the storage connection while the database is down.
 // Standalone on purpose: common.js expects the regular layout and a working database.
 (function () {
   'use strict';
 
+  // static/js/i18n.js is loaded first and holds the recovery.* messages of the page.
+  const LL = window.LoadLens;
   const POLL_MS = 15000;
   const FIELDS = ['host', 'port', 'dbname', 'schema', 'user', 'password', 'sslmode', 'connect_timeout_sec'];
   const form = document.getElementById('storageForm');
@@ -56,14 +59,14 @@
     if (storage.available) {
       box.classList.remove('banner-fail');
       box.classList.add('banner-ok');
-      setText('storageTitle', 'Хранилище доступно');
-      setText('storageHint', 'Подключение работает.');
+      setText('storageTitle', LL.t('recovery.state.available'));
+      setText('storageHint', LL.t('recovery.state.available_hint'));
       details.hidden = true;
       return;
     }
     box.classList.remove('banner-ok');
     box.classList.add('banner-fail');
-    setText('storageTitle', storage.available === false ? storage.title : 'Подключение ещё не проверялось');
+    setText('storageTitle', storage.available === false ? storage.title : LL.t('recovery.state.not_checked'));
     setText('storageHint', storage.hint || '');
     setText('storageAddress', storage.address || '');
     setText('storageMessage', storage.message || '');
@@ -108,12 +111,12 @@
     try {
       reply = await api('GET', '/recovery/status');
     } catch (e) {
-      showResult('fail', 'Сервер приложения не отвечает. Повторим через несколько секунд.');
+      showResult('fail', LL.t('recovery.error.no_server_retry'));
       return;
     }
     if (!reply) return;
     if (!reply.ok) {
-      showResult('fail', reply.data.error || 'Не удалось получить состояние хранилища.');
+      showResult('fail', reply.data.error || LL.t('recovery.error.status_failed'));
       return;
     }
     const data = reply.data;
@@ -128,18 +131,21 @@
   async function check() {
     if (busy) return;
     setBusy(true);
-    showResult('pending', 'Проверяем соединение…');
+    showResult('pending', LL.t('recovery.check.pending'));
     try {
       const reply = await api('POST', '/recovery/storage/check', formValues());
       if (!reply) return;
       if (!reply.ok) {
-        showResult('fail', reply.data.error || 'Проверка не выполнена.');
+        showResult('fail', reply.data.error || LL.t('recovery.check.failed'));
       } else {
-        const elapsed = reply.data.elapsed_ms ? ' (' + reply.data.elapsed_ms + ' мс)' : '';
-        showResult(reply.data.ok ? 'ok' : 'fail', (reply.data.message || '') + elapsed);
+        const message = reply.data.message || '';
+        const text = reply.data.elapsed_ms
+          ? LL.t('recovery.check.result_elapsed', { message, ms: reply.data.elapsed_ms })
+          : message;
+        showResult(reply.data.ok ? 'ok' : 'fail', text);
       }
     } catch (e) {
-      showResult('fail', 'Сервер приложения не отвечает.');
+      showResult('fail', LL.t('recovery.error.no_server'));
     } finally {
       setBusy(false);
     }
@@ -149,28 +155,30 @@
     event.preventDefault();
     if (busy) return;
     setBusy(true);
-    showResult('pending', 'Сохраняем и подключаемся…');
+    showResult('pending', LL.t('recovery.save.pending'));
     let redirecting = false;
     try {
       const reply = await api('POST', '/recovery/storage/save', formValues());
       if (!reply) return;
       if (!reply.ok) {
-        showResult('fail', reply.data.error || 'Настройки не сохранены.');
+        showResult('fail', reply.data.error || LL.t('recovery.save.failed'));
         return;
       }
       const data = reply.data;
       if (data.available && data.redirect) {
         redirecting = true;
         showState({ available: true });
-        showResult('ok', 'Сохранено. Хранилище доступно, переходим дальше…');
+        showResult('ok', LL.t('recovery.save.done'));
         setTimeout(() => { window.location.href = data.redirect; }, 1200);
         return;
       }
       showState(data.storage);
-      const title = data.storage && data.storage.title ? data.storage.title.toLowerCase() : 'нет ответа';
-      showResult('warn', 'Сохранено, но хранилище всё ещё недоступно: ' + title + '.');
+      const reason = data.storage && data.storage.title
+        ? data.storage.title.toLowerCase()
+        : LL.t('recovery.save.no_answer');
+      showResult('warn', LL.t('recovery.save.still_down', { reason }));
     } catch (e) {
-      showResult('fail', 'Сервер приложения не отвечает.');
+      showResult('fail', LL.t('recovery.error.no_server'));
     } finally {
       if (!redirecting) setBusy(false);
     }

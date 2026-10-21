@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import logging
 import json
 import math
@@ -12,7 +13,10 @@ from psycopg2 import sql
 from psycopg2.extras import Json, execute_batch
 
 from AI import storage_state
+from AI.i18n import get_locale, t
 from AI.scoring import parse_llm_analysis_strict
+from AI.verdicts import CODES as VERDICT_CODES, PASS, code_sql, exact_code, normalize_report, optional_code, to_code
+from AI.verdicts import label as verdict_label
 
 
 logger = logging.getLogger(__name__)
@@ -595,38 +599,14 @@ def _ensure_engineer_reports_table(conn, storage_cfg: Dict[str, object]) -> None
     _ENSURED_TABLES.add(key)
 
 
-def _standardize_verdict(raw: Optional[str]) -> Optional[str]:
-    """Приводит произвольный текст вердикта к одному из стандартных вариантов.
-    Варианты: "Успешно", "Есть риски", "Провал", "Недостаточно данных".
-    """
-    if not isinstance(raw, str) or not raw.strip():
-        return "Недостаточно данных"
-    s = raw.strip().lower()
-    try:
-        # Недостаточно данных
-        if any(k in s for k in ["insufficient", "нет данных", "недостаточно", "no data", "unknown", "n/a"]):
-            return "Недостаточно данных"
-        # Провал/критично
-        if any(k in s for k in ["fail", "failed", "провал", "критич", "неудовлет", "red", "severe"]):
-            return "Провал"
-        # Есть риски/деградация/предупреждения
-        if any(k in s for k in ["warn", "risk", "risks", "рис", "замеч", "degrad", "degraded", "под вопрос", "нестабиль"]):
-            return "Есть риски"
-        # Успешно/норма/стабильно
-        if any(k in s for k in ["ok", "усп", "норма", "стаб", "успешно", "green", "success", "passed"]):
-            return "Успешно"
-    except Exception:
-        pass
-    # По умолчанию не рискуем — считаем как недостаточно данных
-    return "Недостаточно данных"
-
-
 # ---- manual verdicts ------------------------------------------------------------------------------------
 
 # Verdicts an engineer set by hand, with a reason. Every change is a row: the newest row of a run wins, and a row
 # without a verdict returns the automatic one. llm_reports is never changed, so the analysis stays as it was built.
+# New rows hold verdict codes (AI.verdicts); rows written before the codes hold Russian labels and are read by
+# mapping them to codes. The API accepts a code or a legacy label.
 REPORT_VERDICTS_TABLE = "report_verdicts"
-MANUAL_VERDICTS = ("Успешно", "Есть риски", "Провал", "Недостаточно данных")
+MANUAL_VERDICTS = VERDICT_CODES
 MANUAL_VERDICT_REASON_MAX = 1000
 MANUAL_VERDICT_HISTORY_LIMIT = 50
 _MANUAL_VERDICTS_READY: set[str] = set()
@@ -727,18 +707,26 @@ def manual_verdicts_cte(schema: str, ready: bool) -> str:
 
 
 def effective_verdict_sql(alias: str = "", fallback: bool = True) -> str:
-    """The verdict a run shows: the manual one, else the SLA verdict, else the stored verdict of the final row."""
+    """Code of the verdict a run shows: the manual one, else the SLA verdict, else the stored verdict of the
+    final row; old labels map to codes and a run without any verdict is ``no_data``.
+
+    ``fallback`` is kept for callers; NULL maps to ``no_data`` either way (``AI.verdicts.code_sql``).
+    """
     prefix = f"{alias}." if alias else ""
-    tail = ", 'Недостаточно данных'" if fallback else ""
-    return f"COALESCE(mv.verdict, {prefix}sla_verdict, {prefix}verdict{tail})"
+    return code_sql(f"COALESCE(mv.verdict, {prefix}sla_verdict, {prefix}verdict)")
+
+
+def _code_or_blank(value: Any) -> str:
+    """Code of a stored verdict, '' for an empty one (previous/auto verdict of an old history row)."""
+    return optional_code(value) or ""
 
 
 def _manual_entry(row: Sequence[Any]) -> Dict[str, Any]:
     changed_at, verdict, previous, automatic, reason, author = row[:6]
     return {
-        "verdict": verdict,
-        "previous_verdict": str(previous or ""),
-        "auto_verdict": str(automatic or ""),
+        "verdict": optional_code(verdict),
+        "previous_verdict": _code_or_blank(previous),
+        "auto_verdict": _code_or_blank(automatic),
         "reason": str(reason or ""),
         "author": str(author or ""),
         "changed_at": changed_at.isoformat() if isinstance(changed_at, datetime) else (str(changed_at) if changed_at else None),
@@ -748,12 +736,12 @@ def _manual_entry(row: Sequence[Any]) -> Dict[str, Any]:
 def load_verdict_state(conn, schema: str, llm_table: str, run_name: str) -> Optional[Dict[str, Any]]:
     """Automatic and current verdict of a run with its manual changes (newest first), or None without a final report.
 
-    ``manual`` is the change in force: None when the run shows its automatic verdict.
+    ``manual`` is the change in force: None when the run shows its automatic verdict. Every verdict is a code.
     """
     with conn.cursor() as cur:
         cur.execute(
             sql.SQL(
-                "SELECT COALESCE(sla_verdict, verdict, 'Недостаточно данных'), COALESCE(run_id, '') FROM {} "
+                "SELECT " + code_sql("COALESCE(sla_verdict, verdict)") + ", COALESCE(run_id, '') FROM {} "
                 "WHERE run_name = %s AND domain = 'final' ORDER BY created_at DESC LIMIT 1"
             ).format(sql.Identifier(str(schema or "public"), llm_table)),
             (run_name,),
@@ -761,7 +749,7 @@ def load_verdict_state(conn, schema: str, llm_table: str, run_name: str) -> Opti
         final = cur.fetchone()
     if not final:
         return None
-    automatic = str(final[0] or "Недостаточно данных")
+    automatic = to_code(final[0])
     history: List[Dict[str, Any]] = []
     if manual_verdicts_ready(conn, schema):
         with conn.cursor() as cur:
@@ -795,24 +783,28 @@ def save_manual_verdict(
 ) -> Dict[str, Any]:
     """Sets the verdict of a run by hand (``verdict`` None returns the automatic one) and returns the new state.
 
-    Raises LookupError without a final report and ValueError for a verdict outside ``MANUAL_VERDICTS``, a missing
+    ``verdict`` is a code of ``MANUAL_VERDICTS`` or a legacy label; the row stores codes in all three verdict
+    columns. Raises LookupError without a final report and ValueError for an unknown verdict, a missing
     or too long reason, or a change that changes nothing. Runs in the caller's transaction and does not commit.
     """
     reason = str(reason or "").strip()
-    if verdict is not None and verdict not in MANUAL_VERDICTS:
-        raise ValueError("Вердикт должен быть одним из: " + ", ".join(MANUAL_VERDICTS))
+    if verdict is not None:
+        code = exact_code(verdict)
+        if code is None:
+            raise ValueError(t("server.verdict.unknown", allowed=", ".join(MANUAL_VERDICTS)))
+        verdict = code
     if verdict is not None and not reason:
-        raise ValueError("Укажите причину изменения вердикта")
+        raise ValueError(t("server.verdict.reason_required"))
     if len(reason) > MANUAL_VERDICT_REASON_MAX:
-        raise ValueError(f"Причина — не длиннее {MANUAL_VERDICT_REASON_MAX} символов")
+        raise ValueError(t("server.verdict.reason_too_long", max=MANUAL_VERDICT_REASON_MAX))
     ensure_report_verdicts_table(conn, schema)
     state = load_verdict_state(conn, schema, llm_table, run_name)
     if state is None:
-        raise LookupError(f"Итоговый отчёт '{run_name}' не найден")
+        raise LookupError(t("server.report.final_not_found", run_name=run_name))
     if verdict is None and state["manual"] is None:
-        raise ValueError("Вердикт и так определён автоматически")
+        raise ValueError(t("server.verdict.already_automatic"))
     if verdict is not None and verdict == state["verdict"]:
-        raise ValueError(f"Вердикт уже «{verdict}»")
+        raise ValueError(t("server.verdict.unchanged", verdict=verdict_label(verdict, get_locale())))
     with conn.cursor() as cur:
         cur.execute(
             sql.SQL(
@@ -878,17 +870,18 @@ def find_previous_run(
 ) -> Optional[BaselineRun]:
     """Latest earlier run of the same service (and project area, when set) to use as a baseline.
 
-    ``mode=previous_success`` requires the effective verdict «Успешно»; ``mode=previous``
-    takes any earlier run. ``services`` limits the lookup to the current project area.
+    ``mode=previous_success`` requires the effective verdict ``pass`` (a code or its old label);
+    ``mode=previous`` takes any earlier run. ``services`` limits the lookup to the current project area.
     Rows saved before ``project_area`` existed stay eligible when their area is empty.
     ``test_type`` (normalized step/soak/spike/stress) limits the lookup to runs of the same
     type, matching any stored alias; step runs also accept rows saved without a type.
+    ``BaselineRun.verdict`` is a code.
     """
     if mode not in BASELINE_MODES:
         raise ValueError(f"Unknown baseline mode '{mode}', expected one of {BASELINE_MODES}")
     manual_cte = sql.SQL(manual_verdicts_cte(schema, manual_verdicts_ready(conn, schema)))
     success_filter = (
-        sql.SQL(f"AND {effective_verdict_sql('r', fallback=False)} = 'Успешно'")
+        sql.SQL(f"AND {effective_verdict_sql('r', fallback=False)} = '{PASS}'")
         if mode == BASELINE_MODE_PREVIOUS_SUCCESS
         else sql.SQL("")
     )
@@ -962,7 +955,7 @@ def find_previous_run(
     return BaselineRun(
         run_name=str(row[0]),
         service=str(row[1] or ""),
-        verdict=str(row[2] or "Недостаточно данных"),
+        verdict=to_code(row[2]),
         created_at=row[3],
     )
 
@@ -1105,7 +1098,7 @@ def list_final_reports(conn, schema: str, llm_table: str, services: Sequence[str
             test_type=str(row[3] or ""),
             project_area=str(row[4] or ""),
             created_at=row[5] if isinstance(row[5], datetime) else None,
-            verdict=str(row[6] or "Недостаточно данных"),
+            verdict=to_code(row[6]),
             lt_series_labels=_series_labels(row[7]),
         )
         for row in rows
@@ -1406,7 +1399,8 @@ def save_llm_results(
         scores_all = (results.get("scores", {}) or {})
         contexts_all = results.get("contexts") if isinstance(results.get("contexts"), dict) else {}
         system_context_snapshot = results.get("system_context") if isinstance(results.get("system_context"), dict) else None
-        run_sla_verdict = results.get("sla_verdict") if results.get("sla_checks") else None
+        # Verdicts are stored as codes (AI.verdicts); parsed analyses get codes in ``verdict`` as well.
+        run_sla_verdict = optional_code(results.get("sla_verdict")) if results.get("sla_checks") else None
         load_step_table = results.get("load_step_table") if isinstance(results.get("load_step_table"), dict) else None
         run_sla_details = None
         if results.get("sla_checks") or load_step_table:
@@ -1418,6 +1412,9 @@ def save_llm_results(
                 run_sla_details["load_step_table"] = load_step_table
             if isinstance(results.get("sla_window"), dict):
                 run_sla_details["stable_window"] = results.get("sla_window")
+            if results.get("report_language"):
+                # Readers of the run row (forecast, SLA block) find the report language without the final JSON.
+                run_sla_details["report_language"] = results.get("report_language")
         domains = [
             ("jvm", results.get("jvm"), results.get("jvm_parsed"), scores_all.get("jvm")),
             ("database", results.get("database"), results.get("database_parsed"), scores_all.get("database")),
@@ -1444,11 +1441,9 @@ def save_llm_results(
                     pass
 
             verdict_std = None
-            try:
-                if isinstance(parsed_val, dict):
-                    verdict_std = _standardize_verdict(parsed_val.get("verdict"))
-            except Exception:
-                pass
+            if isinstance(parsed_val, dict):
+                parsed_val = normalize_report(parsed_val)
+                verdict_std = to_code(parsed_val.get("verdict"))
 
             text_str = raw_text
             raw_json_like = bool((raw_text or "").strip().startswith("{") or (raw_text or "").strip().startswith("```json"))
@@ -1593,19 +1588,19 @@ def upsert_llm_feedback(conn, storage_cfg: Dict[str, object], payload: Dict[str,
     finding_id = str(payload.get("finding_id") or "").strip()
     comment = str(payload.get("comment") or "").strip()
     if not run_name:
-        raise ValueError("run_name обязателен")
+        raise ValueError(t("api.required.run_name"))
     if not domain:
-        raise ValueError("domain обязателен")
+        raise ValueError(t("server.feedback.domain_required"))
     if target not in FEEDBACK_TARGETS:
-        raise ValueError("target должен быть verdict или finding")
+        raise ValueError(t("server.feedback.bad_target"))
     if vote not in FEEDBACK_VOTES:
-        raise ValueError("vote должен быть agree или disagree")
+        raise ValueError(t("server.feedback.bad_vote"))
     if target == "verdict":
         finding_id = ""
     elif not finding_id:
-        raise ValueError("finding_id обязателен для находки")
+        raise ValueError(t("server.feedback.finding_required"))
     if len(comment) > 2000:
-        raise ValueError("comment слишком длинный")
+        raise ValueError(t("server.feedback.comment_too_long"))
     query = sql.SQL(
         """
         INSERT INTO {}.{} (run_name, domain, target, finding_id, vote, comment, created_at)

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Universal Scalability Law forecast from one load-test run.
 
 Samples are the stored metric buckets up to the first RPS drop. Concurrency is
@@ -17,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 from AI.context_pack import format_iso, to_utc
+from AI.i18n import t
 from AI.sla_evaluator import _bin_width
 
 LOAD_MODELS = ("open", "closed")
@@ -213,7 +215,7 @@ def _named(values: pd.Series, name: str) -> pd.Series:
 
 def _require_closed_vus(frame: pd.DataFrame) -> pd.DataFrame:
     if "vus" not in frame.columns:
-        raise CapacityModelError("Для закрытой модели нужен ряд числа VU", "missing_series")
+        raise CapacityModelError(t("server.capacity.missing_vus"), "missing_series")
     kept = frame.dropna(subset=["vus"])
     kept = kept.copy()
     kept["n"] = kept["vus"]
@@ -342,27 +344,19 @@ def _check_coverage(fit: pd.DataFrame, frame: pd.DataFrame) -> None:
         edges = int((frame["role"] == ROLE_EDGE).sum())
         stalls = int((frame["role"] == ROLE_STALL).sum())
         raise CapacityModelError(
-            f"Для модели осталось {count} точек до первого падения RPS "
-            f"(исключены разгон и спад нагрузки — {edges}, провалы — {stalls}), нужно не меньше {MIN_SAMPLES}",
+            t("server.capacity.too_few_points", count=count, edges=edges, stalls=stalls, min=MIN_SAMPLES),
             "too_few_points",
         )
     low, high = float(fit["n"].min()), float(fit["n"].max())
     if not (high > 0) or low > LOW_LOAD_SHARE * high:
-        raise CapacityModelError(
-            "Нет точек на низкой нагрузке: модели нужен разгон с малой нагрузки",
-            "no_low_load",
-        )
+        raise CapacityModelError(t("server.capacity.no_low_load"), "no_low_load")
 
 
 def _think_time(fit: pd.DataFrame) -> float:
     raw = float((fit["vus"] / fit["x"] - fit["r_s"]).median())
     response = float(fit["r_s"].median())
     if raw < -THINK_TIME_NOISE_SHARE * response:
-        raise CapacityModelError(
-            "Число VU меньше параллелизма по закону Литтла (RPS × время отклика): "
-            "похоже, сценарий шлёт запросы параллельно. Выберите открытую модель нагрузки.",
-            "negative_think_time",
-        )
+        raise CapacityModelError(t("server.capacity.negative_think_time"), "negative_think_time")
     return max(raw, 0.0)
 
 
@@ -413,7 +407,7 @@ def fit_usl(concurrency: np.ndarray, throughput: np.ndarray) -> UslFit:
     """Coarse σ×κ grid, then two zooms around the best cell; κ grid is scaled by n_max**2."""
     n_max = float(np.max(concurrency))
     if n_max <= 0:
-        raise CapacityModelError("Параллелизм на всех точках нулевой", "no_low_load")
+        raise CapacityModelError(t("server.capacity.zero_concurrency"), "no_low_load")
     span = (KAPPA_LOG_RANGE[1] - KAPPA_LOG_RANGE[0]) / (KAPPA_GRID_POINTS - 1)
     kappas = np.concatenate(([0.0], np.logspace(*KAPPA_LOG_RANGE, KAPPA_GRID_POINTS) / n_max ** 2))
     best = _grid_best(concurrency, throughput, SIGMA_GRID, kappas)

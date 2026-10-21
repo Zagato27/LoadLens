@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """System context per service: stored under the service, used by reports, shown on the project card."""
 
 import json

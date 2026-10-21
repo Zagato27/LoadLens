@@ -1,4 +1,5 @@
-"""run_index (docs/perf-plan.md, agent 5): the table of runs that /runs and the dashboard counter read instead of
+# SPDX-License-Identifier: Apache-2.0
+"""run_index (plans/perf-plan.md, agent 5): the table of runs that /runs and the dashboard counter read instead of
 aggregating the metrics hypertable; its upsert on save, the start-up backfill, the metrics run_name index
 migration and the delete/rename paths. Offline: every connection is a fake that records the statements."""
 
@@ -377,6 +378,7 @@ def test_runs_is_one_statement_over_run_index_with_the_total_in_a_column(client,
                             "report_created_at", "test_type", "test_type_key", "run_id", "project_area", "max_rps",
                             "manual_verdict"}
     assert body[0]["max_rps"] == 120.0 and body[1]["max_rps"] is None and body[0]["run_id"] == "id-b-run"
+    assert body[0]["verdict"] == "pass" and body[0]["llm_verdict"] == "pass" and body[0]["sla_verdict"] is None
     assert ensured == [conn]
 
     (text, params, _), = conn.log
@@ -408,7 +410,7 @@ def test_runs_past_the_last_page_still_reports_the_total(client, monkeypatch, en
     page, count = conn.log
     assert "COUNT(*) OVER ()" in page[0]
     assert count[0].endswith("SELECT COUNT(*) FROM joined WHERE verdict = %s")
-    assert count[1] == ("Провал",)
+    assert count[1] == ("fail",)  # the old label of a shared link selects its code
 
 
 def test_runs_restricts_run_index_and_reports_to_the_area(client, monkeypatch, ensured):

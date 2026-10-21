@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Locust scenario of the dev stack: requests to the FastAPI app, a few of them failing."""
 
 import random

@@ -1,0 +1,23 @@
+{
+  "about.build": "сборка {build}",
+  "about.build_unknown": "сборка не указана: запуск из исходников",
+  "about.discussions_link": "GitHub Discussions",
+  "about.docs": "Документация",
+  "about.docs_link": "README на GitHub",
+  "about.feedback": "Обратная связь",
+  "about.feedback_text": "Сообщить об ошибке: {issues}. Вопросы и предложения: {discussions}.",
+  "about.footer_title": "О программе: версия, лицензия, сторонние компоненты",
+  "about.help": "Версия установки, лицензия и сторонние компоненты. Когда сообщаете об ошибке, укажите версию и сборку.",
+  "about.issues_link": "GitHub Issues",
+  "about.license": "Лицензия",
+  "about.license_name": "Apache License 2.0",
+  "about.license_text": "{license}. Авторские права и уведомления — в файле {notice}.",
+  "about.source": "Исходный код",
+  "about.third_party.failed": "Не удалось загрузить список: {error}",
+  "about.third_party.heading": "Сторонние компоненты",
+  "about.third_party.help": "Библиотеки и шрифты, которые входят в LoadLens, и их лицензии — файл THIRD_PARTY_NOTICES.md этой установки.",
+  "about.third_party.loading": "Загрузка…",
+  "about.third_party.missing": "Файл THIRD_PARTY_NOTICES.md не найден в этой установке.",
+  "about.title": "О программе",
+  "about.version": "Версия"
+}

@@ -1,8 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compares ``run_index`` with a GROUP BY over the metrics table and prints the differences.
 
 The run list (/runs) and the dashboard run counter read ``run_index``; ``AI.db_store.save_domain_labeled``
 keeps it current and ``loadlens_app.migrations.backfill_run_index`` fills it for older data. This script
-checks that the two agree (docs/perf-plan.md, agent 5):
+checks that the two agree (plans/perf-plan.md, agent 5):
 
     C:/Python312/python.exe tools/check_run_index.py --sandbox 5
     C:/Python312/python.exe tools/check_run_index.py --dsn "host=127.0.0.1 port=55432 dbname=ll_s5 user=ltar password=..."

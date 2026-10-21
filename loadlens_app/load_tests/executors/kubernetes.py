@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Kubernetes generators: one Job per instance through the Kubernetes API.
 
 The Job runs the tool image with the rendered command, ``backoffLimit: 0`` and ``activeDeadlineSeconds``
@@ -20,6 +21,7 @@ from datetime import datetime
 from typing import Any, Mapping, Optional
 
 from ..generators import Generator
+from ..messages import msg, t
 from ..tools import ToolTemplate
 from .base import LOG_TAIL_BYTES, CheckReport, GeneratorError, LaunchPlan, LaunchResult, Probe
 from .http import ApiClient, ApiError
@@ -61,14 +63,14 @@ def _k8s_time(value: Any) -> Optional[float]:
 
 def kubernetes_api(generator: Generator) -> ApiClient:
     if generator.kubernetes is None:
-        raise GeneratorError(f"Генератор «{generator.title}» не работает через Kubernetes")
+        raise GeneratorError("lt.k8s.not_k8s", generator=generator.title)
     cfg = generator.kubernetes
     if cfg.in_cluster:
         try:
             with open(os.path.join(IN_CLUSTER_DIR, "token"), encoding="utf-8") as handle:
                 token = handle.read().strip()
         except OSError as exc:
-            raise GeneratorError("LoadLens работает не внутри кластера: нет токена сервисного аккаунта") from exc
+            raise GeneratorError("lt.k8s.not_in_cluster") from exc
         return ApiClient(IN_CLUSTER_URL, name="Kubernetes API", token=token, ca_file=os.path.join(IN_CLUSTER_DIR, "ca.crt"))
     return ApiClient(cfg.api_url, name="Kubernetes API", verify=cfg.verify, ca_cert=cfg.ca_cert, token=cfg.token)
 
@@ -161,7 +163,7 @@ class KubernetesExecutor:
         created, the Job is deleted and the launch fails.
         """
         if not plan.image:
-            raise GeneratorError(f"Для инструмента {plan.tool_id} не задан образ контейнера")
+            raise GeneratorError("lt.executor.no_image", tool=plan.tool_id)
         secret_name = f"{plan.ref}-env" if plan.command.env else ""
         try:
             job = self.api.json("POST", f"{self.batch}/jobs", json=self.job_manifest(plan, secret_name), ok=(201,))
@@ -218,7 +220,7 @@ class KubernetesExecutor:
         if "terminated" in state:
             term = state["terminated"]
             code = term.get("exitCode")
-            message = "Контейнер убит по нехватке памяти (OOM)" if term.get("reason") == "OOMKilled" else ""
+            message = msg("lt.executor.oom") if term.get("reason") == "OOMKilled" else ""
             return Probe(state="exited", started_at=_k8s_time(term.get("startedAt")), finished_at=_k8s_time(term.get("finishedAt")),
                          exit_code=int(code) if isinstance(code, int) else None, message=message)
         failed = conditions.get("Failed")
@@ -238,8 +240,8 @@ class KubernetesExecutor:
             return Probe(state="starting", message=f"{reason}: {waiting.get('message') or ''}".strip(": "), stuck=reason in STUCK_REASONS)
         phase = str(((pod or {}).get("status") or {}).get("phase") or "")
         if pod is None:
-            return Probe(state="starting", message="Под ещё не создан")
-        return Probe(state="starting", message=f"Под в состоянии {phase or 'Pending'}")
+            return Probe(state="starting", message=msg("lt.k8s.pod_not_created"))
+        return Probe(state="starting", message=msg("lt.k8s.pod_phase", phase=phase or "Pending"))
 
     def signal(self, ref: str, signal: str, grace_seconds: int = 30) -> None:
         """Deletes the pod with the grace period: Kubernetes sends SIGTERM, then SIGKILL."""
@@ -276,7 +278,7 @@ class KubernetesExecutor:
         return None
 
     def control(self, ref: str, argv: tuple[str, ...], cwd: str = "") -> tuple[int, str]:
-        return 1, "Команды управления инструментом в Kubernetes не поддерживаются"
+        return 1, t("lt.k8s.no_control")
 
     def list_scripts(self, scripts_dir: str, tool: ToolTemplate) -> Optional[list[str]]:
         """Keys of the scripts ConfigMap that match the tool's masks; nothing for PVCs and images."""
@@ -302,7 +304,7 @@ def _allowed(api: ApiClient, namespace: str, verb: str, group: str, resource: st
 
 
 def check_kubernetes_generator(generator: Generator, tools: Mapping[str, ToolTemplate]) -> CheckReport:
-    """API version, the namespace, the permissions LoadLens needs and the scripts ConfigMap."""
+    """API version, the namespace, the permissions LoadLens needs and the scripts ConfigMap (texts in the request language)."""
     assert generator.kubernetes is not None
     cfg = generator.kubernetes
     try:
@@ -315,7 +317,7 @@ def check_kubernetes_generator(generator: Generator, tools: Mapping[str, ToolTem
         api.json("GET", f"/api/v1/namespaces/{cfg.namespace}")
     except ApiError as exc:
         if exc.status == 404:
-            problem = f"Нет пространства имён {cfg.namespace}"
+            problem = t("lt.k8s.no_namespace", namespace=cfg.namespace)
             return CheckReport(ok=False, message=problem, details={"system": system}, connected=True, problems=[problem])
         # A Role inside the namespace cannot read the namespace object itself: that is fine.
         if exc.status != 403:
@@ -328,8 +330,8 @@ def check_kubernetes_generator(generator: Generator, tools: Mapping[str, ToolTem
             if not _allowed(api, cfg.namespace, verb, group, resource):
                 missing.append(f"{verb} {resource}")
     except GeneratorError as exc:
-        missing.append(f"проверка прав не выполнилась: {exc}")
-    problems = [f"нет прав: {', '.join(missing)}"] if missing else []
+        missing.append(t("lt.k8s.rbac_failed", error=exc))
+    problems = [t("lt.k8s.no_rights", missing=", ".join(missing))] if missing else []
     if cfg.scripts_config_map:
         try:
             api.json("GET", f"/api/v1/namespaces/{cfg.namespace}/configmaps/{cfg.scripts_config_map}")
@@ -337,10 +339,13 @@ def check_kubernetes_generator(generator: Generator, tools: Mapping[str, ToolTem
             problems.append(f"ConfigMap {cfg.scripts_config_map}: {exc}")
     images = {tool_id: generator.image_for(tool) for tool_id, tool in tools.items()
               if generator.offers(tool_id, tool) and generator.image_for(tool)}
-    parts = [f"Kubernetes {version.get('gitVersion', '?')}, пространство имён {cfg.namespace}"]
-    parts.append(f"образы: {', '.join(f'{tools[t].title} — {image}' for t, image in images.items())}" if images else "образов инструментов нет")
+    parts = [t("lt.k8s.summary", version=version.get("gitVersion", "?"), namespace=cfg.namespace)]
+    if images:
+        parts.append(t("lt.k8s.images", images=", ".join(f"{tools[tool_id].display_title} — {image}" for tool_id, image in images.items())))
+    else:
+        parts.append(t("lt.check.no_images"))
     if problems:
-        parts.append(f"проблемы: {'; '.join(problems)}")
+        parts.append(t("lt.check.problems", problems="; ".join(problems)))
     return CheckReport(ok=not missing, message="; ".join(parts),
                        details={"system": system, "tools_found": list(images), "images": images,
                                 "missing_permissions": missing},

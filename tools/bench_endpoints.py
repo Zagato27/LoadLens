@@ -1,4 +1,5 @@
-"""Latency bench of the LoadLens endpoints that the pages poll (see docs/perf-baseline.md).
+# SPDX-License-Identifier: Apache-2.0
+"""Latency bench of the LoadLens endpoints that the pages poll (see plans/perf-baseline.md).
 
 One command against sandbox N (``run_app.py`` of make_sandbox.py listens on 5070+N, data from
 tools/seed_bench_data.py):
@@ -31,8 +32,8 @@ the full plans) and the cost of opening a connection:
 In Git Bash a path argument such as ``--endpoint /runs`` is rewritten to a Windows path; prefix the
 command with ``MSYS_NO_PATHCONV=1`` or use ``--only``.
 
-``--during-job`` measures the endpoints while a report is being built (stage 3 of docs/perf-plan.md, section
-11.1; the full sandbox recipe with the stubs of tools/stubs is in docs/perf-baseline.md, "Этап 3"):
+``--during-job`` measures the endpoints while a report is being built (stage 3 of plans/perf-plan.md, section
+11.1; the full sandbox recipe with the stubs of tools/stubs is in plans/perf-baseline.md, "Этап 3"):
 
     C:/Python312/python.exe -X utf8 tools/bench_endpoints.py --sandbox 1 --setup-stubs       # once per sandbox reset
     C:/Python312/python.exe -X utf8 tools/bench_endpoints.py --sandbox 1 --during-job --label thread --json thread.json
@@ -97,6 +98,16 @@ ENDPOINTS = (
 )
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _SERVER_TIMING_APP = re.compile(r"(?:^|,)\s*app\s*;(?:[^,]*;)?\s*dur=([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
+
+
+def _verdict_label(value: Any) -> str:
+    """Russian label of a verdict code from ``/llm_reports`` (AI/verdicts.py has no dependencies)."""
+    root = str(Path(__file__).resolve().parents[1])
+    if root not in sys.path:
+        sys.path.append(root)
+    from AI.verdicts import label
+
+    return label(value)
 
 
 # ---- statistics and formatting (pure) ----------------------------------------------------------------
@@ -525,7 +536,7 @@ def setup_stubs(args: argparse.Namespace) -> int:
 
 # ---- --during-job: latency while a report is being built ------------------------------------------------------
 
-# The pages a user keeps open while a report runs; the polls of 11.7 of docs/perf-plan.md are among them.
+# The pages a user keeps open while a report runs; the polls of 11.7 of plans/perf-plan.md are among them.
 DURING_JOB_ENDPOINTS = (
     "/",
     "/dashboard_data",
@@ -773,7 +784,7 @@ def parse_during_tables(text: str) -> list[list[dict]]:
     """Every idle / during-job table of a markdown text (as ``render_during_table`` prints them), in order.
 
     Rows come back with the keys of ``during_rows`` (ratios dropped, they are derived); a table copied into
-    docs/perf-baseline.md can be the ``--compare`` baseline of a later run.
+    plans/perf-baseline.md can be the ``--compare`` baseline of a later run.
     """
     titles = {title: key for title, key in (*DURING_COLUMNS, *COMPARE_COLUMNS)}
     tables: list[list[dict]] = []
@@ -938,7 +949,7 @@ def render_job_summary(job: dict) -> str:
         lines.append(
             f"- Отчёт `{report.get('run_name')}`: `{report.get('page_url')}` → {report.get('page_status')}, "
             f"`/llm_reports` → {report.get('llm_status')}, доменов {report.get('domains', 0)}"
-            + (f", итог «{verdict}»" if verdict else "")
+            + (f", итог «{_verdict_label(verdict)}»" if verdict else "")
             + (f"; удалён (`DELETE /runs` → {report['deleted']})" if report.get("deleted") is not None else "; оставлен (`--keep-report`)")
         )
     if job.get("error"):

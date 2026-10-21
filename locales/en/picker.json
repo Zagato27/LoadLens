@@ -1,0 +1,9 @@
+{
+  "picker.empty": "No services configured",
+  "picker.label": "Service",
+  "picker.load_failed": "The services failed to load",
+  "picker.loading": "Loading the services…",
+  "picker.not_found": "No such service",
+  "picker.placeholder": "Start typing a service name",
+  "picker.recent": "recent"
+}

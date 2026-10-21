@@ -1,0 +1,23 @@
+TASK: analysis of application ERROR logs from OpenSearch during a load test.
+
+DOMAIN DATA:
+- intervals[] — errors aggregated by time interval; the aggregation interval matches the resample_interval of the metrics.
+- The service name is in the hostname field; the error type is built from the normalized message (identifiers, UUIDs and long
+  numbers are replaced with placeholders); samples are examples of the original messages, only to illustrate the type.
+- The truncated/max_documents flag means the data is truncated and the picture may be incomplete.
+
+ANALYSIS FOCUS:
+1. Were there significant error bursts and in which intervals; match the intervals with load_steps (by time) to state
+   at which load step the errors appeared or grew.
+2. Which hostnames contributed most and which normalized error types dominate — group by type, not by
+   unique messages.
+3. The nature of the errors from the type text: timeouts, dependency failure, data errors, isolated noise. Do not invent
+   causes that are not in message/samples.
+4. If there are no errors or too few of them for a conclusion — one finding with severity=low about the absence of
+   significant errors, or verdict="no_data" with an explanation.
+
+EVIDENCE REQUIREMENTS:
+- In every finding: hostname (component), the time interval, the number of errors (count) and the normalized error type.
+- Do not draw conclusions from a single sample_message without the aggregated count.
+- If the data is truncated by max_documents — lower confidence and state the risk of an incomplete picture in evidence_summary.
+- metric in evidence_items — "application_logs.error_count", threshold — null if the SLA sets no error threshold.

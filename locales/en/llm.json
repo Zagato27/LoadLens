@@ -1,0 +1,6 @@
+{
+  "llm.error.empty_answer": "{provider}: the model returned empty text",
+  "llm.error.gigachat_no_structured_output": "GigaChat client does not support with_structured_output: update langchain-gigachat or disable llm.gigachat.structured_output",
+  "llm.error.output_truncated": "{provider}: the answer was cut off at {max_tokens} tokens",
+  "llm.error.output_truncated_with_count": "{provider}: the answer was cut off at {max_tokens} tokens, {output_tokens} produced"
+}

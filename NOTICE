@@ -1,0 +1,9 @@
+LoadLens
+Copyright 2025-2026 Pavel Bekker
+
+This product includes software developed by third parties; see THIRD_PARTY_NOTICES.md.
+
+This product bundles DOMPurify (static/vendor/purify.min.js), Copyright (c) Cure53 and
+other contributors, released under the Apache License 2.0 and Mozilla Public License 2.0
+(https://github.com/cure53/DOMPurify). LoadLens redistributes it under the Apache License,
+Version 2.0.

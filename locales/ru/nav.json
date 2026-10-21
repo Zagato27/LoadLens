@@ -1,0 +1,23 @@
+{
+  "nav.account": "Профиль и API-токены",
+  "nav.area_prefix": "область",
+  "nav.brand_home": "LoadLens — на дэшборд",
+  "nav.item.archive": "Архив",
+  "nav.item.compare": "Сравнение тестов",
+  "nav.item.dashboard": "Дэшборд",
+  "nav.item.forecasting": "Прогнозирование",
+  "nav.item.launch": "Запуск теста",
+  "nav.item.new": "Новый отчёт",
+  "nav.item.settings": "Настройки",
+  "nav.lang.label": "Язык",
+  "nav.logout": "Выйти",
+  "nav.main": "Основная навигация",
+  "nav.project_area": "Проектная область",
+  "nav.search": "Поиск",
+  "nav.skip_link": "К содержимому",
+  "nav.theme.label": "Тема",
+  "nav.theme.title": "Тема интерфейса",
+  "nav.user_menu": "Меню пользователя",
+  "nav.view.label": "Вид",
+  "nav.view.title": "Тема и язык интерфейса"
+}

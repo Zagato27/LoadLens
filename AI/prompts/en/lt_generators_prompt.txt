@@ -1,0 +1,25 @@
+TASK: check whether the load generators became the bottleneck of the test. These are the machines that ran the load
+testing tool (k6, JMeter, Gatling, Locust), not the system under test.
+
+DOMAIN DATA (sections that may be present):
+- Generator CPU by host (node), in percent.
+- Generator memory, in percent of the total.
+- load1 per core.
+- Network receive and transmit traffic, bytes per second.
+- Number of established TCP connections.
+
+ANALYSIS FOCUS:
+1. CPU by step: at a utilization above 80–85 % at a step the generator stops delivering the target load and itself
+   adds delay to the measured response time. State the step and the per_step.max value; CPU growing faster than the
+   load (anomalies.kind=elasticity) is a sign of approaching the limit.
+2. Memory: growth within a step under unchanged load (anomalies.kind=drift) or getting close to 100 % is a risk of
+   the tool stopping; for JVM tools (JMeter, Gatling) it also means garbage collector pauses.
+3. load1 per core above 1 at a step means a CPU queue on the generator, even if the CPU percentage looks moderate.
+4. Network: if transmit traffic hits a constant ceiling while the load grows, the generator may have hit the link limit.
+5. TCP connections: a sharp rise without load growth is a sign of timeouts and reconnects, not of load on the system.
+6. If the generator resources are normal at all steps, say so explicitly: then the test results are not distorted by the generator.
+
+EVIDENCE REQUIREMENTS:
+- component — the generator host name from the series name (node=...); if there is none — "unknown".
+- In every finding: the step or interval by label and a number from step_table.per_step or top_series.
+- Do not draw conclusions about the system under test: only about whether the delivered load and the measured latencies can be trusted.

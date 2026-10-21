@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Pages and API for running load tests from LoadLens (see loadlens_app/load_tests)."""
 
 from __future__ import annotations
@@ -8,6 +9,7 @@ from loadlens_app import response_cache
 from loadlens_app.auth import Role, current_auth
 from loadlens_app.core import _active_project_area, _find_area_for_service, _resolve_services_filter
 from loadlens_app.errors import internal_error
+from loadlens_app.i18n import current_locale, translate
 from loadlens_app.load_tests import service
 from loadlens_app.load_tests.executors import TOKEN_HEADER
 from loadlens_app.load_tests.live import cached_load_windows, live_snapshot
@@ -27,13 +29,18 @@ def _owner() -> str:
 
 
 def _error(exc: service.LaunchError):
-    return jsonify({"status": "error", "error": str(exc), "message": str(exc), "code": exc.code}), exc.status
+    # str() renders the message in the language of this request.
+    body = {"status": "error", "error": str(exc), "message": str(exc), "code": exc.code}
+    # The launch page opens the card of the instance by this number (from 1), not by the message text.
+    if getattr(exc, "instance", None) is not None:
+        body["instance"] = exc.instance
+    return jsonify(body), exc.status
 
 
 def _run_or_404(run_id: str):
     run = get_store().get(run_id)
     if run is None:
-        return None, (jsonify({"error": "Прогон не найден", "code": "not_found"}), 404)
+        return None, (jsonify({"error": translate("lt.launch.run_not_found"), "code": "not_found"}), 404)
     return run, None
 
 
@@ -116,7 +123,7 @@ def list_runs():
     try:
         limit = int(request.args.get("limit", "50") or 50)
     except ValueError:
-        return jsonify({"error": "limit должен быть целым числом"}), 400
+        return jsonify({"error": translate("lt.api.limit_int")}), 400
     limit = max(1, min(limit, RUNS_MAX_LIMIT))
     statuses = RUN_ACTIVE if request.args.get("active") == "1" else RUN_STATUSES
     services = _resolve_services_filter(_active_project_area())
@@ -128,7 +135,7 @@ def list_runs():
 
 
 def _active_cache_key() -> tuple | None:
-    """Area services, the query and the user: ``can_stop`` depends on who asks."""
+    """Area services, the query, the user (``can_stop`` depends on who asks) and the language of the texts."""
     try:
         limit = int(request.args.get("limit", "5") or 0)
     except ValueError:
@@ -139,6 +146,7 @@ def _active_cache_key() -> tuple | None:
         request.args.get("live") == "1",
         _owner(),
         current_auth().role >= Role.ADMIN,
+        current_locale(),
     )
 
 
@@ -152,7 +160,7 @@ def active():
     try:
         limit = int(request.args.get("limit", "5") or 0)
     except ValueError:
-        return jsonify({"error": "limit должен быть целым числом"}), 400
+        return jsonify({"error": translate("lt.api.limit_int")}), 400
     auth = current_auth()
     data = service.active_runs(
         _resolve_services_filter(_active_project_area()) or None,
@@ -182,7 +190,7 @@ def stop(run_id: str):
     body = request.get_json(silent=True) or {}
     index = body.get("index") if isinstance(body, dict) else None
     if index is not None and (isinstance(index, bool) or not isinstance(index, int)):
-        return jsonify({"error": "index — номер инстанса (целое число)"}), 400
+        return jsonify({"error": translate("lt.api.index_int")}), 400
     try:
         run = service.request_stop(run_id, index)
     except service.LaunchError as exc:
@@ -202,7 +210,7 @@ def logs(run_id: str):
         index = int(request.args.get("index", "0") or 0)
         max_bytes = int(request.args.get("bytes", "65536") or 65536)
     except ValueError:
-        return jsonify({"error": "index и bytes — целые числа"}), 400
+        return jsonify({"error": translate("lt.api.index_bytes_int")}), 400
     max_bytes = max(1024, min(max_bytes, LOG_MAX_BYTES))
     try:
         text = service.instance_logs(run, index, max_bytes)
@@ -296,10 +304,10 @@ def live(run_id: str):
         since_ms = request.args.get("since", "").strip()
         since = int(since_ms) / 1000 if since_ms else None
     except ValueError:
-        return jsonify({"error": "window — минуты, since — время в мс", "code": "bad_request"}), 400
+        return jsonify({"error": translate("lt.api.window_since"), "code": "bad_request"}), 400
     mode = request.args.get("mode", "").strip()
     if mode not in ("", "filtered", "plain"):
-        return jsonify({"error": "mode — filtered или plain", "code": "bad_request"}), 400
+        return jsonify({"error": translate("lt.api.mode"), "code": "bad_request"}), 400
     return jsonify(live_snapshot(run, service.load_catalog().tools, window_min=window, since=since, mode=mode)), 200
 
 
@@ -312,15 +320,15 @@ def lt_windows():
     """
     service_id = request.args.get("service", "").strip()
     if not service_id:
-        return jsonify({"error": "Укажите сервис", "code": "bad_request"}), 400
+        return jsonify({"error": translate("lt.api.service_required"), "code": "bad_request"}), 400
     raw_hours = request.args.get("hours", "").strip()
     try:
         hours = float(raw_hours) if raw_hours else None
     except ValueError:
-        return jsonify({"error": "hours — число часов", "code": "bad_request"}), 400
+        return jsonify({"error": translate("lt.api.hours_number"), "code": "bad_request"}), 400
     area = _find_area_for_service(service_id)
     if not area:
-        return jsonify({"error": f"Сервис «{service_id}» не найден в настройках", "code": "not_found"}), 404
+        return jsonify({"error": translate("lt.api.service_not_found", service=service_id), "code": "not_found"}), 404
     if hours is None:
         return jsonify(cached_load_windows(area, service_id)), 200
     return jsonify(cached_load_windows(area, service_id, hours)), 200

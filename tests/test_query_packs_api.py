@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Query pack endpoints: catalog, preview, check and apply for global, area and service scopes."""
 
 import copy

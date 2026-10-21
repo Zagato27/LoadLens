@@ -2,6 +2,7 @@ schema_version = 1
 id = "kafka-broker-jmx"
 version = 1
 title = "Kafka брокеры: JMX exporter / Strimzi"
+title_en = "Kafka brokers: JMX exporter / Strimzi"
 category = "messaging"
 stack = ["kafka", "strimzi", "jmx"]
 domain = "kafka"
@@ -11,6 +12,11 @@ description = """
 kafka_server_*, kafka_controller_*, kafka_network_*. Имена зависят от правил экспортера — проверьте \
 запросы кнопкой «Проверить» и снимите те, что вернули пусто.
 """
+description_en = """
+Broker metrics from the JMX exporter with the Strimzi rules (kafka-metrics.yaml) or the kafka-2_0_0.yml \
+example: kafka_server_*, kafka_controller_*, kafka_network_*. The names depend on the exporter rules: check \
+the queries with the "Check" button and deselect the ones that return nothing.
+"""
 requires_metrics = ["kafka_server_brokertopicmetrics_messagesin_total", "kafka_server_replicamanager_underreplicatedpartitions"]
 prompt_addendum = """
 Метрики брокеров Kafka: messagesin/bytesin/bytesout — поток данных, underreplicatedpartitions и \
@@ -18,20 +24,31 @@ offlinepartitionscount — здоровье реплик, requestmetrics totalti
 брокере, networkprocessoravgidlepercent — простой сетевых потоков (ниже 30 % — брокер упирается в сеть \
 или CPU).
 """
+prompt_addendum_en = """
+Kafka broker metrics: messagesin/bytesin/bytesout are the data flow; underreplicatedpartitions and \
+offlinepartitionscount show replica health; requestmetrics totaltimems Produce is the write handling time on \
+the broker; networkprocessoravgidlepercent is the idle time of the network threads (below 30 % the broker is \
+limited by the network or CPU).
+"""
 
 [variables.broker_label]
 title = "Лейбл брокера"
+title_en = "Broker label"
 default = "instance"
 pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
 help = "В Strimzi удобнее pod."
+help_en = "In Strimzi pod is more convenient."
 
 [variables.matchers]
 title = "Дополнительные матчеры"
+title_en = "Extra matchers"
 default = ""
 help = 'Например strimzi_io_cluster="my-cluster".'
+help_en = 'For example strimzi_io_cluster="my-cluster".'
 
 [variables.window]
 title = "Окно rate()"
+title_en = "rate() window"
 default = "2m"
 pattern = '^[1-9][0-9]*[smh]$'
 
@@ -43,6 +60,7 @@ required = true
 query = 'sum by (topic) (rate(kafka_server_brokertopicmetrics_messagesin_total{topic!="", topic!~"__.+", {{matchers}} }[{{window}}]))'
 keys = ["topic"]
 description = "Входящие сообщения по топикам."
+description_en = "Incoming messages by topic."
 
 [[queries]]
 label = "Kafka brokers: bytes in per second by broker"
@@ -51,6 +69,7 @@ unit = "bytes_per_second"
 query = 'label_replace(sum by ({{broker_label}}) (rate(kafka_server_brokertopicmetrics_bytesin_total{topic="", {{matchers}} }[{{window}}])), "broker", "$1", "{{broker_label}}", "(.*)")'
 keys = ["broker"]
 description = "Входящий трафик брокера (сводная метрика без топика)."
+description_en = "Incoming broker traffic (aggregate metric without a topic)."
 
 [[queries]]
 label = "Kafka brokers: bytes out per second by broker"
@@ -59,6 +78,7 @@ unit = "bytes_per_second"
 query = 'label_replace(sum by ({{broker_label}}) (rate(kafka_server_brokertopicmetrics_bytesout_total{topic="", {{matchers}} }[{{window}}])), "broker", "$1", "{{broker_label}}", "(.*)")'
 keys = ["broker"]
 description = "Исходящий трафик брокера."
+description_en = "Outgoing broker traffic."
 
 [[queries]]
 label = "Kafka brokers: under-replicated partitions by broker"
@@ -68,6 +88,7 @@ required = true
 query = 'label_replace(sum by ({{broker_label}}) (kafka_server_replicamanager_underreplicatedpartitions{ {{matchers}} }), "broker", "$1", "{{broker_label}}", "(.*)")'
 keys = ["broker"]
 description = "Недореплицированные партиции на брокере."
+description_en = "Under-replicated partitions on the broker."
 
 [[queries]]
 label = "Kafka brokers: offline partitions"
@@ -76,6 +97,7 @@ unit = "count"
 query = 'label_replace(sum(kafka_controller_kafkacontroller_offlinepartitionscount{ {{matchers}} }), "series", "cluster", "", "")'
 keys = ["series"]
 description = "Партиции без лидера во всём кластере."
+description_en = "Partitions without a leader in the whole cluster."
 
 [[queries]]
 label = "Kafka brokers: Produce p99 total time (ms) by broker"
@@ -84,6 +106,7 @@ unit = "ms"
 query = 'label_replace(max by ({{broker_label}}) (kafka_network_requestmetrics_totaltimems{request="Produce", quantile="0.99", {{matchers}} }), "broker", "$1", "{{broker_label}}", "(.*)")'
 keys = ["broker"]
 description = "p99 полного времени обработки Produce на брокере, мс."
+description_en = "p99 of the full Produce handling time on the broker, ms."
 
 [[queries]]
 label = "Kafka brokers: network processor idle (%) by broker"
@@ -92,6 +115,7 @@ unit = "percent"
 query = 'label_replace(100 * max by ({{broker_label}}) (kafka_network_socketserver_networkprocessoravgidlepercent{ {{matchers}} }), "broker", "$1", "{{broker_label}}", "(.*)")'
 keys = ["broker"]
 description = "Простой сетевых потоков брокера, %."
+description_en = "Idle time of the broker network threads, %."
 
 [[queries]]
 label = "Kafka brokers: connections by broker"
@@ -100,3 +124,4 @@ unit = "count"
 query = 'label_replace(sum by ({{broker_label}}) (kafka_server_socketservermetrics_connection_count{ {{matchers}} }), "broker", "$1", "{{broker_label}}", "(.*)")'
 keys = ["broker"]
 description = "Открытые клиентские соединения."
+description_en = "Open client connections."

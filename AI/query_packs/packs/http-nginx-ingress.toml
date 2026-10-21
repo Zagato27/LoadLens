@@ -10,26 +10,40 @@ description = """
 Метрики контроллера ingress-nginx: запросы и время ответа по ingress, а также время ответа апстрима \
 (сервиса за ingress). Разница между ними — время самого ingress и сети.
 """
+description_en = """
+ingress-nginx controller metrics: requests and response time by ingress plus the upstream response time (the \
+service behind the ingress). The difference between them is the time of the ingress itself and the network.
+"""
 requires_metrics = ["nginx_ingress_controller_requests", "nginx_ingress_controller_request_duration_seconds_bucket"]
 prompt_addendum = """
 Метрики ingress-nginx: request_duration — полное время запроса на ingress, response_duration — время \
 ответа апстрима. Если растёт первое при стабильном втором, узкое место в ingress (CPU, соединения), а не \
 в сервисе.
 """
+prompt_addendum_en = """
+ingress-nginx metrics: request_duration is the full request time on the ingress, response_duration is the \
+upstream response time. If the first grows while the second stays flat, the bottleneck is the ingress (CPU, \
+connections), not the service.
+"""
 
 [variables.service_label]
 title = "Лейбл с именем сервиса"
+title_en = "Label with the service name"
 default = "ingress"
 pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
 help = "ingress, service или host."
+help_en = "ingress, service or host."
 
 [variables.matchers]
 title = "Дополнительные матчеры"
+title_en = "Extra matchers"
 default = ""
 help = 'Например namespace="shop".'
+help_en = 'For example namespace="shop".'
 
 [variables.window]
 title = "Окно rate()"
+title_en = "rate() window"
 default = "1m"
 pattern = '^[1-9][0-9]*[smh]$'
 
@@ -41,6 +55,7 @@ required = true
 query = 'sum by ({{service_label}}) (rate(nginx_ingress_controller_requests{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}"]
 description = "Запросы в секунду через ingress."
+description_en = "Requests per second through the ingress."
 
 [[queries]]
 label = "HTTP (ingress-nginx): average request time (sec) by ingress"
@@ -49,6 +64,7 @@ unit = "seconds"
 query = 'sum by ({{service_label}}) (rate(nginx_ingress_controller_request_duration_seconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}])) / sum by ({{service_label}}) (rate(nginx_ingress_controller_request_duration_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}"]
 description = "Среднее полное время запроса на ingress, с."
+description_en = "Average full request time on the ingress, s."
 
 [[queries]]
 label = "HTTP (ingress-nginx): p95 request time (sec) by ingress"
@@ -57,6 +73,7 @@ unit = "seconds"
 query = 'histogram_quantile(0.95, sum by (le, {{service_label}}) (rate(nginx_ingress_controller_request_duration_seconds_bucket{ {{service_label}}!="", {{matchers}} }[{{window}}])))'
 keys = ["{{service_label}}"]
 description = "p95 полного времени запроса, с."
+description_en = "p95 of the full request time, s."
 
 [[queries]]
 label = "HTTP (ingress-nginx): 5xx error rate (%) by ingress"
@@ -65,6 +82,7 @@ unit = "percent"
 query = '100 * (sum by ({{service_label}}) (rate(nginx_ingress_controller_requests{status=~"5..", {{service_label}}!="", {{matchers}} }[{{window}}])) or 0 * sum by ({{service_label}}) (rate(nginx_ingress_controller_requests{ {{service_label}}!="", {{matchers}} }[{{window}}]))) / sum by ({{service_label}}) (rate(nginx_ingress_controller_requests{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}"]
 description = "Доля ответов 5xx, %."
+description_en = "Share of 5xx responses, %."
 
 [[queries]]
 label = "HTTP (ingress-nginx): RPS by ingress & path (top 20)"
@@ -73,6 +91,7 @@ unit = "per_second"
 query = 'topk(20, sum by ({{service_label}}, path) (rate(nginx_ingress_controller_requests{ {{service_label}}!="", {{matchers}} }[{{window}}])))'
 keys = ["{{service_label}}", "path"]
 description = "Самые нагруженные пути."
+description_en = "Busiest paths."
 
 [[queries]]
 label = "HTTP (ingress-nginx): upstream average response time (sec) by ingress"
@@ -81,3 +100,4 @@ unit = "seconds"
 query = 'sum by ({{service_label}}) (rate(nginx_ingress_controller_response_duration_seconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}])) / sum by ({{service_label}}) (rate(nginx_ingress_controller_response_duration_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}"]
 description = "Среднее время ответа апстрима (сервиса за ingress), с."
+description_en = "Average upstream response time (the service behind the ingress), s."

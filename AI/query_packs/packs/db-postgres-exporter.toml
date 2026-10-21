@@ -12,6 +12,11 @@ description = """
 попадания в буферный кэш, строки, дедлоки, блокировки, временные файлы, самая долгая транзакция и \
 отставание реплики. Шаблонные базы исключены.
 """
+description_en = """
+prometheus-community/postgres_exporter metrics: transactions, connections and their share of max_connections, \
+buffer cache hits, rows, deadlocks, locks, temporary files, the longest transaction and replica lag. Template \
+databases are excluded.
+"""
 requires_metrics = ["pg_stat_database_xact_commit", "pg_stat_activity_count", "pg_settings_max_connections"]
 prompt_addendum = """
 Метрики PostgreSQL: TPS — commit+rollback, соединения по state (idle in transaction долго держит \
@@ -19,19 +24,29 @@ prompt_addendum = """
 с диска), temp_bytes — сортировки и хэши, не уместившиеся в work_mem, pg_stat_activity_max_tx_duration — \
 самая долгая транзакция, pg_locks_count — блокировки по режимам.
 """
+prompt_addendum_en = """
+PostgreSQL metrics: TPS is commit+rollback; connections by state (idle in transaction holds locks for a long \
+time) and their share of max_connections; cache hit is hits in shared_buffers (below 99 % on OLTP means disk \
+reads); temp_bytes are sorts and hashes that did not fit into work_mem; pg_stat_activity_max_tx_duration is \
+the longest transaction; pg_locks_count is locks by mode.
+"""
 
 [variables.datname]
 title = "База данных (регулярное выражение)"
+title_en = "Database (regular expression)"
 default = ".+"
 pattern = '^[^"\n\r{}]*$'
 
 [variables.matchers]
 title = "Дополнительные матчеры"
+title_en = "Extra matchers"
 default = ""
 help = 'Например instance=~"pg-main.*".'
+help_en = 'For example instance=~"pg-main.*".'
 
 [variables.window]
 title = "Окно rate()"
+title_en = "rate() window"
 default = "2m"
 pattern = '^[1-9][0-9]*[smh]$'
 
@@ -43,6 +58,7 @@ required = true
 query = 'sum by (datname) (rate(pg_stat_database_xact_commit{datname=~"{{datname}}", datname!~"template.*", {{matchers}} }[{{window}}]) + rate(pg_stat_database_xact_rollback{datname=~"{{datname}}", datname!~"template.*", {{matchers}} }[{{window}}]))'
 keys = ["datname"]
 description = "Транзакции (commit + rollback) в секунду."
+description_en = "Transactions (commit + rollback) per second."
 
 [[queries]]
 label = "DB (PostgreSQL): connections by database & state"
@@ -51,6 +67,7 @@ unit = "count"
 query = 'sum by (datname, state) (pg_stat_activity_count{datname=~"{{datname}}", datname!~"template.*", {{matchers}} })'
 keys = ["datname", "state"]
 description = "Соединения по состоянию (active, idle, idle in transaction)."
+description_en = "Connections by state (active, idle, idle in transaction)."
 
 [[queries]]
 label = "DB (PostgreSQL): connections used (% of max_connections) by server"
@@ -60,6 +77,7 @@ required = true
 query = 'label_replace(100 * sum by (instance) (pg_stat_activity_count{ {{matchers}} }) / max by (instance) (pg_settings_max_connections{ {{matchers}} }), "server", "$1", "instance", "(.*)")'
 keys = ["server"]
 description = "Доля занятых соединений сервера, %."
+description_en = "Share of used server connections, %."
 
 [[queries]]
 label = "DB (PostgreSQL): cache hit ratio (%) by database"
@@ -68,6 +86,7 @@ unit = "percent"
 query = '100 * sum by (datname) (rate(pg_stat_database_blks_hit{datname=~"{{datname}}", datname!~"template.*", {{matchers}} }[{{window}}])) / (sum by (datname) (rate(pg_stat_database_blks_hit{datname=~"{{datname}}", datname!~"template.*", {{matchers}} }[{{window}}])) + sum by (datname) (rate(pg_stat_database_blks_read{datname=~"{{datname}}", datname!~"template.*", {{matchers}} }[{{window}}])))'
 keys = ["datname"]
 description = "Попадания в shared_buffers, %."
+description_en = "Hits in shared_buffers, %."
 
 [[queries]]
 label = "DB (PostgreSQL): rows read per second by database"
@@ -76,6 +95,7 @@ unit = "per_second"
 query = 'sum by (datname) (rate(pg_stat_database_tup_fetched{datname=~"{{datname}}", datname!~"template.*", {{matchers}} }[{{window}}]))'
 keys = ["datname"]
 description = "Строки, прочитанные запросами."
+description_en = "Rows read by queries."
 
 [[queries]]
 label = "DB (PostgreSQL): rows written per second by database"
@@ -84,6 +104,7 @@ unit = "per_second"
 query = 'sum by (datname) (rate(pg_stat_database_tup_inserted{datname=~"{{datname}}", datname!~"template.*", {{matchers}} }[{{window}}]) + rate(pg_stat_database_tup_updated{datname=~"{{datname}}", datname!~"template.*", {{matchers}} }[{{window}}]) + rate(pg_stat_database_tup_deleted{datname=~"{{datname}}", datname!~"template.*", {{matchers}} }[{{window}}]))'
 keys = ["datname"]
 description = "Вставленные, изменённые и удалённые строки."
+description_en = "Inserted, updated and deleted rows."
 
 [[queries]]
 label = "DB (PostgreSQL): deadlocks per second by database"
@@ -92,6 +113,7 @@ unit = "per_second"
 query = 'sum by (datname) (rate(pg_stat_database_deadlocks{datname=~"{{datname}}", datname!~"template.*", {{matchers}} }[5m]))'
 keys = ["datname"]
 description = "Дедлоки."
+description_en = "Deadlocks."
 
 [[queries]]
 label = "DB (PostgreSQL): locks by mode"
@@ -100,6 +122,7 @@ unit = "count"
 query = 'sum by (mode) (pg_locks_count{datname=~"{{datname}}", datname!~"template.*", {{matchers}} })'
 keys = ["mode"]
 description = "Удерживаемые блокировки по режимам."
+description_en = "Held locks by mode."
 
 [[queries]]
 label = "DB (PostgreSQL): temp files written (bytes/s) by database"
@@ -108,6 +131,7 @@ unit = "bytes_per_second"
 query = 'sum by (datname) (rate(pg_stat_database_temp_bytes{datname=~"{{datname}}", datname!~"template.*", {{matchers}} }[{{window}}]))'
 keys = ["datname"]
 description = "Запись временных файлов: запросам не хватает work_mem."
+description_en = "Temporary file writes: queries lack work_mem."
 
 [[queries]]
 label = "DB (PostgreSQL): longest transaction (s) by database"
@@ -116,6 +140,7 @@ unit = "seconds"
 query = 'max by (datname) (pg_stat_activity_max_tx_duration{datname=~"{{datname}}", datname!~"template.*", {{matchers}} })'
 keys = ["datname"]
 description = "Самая долгая открытая транзакция, с."
+description_en = "Longest open transaction, s."
 
 [[queries]]
 label = "DB (PostgreSQL): replication lag (s) by server"
@@ -124,3 +149,4 @@ unit = "seconds"
 query = 'label_replace(max by (instance) (pg_replication_lag_seconds{ {{matchers}} }), "server", "$1", "instance", "(.*)")'
 keys = ["server"]
 description = "Отставание реплики, с (метрика есть только на репликах)."
+description_en = "Replica lag, s (the metric exists on replicas only)."

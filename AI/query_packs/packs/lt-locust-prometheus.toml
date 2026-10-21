@@ -12,22 +12,35 @@ description = """
 по запросам (строка name="Aggregated" — сводка), p95 текущего окна и пользователи. Среднее время ответа \
 Locust считает с начала теста, поэтому по ступеням оно запаздывает. Задержки в миллисекундах.
 """
+description_en = """
+Metrics of ContainerSolutions/locust_exporter, which polls the Locust web UI: current RPS and errors by \
+request (the name="Aggregated" row is the summary), p95 of the current window and users. Locust computes the \
+average response time from the start of the test, so it lags behind the steps. Latencies are in milliseconds.
+"""
 requires_metrics = ["locust_requests_current_rps", "locust_users"]
 prompt_addendum = """
 Метрики Locust: current_rps и current_fail_per_sec — текущие значения, avg_response_time — среднее с начала \
 теста (накопительное, в мс), current_response_time_percentile_95 — p95 последних запросов, users — активные \
 пользователи (закрытая модель нагрузки).
 """
+prompt_addendum_en = """
+Locust metrics: current_rps and current_fail_per_sec are current values, avg_response_time is the average \
+since the start of the test (cumulative, in ms), current_response_time_percentile_95 is p95 of the latest \
+requests, users are active users (closed load model).
+"""
 
 [variables.matchers]
 title = "Дополнительные матчеры"
+title_en = "Extra matchers"
 default = ""
 
 [variables.load_model]
 title = "Модель нагрузки сценария"
+title_en = "Load model of the scenario"
 default = "closed"
 choices = ["open", "closed"]
 help = "Пользователи Locust — закрытая модель; constant_throughput / constant_pacing ближе к открытой."
+help_en = "Locust users are a closed model; constant_throughput / constant_pacing are closer to an open one."
 
 [sla]
 max_performance_query = "@lt.rps_total"
@@ -46,6 +59,7 @@ required = true
 query = 'label_replace(sum(locust_requests_current_rps{name="Aggregated", {{matchers}} }), "series", "all", "", "")'
 keys = ["series"]
 description = "Общий RPS теста."
+description_en = "Total test RPS."
 
 [[queries]]
 label = "LT (Locust): RPS by name"
@@ -54,6 +68,7 @@ unit = "per_second"
 query = 'topk(20, sum by (name) (locust_requests_current_rps{name!="Aggregated", {{matchers}} }))'
 keys = ["name"]
 description = "RPS по имени запроса."
+description_en = "RPS by request name."
 
 [[queries]]
 label = "LT (Locust): response time p95(ms) current"
@@ -62,6 +77,7 @@ unit = "ms"
 query = 'label_replace(max(locust_requests_current_response_time_percentile_95{ {{matchers}} }), "series", "all", "", "")'
 keys = ["series"]
 description = "p95 времени ответа последних запросов, мс."
+description_en = "p95 of the response time of the latest requests, ms."
 
 [[queries]]
 label = "LT (Locust): average response time(ms) since start"
@@ -71,6 +87,7 @@ required = true
 query = 'label_replace(max(locust_requests_avg_response_time{name="Aggregated", {{matchers}} }), "series", "all", "", "")'
 keys = ["series"]
 description = "Среднее время ответа с начала теста, мс (накопительное)."
+description_en = "Average response time since the start of the test, ms (cumulative)."
 
 [[queries]]
 label = "LT (Locust): error rate (%)"
@@ -79,6 +96,7 @@ unit = "percent"
 query = 'label_replace(100 * sum(locust_requests_current_fail_per_sec{name="Aggregated", {{matchers}} }) / sum(locust_requests_current_rps{name="Aggregated", {{matchers}} }), "series", "all", "", "")'
 keys = ["series"]
 description = "Доля ошибок в текущем окне, %."
+description_en = "Share of errors in the current window, %."
 
 [[queries]]
 label = "LT (Locust): failures per second by name"
@@ -87,6 +105,7 @@ unit = "per_second"
 query = 'topk(20, sum by (name) (locust_requests_current_fail_per_sec{name!="Aggregated", {{matchers}} }))'
 keys = ["name"]
 description = "Ошибки в секунду по запросам."
+description_en = "Errors per second by request."
 
 [[queries]]
 label = "LT (Locust): users"
@@ -95,3 +114,4 @@ unit = "count"
 query = 'label_replace(sum(locust_users{ {{matchers}} }), "series", "all", "", "")'
 keys = ["series"]
 description = "Активные пользователи Locust."
+description_en = "Active Locust users."

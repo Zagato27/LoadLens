@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Operations on one domain block of ``queries``: applying a pack, role lookups, SLA references.
 
 A block keeps its rows in parallel arrays (``labels`` plus a query and series-key array per language).
@@ -13,8 +14,10 @@ import copy
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Literal, Mapping, Optional
 
+from AI.i18n import t
+
 from .catalog import Catalog, load_catalog
-from .models import TEMPLATE_RE, QueryPack
+from .models import TEMPLATE_RE, QueryPack, localized
 from .render import PackRenderError, RenderedPack, RenderedQuery, render_pack, resolve_variables
 from .roles import LIVE_ONLY_ROLES, ROLES, SLA_FIELDS, UNIT_TITLES
 
@@ -114,6 +117,7 @@ def series_annotations(block: Optional[Mapping[str, Any]], catalog: Optional[Cat
     """{label: {"meaning", "unit", "description"}} for the analysis context of the domain.
 
     Text only: the numeric catalog the findings are verified against reads series statistics, not these.
+    Written in the current locale: the pipeline runs inside ``with_locale(report_language)``.
     """
     if not isinstance(block, Mapping):
         return {}
@@ -130,22 +134,23 @@ def series_annotations(block: Optional[Mapping[str, Any]], catalog: Optional[Cat
         if unit:
             item["unit"] = UNIT_TITLES.get(unit, unit)
         if query is not None and query.description:
-            item["description"] = query.description
+            item["description"] = query.text()
         if item:
             out[label] = item
     return out
 
 
 def prompt_addenda(block: Optional[Mapping[str, Any]], catalog: Optional[Catalog] = None) -> list[tuple[str, str]]:
-    """(pack title, text) of installed packs that describe their metrics for the model."""
+    """(pack title, text) of installed packs that describe their metrics for the model, in the current locale."""
     if not isinstance(block, Mapping):
         return []
     labels = set(block_labels(block))
     out = []
     for rendered in _rendered_installed(block, catalog or load_catalog()):
-        text = rendered.pack.prompt_addendum.strip()
+        pack = rendered.pack
+        text = localized(pack, "prompt_addendum").strip()
         if text and any(query.label in labels for query in rendered.queries):
-            out.append((rendered.pack.title, text))
+            out.append((localized(pack, "title"), text))
     return out
 
 
@@ -289,14 +294,14 @@ def add_summed_rps(block: Optional[Mapping[str, Any]]) -> tuple[dict[str, Any], 
     can then follow the whole load instead of one tool.
     """
     if not isinstance(block, Mapping):
-        raise DerivedRowError("В домене нет запросов")
+        raise DerivedRowError(t("packs.error.domain_empty"))
     if filled_languages(block) != ["promql"]:
-        raise DerivedRowError("Суммарный RPS собирается только из запросов PromQL")
+        raise DerivedRowError(t("packs.error.summed_promql_only"))
     current = _aligned(block, ("labels", "promql_queries", "label_keys_list"))
     derived = derived_rows(current)
     parts = [label for label in labels_for_role(current, SUMMED_ROLE) if label not in derived]
     if len(parts) < 2:
-        raise DerivedRowError("Нужны хотя бы два запроса с ролью «Общий RPS теста» от разных инструментов")
+        raise DerivedRowError(t("packs.error.summed_needs_two", role=ROLES[SUMMED_ROLE].title))
     labels = current["labels"]
     if SUMMED_RPS_LABEL not in labels:
         for key in PARALLEL_KEYS:
@@ -404,7 +409,7 @@ def merge_conflict(block: Optional[Mapping[str, Any]], language: str) -> Optiona
     if not present:
         return None
     names = ", ".join(lang_title(lang) for lang in present)
-    return f"в домене уже есть запросы {names}, а домен выполняет один язык"
+    return t("packs.error.one_language", languages=names)
 
 
 def lang_title(lang: str) -> str:
@@ -535,10 +540,7 @@ def sla_update(
     if unit and written & LATENCY_SLA_FIELDS:
         foreign = [f for f in sorted(LATENCY_SLA_FIELDS) if str(sla.get(f) or "").strip() and str(sla.get(f)).strip() not in own]
         if foreign:
-            update.warnings.append(
-                "Единицы задержек не изменены: поля " + ", ".join(foreign)
-                + " ссылаются на запросы не из пакета. Проверьте latency_unit вручную."
-            )
+            update.warnings.append(t("packs.warning.latency_unit_kept", fields=", ".join(foreign)))
         elif str(sla.get("latency_unit") or "") != unit:
             update.changes["latency_unit"] = {"from": sla.get("latency_unit"), "to": unit}
             sla["latency_unit"] = unit
@@ -567,7 +569,10 @@ TITLE_MAX_LEN = 60
 
 
 def domain_title(block: Optional[Mapping[str, Any]], catalog: Optional[Catalog] = None) -> str:
-    """Title of the domain in reports: the block's own ``title``, else the titles of its packs, else ""."""
+    """Title of the domain in reports: the block's own ``title``, else the titles of its packs, else "".
+
+    Pack titles are in the current locale (the report language during a run).
+    """
     if not isinstance(block, Mapping):
         return ""
     own = block.get(TITLE_KEY)
@@ -576,7 +581,7 @@ def domain_title(block: Optional[Mapping[str, Any]], catalog: Optional[Catalog] 
     labels = set(block_labels(block))
     titles: list[str] = []
     for rendered in _rendered_installed(block, catalog or load_catalog()):
-        title = rendered.pack.domain_title.strip()
+        title = localized(rendered.pack, "domain_title").strip()
         if title and title not in titles and any(query.label in labels for query in rendered.queries):
             titles.append(title)
     return " · ".join(titles)

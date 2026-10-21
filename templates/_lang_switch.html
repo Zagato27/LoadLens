@@ -1,0 +1,11 @@
+{#- RU · EN links of the standalone pages (login, recovery, storage outage). static/js/locale.js writes the
+    loadlens.lang cookie and reloads; there is no server endpoint. Hidden when appearance.language_switch is false. -#}
+{% if appearance.language_switch %}
+<nav class="lang-switch" aria-label="{{ t('common.lang_switch.aria') }}">
+  {%- for code in ('ru', 'en') %}
+  {% if not loop.first %}<span class="lang-switch-sep" aria-hidden="true">·</span>{% endif %}
+  <a href="#" data-set-locale="{{ code }}" lang="{{ code }}" hreflang="{{ code }}" title="{{ t('common.lang.' ~ code) }}"{% if locale == code %} aria-current="true"{% endif %}>{{ code | upper }}</a>
+  {%- endfor %}
+</nav>
+<script defer src="{{ url_for('static', filename='js/locale.js') }}"></script>
+{% endif %}

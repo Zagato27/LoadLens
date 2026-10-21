@@ -4,6 +4,8 @@
 #   docker compose up -d                      # core: Prometheus, Grafana, InfluxDB, exporters, Keycloak, FastAPI app
 #   docker compose --profile kafka up -d      # + Kafka and kafka_exporter
 #   docker compose --profile locust up -d     # + Locust and locust_exporter
+#   docker compose --profile arangodb up -d arangodb && docker compose --profile arangodb run --rm arangobench
+#                                             # ArangoDB with built-in metrics and arangobench load
 #   docker compose run --rm k6                # load: InfluxDB 1.x + Prometheus remote write (trend stats)
 #   docker compose run --rm k6-native         # load: Prometheus remote write with native histograms
 #   docker compose --profile gatling up -d victoriametrics && docker compose --profile gatling run --rm gatling
@@ -163,6 +165,29 @@ services:
     image: danielqsj/kafka-exporter:v1.8.0
     command: ["--kafka.server=kafka:9092"]
     depends_on: [kafka]
+
+  arangodb:
+    <<: *restart
+    profiles: [arangodb]
+    image: arangodb:3.12
+    # Built-in metrics on /_admin/metrics/v2. The low slow-query threshold lets the dev load produce slow AQL
+    # queries. The CPU limit shows up only in effective_cpu_cores; the memory override (below the limit) is what
+    # physical_memory reports and what RocksDB sizes its caches from, otherwise they follow the host memory.
+    command: ["--query.slow-threshold", "0.05"]
+    cpus: 2
+    mem_limit: 3g
+    environment:
+      ARANGO_NO_AUTH: "1"
+      ARANGODB_OVERRIDE_DETECTED_TOTAL_MEMORY: "2147483648"
+    ports: ["127.0.0.1:18529:8529"]
+
+  arangobench:
+    profiles: [arangodb]
+    image: arangodb:3.12
+    entrypoint: ["sh", "/mnt/arangodb/load.sh"]
+    volumes:
+      - ./arangodb:/mnt/arangodb:ro
+    depends_on: [arangodb]
 
   locust:
     profiles: [locust]

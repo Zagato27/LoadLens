@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Health of the storage database: a circuit breaker around every psycopg2.connect to storage.timescale.
 
 A failed connection opens the breaker. For ``retry_seconds`` further calls fail at once with
@@ -30,6 +31,8 @@ from typing import Any, Callable, Mapping, Optional
 import psycopg2
 from psycopg2 import extensions as _pg_ext
 
+from AI.i18n import t
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONNECT_TIMEOUT_SEC = 5
@@ -39,23 +42,25 @@ DEFAULT_POOL_MAX = 12
 DEFAULT_POOL_IDLE_SEC = 300.0
 MESSAGE_LIMIT = 300
 
+# Dictionary keys of the outage title and hint per failure kind; the text is rendered in the locale of the
+# reader (kind_title / kind_hint), so the login page, the outage page and /recovery/status follow the UI language.
 KIND_TITLES: dict[str, str] = {
-    "timeout": "Сервер базы не ответил вовремя",
-    "refused": "Сервер базы отклонил подключение",
-    "auth": "База отклонила логин или пароль",
-    "dns": "Имя хоста базы не найдено",
-    "database": "На сервере нет указанной базы данных",
-    "ssl": "Ошибка TLS при подключении к базе",
-    "other": "Не удалось подключиться к базе",
+    "timeout": "server.storage.title.timeout",
+    "refused": "server.storage.title.refused",
+    "auth": "server.storage.title.auth",
+    "dns": "server.storage.title.dns",
+    "database": "server.storage.title.database",
+    "ssl": "server.storage.title.ssl",
+    "other": "server.storage.title.generic",
 }
 KIND_HINTS: dict[str, str] = {
-    "timeout": "Проверьте сеть и VPN до сервера базы и что адрес и порт указаны верно.",
-    "refused": "База не запущена или слушает другой порт. Проверьте, что сервер PostgreSQL работает.",
-    "auth": "Проверьте пользователя и пароль базы в настройках хранилища.",
-    "dns": "Проверьте имя хоста базы и DNS.",
-    "database": "Проверьте имя базы данных в настройках хранилища.",
-    "ssl": "Проверьте режим SSL в настройках хранилища и сертификаты сервера.",
-    "other": "Подробности — в журнале приложения.",
+    "timeout": "server.storage.hint.timeout",
+    "refused": "server.storage.hint.refused",
+    "auth": "server.storage.hint.auth",
+    "dns": "server.storage.hint.dns",
+    "database": "server.storage.hint.database",
+    "ssl": "server.storage.hint.ssl",
+    "other": "server.storage.hint.generic",
 }
 # libpq and Windows socket messages; the server side may answer in Russian.
 _PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -75,6 +80,16 @@ class StorageUnavailableError(psycopg2.OperationalError):
 
 def is_storage_error(exc: BaseException) -> bool:
     return isinstance(exc, StorageUnavailableError)
+
+
+def kind_title(kind: str, locale: Optional[str] = None) -> str:
+    """Short title of an outage kind (``KIND_TITLES``) in the locale."""
+    return t(KIND_TITLES.get(kind, KIND_TITLES["other"]), locale=locale)
+
+
+def kind_hint(kind: str, locale: Optional[str] = None) -> str:
+    """What to check for an outage kind (``KIND_HINTS``) in the locale."""
+    return t(KIND_HINTS.get(kind, KIND_HINTS["other"]), locale=locale)
 
 
 def classify(message: str) -> str:
@@ -152,8 +167,8 @@ class StorageBreaker:
             return StorageStatus(
                 available=False,
                 kind=self._kind,
-                title=KIND_TITLES.get(self._kind, KIND_TITLES["other"]),
-                hint=KIND_HINTS.get(self._kind, KIND_HINTS["other"]),
+                title=kind_title(self._kind),
+                hint=kind_hint(self._kind),
                 message=self._message,
                 address=self._address,
                 checked_at=self._checked_at,
@@ -182,7 +197,7 @@ class StorageBreaker:
             self._retry_seconds = retry_seconds
             if self._failed_at is not None:
                 if self._probing or self._wait_left() > 0:
-                    raise StorageUnavailableError(self._message or KIND_TITLES.get(self._kind, KIND_TITLES["other"]))
+                    raise StorageUnavailableError(self._message or kind_title(self._kind))
                 self._probing = probing = True
         try:
             conn = opener()
@@ -654,6 +669,8 @@ __all__ = [
     "BREAKER",
     "KIND_HINTS",
     "KIND_TITLES",
+    "kind_hint",
+    "kind_title",
     "PooledConnection",
     "StorageBreaker",
     "StorageStatus",

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Offline eval harness: fixture metrics and DB loading without a live GigaChat call."""
 
 import json
@@ -14,12 +15,16 @@ from AI.eval import evaluate_analysis, evaluate_fixture, evaluate_run_records, l
 from tests.test_smoke_api import RecordingConnection
 
 FIXTURE_PATH = ROOT_DIR / "tests" / "fixtures" / "ai_eval" / "sample.json"
+FIXTURE_EN_PATH = ROOT_DIR / "tests" / "fixtures" / "ai_eval" / "sample_en.json"
 
 
-def test_eval_fixture_metrics_are_deterministic():
-    metrics = evaluate_fixture(FIXTURE_PATH)
+@pytest.mark.parametrize("path, lang", [(FIXTURE_PATH, "ru"), (FIXTURE_EN_PATH, "en")])
+def test_eval_fixture_metrics_are_deterministic(path, lang):
+    metrics = evaluate_fixture(path)
     assert metrics["domain"] == "final"
-    assert metrics["verdict"] == "Есть риски"
+    assert metrics["verdict"] == "risk"  # the ru fixture keeps the old label; metrics carry the code
+    # The ru fixture predates report_language (old reports are Russian); the en one names it.
+    assert metrics["report_language"] == lang and metrics["language_match"] >= 0.5
     assert metrics["verdict_match"] == 1.0
     assert metrics["findings_total"] == 3
     assert metrics["findings_verified"] == 1
@@ -42,6 +47,19 @@ def test_eval_fixture_metrics_are_deterministic():
         "elapsed_ms": 1200,
         "cost": None,
     }
+
+
+def test_eval_language_match_flags_an_answer_in_the_other_language():
+    ru = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+    en = json.loads(FIXTURE_EN_PATH.read_text(encoding="utf-8"))
+    # A Russian answer scored as an en report (and the other way round) matches poorly.
+    assert evaluate_analysis(ru["parsed"], report_language="en")["language_match"] < 0.5
+    assert evaluate_analysis({**en["parsed"], "report_language": "ru"})["language_match"] < 0.5
+    records = [{"domain": "final", "parsed": en["parsed"], "scores": en["scores"], "feedback": []},
+               {"domain": "jvm", "parsed": {"verdict": "pass", "verdict_rationale": "Heap is stable."}, "scores": {}}]
+    run = evaluate_run_records(records)
+    assert run["report_language"] == "en" and run["domains"]["jvm"]["report_language"] == "en"
+    assert run["language_match"] == pytest.approx(1.0)
 
 
 def test_eval_without_feedback_leaves_verdict_match_empty():

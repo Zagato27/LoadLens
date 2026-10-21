@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Docker generators: one container per instance through the Docker Engine API.
 
 LoadLens talks HTTP(S) to the engine: ``https://host:2376`` with client certificates, or a socket proxy
@@ -20,6 +21,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Optional
 
 from ..generators import Generator
+from ..messages import msg, t
 from ..tools import ToolTemplate, render_version_command
 from .base import LOG_TAIL_BYTES, CheckReport, GeneratorError, LaunchPlan, LaunchResult, Probe, SKIPPED_DIRS, SCRIPT_LIST_LIMIT
 from .http import ApiClient, ApiError
@@ -67,7 +69,7 @@ def demux(raw: bytes) -> str:
 
 def docker_api(generator: Generator) -> ApiClient:
     if generator.docker is None:
-        raise GeneratorError(f"Генератор «{generator.title}» не работает через Docker")
+        raise GeneratorError("lt.docker.not_docker", generator=generator.title)
     cfg = generator.docker
     return ApiClient(
         cfg.url + API_PREFIX,
@@ -110,7 +112,7 @@ class DockerExecutor:
 
     def launch(self, plan: LaunchPlan) -> LaunchResult:
         if not plan.image:
-            raise GeneratorError(f"Для инструмента {plan.tool_id} не задан образ контейнера")
+            raise GeneratorError("lt.executor.no_image", tool=plan.tool_id)
         body = {
             "Image": plan.image,
             # [""] resets the image entrypoint: argv[0] of the command is the tool itself.
@@ -132,7 +134,7 @@ class DockerExecutor:
             self.api.request("POST", "/containers/create", params={"name": plan.ref}, json=body, ok=(201,))
         except ApiError as exc:
             if exc.status == 404:
-                raise GeneratorError(f"Образа {plan.image} нет на Docker-хосте: скачайте его заранее (docker pull {plan.image})") from exc
+                raise GeneratorError("lt.docker.image_missing_pull", image=plan.image) from exc
             if exc.status != 409:
                 raise
             state = self.api.json("GET", f"/containers/{plan.ref}/json").get("State") or {}
@@ -153,10 +155,10 @@ class DockerExecutor:
         status = str(state.get("Status") or "")
         started = _docker_time(state.get("StartedAt"))
         if status == "created":
-            return Probe(state="starting", message="Контейнер создан, ещё не запущен")
+            return Probe(state="starting", message=msg("lt.docker.created"))
         if status in ("running", "paused", "restarting"):
             return Probe(state="running", started_at=started)
-        message = "Контейнер убит по нехватке памяти (OOM)" if state.get("OOMKilled") else str(state.get("Error") or "")
+        message = msg("lt.executor.oom") if state.get("OOMKilled") else str(state.get("Error") or "")
         code = state.get("ExitCode")
         return Probe(
             state="exited",
@@ -222,7 +224,7 @@ class DockerExecutor:
             self.api.request("POST", "/containers/create", params={"name": name}, json=body, ok=(201,))
         except ApiError as exc:
             if exc.status == 404:
-                raise GeneratorError(f"Образа {image} нет на Docker-хосте") from exc
+                raise GeneratorError("lt.docker.image_missing", image=image) from exc
             raise
         try:
             self.api.request("POST", f"/containers/{name}/start", ok=(204, 304))
@@ -240,13 +242,13 @@ class DockerExecutor:
 
         image = self.generator.image_for(tool)
         if not image:
-            raise GeneratorError(f"Для инструмента {tool.title} не задан образ контейнера")
+            raise GeneratorError("lt.executor.no_image", tool=tool.display_title)
         code, out = self.run_helper(image, list_scripts_script(scripts_dir, list(tool.scripts_glob)))
         return parse_script_list(out, tool.script_kind)
 
 
 def check_docker_generator(generator: Generator, tools: Mapping[str, ToolTemplate]) -> CheckReport:
-    """Ping, engine version, images of the offered tools, the network and named volumes."""
+    """Ping, engine version, images of the offered tools, the network and named volumes (texts in the request language)."""
     assert generator.docker is not None
     api = docker_api(generator)
     cfg = generator.docker
@@ -265,7 +267,7 @@ def check_docker_generator(generator: Generator, tools: Mapping[str, ToolTemplat
         image = generator.image_for(tool)
         if not image:
             if tool_id in generator.tools:
-                problems.append(f"для {tool.title} не задан образ")
+                problems.append(t("lt.docker.check.no_image", tool=tool.display_title))
             continue
         try:
             api.request("GET", f"/images/{image}/json")
@@ -275,27 +277,27 @@ def check_docker_generator(generator: Generator, tools: Mapping[str, ToolTemplat
             if exc.status != 404:
                 return CheckReport(ok=False, message=str(exc), connected=True, problems=[str(exc)])
             missing.append(tool_id)
-            problems.append(f"нет образа {image} ({tool.title}): docker pull {image} на Docker-хосте")
+            problems.append(t("lt.docker.check.image_missing", image=image, tool=tool.display_title))
     if cfg.network:
         try:
             api.request("GET", f"/networks/{cfg.network}")
         except ApiError as exc:
-            problems.append(f"нет сети {cfg.network}" if exc.status == 404 else str(exc))
+            problems.append(t("lt.docker.check.no_network", network=cfg.network) if exc.status == 404 else str(exc))
     for mount in cfg.mounts:
         if mount.is_bind:
             continue
         try:
             api.request("GET", f"/volumes/{mount.source}")
         except ApiError as exc:
-            problems.append(f"нет тома {mount.source}: Docker создаст пустой" if exc.status == 404 else str(exc))
+            problems.append(t("lt.docker.check.no_volume", volume=mount.source) if exc.status == 404 else str(exc))
     plain = cfg.url.startswith("http://") and not re.match(r"^http://(127\.0\.0\.1|localhost|\[::1\])[:/]", cfg.url)
     if plain:
-        problems.append("Docker API без TLS: доступ к нему равен правам root на хосте, закройте его сетью")
-    titles = [tools[tool_id].title for tool_id in found]
+        problems.append(t("lt.docker.check.no_tls"))
+    titles = [tools[tool_id].display_title for tool_id in found]
     parts = [f"Docker {version.get('Version', '?')} ({version.get('Os', '?')}/{version.get('Arch', '?')})"]
-    parts.append(f"образы есть: {', '.join(titles)}" if titles else "образов инструментов нет")
+    parts.append(t("lt.docker.check.images", tools=", ".join(titles)) if titles else t("lt.check.no_images"))
     if problems:
-        parts.append(f"проблемы: {'; '.join(problems)}")
+        parts.append(t("lt.check.problems", problems="; ".join(problems)))
     fatal = not found and bool(generator.tools)
     return CheckReport(
         ok=not fatal,

@@ -2,6 +2,7 @@ schema_version = 1
 id = "db-pgbouncer"
 version = 1
 title = "Пул соединений PgBouncer (pgbouncer_exporter)"
+title_en = "PgBouncer connection pool (pgbouncer_exporter)"
 category = "database"
 stack = ["postgresql", "pgbouncer"]
 domain = "database"
@@ -12,18 +13,29 @@ description = """
 максимальное ожидание, запросы и транзакции в секунду и среднее время запроса через пул. Подходят имена \
 статистики новых версий экспортера (pgbouncer_stats_totals_*) и старых (pgbouncer_stats_*).
 """
+description_en = """
+prometheus-community/pgbouncer_exporter metrics: active and waiting clients, server connections, maximum wait, \
+queries and transactions per second and the average query time through the pool. Works with the statistics \
+names of new exporter versions (pgbouncer_stats_totals_*) and old ones (pgbouncer_stats_*).
+"""
 requires_metrics = ["pgbouncer_pools_client_active_connections", "pgbouncer_pools_client_waiting_connections"]
 prompt_addendum = """
 Метрики PgBouncer: клиенты в ожидании и растущее maxwait означают, что серверных соединений пула не \
 хватает (default_pool_size) — время запроса растёт до того, как нагружается сама PostgreSQL.
 """
+prompt_addendum_en = """
+PgBouncer metrics: waiting clients and a growing maxwait mean the pool lacks server connections \
+(default_pool_size); query time grows before PostgreSQL itself is loaded.
+"""
 
 [variables.matchers]
 title = "Дополнительные матчеры"
+title_en = "Extra matchers"
 default = ""
 
 [variables.window]
 title = "Окно rate()"
+title_en = "rate() window"
 default = "2m"
 pattern = '^[1-9][0-9]*[smh]$'
 
@@ -35,6 +47,7 @@ required = true
 query = 'sum by (database) (pgbouncer_pools_client_active_connections{ {{matchers}} })'
 keys = ["database"]
 description = "Клиенты, привязанные к серверному соединению."
+description_en = "Clients bound to a server connection."
 
 [[queries]]
 label = "DB pool (PgBouncer): waiting clients by database"
@@ -44,6 +57,7 @@ required = true
 query = 'sum by (database) (pgbouncer_pools_client_waiting_connections{ {{matchers}} })'
 keys = ["database"]
 description = "Клиенты, ждущие серверное соединение."
+description_en = "Clients waiting for a server connection."
 
 [[queries]]
 label = "DB pool (PgBouncer): server active connections by database"
@@ -52,6 +66,7 @@ unit = "count"
 query = 'sum by (database) (pgbouncer_pools_server_active_connections{ {{matchers}} })'
 keys = ["database"]
 description = "Серверные соединения с PostgreSQL в работе."
+description_en = "Active server connections to PostgreSQL."
 
 [[queries]]
 label = "DB pool (PgBouncer): max client wait (s) by database"
@@ -60,6 +75,7 @@ unit = "seconds"
 query = 'max by (database) (pgbouncer_pools_client_maxwait_seconds{ {{matchers}} })'
 keys = ["database"]
 description = "Самое долгое ожидание соединения клиентом, с."
+description_en = "Longest client wait for a connection, s."
 
 [[queries]]
 label = "DB pool (PgBouncer): queries per second by database"
@@ -68,6 +84,7 @@ unit = "per_second"
 query = 'sum by (database) (rate(pgbouncer_stats_totals_queries_pooled_total{ {{matchers}} }[{{window}}]) or rate(pgbouncer_stats_queries_pooled_total{ {{matchers}} }[{{window}}]))'
 keys = ["database"]
 description = "Запросы через пул в секунду."
+description_en = "Queries through the pool per second."
 
 [[queries]]
 label = "DB pool (PgBouncer): average query time (sec) by database"
@@ -76,6 +93,7 @@ unit = "seconds"
 query = 'sum by (database) (rate(pgbouncer_stats_totals_queries_duration_seconds_total{ {{matchers}} }[{{window}}]) or rate(pgbouncer_stats_queries_duration_seconds_total{ {{matchers}} }[{{window}}])) / sum by (database) (rate(pgbouncer_stats_totals_queries_pooled_total{ {{matchers}} }[{{window}}]) or rate(pgbouncer_stats_queries_pooled_total{ {{matchers}} }[{{window}}]))'
 keys = ["database"]
 description = "Среднее время запроса через пул, с."
+description_en = "Average query time through the pool, s."
 
 [[queries]]
 label = "DB pool (PgBouncer): transactions per second by database"
@@ -84,3 +102,4 @@ unit = "per_second"
 query = 'sum by (database) (rate(pgbouncer_stats_totals_sql_transactions_pooled_total{ {{matchers}} }[{{window}}]) or rate(pgbouncer_stats_sql_transactions_pooled_total{ {{matchers}} }[{{window}}]))'
 keys = ["database"]
 description = "Транзакции через пул в секунду."
+description_en = "Transactions through the pool per second."

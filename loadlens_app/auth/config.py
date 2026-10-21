@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Auth settings: ``CONFIG["auth"]`` from settings.py, overridden by environment variables.
 
 The section is deliberately not editable through ``POST /config``: a stray edit must not be

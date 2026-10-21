@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Blueprint with comparison/reporting endpoints."""
 
 from __future__ import annotations
@@ -7,6 +8,8 @@ from typing import Optional
 from flask import Blueprint, jsonify, render_template, request
 
 from settings import CONFIG
+from AI.i18n import t as translate
+from AI.verdicts import to_code
 from loadlens_app.errors import internal_error
 from loadlens_app.core import (
     _active_project_area,
@@ -31,7 +34,7 @@ def _aggregate_sql() -> tuple[str, str] | tuple[None, str]:
     """Returns (agg_key, sql) for the ``agg`` request param or (None, error message)."""
     agg = (request.args.get("agg") or DEFAULT_AGGREGATE).strip().lower()
     if agg not in AGGREGATES:
-        return None, f"Недопустимый агрегат «{agg}». Допустимо: {', '.join(AGGREGATES)}"
+        return None, translate("api.compare.bad_aggregate", agg=agg, allowed=", ".join(AGGREGATES))
     return agg, AGGREGATES[agg]
 
 
@@ -71,7 +74,7 @@ def compare_summary():
     run_b = request.args.get("run_b")
     domain = request.args.get("domain")
     if not all([run_a, run_b, domain]):
-        return jsonify({"error": "run_a, run_b, domain обязательны"}), 400
+        return jsonify({"error": translate("api.required.compare_runs")}), 400
     agg, agg_sql = _aggregate_sql()
     if agg is None:
         return jsonify({"error": agg_sql}), 400
@@ -116,7 +119,7 @@ def compare_metric_summary():
     ql = request.args.get("query_label")
     series_key = request.args.get("series_key")
     if not all([run_a, run_b, domain, ql]):
-        return jsonify({"error": "run_a, run_b, domain, query_label обязательны"}), 400
+        return jsonify({"error": translate("api.required.compare_series")}), 400
     agg, agg_sql = _aggregate_sql()
     if agg is None:
         return jsonify({"error": agg_sql}), 400
@@ -178,9 +181,9 @@ def compare_baseline():
     """Ищет предыдущий прогон того же сервиса, проектной области и типа теста для сравнения.
 
     ``mode=previous_success`` (по умолчанию) — последний более ранний прогон с итоговым
-    вердиктом «Успешно»; ``mode=previous`` — последний более ранний прогон без учёта вердикта.
+    вердиктом ``pass``; ``mode=previous`` — последний более ранний прогон без учёта вердикта.
     Тип теста сравнивается с учётом синонимов (``AI.db_store.find_previous_run``); отчёты,
-    сохранённые без области, подходят любой области.
+    сохранённые без области, подходят любой области. ``verdict`` в ответе — код.
     """
     from AI.db_store import find_previous_run
     from AI.test_profile import normalize_test_type
@@ -188,9 +191,9 @@ def compare_baseline():
     run_name = (request.args.get("run_name") or "").strip()
     mode = (request.args.get("mode") or "previous_success").strip().lower()
     if not run_name:
-        return jsonify({"error": "run_name обязателен"}), 400
+        return jsonify({"error": translate("api.required.run_name")}), 400
     if mode not in BASELINE_MODES:
-        return jsonify({"error": f"Недопустимый mode «{mode}». Допустимо: {', '.join(BASELINE_MODES)}"}), 400
+        return jsonify({"error": translate("api.compare.bad_mode", mode=mode, allowed=", ".join(BASELINE_MODES))}), 400
     cfg = (CONFIG.get("storage", {}) or {}).get("timescale", {})
     schema = cfg.get("schema", "public")
     table = cfg.get("llm_table", "llm_reports")
@@ -218,13 +221,17 @@ def compare_baseline():
     except Exception as e:  # pragma: no cover
         return internal_error(e)
     if previous is None:
-        label = "предыдущий успешный прогон" if mode == "previous_success" else "предыдущий прогон"
-        type_note = f" с типом теста «{type_key}»" if type_key else ""
-        return jsonify({"error": f"Для «{run_name}» не найден {label} того же сервиса{type_note}", "mode": mode}), 404
+        label = translate("api.compare.previous_success" if mode == "previous_success" else "api.compare.previous")
+        message = (
+            translate("api.compare.baseline_not_found_type", run_name=run_name, label=label, test_type=type_key)
+            if type_key
+            else translate("api.compare.baseline_not_found", run_name=run_name, label=label)
+        )
+        return jsonify({"error": message, "mode": mode}), 404
     return jsonify({
         "run_name": previous.run_name,
         "service": previous.service,
-        "verdict": previous.verdict,
+        "verdict": to_code(previous.verdict),
         "created_at": previous.created_at.isoformat() if previous.created_at else None,
         "mode": mode,
     })
@@ -281,7 +288,7 @@ def compare_series():
     series_key = request.args.get("series_key")
     align = request.args.get("align", "offset")
     if not all([run_a, run_b, domain, ql]):
-        return jsonify({"error": "run_a, run_b, domain, query_label обязательны"}), 400
+        return jsonify({"error": translate("api.required.compare_series")}), 400
     try:
         if not series_key or series_key == "auto":
             series_key = _series_key_for(domain, ql, default_key="application")
@@ -337,7 +344,7 @@ def run_series():
     series_key = request.args.get("series_key")
     align = request.args.get("align", "absolute")
     if not all([run_name, domain, ql]):
-        return jsonify({"error": "run_name, domain, query_label обязательны"}), 400
+        return jsonify({"error": translate("api.required.run_series")}), 400
     try:
         if not series_key or series_key == "auto":
             series_key = _series_key_for(domain, ql, default_key="application")

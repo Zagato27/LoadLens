@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Short-lived cache of the JSON answers the pages poll (dashboard, job list, active load test runs).
 
 Every open tab polls ``/dashboard_data``, ``/jobs`` and ``/load_tests/active`` every few seconds; within the
@@ -212,7 +213,12 @@ def cached_json(prefix: str, ttl: float, key: Callable[[], Optional[tuple]]):
                     return response.get_data()
                 return None
 
-            body = response_cache.get_or_set((prefix, *parts), ttl, compute, cacheable=lambda data: data is not None)
+            # The answer holds texts in the UI language of the request: the locale is the last key element, so
+            # invalidation by a leading part of the key still drops every language.
+            from loadlens_app.i18n import current_locale
+
+            key_parts = (prefix, *parts, current_locale())
+            body = response_cache.get_or_set(key_parts, ttl, compute, cacheable=lambda data: data is not None)
             if produced:
                 return produced[0]
             return Response(body, status=200, mimetype="application/json")

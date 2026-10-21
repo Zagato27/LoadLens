@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Masking of credentials in configuration payloads exchanged with the browser.
 
 The UI never receives real passwords or tokens: ``GET /config`` replaces them, and passwords inside
@@ -15,6 +16,8 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable, Optional
 from urllib.parse import urlsplit
+
+from AI.i18n import t
 
 MASK = "***"
 
@@ -44,10 +47,7 @@ class SecretPlaceholderError(ValueError):
     """Raised when a payload contains the mask sentinel but no stored value exists."""
 
     def __init__(self, path: str, message: Optional[str] = None):
-        super().__init__(
-            message
-            or f"Секрет «{path}» не задан: замените {MASK} реальным значением или оставьте поле пустым"
-        )
+        super().__init__(message or t("server.secrets.placeholder", path=path, mask=MASK))
         self.path = path
 
 
@@ -55,11 +55,7 @@ class SecretDestinationChangedError(SecretPlaceholderError):
     """Raised when a masked secret would be sent to another address than the one it was saved for."""
 
     def __init__(self, path: str):
-        super().__init__(
-            path,
-            f"Секрет «{path}» не подставлен: адрес, порт, прокси или настройки TLS подключения изменились. "
-            f"Введите секрет заново вместо {MASK}",
-        )
+        super().__init__(path, t("server.secrets.destination_changed", path=path, mask=MASK))
 
 
 def mask_secrets(tree: Any) -> Any:

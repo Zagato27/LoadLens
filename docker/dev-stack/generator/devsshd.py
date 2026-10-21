@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Minimal SSH server of the dev-stack load generator. Dev stack only.
 
 Networks with a filtering proxy block the Debian mirror, so the image cannot install OpenSSH. This server

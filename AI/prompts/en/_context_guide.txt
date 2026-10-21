@@ -1,0 +1,59 @@
+HOW TO READ THE CONTEXT (JSON, passed together with this task):
+- time_range: test boundaries — start_iso/end_iso (local time with the UTC offset) and duration_min.
+- load_steps[]: load steps. For a step test the boundaries come from the step detector on the designated
+  RPS metric (rps_level — the load level, stable — whether the step was stable); otherwise they are equal time
+  intervals. Every step has index, label, start_iso/end_iso and minute_from/minute_to from the test start.
+  plateau_start_iso/plateau_end_iso — the step plateau on which rps_level held; drop_iso — the moment when RPS
+  fell inside the step and never returned to its previous level. The RPS of a step is rps_level only (it is also in
+  label); do not replace it with the step mean. after_drop=true — a step after such a drop (degradation or load
+  ramp-down): it is not a level the system sustained. dip=true — a short dip: RPS fell and returned to its previous
+  level; it is neither a separate load step nor the system limit. The flags are present only on such steps.
+  In a spike test the steps alternate background and spikes ("background 1 · ≈100 RPS", "spike 1 · ≈480 RPS").
+  Refer to steps by label (for example "step 3 · ≈150 RPS" or "interval 2 · 10:20–10:30").
+- sections[]: metric groups of the domain (label — the query name). Each section has:
+  * meaning, unit, description (if present) — what the series means, its unit and the note from the query pack. The
+    section's numbers are expressed in unit; do not convert them to other units without an explicit conversion.
+  * top_series[] — series statistics over the whole test: mean, min, max, last, change_pct (change between the start
+    and the end of the test in %), max_time_iso/min_time_iso and max_minute_from_start. Series of the load testing
+    tool may have stable_max (the level of the last stable step) and step_segments (detector segments with the same
+    after_drop and dip flags).
+  * anomalies[] — deviations found programmatically relative to the steps. Each step_anomalies[].kind:
+    elasticity — the metric grew noticeably faster than the load between steps (load_change_pct — load growth);
+    drift — the metric changed on the plateau of one step while the load stayed the same;
+    shift — the interval differs noticeably from the first one (for tests without steps).
+    The value/reference/change_pct and explanation fields already contain a ready-made wording.
+- step_table[]: for each section — series ranked by the size of the change between steps
+  (change_vs_first_pct), and per_step[] = {step, mean, p95, max, samples} for every step. The values are computed on
+  the step plateau. If RPS fell after the plateau or the test ended, per_step has after_plateau = {mean, min, max,
+  samples} — the values after the plateau: describe post-plateau degradation with them (for example
+  "at step 11 · ≈258 RPS, after the plateau RPS fell to min"), not as the step level. This is the main source of
+  numbers for findings: name the step and the value from per_step.
+- baseline: the previous run of the same service (run_name, verdict) and its statistics for the same series:
+  baseline_mean/baseline_p95/baseline_max and delta_mean_pct/delta_max_pct — the change of the current run relative
+  to it in %. If available=false, the cause is given in reason — comparison with the previous run is unavailable; do not invent it.
+- timeline (final task only): a "metric × step" matrix across all domains (mean_per_step — means over the step
+  plateau) — use it to link events of different components at the same step.
+- deterministic_sla (final task): the result of the programmatic SLA check — verdict, checks[] with actual/threshold
+  and passed. It is the source of truth for the SLA; do not recompute it and do not contradict it without an explicit reason.
+- designated_peak_performance (final task): the only source of maximum performance
+  (stable_max). Do not take RPS from other domains to estimate the maximum.
+- sla_step (domain tasks): the step on which the SLA was checked programmatically — step_label, start_iso/end_iso,
+  rps and checks[] with threshold/actual/passed. Determine the domain status from the steps up to and including the end of sla_step.
+  Describe degradation on later steps as findings with its start_time (where and why the system hit its limit), but
+  do not set verdict "fail" because of it: in a step test this is the expected outcome. "fail" — only if the problem began
+  before the end of sla_step. If there is no sla_step, assess the whole test.
+- test_profile: the test type (normalized_test_type: step | soak | spike | stress) and the analysis mode (mode).
+- hold_window (soak): the load hold window without the ramp-up — start_iso/end_iso, actual_rps_mean (mean RPS),
+  min_bucket_rps/min_bucket_label (the weakest interval), drop_pct, early_drop_iso (RPS fell long before the end).
+  The SLA of a soak test is checked on this window.
+- stability_under_load (final task, soak): the source of truth for the load hold (hold) and the trends
+  (trends[] — first/last/change_pct/slope_per_hour for RPS, p95, errors, CPU, memory; flagged=true — an unfavourable
+  drift larger than trend_threshold_pct).
+- spike_profile (lt_framework) / spike_windows (domains) / spike_analysis (final task, spike): the detected
+  spikes — level, duration, pre/during p95 and error rate, overshoot_p95_pct, recovered and recovery_time_sec.
+- saturation (final task, stress): the saturation point (saturation_rps, step), the first degraded step,
+  failure_mode and limiting_resource.
+- system_context: a reference description of the system; use it as context, not as facts about the metrics.
+All numbers in the answer come only from this context: if a value is not in top_series / step_table / anomalies /
+baseline / timeline / deterministic_sla / sla_step / hold_window / stability_under_load / spike_analysis /
+saturation — it must not be stated.

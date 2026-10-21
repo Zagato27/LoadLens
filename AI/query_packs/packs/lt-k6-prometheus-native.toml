@@ -12,25 +12,39 @@ description = """
 Перцентили и среднее считаются по окну rate(), поэтому точнее статистик trend. Нужен Prometheus 2.40+ \
 с включёнными native histograms (--enable-feature=native-histograms).
 """
+description_en = """
+k6 output `--out experimental-prometheus-rw` with K6_PROMETHEUS_RW_TREND_AS_NATIVE_HISTOGRAM=true. Percentiles \
+and the average are computed over the rate() window, so they are more accurate than trend stats. Needs \
+Prometheus 2.40+ with native histograms enabled (--enable-feature=native-histograms).
+"""
 requires_metrics = ["k6_http_reqs_total", "k6_http_req_duration_seconds", "k6_vus"]
 prompt_addendum = """
 Метрики k6 в Prometheus: k6_http_reqs_total — счётчик запросов (expected_response="false" — неуспешные), \
 k6_http_req_duration_seconds — native histogram времени ответа (в отчёте перцентили и среднее в мс), \
 k6_vus — виртуальные пользователи, k6_checks_rate — доля успешных проверок.
 """
+prompt_addendum_en = """
+k6 metrics in Prometheus: k6_http_reqs_total is the request counter (expected_response="false" means failed), \
+k6_http_req_duration_seconds is a native histogram of the response time (the report shows percentiles and the \
+average in ms), k6_vus are virtual users, k6_checks_rate is the share of successful checks.
+"""
 
 [variables.matchers]
 title = "Дополнительные матчеры"
+title_en = "Extra matchers"
 default = ""
 help = 'Например testid="checkout-2025-01-15". Пусто — все метрики k6.'
+help_en = 'For example testid="checkout-2025-01-15". Empty means all k6 metrics.'
 
 [variables.window]
 title = "Окно rate()"
+title_en = "rate() window"
 default = "1m"
 pattern = '^[1-9][0-9]*[smh]$'
 
 [variables.load_model]
 title = "Модель нагрузки сценария"
+title_en = "Load model of the scenario"
 default = "open"
 choices = ["open", "closed"]
 help = "open — executors constant/ramping-arrival-rate, closed — ramping-vus, constant-vus, per-vu-iterations."
@@ -58,6 +72,7 @@ required = true
 query = 'label_replace(sum(rate(k6_http_reqs_total{ {{matchers}} }[{{window}}])), "series", "all", "", "")'
 keys = ["series"]
 description = "Общий RPS теста."
+description_en = "Total test RPS."
 
 [[queries]]
 label = "LT (k6 native): RPS by name"
@@ -66,6 +81,7 @@ unit = "per_second"
 query = 'topk(20, sum by (name) (rate(k6_http_reqs_total{ {{matchers}} }[{{window}}])))'
 keys = ["name"]
 description = "RPS по имени запроса, 20 самых нагруженных."
+description_en = "RPS by request name, the 20 busiest."
 
 [[queries]]
 label = "LT (k6 native): http_req_duration p95(ms) total"
@@ -74,6 +90,7 @@ unit = "ms"
 query = 'label_replace(1000 * histogram_quantile(0.95, sum(rate(k6_http_req_duration_seconds{ {{matchers}} }[{{window}}]))), "series", "all", "", "")'
 keys = ["series"]
 description = "p95 времени ответа всех запросов, мс."
+description_en = "p95 of the response time of all requests, ms."
 
 [[queries]]
 label = "LT (k6 native): http_req_duration p99(ms) total"
@@ -82,6 +99,7 @@ unit = "ms"
 query = 'label_replace(1000 * histogram_quantile(0.99, sum(rate(k6_http_req_duration_seconds{ {{matchers}} }[{{window}}]))), "series", "all", "", "")'
 keys = ["series"]
 description = "p99 времени ответа всех запросов, мс."
+description_en = "p99 of the response time of all requests, ms."
 
 [[queries]]
 label = "LT (k6 native): http_req_duration p95(ms) by name"
@@ -90,6 +108,7 @@ unit = "ms"
 query = 'topk(20, 1000 * histogram_quantile(0.95, sum by (name) (rate(k6_http_req_duration_seconds{ {{matchers}} }[{{window}}]))))'
 keys = ["name"]
 description = "p95 по имени запроса, мс."
+description_en = "p95 by request name, ms."
 
 [[queries]]
 label = "LT (k6 native): http_req_duration mean(ms)"
@@ -99,6 +118,7 @@ required = true
 query = 'label_replace(1000 * histogram_sum(sum(rate(k6_http_req_duration_seconds{ {{matchers}} }[{{window}}]))) / histogram_count(sum(rate(k6_http_req_duration_seconds{ {{matchers}} }[{{window}}]))), "series", "all", "", "")'
 keys = ["series"]
 description = "Среднее время ответа, мс."
+description_en = "Average response time, ms."
 
 [[queries]]
 label = "LT (k6 native): error rate (%)"
@@ -107,6 +127,7 @@ unit = "percent"
 query = 'label_replace(100 * (sum(rate(k6_http_reqs_total{expected_response="false", {{matchers}} }[{{window}}])) or vector(0)) / sum(rate(k6_http_reqs_total{ {{matchers}} }[{{window}}])), "series", "all", "", "")'
 keys = ["series"]
 description = "Доля запросов с неожидаемым статусом, %."
+description_en = "Share of requests with an unexpected status, %."
 
 [[queries]]
 label = "LT (k6 native): VUs"
@@ -115,6 +136,7 @@ unit = "count"
 query = 'label_replace(sum(k6_vus{ {{matchers}} }), "series", "all", "", "")'
 keys = ["series"]
 description = "Виртуальные пользователи всех экземпляров k6."
+description_en = "Virtual users of all k6 instances."
 
 [[queries]]
 label = "LT (k6 native): checks passed (%) by check"
@@ -123,6 +145,7 @@ unit = "percent"
 query = '100 * avg by (check) (k6_checks_rate{ {{matchers}} })'
 keys = ["check"]
 description = "Доля успешных проверок k6, %."
+description_en = "Share of successful k6 checks, %."
 
 [[queries]]
 label = "LT (k6 native): RPS by LoadLens instance"
@@ -132,3 +155,4 @@ query = 'sum by (lt_instance) (rate(k6_http_reqs_total{ {{matchers}} }[{{window}
 keys = ["lt_instance"]
 since = 2
 description = "RPS каждого инстанса прогона LoadLens (тег lt_instance) для живых графиков страницы прогона; в отчёт не входит."
+description_en = "RPS of every instance of a LoadLens run (the lt_instance tag) for the live charts of the run page; not part of the report."

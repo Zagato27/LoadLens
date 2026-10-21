@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Chart markers, SLA thresholds and series colors of a report, shared by the web page and Confluence.
 
 The report page computes the same lists in ``static/js/reports.js`` (``reportMarkers``,
@@ -8,6 +9,10 @@ together.
 Times come only from deterministic data: the load-step table, the SLA window and the test-type
 payloads (``saturation``, ``stability_under_load``, ``spike_analysis``). ``peak_performance.max_time``
 and ``drop_time`` are LLM text and are never used.
+
+Labels are dictionary texts (``report.marker.*``, ``report.threshold.*``) in the current locale of
+``AI.i18n``: the request locale on the web, ``with_locale(report_language)`` when Confluence publishes.
+Labels stored with the report (spike ``label``, window ``title``) are kept as they are.
 
 Marker::
 
@@ -29,34 +34,40 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from AI.i18n import t
+
 # Light-theme series palette, copied from static/css/app.css (:root[data-theme="light"] --series-1..8).
 # Confluence pages are light, so PNG charts use these values; the web page reads the same tokens
 # through LL.charts.palette, so a series gets the same slot color in both.
 SERIES_PALETTE: Tuple[str, ...] = ("#026fd7", "#ad3d9a", "#706d06", "#0d8ca3", "#6f3680", "#7a4306", "#8d6cc2", "#035397")
-# Light-theme marker and threshold tones (app.css: --accent, --status-ok/warn/fail, --text-dim).
+# Light-theme marker and threshold tones (app.css: --accent, --status-ok/warn/fail, --text-dim, which resolve to
+# --ok, --warn, --fail and --dim of the light theme).
 TONE_COLORS: Dict[str, str] = {
     "accent": "#6c5ce7",
-    "ok": "#16a34a",
-    "warn": "#d97706",
-    "fail": "#dc2626",
-    "muted": "#666e7c",
+    "ok": "#1b7943",
+    "warn": "#8e6200",
+    "fail": "#b73a33",
+    "muted": "#6c6a64",
 }
 DEFAULT_OFFSET_HOURS = 3.0
 # An RPS drop closer than this to the degradation line is the same event and gets no second line.
 DROP_MERGE_MS = 60_000
 
+# Check name -> (dictionary key of the threshold label with ``{value}``, tone).
 THRESHOLD_SPECS: Dict[str, Tuple[str, str]] = {
-    "target_rps": ("цель ≥ {} RPS", "accent"),
-    "p95_latency": ("p95 ≤ {} мс", "fail"),
-    "p99_latency": ("p99 ≤ {} мс", "fail"),
-    "error_rate": ("ошибки ≤ {} %", "fail"),
-    "cpu_usage": ("CPU ≤ {} %", "fail"),
-    "memory_usage": ("память ≤ {} %", "fail"),
+    "target_rps": ("report.threshold.target_rps", "accent"),
+    "p95_latency": ("report.threshold.p95_latency", "fail"),
+    "p99_latency": ("report.threshold.p99_latency", "fail"),
+    "error_rate": ("report.threshold.error_rate", "fail"),
+    "cpu_usage": ("report.threshold.cpu_usage", "fail"),
+    "memory_usage": ("report.threshold.memory_usage", "fail"),
 }
+# Query and series named in the text of a check of an older report: label='…' / series='…', or
+# «запрос «…»» / «серия «…»» (ru) and «query «…»» / «series «…»» (en). Newer checks carry query_label/series.
 _LABEL_RE = re.compile(r"label='([^']*)'")
-_QUERY_RE = re.compile(r"запрос «([^»]*)»")
-_SERIES_EN_RE = re.compile(r"series='([^']*)'")
-_SERIES_RU_RE = re.compile(r"серия «([^»]*)»")
+_QUERY_RE = re.compile(r"(?:запрос|query) «([^»]*)»")
+_SERIES_ATTR_RE = re.compile(r"series='([^']*)'")
+_SERIES_TEXT_RE = re.compile(r"(?:серия|series) «([^»]*)»")
 _OFFSET_RE = re.compile(r"([+-])(\d{2}):(\d{2})$")
 
 
@@ -242,7 +253,7 @@ def _step_markers(parsed: Mapping[str, Any], window: Mapping[str, Any], checks: 
     saturation = parsed.get("saturation") if isinstance(parsed.get("saturation"), Mapping) else None
     chosen = chosen_step(steps, window, checks)
     kind = _text(window.get("kind")).lower() or "step"
-    label = f"SLA: ступень {_text(chosen.get('index'))}" if chosen and _text(chosen.get("index")) else "SLA: окно"
+    label = t("report.marker.sla_step", index=_text(chosen.get("index"))) if chosen and _text(chosen.get("index")) else t("report.marker.sla_window")
     band = None
     if window and kind == "step":
         band = _band(window.get("start") or window.get("start_iso"), window.get("end") or window.get("end_iso"), label, "accent", "sla")
@@ -254,30 +265,31 @@ def _step_markers(parsed: Mapping[str, Any], window: Mapping[str, Any], checks: 
     if band is not None:
         out.append(band)
     for step in steps[1:]:
-        t = moment_ms(step.get("start_iso"))
-        if t is not None:
-            out.append(_marker("tick", t, None, "", "muted", "step"))
+        start_ms = moment_ms(step.get("start_iso"))
+        if start_ms is not None:
+            out.append(_marker("tick", start_ms, None, "", "muted", "step"))
     degradation_ms: Optional[int] = None
     if window and kind == "step" and (window.get("degraded_level") is not None or window.get("degraded_checks")):
         position = _position(steps, chosen)
         following = steps[position + 1] if 0 <= position < len(steps) - 1 else None
         degradation_ms = moment_ms(following.get("start_iso")) if following else moment_ms(window.get("end") or window.get("end_iso"))
         if degradation_ms is not None:
-            out.append(_marker("line", degradation_ms, None, f"деградация {clock(degradation_ms, offset)}", "fail", "degradation"))
+            out.append(_marker("line", degradation_ms, None, t("report.marker.degradation", time=clock(degradation_ms, offset)), "fail", "degradation"))
     drop_ms = moment_ms(saturation.get("rps_drop_iso")) if saturation is not None else None
     if drop_ms is None:
         after_drop = next((step for step in steps if step.get("after_drop") is True), None)
         drop_ms = moment_ms(after_drop.get("start_iso")) if after_drop else None
     if drop_ms is not None and (degradation_ms is None or abs(drop_ms - degradation_ms) > DROP_MERGE_MS):
-        out.append(_marker("line", drop_ms, None, f"падение RPS {clock(drop_ms, offset)}", "fail", "rps_drop"))
+        out.append(_marker("line", drop_ms, None, t("report.marker.rps_drop", time=clock(drop_ms, offset)), "fail", "rps_drop"))
     return out
 
 
 def _hold_markers(parsed: Mapping[str, Any], window: Mapping[str, Any]) -> List[Dict[str, Any]]:
     hold = _as_dict(_as_dict(parsed.get("stability_under_load")).get("hold"))
-    band = _band(hold.get("start_iso"), hold.get("end_iso"), "окно удержания", "accent", "hold")
+    label = t("report.marker.hold_window")
+    band = _band(hold.get("start_iso"), hold.get("end_iso"), label, "accent", "hold")
     if band is None and _text(window.get("kind")).lower() == "hold":
-        band = _band(window.get("start") or window.get("start_iso"), window.get("end") or window.get("end_iso"), "окно удержания", "accent", "hold")
+        band = _band(window.get("start") or window.get("start_iso"), window.get("end") or window.get("end_iso"), label, "accent", "hold")
     return [band] if band else []
 
 
@@ -287,12 +299,12 @@ def _spike_markers(parsed: Mapping[str, Any], window: Mapping[str, Any]) -> List
     for position, spike in enumerate(spikes if isinstance(spikes, list) else []):
         if not isinstance(spike, Mapping):
             continue
-        label = _text(spike.get("label")) or f"всплеск {_text(spike.get('index')) or position + 1}"
+        label = _text(spike.get("label")) or t("report.marker.spike_n", index=_text(spike.get("index")) or position + 1)
         band = _band(spike.get("start_iso"), spike.get("end_iso"), label, "warn", "spike")
         if band:
             out.append(band)
     if not out and _text(window.get("kind")).lower() == "spike":
-        band = _band(window.get("start") or window.get("start_iso"), window.get("end") or window.get("end_iso"), _text(window.get("title")) or "всплеск", "warn", "spike")
+        band = _band(window.get("start") or window.get("start_iso"), window.get("end") or window.get("end_iso"), _text(window.get("title")) or t("report.marker.spike"), "warn", "spike")
         if band:
             out.append(band)
     return out
@@ -323,7 +335,7 @@ def markers_for(final_row: Mapping[str, Any], step_table: Optional[Mapping[str, 
 
 def _message_hint(message: str) -> Tuple[str, str]:
     label = _LABEL_RE.search(message) or _QUERY_RE.search(message)
-    series = _SERIES_EN_RE.search(message) or _SERIES_RU_RE.search(message)
+    series = _SERIES_ATTR_RE.search(message) or _SERIES_TEXT_RE.search(message)
     return (label.group(1) if label else ""), (series.group(1) if series else "")
 
 
@@ -367,7 +379,7 @@ def thresholds_for(final_row: Mapping[str, Any], step_table: Optional[Mapping[st
             "query_label": label,
             "series": series,
             "value": value,
-            "label": spec[0].format(number_text(value)),
+            "label": t(spec[0], value=number_text(value)),
             "tone": spec[1],
         })
     return out

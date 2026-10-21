@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Common utilities shared across pages
 window.LoadLens = window.LoadLens || {};
 
@@ -36,16 +37,20 @@ window.LoadLens = window.LoadLens || {};
     const inner = document.createElement('div');
     const title = document.createElement('div');
     title.className = 'banner-title';
-    title.textContent = 'Хранилище недоступно';
+    title.textContent = LL.t('ui.storage_down.title');
     inner.appendChild(title);
-    inner.appendChild(document.createTextNode('Отчёты и архив сейчас не загружаются. '));
     if (LL.can('admin')) {
+      // The link stands where the {action} placeholder is in the sentence of the UI language.
       const link = document.createElement('a');
       link.href = '/recovery';
-      link.textContent = 'Проверить и исправить подключение';
-      inner.appendChild(link);
+      link.textContent = LL.t('ui.storage_down.fix_link');
+      const marker = '\u0000';
+      LL.t('ui.storage_down.text', { action: marker }).split(marker).forEach((part, i) => {
+        if (i) inner.appendChild(link);
+        if (part) inner.appendChild(document.createTextNode(part));
+      });
     } else {
-      inner.appendChild(document.createTextNode('Сообщите администратору LoadLens.'));
+      inner.appendChild(document.createTextNode(LL.t('ui.storage_down.text', { action: LL.t('ui.storage_down.ask_admin') })));
     }
     box.appendChild(inner);
     main.prepend(box);
@@ -109,32 +114,33 @@ window.LoadLens.dismissJobs = async function dismissJobs(jobIds) {
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
-      toast(data.error || `Не удалось очистить список задач (HTTP ${resp.status})`, 'error');
+      toast(data.error || LL.t('ui.jobs.dismiss_failed', { status: resp.status }), 'error');
       return null;
     }
     const hidden = Array.isArray(data.dismissed) ? data.dismissed.length : 0;
     const running = Array.isArray(data.skipped_running) ? data.skipped_running.length : 0;
-    const parts = [];
-    if (hidden) parts.push(`Скрыто задач: ${hidden}`);
-    if (running) parts.push(`ещё выполняются и остались в списке: ${running}`);
-    toast(parts.length ? parts.join(', ') : 'Эти задачи уже скрыты', running ? 'warn' : 'ok');
+    let text = LL.t('ui.jobs.already_hidden');
+    if (hidden && running) text = LL.t('ui.jobs.dismissed_some_running', { hidden, running });
+    else if (hidden) text = LL.t('ui.jobs.dismissed', { n: hidden });
+    else if (running) text = LL.t('ui.jobs.still_running', { n: running });
+    toast(text, running ? 'warn' : 'ok');
     return data;
   } catch (e) {
-    toast('Сервер не отвечает, список задач не очищен', 'error');
+    toast(LL.t('ui.jobs.no_answer'), 'error');
     return null;
   }
 };
 
-// Builds the "Скрыть" button of a finished job row; ``onDone`` reloads the list.
+// Builds the "Hide" button of a finished job row; ``onDone`` reloads the list.
 window.LoadLens.jobDismissButton = function jobDismissButton(job, onDone) {
   const LL = window.LoadLens;
   if (job.status === 'running' || !LL.can('engineer')) return null;
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'btn btn-sm btn-ghost job-dismiss';
-  btn.textContent = 'Скрыть';
-  btn.title = 'Убрать задачу из списка. Она останется доступна по ссылке.';
-  btn.setAttribute('aria-label', `Скрыть задачу ${job.run_name || ''}`.trim());
+  btn.textContent = LL.t('ui.jobs.hide');
+  btn.title = LL.t('ui.jobs.hide_title');
+  btn.setAttribute('aria-label', LL.t('ui.jobs.hide_aria', { name: job.run_name || '' }).trim());
   btn.addEventListener('click', async () => {
     btn.disabled = true;
     const result = await LL.dismissJobs([job.job_id]);
@@ -144,7 +150,7 @@ window.LoadLens.jobDismissButton = function jobDismissButton(job, onDone) {
   return btn;
 };
 
-// Badge with the number of load tests going on now at «Запуск теста» in the menu, for engineers and
+// Badge with the number of load tests going on now at «Run a test» in the menu, for engineers and
 // admins: polled every 30 s. The dashboard reads the runs itself, claims the badge and passes the number.
 (function installActiveRunsBadge() {
   const LL = window.LoadLens;
@@ -157,7 +163,7 @@ window.LoadLens.jobDismissButton = function jobDismissButton(job, onDone) {
     const n = Math.max(0, Math.floor(Number(total) || 0));
     badge.hidden = n === 0;
     badge.textContent = n > 99 ? '99+' : String(n);
-    badge.title = n ? `Идут прогоны: ${n}` : '';
+    badge.title = n ? LL.t('ui.active_runs.title', { n }) : '';
   }
   async function poll() {
     clearTimeout(timer);
@@ -182,14 +188,15 @@ window.LoadLens.jobDismissButton = function jobDismissButton(job, onDone) {
   });
 })();
 
-// «Изменён вручную: ivanov, 17.10.2026 15:20. Причина: …» for a manual verdict ({verdict, reason, author,
+// «Changed manually: ivanov, 2026-10-17 15:20. Reason: …» for a manual verdict ({verdict, reason, author,
 // changed_at}); '' without one.
 window.LoadLens.manualVerdictTitle = function manualVerdictTitle(manual) {
   if (!manual || !manual.verdict) return '';
   const LL = window.LoadLens;
   const who = [String(manual.author || '').trim(), manual.changed_at ? LL.formatDateTime(manual.changed_at) : ''].filter(Boolean).join(', ');
   const reason = String(manual.reason || '').trim();
-  return `Изменён вручную${who ? `: ${who}` : ''}.${reason ? ` Причина: ${reason}` : ''}`;
+  const head = who ? LL.t('ui.manual_verdict.changed_by', { who }) : LL.t('ui.manual_verdict.changed');
+  return reason ? `${head} ${LL.t('ui.manual_verdict.reason', { reason })}` : head;
 };
 
 // Project area selector in the header. The chosen area is stored in a cookie that
@@ -212,7 +219,7 @@ window.LoadLens.initProjectArea = function initProjectArea() {
       sel.innerHTML = '';
       const all = document.createElement('option');
       all.value = '';
-      all.textContent = 'Все области';
+      all.textContent = LL.t('ui.project_area.all');
       sel.appendChild(all);
       LL.projectAreas.forEach((a) => {
         const id = (a && typeof a === 'object') ? String(a.id || '') : String(a || '');
@@ -270,17 +277,20 @@ window.LoadLens.colorFor = function colorFor(name, alpha = 0.85) {
   return `hsla(${hue.toFixed(0)}, ${saturation}%, ${lightness}%, ${alpha})`;
 };
 
-window.LoadLens.DOMAIN_TITLES = {
-  final: 'Итог',
-  jvm: 'JVM',
-  database: 'База данных',
-  kafka: 'Kafka',
-  microservices: 'Микросервисы',
-  hard_resources: 'Ресурсы узлов',
-  lt_framework: 'Нагрузочный инструмент',
-  lt_generators: 'Ресурсы генераторов нагрузки',
-  application_logs: 'Логи приложений',
+// Tables whose values follow the UI language: every value is read from the dictionary when it is accessed,
+// so the keys, Object.keys() and JSON stay the same while the text is LL.t of the key.
+window.LoadLens.messageTable = function messageTable(keys, text) {
+  const out = {};
+  (keys || []).forEach((key) => {
+    Object.defineProperty(out, key, { enumerable: true, get: () => text(key) });
+  });
+  return out;
 };
+
+window.LoadLens.DOMAIN_TITLES = window.LoadLens.messageTable(
+  ['final', 'jvm', 'database', 'kafka', 'microservices', 'hard_resources', 'lt_framework', 'lt_generators', 'application_logs'],
+  (key) => window.LoadLens.t(`common.domain.${key}`),
+);
 window.LoadLens.domainTitle = function domainTitle(key) {
   return window.LoadLens.DOMAIN_TITLES[key] || String(key || '');
 };
@@ -298,26 +308,51 @@ window.LoadLens.reportDomainTitles = function reportDomainTitles(rows) {
   return titles && typeof titles === 'object' ? titles : {};
 };
 
-window.LoadLens.TEST_TYPE_LABELS = {
-  step: 'Ступенчатый (max perf)',
-  soak: 'Долговременный (soak)',
-  spike: 'Всплески (spike)',
-  stress: 'Стресс',
-};
+window.LoadLens.TEST_TYPE_LABELS = window.LoadLens.messageTable(
+  ['step', 'soak', 'spike', 'stress'],
+  (key) => window.LoadLens.t(`common.test_type.${key}`),
+);
 window.LoadLens.testTypeLabel = function testTypeLabel(key) {
   const k = String(key || '').trim().toLowerCase();
   if (!k) return '—';
   return window.LoadLens.TEST_TYPE_LABELS[k] || k;
 };
 
-window.LoadLens.VERDICTS = ['Успешно', 'Есть риски', 'Провал', 'Недостаточно данных'];
-window.LoadLens.verdictClass = function verdictClass(verdict) {
-  const t = String(verdict || '').toLowerCase();
-  if (t.includes('усп')) return 'ok';
-  if (t.includes('риск')) return 'warn';
-  if (t.includes('провал')) return 'fail';
-  return 'na';
-};
+// Verdicts: the API sends codes (pass | risk | fail | no_data); reports saved before the codes may still
+// carry the Russian labels. The one JS copy of AI/verdicts.py (tests/test_verdicts.py keeps them equal):
+// codes and old labels map exactly, other text is no_data (the heuristic for free text lives in Python).
+(function verdictHelpers(LL) {
+  const CODES = ['pass', 'risk', 'fail', 'no_data'];
+  // The Russian labels stored as the verdict before the codes (AI/verdicts.py LEGACY): parsed into codes in
+  // every UI language. Shown labels come from the dictionary (common.verdict.<code>).
+  const LEGACY_LABELS = { pass: 'Успешно', risk: 'Есть риски', fail: 'Провал', no_data: 'Недостаточно данных' };
+  const label = (code) => LL.t(`common.verdict.${code}`);
+  // Pill tones of app.css, the report pill classes and the glossary terms of each code.
+  const TONES = { pass: 'ok', risk: 'warn', fail: 'fail', no_data: 'na' };
+  const REPORT_CLASSES = { pass: 'report-verdict-success', risk: 'report-verdict-risk', fail: 'report-verdict-fail', no_data: 'report-verdict-na' };
+  const TERMS = { pass: 'verdict_success', risk: 'verdict_risk', fail: 'verdict_fail', no_data: 'verdict_na' };
+  // Lowercase with the letter ё folded into е and runs of spaces collapsed.
+  const norm = (value) => String(value).toLowerCase().replace(/ё/g, 'е').split(/\s+/).filter(Boolean).join(' ');
+  const EXACT = {};
+  CODES.forEach((code) => { EXACT[norm(code)] = code; });
+  CODES.forEach((code) => { EXACT[norm(LEGACY_LABELS[code])] = code; });
+
+  LL.VERDICTS = CODES.slice();
+  // {code: label} in the UI language.
+  LL.VERDICT_LABELS = LL.messageTable(CODES, label);
+  // Code of a code or an old label (case, ё and spaces do not matter); ``fallback`` (default 'no_data')
+  // for anything else, e.g. null to tell an unknown value from no_data.
+  LL.verdictCode = function verdictCode(value, fallback) {
+    const missing = fallback === undefined ? 'no_data' : fallback;
+    if (value === null || value === undefined) return missing;
+    return Object.prototype.hasOwnProperty.call(EXACT, norm(value)) ? EXACT[norm(value)] : missing;
+  };
+  LL.verdictLabel = function verdictLabel(value) { return label(LL.verdictCode(value)); };
+  // Pill tone (ok / warn / fail / na) of the status classes.
+  LL.verdictClass = function verdictClass(value) { return TONES[LL.verdictCode(value)]; };
+  LL.verdictReportClass = function verdictReportClass(value) { return REPORT_CLASSES[LL.verdictCode(value)]; };
+  LL.verdictTermKey = function verdictTermKey(value) { return TERMS[LL.verdictCode(value)]; };
+})(window.LoadLens);
 
 window.LoadLens.formatDateTime = function formatDateTime(value) {
   const d = value instanceof Date ? value : new Date(value);
@@ -334,39 +369,41 @@ window.LoadLens.reportUrl = function reportUrl(run) {
   return name ? `/reports/${encodeURIComponent(name)}` : '/reports';
 };
 
-// "5 мин назад" style date for lists; older than a week (or in the future) falls back to formatDateTime.
-// Up to a minute in the future still reads «только что» to absorb clock skew between server and browser.
+// "5 min ago" style date for lists (common.time.*); older than a week (or in the future) falls back to
+// formatDateTime. Up to a minute in the future still reads "just now" to absorb clock skew between server and browser.
 window.LoadLens.relativeTime = function relativeTime(value, now = Date.now()) {
+  const LL = window.LoadLens;
   const d = value instanceof Date ? value : new Date(value);
-  const t = d.getTime();
+  const time = d.getTime();
   const nowMs = now instanceof Date ? now.getTime() : Number(now);
-  if (value === null || value === undefined || value === '' || !Number.isFinite(t) || !Number.isFinite(nowMs)) return '—';
-  const diff = nowMs - t;
+  if (value === null || value === undefined || value === '' || !Number.isFinite(time) || !Number.isFinite(nowMs)) return '—';
+  const diff = nowMs - time;
   const MIN = 60000; const HOUR = 60 * MIN; const DAY = 24 * HOUR;
-  if (diff < -MIN) return window.LoadLens.formatDateTime(d);
-  if (diff < MIN) return 'только что';
-  if (diff < HOUR) return `${Math.floor(diff / MIN)} мин назад`;
-  if (diff < DAY) return `${Math.floor(diff / HOUR)} ч назад`;
+  if (diff < -MIN) return LL.formatDateTime(d);
+  if (diff < MIN) return LL.t('common.time.just_now');
+  if (diff < HOUR) return LL.t('common.time.minutes_ago', { n: Math.floor(diff / MIN) });
+  if (diff < DAY) return LL.t('common.time.hours_ago', { n: Math.floor(diff / HOUR) });
   const midnight = (ms) => { const x = new Date(ms); x.setHours(0, 0, 0, 0); return x.getTime(); };
-  const days = Math.round((midnight(nowMs) - midnight(t)) / DAY);
+  const days = Math.round((midnight(nowMs) - midnight(time)) / DAY);
   const pad = (n) => String(n).padStart(2, '0');
-  if (days <= 1) return `вчера в ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  if (days < 7) return `${days} дн назад`;
-  return window.LoadLens.formatDateTime(d);
+  if (days <= 1) return LL.t('common.time.yesterday_at', { time: `${pad(d.getHours())}:${pad(d.getMinutes())}` });
+  if (days < 7) return LL.tn('common.time.days_ago', days);
+  return LL.formatDateTime(d);
 };
 
-// Human duration: «45 с», «59 мин», «1 ч 05 мин», «2 д 3 ч»; '—' for invalid or negative input.
+// Human duration (common.time.*): ru «45 с», «59 мин», «1 ч 05 мин», «2 д 3 ч»; '—' for invalid or negative input.
 window.LoadLens.formatDuration = function formatDuration(ms) {
+  const LL = window.LoadLens;
   if (ms === null || ms === undefined || ms === '' || typeof ms === 'boolean') return '—';
   const value = Number(ms);
   if (!Number.isFinite(value) || value < 0) return '—';
   const totalSec = Math.floor(value / 1000);
-  if (totalSec < 60) return `${totalSec} с`;
+  if (totalSec < 60) return LL.t('common.time.seconds', { n: totalSec });
   const totalMin = Math.floor(totalSec / 60);
-  if (totalMin < 60) return `${totalMin} мин`;
+  if (totalMin < 60) return LL.t('common.time.minutes', { n: totalMin });
   const totalHours = Math.floor(totalMin / 60);
-  if (totalHours < 24) return `${totalHours} ч ${String(totalMin % 60).padStart(2, '0')} мин`;
-  return `${Math.floor(totalHours / 24)} д ${totalHours % 24} ч`;
+  if (totalHours < 24) return LL.t('common.time.hours_minutes', { h: totalHours, m: String(totalMin % 60).padStart(2, '0') });
+  return LL.t('common.time.days_hours', { d: Math.floor(totalHours / 24), h: totalHours % 24 });
 };
 
 // Browser time zone as "UTC+03:00 (Europe/Moscow)" so users know which clock the dates use.

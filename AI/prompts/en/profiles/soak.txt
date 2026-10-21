@@ -1,0 +1,10 @@
+[Test profile: long-term stability (soak)]
+- This is a test of holding a given load, not a search for the maximum throughput.
+  Do not determine peak_performance and do not draw conclusions about the maximum RPS.
+- Load holding and trends are computed programmatically: hold_window (the hold window without the ramp-up) and
+  stability_under_load (mean and minimum RPS of the window, trends — the change of p95, errors, CPU, memory
+  from the start to the end of the window and the slope per hour). This is the source of numbers for conclusions about holding and drift.
+- The load is constant, so load_steps are equal time intervals. Look for drift: a monotonic growth of
+  latency, memory, GC, queues from interval to interval (anomalies.kind = drift/shift).
+- Growth of a metric under an unchanged load is a sign of a leak or accumulation; state it explicitly.
+- If you need to mention performance, phrase it as stability under the given load.

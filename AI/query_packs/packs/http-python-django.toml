@@ -10,24 +10,37 @@ description = """
 Метрики django-prometheus: ответы по статусам, задержка с учётом middleware (общий p95) и по view. \
 В multiprocess-режиме gunicorn нужен PROMETHEUS_MULTIPROC_DIR, иначе значения воркеров не сводятся.
 """
+description_en = """
+django-prometheus metrics: responses by status, latency including middleware (overall p95) and by view. In \
+gunicorn multiprocess mode PROMETHEUS_MULTIPROC_DIR is required, otherwise the values of the workers are not \
+combined.
+"""
 requires_metrics = ["django_http_responses_total_by_status_total", "django_http_requests_latency_including_middlewares_seconds_bucket"]
 prompt_addendum = """
 Метрики Django: django_http_responses_total_by_status_total — ответы по status, \
 django_http_requests_latency_including_middlewares_seconds — время запроса с middleware, \
 django_http_requests_latency_seconds_by_view_method — время по view. Времена в секундах.
 """
+prompt_addendum_en = """
+Django metrics: django_http_responses_total_by_status_total are responses by status, \
+django_http_requests_latency_including_middlewares_seconds is the request time including middleware, \
+django_http_requests_latency_seconds_by_view_method is the time by view. Times are in seconds.
+"""
 
 [variables.service_label]
 title = "Лейбл с именем сервиса"
+title_en = "Label with the service name"
 default = "job"
 pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
 
 [variables.matchers]
 title = "Дополнительные матчеры"
+title_en = "Extra matchers"
 default = ""
 
 [variables.window]
 title = "Окно rate()"
+title_en = "rate() window"
 default = "1m"
 pattern = '^[1-9][0-9]*[smh]$'
 
@@ -39,6 +52,7 @@ required = true
 query = 'sum by ({{service_label}}) (rate(django_http_responses_total_by_status_total{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}"]
 description = "Ответы в секунду."
+description_en = "Responses per second."
 
 [[queries]]
 label = "HTTP (Django): average request time (sec) by service"
@@ -47,6 +61,7 @@ unit = "seconds"
 query = 'sum by ({{service_label}}) (rate(django_http_requests_latency_including_middlewares_seconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}])) / sum by ({{service_label}}) (rate(django_http_requests_latency_including_middlewares_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}"]
 description = "Среднее время запроса с middleware, с."
+description_en = "Average request time including middleware, s."
 
 [[queries]]
 label = "HTTP (Django): p95 request time (sec) by service"
@@ -55,6 +70,7 @@ unit = "seconds"
 query = 'histogram_quantile(0.95, sum by (le, {{service_label}}) (rate(django_http_requests_latency_including_middlewares_seconds_bucket{ {{service_label}}!="", {{matchers}} }[{{window}}])))'
 keys = ["{{service_label}}"]
 description = "p95 времени запроса, с."
+description_en = "p95 of the request time, s."
 
 [[queries]]
 label = "HTTP (Django): 5xx error rate (%) by service"
@@ -63,6 +79,7 @@ unit = "percent"
 query = '100 * (sum by ({{service_label}}) (rate(django_http_responses_total_by_status_total{status=~"5..", {{service_label}}!="", {{matchers}} }[{{window}}])) or 0 * sum by ({{service_label}}) (rate(django_http_responses_total_by_status_total{ {{service_label}}!="", {{matchers}} }[{{window}}]))) / sum by ({{service_label}}) (rate(django_http_responses_total_by_status_total{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}"]
 description = "Доля ответов 5xx, %."
+description_en = "Share of 5xx responses, %."
 
 [[queries]]
 label = "HTTP (Django): RPS by service & view (top 20)"
@@ -71,6 +88,7 @@ unit = "per_second"
 query = 'topk(20, sum by ({{service_label}}, view) (rate(django_http_requests_latency_seconds_by_view_method_count{ {{service_label}}!="", {{matchers}} }[{{window}}])))'
 keys = ["{{service_label}}", "view"]
 description = "Самые нагруженные view."
+description_en = "Busiest views."
 
 [[queries]]
 label = "HTTP (Django): p95 request time (sec) by service & view (top 20)"
@@ -79,3 +97,4 @@ unit = "seconds"
 query = 'topk(20, histogram_quantile(0.95, sum by (le, {{service_label}}, view) (rate(django_http_requests_latency_seconds_by_view_method_bucket{ {{service_label}}!="", {{matchers}} }[{{window}}]))))'
 keys = ["{{service_label}}", "view"]
 description = "Самые медленные view по p95."
+description_en = "Slowest views by p95."

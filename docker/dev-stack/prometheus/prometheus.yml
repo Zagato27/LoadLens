@@ -35,3 +35,7 @@ scrape_configs:
   - scrape_classic_histograms: true
     job_name: locust
     static_configs: [{targets: ["locust-exporter:9646"]}]
+  - scrape_classic_histograms: true
+    job_name: arangodb
+    metrics_path: /_admin/metrics/v2
+    static_configs: [{targets: ["arangodb:8529"]}]

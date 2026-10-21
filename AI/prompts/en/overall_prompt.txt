@@ -1,0 +1,54 @@
+TASK: the final report on the results of a load test, based on the domain reports and the cross-domain context.
+
+INPUT DATA:
+- Domain reports (JSON, already checked against the numbers; findings may have verification.status):
+  JVM:
+{answer_jvm}
+  Database:
+{answer_database}
+  Kafka:
+{answer_kafka}
+  Microservices:
+{answer_microservices}
+  Node resources (CPU/MEM/Disk):
+{answer_hard_resources}
+  Load testing tool (lt_framework):
+{answer_lt_framework}
+  Load generator resources (lt_generators; if a generator hit a resource limit, the load and latencies at that step
+  are distorted — take this into account in the verdict):
+{answer_lt_generators}
+  Application ERROR logs:
+{answer_application_logs}
+- Context of the system under test (reference):
+{system_context_brief}
+- In the JSON context: load_steps, timeline (metric × step across all domains), baseline, deterministic_sla,
+  designated_peak_performance, test_profile, domain packs and test type data (stability_under_load for soak,
+  spike_analysis for spike, saturation for stress).
+
+ANALYSIS FOCUS:
+1. Step where degradation began: from timeline determine at which step latency/errors first grew in lt_framework and
+   which metrics of other domains changed at the same step (JVM, DB, Kafka, resources, logs). A match by step is
+   a correlation; phrase it as a coincidence in time, not as a proven cause.
+2. Chains between components: describe the sequence "load → resource/component → user-facing metric"
+   only where every link is confirmed by numbers from timeline or the domain reports.
+3. SLA: deterministic_sla is the source of truth. The final verdict must not contradict deterministic_sla.verdict;
+   if target_rps_check.passed=true, do not write that the target RPS was not reached, and vice versa. Do not recompute the SLA yourself.
+4. Result by test type (test_profile.normalized_test_type):
+   - step/stress — maximum performance only from designated_peak_performance (stable_max, method
+     last_stable_step); for stress call it the saturation point and describe saturation.failure_mode and
+     saturation.limiting_resource. Do not take RPS from the microservices domain and do not use short peaks.
+   - soak — load hold and trends from stability_under_load (hold, trends, flagged_trends) instead of
+     peak_performance.
+   - spike — spike level, p95 and error growth relative to the background, and recovery time from spike_analysis.
+5. Baseline: if it is available — name the key differences from the previous run (key_deltas) and take them into account
+   in the verdict (a regression against a run with verdict "pass" is a risk). If the baseline is unavailable — do not mention a comparison with the past.
+6. Do not use domain findings with verification.status="unverified" as grounds for the verdict — mention them
+   only with the note "not confirmed by data".
+
+REQUIREMENTS:
+- Final findings are systemic (cross-component) or the most significant domain findings; do not retell all domain findings.
+- In every finding: the step by label, numbers from timeline/domain reports, the affected components.
+- Prioritize recommendations by systemic impact and link them to findings via for_finding_ids.
+- verdict_rationale is mandatory and must explain exactly the final status (consistent with deterministic_sla.verdict).
+- Fill in the peak_performance field from designated_peak_performance; if stable_max is absent or
+  designated_peak_performance.not_applicable=true — do not add it.

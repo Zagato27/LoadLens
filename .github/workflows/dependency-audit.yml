@@ -1,12 +1,12 @@
-# Known vulnerabilities in the pinned dependencies. Runs on dependency changes and weekly, because
-# new advisories appear without any change in this repository.
+# Known vulnerabilities and license drift in the pinned dependencies. Runs on dependency changes and
+# weekly, because new advisories appear without any change in this repository.
 name: Dependency audit
 
 on:
   push:
-    paths: ["requirements*.txt", ".github/workflows/dependency-audit.yml"]
+    paths: ["requirements*.txt", "THIRD_PARTY_NOTICES.md", ".github/workflows/dependency-audit.yml"]
   pull_request:
-    paths: ["requirements*.txt", ".github/workflows/dependency-audit.yml"]
+    paths: ["requirements*.txt", "THIRD_PARTY_NOTICES.md", ".github/workflows/dependency-audit.yml"]
   schedule:
     - cron: "17 5 * * 1"
   workflow_dispatch:
@@ -26,3 +26,50 @@ jobs:
         run: python -m pip install --upgrade pip pip-audit
       - name: Audit requirements.txt
         run: pip-audit --requirement requirements.txt --progress-spinner off --desc
+
+  # Licenses of the installed packages (runtime set only) and the completeness of THIRD_PARTY_NOTICES.md.
+  licenses:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the runtime dependencies and pip-licenses
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pip-licenses
+      # pip-licenses compares the license names of each package (every trove classifier, else the License
+      # metadata field, --from=mixed) with the --fail-on list as whole strings, case-insensitively: "GPL" alone
+      # would match neither "GNU General Public License v3 (GPLv3)" nor "GPL-3.0-only", and --partial-match
+      # would also catch "GNU Library or Lesser General Public License (LGPL)". LGPL is accepted on purpose:
+      # psycopg2 ("LGPL with exceptions or ZPL") and paramiko (LGPL-2.1) stay dynamically linked and unmodified.
+      # The list therefore spells out the classifier and SPDX forms of GPL, AGPL, SSPL and EUPL.
+      - name: Refuse copyleft licenses that Apache-2.0 cannot carry
+        run: >-
+          pip-licenses --from=mixed --summary --fail-on
+          "GNU General Public License (GPL);GNU General Public License v2 (GPLv2);GNU General Public License v2 or later (GPLv2+);GNU General Public License v3 (GPLv3);GNU General Public License v3 or later (GPLv3+);GPL;GPLv2;GPLv2+;GPLv3;GPLv3+;GPL-2.0;GPL-2.0-only;GPL-2.0-or-later;GPL-3.0;GPL-3.0-only;GPL-3.0-or-later;GNU Affero General Public License v3;GNU Affero General Public License v3 or later (AGPLv3+);AGPL;AGPLv3;AGPLv3+;AGPL-3.0;AGPL-3.0-only;AGPL-3.0-or-later;SSPL;SSPL-1.0;Server Side Public License;European Union Public Licence 1.0 (EUPL 1.0);European Union Public Licence 1.1 (EUPL 1.1);European Union Public Licence 1.2 (EUPL 1.2);EUPL;EUPL-1.0;EUPL-1.1;EUPL-1.2"
+      - name: Licenses of the runtime packages
+        run: pip-licenses --from=mixed --order=license --format=markdown
+      # Mirrors tests/test_license_files.py: every package of requirements.txt is named in the notices.
+      - name: Every requirement is listed in THIRD_PARTY_NOTICES.md
+        run: |
+          python - <<'EOF'
+          import re, sys
+          from pathlib import Path
+          notices = Path("THIRD_PARTY_NOTICES.md")
+          if not notices.is_file():
+              sys.exit("THIRD_PARTY_NOTICES.md is missing")
+          text = notices.read_text(encoding="utf-8").lower()
+          missing = []
+          for line in Path("requirements.txt").read_text(encoding="utf-8").splitlines():
+              line = line.split("#", 1)[0].strip()
+              if not line or line.startswith("-"):
+                  continue
+              name = re.split(r"[\[<>=!~; ]", line, 1)[0].strip().lower()
+              if name and name.replace("_", "-") not in text.replace("_", "-"):
+                  missing.append(name)
+          if missing:
+              sys.exit("not listed in THIRD_PARTY_NOTICES.md: " + ", ".join(missing))
+          print("THIRD_PARTY_NOTICES.md names every requirement")
+          EOF

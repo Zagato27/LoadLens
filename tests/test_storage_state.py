@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Storage circuit breaker: short timeouts, fast failures while the database is down, one probe at a time."""
 
 import logging

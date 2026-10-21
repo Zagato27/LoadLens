@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """OpenAI-compatible LLM stub for a LoadLens sandbox on 127.0.0.1:5090.
 
 How to run (own console, or in the background; Ctrl+C stops it):
@@ -5,6 +6,7 @@ How to run (own console, or in the background; Ctrl+C stops it):
     C:/Python312/python.exe tools/stubs/llm_stub.py                    # 2 s per answer, like a fast model
     C:/Python312/python.exe tools/stubs/llm_stub.py --delay 0.2        # quick functional checks
     C:/Python312/python.exe tools/stubs/llm_stub.py --delay 5 --jitter 0.3 --log %TEMP%/ll_stubs/llm.jsonl
+    C:/Python312/python.exe tools/stubs/llm_stub.py --lang en          # always answer in English
 
 Point the sandbox at it in its settings_runtime.json (``tools/bench_endpoints.py --setup-stubs`` writes it):
 
@@ -15,14 +17,19 @@ Point the sandbox at it in its settings_runtime.json (``tools/bench_endpoints.py
 (+- ``--jitter`` share, deterministic per request) and answers by the kind of request:
 
 * report analysis of a domain (the context JSON carries ``"domain": "<key>"``): a valid ``LLMAnalysis``
-  JSON (verdict, rationale, qualitative findings without numbers, actions) for that domain; the final
+  JSON (verdict code, rationale, qualitative findings without numbers, actions) for that domain; the final
   analysis (context with ``designated_peak_performance``) and the verification pass (``unverified_findings``)
   get the overall answer with ``peak_performance``. Findings carry no numbers on purpose: the programmatic
   check marks them "qualitative", so no verification pass is triggered.
-* judge (system prompt of AI/scoring.py ``JUDGE_SYSTEM_PROMPT``): scores for every candidate index found.
-* context import (system prompt of loadlens_app/context_import.py): the fixed "Checkout" system context draft
+* judge (system prompt ``judge.system`` of AI/prompts/<lang>/_strings.json, ru or en): scores for every
+  candidate index found.
+* context import (system prompt ``context_import.system``, ru or en): the fixed "Checkout" system context draft
   the e2e test of context import expects (this is what the original %TEMP%/ll_ctx_e2e/llm_stub.py answered).
 * connection check of the settings page ("Отвечай одним словом."): ``OK``.
+
+Language of the analysis answers (``--lang``): ``auto`` (default) answers in the language of the system prompt
+(Russian when it is mostly Cyrillic, else English; without a system prompt the user prompt decides), ``ru`` and
+``en`` force one. Verdicts are codes (pass | risk | fail | no_data), as AI/prompts/*/_response_format.txt asks.
 
 With the defaults of settings.example.py (``self_consistency_k`` 3, a judge per domain) one report with six
 domains makes 28 calls: (6 domains + final) x (3 candidates + 1 judge); with ``llm.openai.max_concurrent`` 2
@@ -31,7 +38,8 @@ the LLM phase lasts about 14 x ``--delay``.
 Other endpoints: ``GET /v1/models``; ``GET /_stub/stats`` (calls by kind and domain, delay settings) and
 ``POST /_stub/reset`` - ``tools/bench_endpoints.py --during-job`` reads them to report the number of calls.
 ``--fail-every N`` answers every N-th call with 500 (retry paths). ``--log FILE`` appends the request bodies
-as JSON lines (off by default; the prompts are large). Listens on 127.0.0.1/localhost only. Standard library.
+as JSON lines (off by default; the prompts are large). Listens on 127.0.0.1/localhost; ``--host 0.0.0.0`` is
+for a container of the demo stack (docker/docker-compose.demo.yml). Standard library.
 """
 
 from __future__ import annotations
@@ -49,6 +57,8 @@ from urllib.parse import urlsplit
 
 DEFAULT_PORT = 5090
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+# Inside a container (docker/docker-compose.demo.yml) the stub must answer the other containers.
+CONTAINER_HOSTS = frozenset({"0.0.0.0", "::"})
 MODEL = "stub-model"
 
 # Context import (loadlens_app/context_import.py): the draft the context-import e2e test expects.
@@ -76,50 +86,102 @@ CONTEXT_DRAFT = {
     },
 }
 
-# Per domain: verdict, component, what was looked at, the finding and the action. No digits anywhere.
+LANGS = ("ru", "en")
+# Per domain: verdict code, component, what was looked at, the finding and the action. No digits anywhere.
+# hard_resources answers ``risk``, the other domains ``pass``.
 DOMAINS: dict[str, dict[str, str]] = {
-    "jvm": {"title": "JVM", "verdict": "Успешно", "metric": "jvm_memory_used_bytes",
+    "jvm": {"title": "JVM", "verdict": "pass", "metric": "jvm_memory_used_bytes",
             "finding": "Куча и паузы сборщика мусора стабильны на всех ступенях нагрузки",
             "action": "Оставить текущие настройки памяти JVM"},
-    "database": {"title": "База данных", "verdict": "Успешно", "metric": "hikaricp_connections_active",
+    "database": {"title": "База данных", "verdict": "pass", "metric": "hikaricp_connections_active",
                  "finding": "Пул соединений не исчерпывается, ожидающих потоков нет",
                  "action": "Наблюдать за пулом соединений на следующих прогонах"},
-    "kafka": {"title": "Kafka", "verdict": "Успешно", "metric": "kafka_consumergroup_lag",
+    "kafka": {"title": "Kafka", "verdict": "pass", "metric": "kafka_consumergroup_lag",
               "finding": "Лаг потребителей не растёт, сообщения обрабатываются без задержек",
               "action": "Изменений не требуется"},
-    "microservices": {"title": "Микросервисы", "verdict": "Успешно", "metric": "http_server_requests_seconds_count",
+    "microservices": {"title": "Микросервисы", "verdict": "pass", "metric": "http_server_requests_seconds_count",
                       "finding": "Время ответа сервисов растёт вместе с нагрузкой без скачков ошибок",
                       "action": "Сравнить время ответа с прошлым прогоном"},
-    "hard_resources": {"title": "Ресурсы", "verdict": "Есть риски", "metric": "node_cpu_seconds_total",
+    "hard_resources": {"title": "Ресурсы", "verdict": "risk", "metric": "node_cpu_seconds_total",
                        "finding": "Загрузка процессора узлов растёт ступенями вслед за нагрузкой",
                        "action": "Проверить запас по процессору перед повышением нагрузки"},
-    "lt_framework": {"title": "Инструмент нагрузки", "verdict": "Успешно", "metric": "http_reqs",
+    "lt_framework": {"title": "Инструмент нагрузки", "verdict": "pass", "metric": "http_reqs",
                      "finding": "Нагрузка подавалась ступенями, ошибок генератора не видно",
                      "action": "Сохранить профиль нагрузки для следующего прогона"},
-    "lt_generators": {"title": "Генераторы нагрузки", "verdict": "Успешно", "metric": "node_cpu_seconds_total",
+    "lt_generators": {"title": "Генераторы нагрузки", "verdict": "pass", "metric": "node_cpu_seconds_total",
                       "finding": "Генераторы не упирались в процессор и сеть",
                       "action": "Изменений не требуется"},
-    "application_logs": {"title": "Логи приложений", "verdict": "Успешно", "metric": "error_count",
+    "application_logs": {"title": "Логи приложений", "verdict": "pass", "metric": "error_count",
                          "finding": "Новых типов ошибок в логах не появилось",
                          "action": "Изменений не требуется"},
-    "final": {"title": "Итог", "verdict": "Успешно", "metric": "http_reqs",
+    "final": {"title": "Итог", "verdict": "pass", "metric": "http_reqs",
               "finding": "Система держала нагрузку на всех ступенях без деградации",
               "action": "Принять результат теста и сохранить его как базовый"},
 }
+# The same domains in English (verdicts and metrics are shared).
+DOMAINS_EN: dict[str, dict[str, str]] = {
+    "jvm": {"title": "JVM", "finding": "The heap and the garbage collector pauses are stable on every load step",
+            "action": "Keep the current JVM memory settings"},
+    "database": {"title": "Database", "finding": "The connection pool is not exhausted, no threads are waiting",
+                 "action": "Watch the connection pool in the next runs"},
+    "kafka": {"title": "Kafka", "finding": "The consumer lag does not grow, messages are processed without delays",
+              "action": "No changes needed"},
+    "microservices": {"title": "Microservices", "finding": "The response time of the services grows with the load without error bursts",
+                      "action": "Compare the response time with the previous run"},
+    "hard_resources": {"title": "Resources", "finding": "The CPU usage of the nodes grows in steps following the load",
+                       "action": "Check the CPU headroom before raising the load"},
+    "lt_framework": {"title": "Load tool", "finding": "The load was applied in steps, no generator errors are visible",
+                     "action": "Keep the load profile for the next run"},
+    "lt_generators": {"title": "Load generators", "finding": "The generators did not hit their CPU or network limits",
+                      "action": "No changes needed"},
+    "application_logs": {"title": "Application logs", "finding": "No new error types appeared in the logs",
+                         "action": "No changes needed"},
+    "final": {"title": "Summary", "finding": "The system held the load on every step without degradation",
+              "action": "Accept the test result and keep it as the baseline"},
+}
+_TEXTS = {
+    "ru": {"domain": "Домен", "evidence": "Ряды {metric} без резких скачков", "observed": "стабильно",
+           "note": "ответ заглушки", "details": "Ответ заглушки модели для песочницы LoadLens: действие не требует изменений в системе."},
+    "en": {"domain": "Domain", "evidence": "The {metric} series have no sharp jumps", "observed": "stable",
+           "note": "stub answer", "details": "Answer of the model stub for the LoadLens sandbox: the action needs no changes in the system."},
+}
 _DOMAIN_RE = re.compile(r'"domain"\s*:\s*"([a-z_]+)"')
+_CYRILLIC_RE = re.compile(r"[\u0400-\u04ff]")
+_LATIN_RE = re.compile("[A-Za-z]")
 _INDEX_RE = re.compile(r'"index"\s*:\s*(\d+)')
+
+
+def _parts(body: dict) -> tuple[str, str]:
+    messages = body.get("messages") if isinstance(body.get("messages"), list) else []
+    system = " ".join(str(m.get("content") or "") for m in messages if isinstance(m, dict) and m.get("role") == "system")
+    user = "\n".join(str(m.get("content") or "") for m in messages if isinstance(m, dict) and m.get("role") != "system")
+    return system, user
+
+
+def detect_language(text: str) -> str:
+    """``ru`` when at least a third of the letters are Cyrillic, else ``en``."""
+    cyrillic = len(_CYRILLIC_RE.findall(text or ""))
+    latin = len(_LATIN_RE.findall(text or ""))
+    return "ru" if cyrillic and cyrillic * 2 >= latin else "en"
+
+
+def request_language(body: dict, mode: str = "auto") -> str:
+    """Language of the answer: ``mode`` when it is ru/en, else the language of the system prompt (user prompt)."""
+    if mode in LANGS:
+        return mode
+    system, user = _parts(body)
+    # Only the instructions, not the JSON context: metric names are Latin in both languages.
+    return detect_language(system.strip() or user.split("\n\n{", 1)[0])
 
 
 def classify(body: dict) -> tuple[str, str]:
     """``(kind, domain)`` of a chat completion request: kind is judge, context_import, ping or analysis."""
-    messages = body.get("messages") if isinstance(body.get("messages"), list) else []
-    system = " ".join(str(m.get("content") or "") for m in messages if isinstance(m, dict) and m.get("role") == "system")
-    user = "\n".join(str(m.get("content") or "") for m in messages if isinstance(m, dict) and m.get("role") != "system")
-    if "судьёй" in system or "судьей" in system:
+    system, user = _parts(body)
+    if "судьёй" in system or "судьей" in system or "independent judge" in system:
         return "judge", ""
-    if "переносите описание" in system:
+    if "переносите описание" in system or "description of a software system" in system:
         return "context_import", ""
-    if system.strip().startswith("Отвечай одним словом"):
+    if system.strip().startswith(("Отвечай одним словом", "Answer with one word", "Reply with one word")):
         return "ping", ""
     if "unverified_findings" in user:
         return "analysis", "final"
@@ -129,9 +191,13 @@ def classify(body: dict) -> tuple[str, str]:
     return "analysis", (match.group(1) if match else "unknown")
 
 
-def analysis_answer(domain: str) -> dict:
-    """A valid LLMAnalysis payload for ``domain`` (AI/scoring.py), with qualitative findings only."""
-    spec = DOMAINS.get(domain) or {**DOMAINS["final"], "title": domain or "Домен"}
+def analysis_answer(domain: str, lang: str = "ru") -> dict:
+    """A valid LLMAnalysis payload for ``domain`` (AI/scoring.py) in ``lang``, with qualitative findings only."""
+    lang = lang if lang in LANGS else "ru"
+    texts = _TEXTS[lang]
+    spec = DOMAINS.get(domain) or {**DOMAINS["final"], "title": domain or texts["domain"]}
+    if lang == "en":
+        spec = {**spec, **(DOMAINS_EN.get(domain) or {**DOMAINS_EN["final"], "title": domain or texts["domain"]})}
     component = domain if domain in DOMAINS and domain != "final" else "system"
     answer: dict[str, Any] = {
         "verdict": spec["verdict"],
@@ -140,17 +206,17 @@ def analysis_answer(domain: str) -> dict:
         "findings": [{
             "id": "f1",
             "summary": spec["finding"],
-            "severity": "medium" if spec["verdict"] == "Есть риски" else "low",
+            "severity": "medium" if spec["verdict"] == "risk" else "low",
             "component": component,
             "start_time": "",
             "end_time": "",
             "peak_time": "",
-            "evidence_summary": f"Ряды {spec['metric']} без резких скачков",
-            "evidence_items": [{"metric": spec["metric"], "observed_value": "стабильно", "threshold": "", "note": "ответ заглушки"}],
+            "evidence_summary": texts["evidence"].format(metric=spec["metric"]),
+            "evidence_items": [{"metric": spec["metric"], "observed_value": texts["observed"], "threshold": None, "note": texts["note"]}],
         }],
         "recommended_actions": [{
             "summary": spec["action"],
-            "details": "Ответ заглушки модели для песочницы LoadLens: действие не требует изменений в системе.",
+            "details": texts["details"],
             "priority": "low",
             "affected_components": [component],
             "for_finding_ids": ["f1"],
@@ -158,7 +224,7 @@ def analysis_answer(domain: str) -> dict:
         "affected_components": [component],
     }
     if domain in ("lt_framework", "final"):
-        answer["peak_performance"] = {"max_rps": 1000.0, "method": "stub", "note": "ответ заглушки"}
+        answer["peak_performance"] = {"max_rps": 1000.0, "method": "stub", "note": texts["note"]}
     return answer
 
 
@@ -170,8 +236,8 @@ def judge_answer(user_text: str) -> list[dict]:
     return [{"index": i, "rubric": rubric, "overall": 0.78} for i in range(min(count, 20))]
 
 
-def answer_text(body: dict) -> tuple[str, str, str]:
-    """``(content, kind, domain)`` for a request body."""
+def answer_text(body: dict, lang: str = "auto") -> tuple[str, str, str]:
+    """``(content, kind, domain)`` for a request body; ``lang`` is auto, ru or en (analysis answers)."""
     kind, domain = classify(body)
     if kind == "judge":
         messages = body.get("messages") or []
@@ -181,7 +247,7 @@ def answer_text(body: dict) -> tuple[str, str, str]:
         return "```json\n" + json.dumps(CONTEXT_DRAFT, ensure_ascii=False) + "\n```", kind, domain
     if kind == "ping":
         return "OK", kind, domain
-    return json.dumps(analysis_answer(domain), ensure_ascii=False), kind, domain
+    return json.dumps(analysis_answer(domain, request_language(body, lang)), ensure_ascii=False), kind, domain
 
 
 def call_delay(body_bytes: bytes, delay: float, jitter: float) -> float:
@@ -283,7 +349,7 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(raw or b"{}")
         except ValueError:
             return self._send(400, {"error": {"message": "invalid JSON body"}})
-        content, kind, domain = answer_text(body if isinstance(body, dict) else {})
+        content, kind, domain = answer_text(body if isinstance(body, dict) else {}, self.options.lang)
         number = self.stats.begin(kind, domain)
         failed = False
         try:
@@ -305,15 +371,17 @@ class Handler(BaseHTTPRequestHandler):
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="OpenAI-compatible LLM stub for the LoadLens sandbox (see the module docstring).")
-    parser.add_argument("--host", default="127.0.0.1", help="address to listen on (local only)")
+    parser.add_argument("--host", default="127.0.0.1", help="address to listen on: 127.0.0.1/localhost, or 0.0.0.0 inside a container")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--delay", type=float, default=2.0, help="seconds per answer (model latency)")
     parser.add_argument("--jitter", type=float, default=0.0, help="+- share of --delay, deterministic per request")
     parser.add_argument("--fail-every", type=int, default=0, help="answer every N-th call with 500 (0: never)")
     parser.add_argument("--log", help="append the request bodies to this file as JSON lines")
+    parser.add_argument("--lang", choices=("auto", *LANGS), default="auto",
+                        help="language of the analysis answers: auto (the system prompt decides), ru or en")
     args = parser.parse_args(argv)
-    if args.host not in LOCAL_HOSTS:
-        parser.error("the stub listens on 127.0.0.1/localhost only")
+    if args.host not in LOCAL_HOSTS and args.host not in CONTAINER_HOSTS:
+        parser.error("the stub listens on 127.0.0.1/localhost, or on 0.0.0.0 inside a container")
     if args.delay < 0 or not 0 <= args.jitter <= 1 or args.fail_every < 0:
         parser.error("--delay and --fail-every must not be negative, --jitter is within 0..1")
     return args
@@ -329,7 +397,7 @@ def make_server(args: argparse.Namespace) -> ThreadingHTTPServer:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     server = make_server(args)
-    print(f"llm stub on http://{args.host}:{args.port}/v1 (delay {args.delay} s +- {args.jitter:.0%})", flush=True)
+    print(f"llm stub on http://{args.host}:{args.port}/v1 (delay {args.delay} s +- {args.jitter:.0%}, lang {args.lang})", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

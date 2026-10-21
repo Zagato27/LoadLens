@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Shared UI components: preferences, toasts, dialogs, combobox, tabs, theme, glossary tooltips.
 (function () {
   const LL = window.LoadLens = window.LoadLens || {};
@@ -12,9 +13,10 @@
 
   // ---- preferences -------------------------------------------------------
   // localStorage under "loadlens.<key>", JSON-encoded. "theme" stays a plain string because the
-  // pre-paint script in base.html reads it raw. Known keys: theme, recentServices.
+  // pre-paint script in base.html reads it raw; "lang" (a copy of the loadlens.lang cookie written by
+  // locale.js) is plain too. Known keys: theme, lang, recentServices.
   const PREFS_PREFIX = 'loadlens.';
-  const RAW_PREFS = new Set(['theme']);
+  const RAW_PREFS = new Set(['theme', 'lang']);
   const prefListeners = new Map();
   function decodePref(key, raw, fallback) {
     if (raw === null || raw === undefined) return fallback;
@@ -61,11 +63,13 @@
   try { localStorage.removeItem(`${PREFS_PREFIX}density`); } catch (e) { /* storage unavailable */ }
 
   // ---- theme -------------------------------------------------------------
-  // The stored preference (mode) is 'system', 'light' or 'dark'; <html data-theme> always carries the
-  // resolved theme. The pre-paint scripts (base.html, login.html, recovery.html, storage_unavailable.html)
-  // resolve 'system' the same way before the first paint; here it keeps following the OS setting.
+  // The stored preference (mode) is 'system', 'light' or 'dark'; without a stored choice (or with an unknown
+  // value) the mode is 'system'. <html data-theme> always carries the resolved theme. The pre-paint scripts
+  // (base.html, login.html, recovery.html, storage_unavailable.html) resolve the mode the same way before the
+  // first paint; here 'system' keeps following the OS setting.
   const THEME_MODES = ['system', 'light', 'dark'];
-  const THEME_LABELS = { system: 'Как в системе', light: 'Светлая', dark: 'Тёмная' };
+  // Name of a mode in the UI language (the value shown in the theme menu button).
+  const THEME_LABELS = { system: () => LL.t('ui.theme.system'), light: () => LL.t('ui.theme.light'), dark: () => LL.t('ui.theme.dark') };
   const themeListeners = [];
   let lightQuery = null;
   try {
@@ -79,8 +83,7 @@
     return mode === 'light' ? 'light' : 'dark';
   }
   const storedTheme = LL.prefs.get('theme', null);
-  // Without a stored choice the page keeps the theme it was rendered with (dark by default).
-  let themeMode = THEME_MODES.includes(storedTheme) ? storedTheme : documentTheme();
+  let themeMode = THEME_MODES.includes(storedTheme) ? storedTheme : 'system';
   // Listeners get the resolved theme; `always` notifies even when it did not change (explicit set()).
   function applyTheme(always) {
     const before = documentTheme();
@@ -96,7 +99,7 @@
     // Stored preference: 'system', 'light' or 'dark'.
     mode() { return themeMode; },
     set(name) {
-      themeMode = THEME_MODES.includes(name) ? name : 'dark';
+      themeMode = THEME_MODES.includes(name) ? name : 'system';
       LL.prefs.set('theme', themeMode);
       applyTheme(true);
     },
@@ -114,7 +117,7 @@
   };
   // A choice made in another tab (storage event) applies here too; set() in this tab is already applied.
   LL.prefs.onChange('theme', (value) => {
-    const mode = THEME_MODES.includes(value) ? value : 'dark';
+    const mode = THEME_MODES.includes(value) ? value : 'system';
     if (mode === themeMode) return;
     themeMode = mode;
     applyTheme(false);
@@ -128,15 +131,37 @@
   }
   if (themeMode === 'system') applyTheme(false);
 
-  // ---- theme menu (sidebar foot) --------------------------------------------
+  // ---- interface language ------------------------------------------------------
+  // locale.js writes the cookie and reloads; another tab that switched the language asks this one to reload
+  // (no automatic reload: unsaved forms would be lost).
+  function interfaceLocale() {
+    return ui.locale && typeof ui.locale.current === 'function' ? ui.locale.current() : (LL.locale || 'ru');
+  }
+  LL.prefs.onChange('lang', (value) => {
+    const locale = ui.locale;
+    if (!locale || typeof locale.normalize !== 'function') return;
+    const code = locale.normalize(value);
+    if (!code || code === interfaceLocale() || locale.switching()) return;
+    if (typeof ui.toast === 'function') ui.toast(LL.t('ui.locale.changed'), { tone: 'info', timeout: 0 });
+  });
+
+  // ---- view menu (top bar): theme and interface language -----------------------
   function syncViewMenu() {
     const menu = document.getElementById('viewMenu');
     if (!menu) return;
     menu.querySelectorAll('[data-view-pref="theme"]').forEach((item) => {
       item.setAttribute('aria-checked', item.dataset.value === themeMode ? 'true' : 'false');
     });
+    const lang = interfaceLocale();
+    const langItems = Array.from(menu.querySelectorAll('[data-view-pref="lang"]'));
+    langItems.forEach((item) => {
+      item.setAttribute('aria-checked', item.dataset.value === lang ? 'true' : 'false');
+    });
     const value = document.getElementById('viewMenuValue');
-    if (value) value.textContent = THEME_LABELS[themeMode] || '';
+    if (!value) return;
+    const theme = THEME_LABELS[themeMode] ? THEME_LABELS[themeMode]() : '';
+    // "Dark · EN": the language part only when the menu offers the language switch.
+    value.textContent = langItems.length ? `${theme} · ${String(lang).toUpperCase()}` : theme;
   }
   function wireViewMenu() {
     const menu = document.getElementById('viewMenu');
@@ -150,11 +175,18 @@
       const checked = items().find((item) => item.getAttribute('aria-checked') === 'true') || items()[0];
       if (checked) checked.focus();
     });
-    // A choice applies the theme and closes the menu, returning focus to its button.
+    // A choice applies the theme (or switches the language: locale.js reloads the page) and closes the menu,
+    // returning focus to its button.
     menu.addEventListener('click', (event) => {
-      const item = event.target.closest('[data-view-pref="theme"]');
+      const item = event.target.closest('[data-view-pref]');
       if (!item || !menu.contains(item)) return;
-      ui.theme.set(item.dataset.value);
+      if (item.dataset.viewPref === 'lang') {
+        if (item.dataset.value !== interfaceLocale() && ui.locale) ui.locale.set(item.dataset.value);
+      } else if (item.dataset.viewPref === 'theme') {
+        ui.theme.set(item.dataset.value);
+      } else {
+        return;
+      }
       menu.open = false;
       if (summary) summary.focus();
     });
@@ -182,23 +214,30 @@
     });
   }
 
+  // Font stacks of app.css (--mono, --sans) for canvases, which cannot read CSS variables in a font string.
+  const MONO_FONT = "'JetBrains Mono', Consolas, 'Courier New', monospace";
+  const SANS_FONT = "'Golos Text', 'Segoe UI', system-ui, Arial, sans-serif";
+  ui.fonts = { mono: MONO_FONT, sans: SANS_FONT };
   // Chart.js colors follow the active theme.
   ui.chartColors = function chartColors() {
     const css = getComputedStyle(document.documentElement);
     return {
-      grid: css.getPropertyValue('--chart-grid').trim() || 'rgba(255, 255, 255, 0.06)',
-      text: css.getPropertyValue('--chart-text').trim() || '#8b93a5',
-      background: css.getPropertyValue('--bg-chart').trim() || '#12151c',
+      grid: css.getPropertyValue('--line').trim() || 'rgba(255, 255, 255, 0.09)',
+      text: css.getPropertyValue('--dim').trim() || '#84837d',
+      background: css.getPropertyValue('--bg').trim() || '#131416',
       accent: css.getPropertyValue('--accent').trim() || '#6c5ce7',
       accentSoft: css.getPropertyValue('--accent-soft').trim() || 'rgba(108, 92, 231, 0.16)',
-      statusOk: css.getPropertyValue('--status-ok').trim() || '#22c55e',
-      statusWarn: css.getPropertyValue('--status-warn').trim() || '#f59e0b',
-      statusFail: css.getPropertyValue('--status-fail').trim() || '#ef4444',
-      statusNa: css.getPropertyValue('--status-na').trim() || '#94a3b8',
-      surface: css.getPropertyValue('--bg-elev').trim() || '#151821',
-      border: css.getPropertyValue('--border').trim() || 'rgba(255, 255, 255, 0.09)',
-      ink: css.getPropertyValue('--text').trim() || '#e8eaf0',
-      inkMuted: css.getPropertyValue('--text-muted').trim() || '#a3aab8'
+      statusOk: css.getPropertyValue('--ok').trim() || '#52c483',
+      statusWarn: css.getPropertyValue('--warn').trim() || '#e4a93b',
+      statusFail: css.getPropertyValue('--fail').trim() || '#e4574f',
+      statusNa: css.getPropertyValue('--na').trim() || '#8b8a86',
+      // The page surface (chart gaps "in the page color") and the popover surface of floating layers.
+      surface: css.getPropertyValue('--bg').trim() || '#131416',
+      popover: css.getPropertyValue('--bg-pop').trim() || '#1c1d20',
+      border: css.getPropertyValue('--line').trim() || 'rgba(255, 255, 255, 0.09)',
+      borderStrong: css.getPropertyValue('--line-2').trim() || 'rgba(255, 255, 255, 0.18)',
+      ink: css.getPropertyValue('--text').trim() || '#e9e7e2',
+      inkMuted: css.getPropertyValue('--muted').trim() || '#a3a19a'
     };
   };
   function applyChartDefaults() {
@@ -207,17 +246,21 @@
     const defaults = window.Chart.defaults;
     defaults.color = colors.text;
     defaults.borderColor = colors.grid;
-    if (defaults.font) defaults.font.family = "'Inter', 'Segoe UI', system-ui, Arial, sans-serif";
+    // Axes, tooltips and canvas labels are readings: JetBrains Mono 11px (the --mono stack of app.css).
+    if (defaults.font) {
+      defaults.font.family = MONO_FONT;
+      defaults.font.size = 11;
+    }
     const tooltip = defaults.plugins && defaults.plugins.tooltip;
     if (tooltip) {
-      tooltip.backgroundColor = colors.surface;
-      tooltip.borderColor = colors.border;
+      tooltip.backgroundColor = colors.popover;
+      tooltip.borderColor = colors.borderStrong;
       tooltip.borderWidth = 1;
       tooltip.titleColor = colors.ink;
       tooltip.bodyColor = colors.ink;
       tooltip.footerColor = colors.inkMuted;
       tooltip.padding = 10;
-      tooltip.cornerRadius = 8;
+      tooltip.cornerRadius = 3;
       tooltip.boxPadding = 4;
       tooltip.usePointStyle = true;
     }
@@ -267,7 +310,7 @@
     const close = document.createElement('button');
     close.className = 'toast-close';
     close.type = 'button';
-    close.setAttribute('aria-label', 'Закрыть уведомление');
+    close.setAttribute('aria-label', LL.t('ui.toast.close'));
     close.textContent = '×';
     close.addEventListener('click', () => el.remove());
     el.appendChild(text);
@@ -336,11 +379,11 @@
       const cancel = document.createElement('button');
       cancel.type = 'button';
       cancel.className = 'btn';
-      cancel.textContent = config.cancelText || 'Отмена';
+      cancel.textContent = config.cancelText || LL.t('common.action.cancel');
       const ok = document.createElement('button');
       ok.type = 'button';
       ok.className = `btn ${config.danger ? 'btn-danger' : 'btn-primary'}`;
-      ok.textContent = config.confirmText || 'ОК';
+      ok.textContent = config.confirmText || LL.t('ui.dialog.ok');
       actions.appendChild(cancel);
       actions.appendChild(ok);
       let settled = false;
@@ -371,7 +414,7 @@
   }
   ui.confirm = function confirm(config) {
     const cfg = typeof config === 'string' ? { message: config } : (config || {});
-    return openDialog({ title: cfg.title || 'Подтверждение', message: cfg.message, confirmText: cfg.confirmText || 'Подтвердить', cancelText: cfg.cancelText, danger: !!cfg.danger });
+    return openDialog({ title: cfg.title || LL.t('ui.dialog.confirm_title'), message: cfg.message, confirmText: cfg.confirmText || LL.t('ui.dialog.confirm'), cancelText: cfg.cancelText, danger: !!cfg.danger });
   };
   ui.prompt = function prompt(config) {
     const cfg = config || {};
@@ -379,14 +422,14 @@
       title: cfg.title || '',
       message: cfg.message,
       bodyHtml: cfg.bodyHtml,
-      confirmText: cfg.confirmText || 'Сохранить',
+      confirmText: cfg.confirmText || LL.t('common.action.save'),
       cancelText: cfg.cancelText,
       input: { label: cfg.label || '', value: cfg.value || '', placeholder: cfg.placeholder || '', validate: cfg.validate, list: cfg.list, multiline: !!cfg.multiline }
     });
   };
   ui.alert = function alert(config) {
     const cfg = typeof config === 'string' ? { message: config } : (config || {});
-    return openDialog({ title: cfg.title || 'Сообщение', message: cfg.message, bodyHtml: cfg.bodyHtml, confirmText: 'Закрыть', cancelText: '' }).then(() => true);
+    return openDialog({ title: cfg.title || LL.t('ui.dialog.message_title'), message: cfg.message, bodyHtml: cfg.bodyHtml, confirmText: LL.t('common.action.close'), cancelText: '' }).then(() => true);
   };
   // Generic dialog with custom body and actions: actions = [{label, primary, danger, onClick(close, bodyEl)}].
   ui.dialog = function dialog(config) {
@@ -406,7 +449,7 @@
         el.remove();
         resolve(value);
       };
-      (cfg.actions || [{ label: 'Закрыть' }]).forEach((action) => {
+      (cfg.actions || [{ label: LL.t('common.action.close') }]).forEach((action) => {
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = `btn ${action.primary ? 'btn-primary' : ''} ${action.danger ? 'btn-danger' : ''}`.trim();
@@ -432,7 +475,7 @@
     host.classList.add('combobox');
     host.innerHTML = `
       <input type="text" class="combobox-input" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="${listId}" placeholder="${escapeHtml(opts.placeholder || '')}" autocomplete="off" />
-      <button type="button" class="combobox-clear" aria-label="Очистить" style="display:none">×</button>
+      <button type="button" class="combobox-clear" aria-label="${escapeHtml(LL.t('ui.combobox.clear'))}" style="display:none">×</button>
       <div class="combobox-list" id="${listId}" role="listbox"></div>`;
     const input = host.querySelector('.combobox-input');
     const clearBtn = host.querySelector('.combobox-clear');
@@ -453,7 +496,7 @@
       if (!items.length) {
         const empty = document.createElement('div');
         empty.className = 'combobox-empty';
-        empty.textContent = opts.emptyText || 'Ничего не найдено';
+        empty.textContent = opts.emptyText || LL.t('ui.combobox.empty');
         list.appendChild(empty);
         return;
       }
@@ -487,7 +530,7 @@
         if (seq !== requestSeq) return;
         items = [];
         renderList();
-        list.querySelector('.combobox-empty').textContent = `Ошибка загрузки: ${e.message}`;
+        list.querySelector('.combobox-empty').textContent = LL.t('ui.combobox.load_error', { error: e.message });
         setOpen(true);
       }
     }
@@ -575,35 +618,20 @@
   };
 
   // ---- glossary ----------------------------------------------------------
-  LL.GLOSSARY = LL.GLOSSARY || {
-    stable_max: 'Максимальная нагрузка (RPS), которую система держала стабильно не менее заданного времени (по умолчанию 5 минут) без деградации. Кратковременные пики не учитываются.',
-    peak_max: 'Абсолютный максимум метрики за окно теста. Используется как запасной вариант, когда стабильная ступень не найдена.',
-    verdict_success: 'Все заданные SLA-критерии соблюдены (или, если SLA не заданы, ИИ не нашёл существенных проблем).',
-    verdict_risk: 'Целевой RPS достигнут, но нарушены вторичные пороги (задержки, ошибки, ресурсы), либо ИИ отметил локальные деградации.',
-    verdict_fail: 'Целевой RPS не достигнут или нарушены критичные пороги SLA.',
-    verdict_na: 'Метрик недостаточно для оценки: не собраны данные lt_framework или не заданы критерии.',
-    sla_first: 'Если для сервиса заданы SLA-критерии, итоговый вердикт определяется ими; оценка ИИ показывается рядом как дополнение.',
-    confidence: 'Служебная оценка качества ответа ИИ: сочетание оценки судьи (второй модели) и эвристической проверки чисел и названий метрик по данным.',
-    judge: 'Отдельный запрос к модели, который оценивает кандидаты ответов по рубрике: опора на данные, покрытие проблем, конкретика, учёт SLA, полезность рекомендаций.',
-    p95: '95-й перцентиль: значение, ниже которого лежат 95 % измерений. Показывает «хвост» задержек без влияния единичных выбросов.',
-    step_profile: 'Ступенчатый тест: нагрузка растёт ступенями; анализ ищет последнюю ступень, на которой система была стабильна.',
-    resample: 'Интервал агрегации временных рядов перед анализом (например, 5 минут): метрики усредняются внутри интервала.',
-    target_rps: 'Целевая пропускная способность. В ступенчатом и стресс-тесте — уровень, который нужно достичь на стабильной ступени; в soak — уровень, который нужно удерживать весь тест; в spike — уровень всплеска.',
-    error_rate: 'Доля запросов с ошибками в процентах за окно теста.',
-    trend_better: 'Изменение метрики между прогонами оценивается по её смыслу: рост RPS — лучше, рост задержек и ошибок — хуже.',
-    unverified: 'Числа в находке не нашлись в собранных метриках. Такая находка остаётся в отчёте, но не используется как основание вердикта.',
-    test_type_step: 'Ступенчатый тест: нагрузка растёт ступенями; анализ ищет последнюю ступень, на которой система была стабильна.',
-    test_type_soak: 'Долговременный тест: заданная нагрузка держится долго; анализ проверяет удержание нагрузки и ищет дрейф задержек, ошибок и ресурсов.',
-    test_type_spike: 'Тест всплесками: нагрузка резко растёт и возвращается к фону; анализ оценивает рост задержек и ошибок во время всплеска и время восстановления.',
-    test_type_stress: 'Стресс-тест: нагрузка выходит за проектную мощность; анализ ищет точку насыщения, характер деградации и ограничивающий ресурс.',
-    hold_window: 'Окно удержания: часть soak-теста без разгона и финального спада, где RPS держался на рабочем уровне. SLA soak-теста проверяется на этом окне.',
-    trend_drift: 'Изменение метрики от начала к концу окна удержания при неизменной нагрузке. Рост задержек, ошибок или памяти больше порога отмечается как риск.',
-    spike_window: 'Всплеск: участок, где RPS поднялся выше фона в 1,5 раза и держался не меньше минуты.',
-    overshoot: 'Рост p95 во время всплеска относительно фона прямо перед ним.',
-    recovery_time: 'Время от конца всплеска до момента, когда p95 вернулся к уровню фона (с допуском 10 %).',
-    saturation_point: 'Точка насыщения: последняя ступень стресс-теста, на которой выполнялись пороги задержек и ошибок.',
-    limiting_resource: 'Ресурс узлов (CPU или память), который превысил порог SLA или сильнее всего вырос к ступени деградации.'
-  };
+  // Term explanations in the UI language (glossary.<term>); a page may set LL.GLOSSARY before ui.js loads.
+  const GLOSSARY_TERMS = [
+    'stable_max', 'peak_max', 'verdict_success', 'verdict_risk', 'verdict_fail', 'verdict_na', 'sla_first',
+    'confidence', 'judge', 'p95', 'step_profile', 'resample', 'target_rps', 'error_rate', 'trend_better',
+    'unverified', 'test_type_step', 'test_type_soak', 'test_type_spike', 'test_type_stress', 'hold_window',
+    'trend_drift', 'spike_window', 'overshoot', 'recovery_time', 'saturation_point', 'limiting_resource'
+  ];
+  LL.GLOSSARY = LL.GLOSSARY || (function glossaryTable() {
+    const out = {};
+    GLOSSARY_TERMS.forEach((term) => {
+      Object.defineProperty(out, term, { enumerable: true, get: () => LL.t(`glossary.${term}`) });
+    });
+    return out;
+  })();
   ui.term = function term(key, text) {
     const tip = LL.GLOSSARY[key];
     const label = text || key;
@@ -760,14 +788,15 @@
   // ---- header wiring -----------------------------------------------------
   document.addEventListener('DOMContentLoaded', () => {
     wireViewMenu();
-    // On narrow screens the sidebar is an off-canvas drawer toggled from the top bar.
+    // Below 1024px the navigation and the controls of the top bar (#appSidebar) become an off-canvas drawer
+    // toggled by the menu button of the bar.
     const navToggle = document.getElementById('navToggle');
-    const sidebar = document.getElementById('appSidebar');
-    if (navToggle && sidebar) {
+    const drawer = document.getElementById('appSidebar');
+    if (navToggle && drawer) {
       const setOpen = (open) => {
         document.body.classList.toggle('nav-open', open);
         navToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
-        navToggle.setAttribute('aria-label', open ? 'Закрыть меню' : 'Открыть меню');
+        navToggle.setAttribute('aria-label', open ? LL.t('ui.nav_menu.close') : LL.t('ui.nav_menu.open'));
       };
       navToggle.addEventListener('click', () => setOpen(!document.body.classList.contains('nav-open')));
       const navClose = document.getElementById('navClose');
@@ -776,7 +805,7 @@
       if (backdrop) backdrop.addEventListener('click', () => setOpen(false));
       document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && document.body.classList.contains('nav-open')) setOpen(false); });
     }
-    // The sidebar user and view menus close on an outside click or Escape.
+    // The user and view menus of the top bar close on an outside click or Escape.
     const closeUserMenus = (except) => document.querySelectorAll('details.user-menu[open], details.view-menu[open]').forEach((m) => { if (!except || !m.contains(except)) m.removeAttribute('open'); });
     document.addEventListener('click', (event) => closeUserMenus(event.target));
     document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeUserMenus(null); });

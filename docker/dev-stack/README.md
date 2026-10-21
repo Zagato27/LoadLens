@@ -16,6 +16,7 @@
 | Keycloak 26 (Quarkus, Micrometer) | JVM и HTTP-метрики Micrometer | 18080 |
 | FastAPI-приложение (`pyapp/`) | Python runtime и HTTP-метрики FastAPI | 18000 |
 | Kafka 3.8 KRaft + kafka_exporter (профиль `kafka`) | топики, consumer lag | — |
+| ArangoDB 3.12 + arangobench (профиль `arangodb`) | встроенные метрики `/_admin/metrics/v2`: HTTP, AQL, планировщик, транзакции | 18529 |
 | Locust + locust_exporter (профиль `locust`) | метрики Locust | — |
 | k6 0.54 (профиль `load`) | ступенчатая нагрузка: InfluxDB, Prometheus RW (trend stats и native histograms) | — |
 | Gatling 3.10.5 + VictoriaMetrics 1.106 (профиль `gatling`) | Graphite-вывод Gatling, ступени 10 → 20 → 30 пользователей/с | 18428 |
@@ -45,6 +46,10 @@ docker compose --profile gatling run --rm gatling
 # то же в VictoriaMetrics с relabeling; outputDirectoryBaseName — тег прогона вместо имени симуляции
 docker compose --profile gatling up -d victoriametrics-labels
 docker compose --profile gatling run --rm -e JAVA_OPTS="-Dgatling.data.graphite.host=victoriametrics-labels -Dgatling.core.outputDirectoryBaseName=devstack-labels" gatling
+
+# ArangoDB: CRUD документов, AQL-вставки и AQL-чтения 10 минут (ARANGO_LOAD_SEC меняет длительность)
+docker compose --profile arangodb up -d arangodb
+docker compose --profile arangodb run --rm arangobench
 
 # Проверка пакетов (из корня репозитория; окно — последние 15 минут)
 python docker/dev-stack/check_packs.py --json dev-stack-results.json
@@ -77,7 +82,7 @@ unzip -q gatling.zip && mv gatling-charts-highcharts-bundle-3.10.5 docker/dev-st
 пробелами, запрос `/fail` с ошибкой и закрытый сценарий рядом с открытым. `gatling/gatling.conf` включает
 Graphite-вывод в VictoriaMetrics.
 
-Остановка: `docker compose --profile kafka --profile locust --profile load --profile gatling --profile generator down -v`.
+Остановка: `docker compose --profile kafka --profile locust --profile load --profile gatling --profile arangodb --profile generator down -v`.
 
 ## Генератор нагрузки для страницы «Запуск теста»
 
@@ -207,6 +212,20 @@ Kubernetes + k6 (InfluxDB)» первым: подходят 6 из 9 пакет�
 фильтр прогона находит его ряды, а с чужим тегом рядов нет. Правило для групп даёт запросы `Catalog.Item_page`; без него
 пути из шести частей остаются как есть. С правилом пользователей вида `gatling.users.*.*.*` (оно не срабатывает) пользователи
 лежат в `gatling_request_active{request="users"}`, и пакет читает их оттуда.
+
+## Результат прогона 2026-10-20: ArangoDB
+
+`db-arangodb` вернул данные по всем 17 запросам на ArangoDB 3.12.12 (single server, лимит контейнера 2 CPU и 3 ГБ,
+`ARANGODB_OVERRIDE_DETECTED_TOTAL_MEMORY` = 2 ГБ) под нагрузкой `arangobench`: около 1600 HTTP-запросов и 420 AQL-запросов
+в секунду, из них около 9 медленнее порога 0,05 с. CPU процесса — 100 % от двух ядер, память — 32 % от 2 ГБ.
+Пакет отмечен `verified = true`.
+
+Что показал живой сервер: лимит контейнера виден только в `arangodb_server_statistics_effective_cpu_cores` и
+`..._effective_physical_memory`, а `cpu_cores` и `physical_memory` показывают хост или значения
+`ARANGODB_OVERRIDE_DETECTED_*`; поэтому пакет делит CPU и память на меньшее из двух. Без подмены памяти ArangoDB
+рассчитывает кэши RocksDB от памяти хоста. Гистограмма `client_connection_statistics_total_time` начинается с 10 мс,
+поэтому для HTTP-запросов в пакете только среднее время, а p95 считается по AQL (`aql_query_time`, бакеты от 95 мкс).
+Нулями остались отклонённые запросы, прерванные транзакции и остановки записи RocksDB: стенд до них не доходит.
 
 ## Что стенд не покрывает
 

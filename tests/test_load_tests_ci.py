@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """CI generators run the team's own pipeline: parameters read from GitLab and Jenkins, checked values, launch,
 status and the report window cut by the RPS data."""
 

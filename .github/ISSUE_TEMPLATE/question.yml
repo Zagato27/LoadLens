@@ -1,0 +1,26 @@
+name: Question
+description: Something in the documentation is unclear, or you are not sure how to set LoadLens up for your stack
+title: "[Question]: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        GitHub Discussions is the better place for most questions: others can find and answer them. Use this form when the answer
+        probably belongs in the documentation.
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you tried
+      description: Pages of the documentation you read, settings you changed, what happened.
+  - type: input
+    id: version
+    attributes:
+      label: LoadLens version and setup
+      placeholder: "1.0.0, Docker Compose, InfluxDB 1.8 with JMeter"

@@ -11,24 +11,36 @@ description = """
 Runtime-метрики OpenTelemetry Java agent 1.x (до стабилизации соглашений JVM): process_runtime_jvm_*. \
 Длительность GC приходит в миллисекундах и переводится в секунды.
 """
+description_en = """
+Runtime metrics of the OpenTelemetry Java agent 1.x (before the JVM conventions were stabilized): \
+process_runtime_jvm_*. GC duration comes in milliseconds and is converted to seconds.
+"""
 requires_metrics = ["process_runtime_jvm_memory_usage_bytes", "process_runtime_jvm_cpu_utilization_ratio"]
 prompt_addendum = """
 Метрики OpenTelemetry JVM 1.x: process_runtime_jvm_memory_usage_bytes{type="heap"} — занятая куча, \
 process_runtime_jvm_memory_limit_bytes — её предел, process_runtime_jvm_gc_duration_milliseconds — \
 длительность сборок, process_runtime_jvm_cpu_utilization_ratio — CPU процесса как доля 0..1.
 """
+prompt_addendum_en = """
+OpenTelemetry JVM 1.x metrics: process_runtime_jvm_memory_usage_bytes{type="heap"} is the used heap, \
+process_runtime_jvm_memory_limit_bytes is its limit, process_runtime_jvm_gc_duration_milliseconds is the \
+collection duration, process_runtime_jvm_cpu_utilization_ratio is process CPU as a 0..1 fraction.
+"""
 
 [variables.service_label]
 title = "Лейбл с именем сервиса"
+title_en = "Label with the service name"
 default = "job"
 pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
 
 [variables.matchers]
 title = "Дополнительные матчеры"
+title_en = "Extra matchers"
 default = ""
 
 [variables.window]
 title = "Окно rate()"
+title_en = "rate() window"
 default = "2m"
 pattern = '^[1-9][0-9]*[smh]$'
 
@@ -43,6 +55,7 @@ required = true
 query = 'sum by ({{service_label}}, instance) (process_runtime_jvm_memory_usage_bytes{type="heap", {{service_label}}!="", {{matchers}} })'
 keys = ["{{service_label}}", "instance"]
 description = "Занятая куча экземпляра."
+description_en = "Used heap of an instance."
 
 [[queries]]
 label = "JVM (OTel 1.x): Heap limit (bytes) by ({{service_label}}, instance)"
@@ -51,6 +64,7 @@ unit = "bytes"
 query = 'sum by ({{service_label}}, instance) (process_runtime_jvm_memory_limit_bytes{type="heap", {{service_label}}!="", {{matchers}} } > 0)'
 keys = ["{{service_label}}", "instance"]
 description = "Предел кучи."
+description_en = "Heap limit."
 
 [[queries]]
 label = "JVM (OTel 1.x): CPU utilization by ({{service_label}}, instance)"
@@ -60,6 +74,7 @@ required = true
 query = 'max by ({{service_label}}, instance) (process_runtime_jvm_cpu_utilization_ratio{ {{service_label}}!="", {{matchers}} })'
 keys = ["{{service_label}}", "instance"]
 description = "CPU процесса как доля 0..1."
+description_en = "Process CPU as a 0..1 fraction."
 
 [[queries]]
 label = "JVM (OTel 1.x): GC time (%) by ({{service_label}}, instance)"
@@ -68,6 +83,7 @@ unit = "percent"
 query = '0.1 * sum by ({{service_label}}, instance) (rate(process_runtime_jvm_gc_duration_milliseconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}", "instance"]
 description = "Доля времени в сборках мусора, % (мс в секунду / 1000 × 100)."
+description_en = "Share of time spent in garbage collection, % (ms per second / 1000 × 100)."
 
 [[queries]]
 label = "JVM (OTel 1.x): GC avg (s) by ({{service_label}}, instance)"
@@ -76,6 +92,7 @@ unit = "seconds"
 query = 'sum by ({{service_label}}, instance) (rate(process_runtime_jvm_gc_duration_milliseconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}])) / sum by ({{service_label}}, instance) (rate(process_runtime_jvm_gc_duration_milliseconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}])) / 1000'
 keys = ["{{service_label}}", "instance"]
 description = "Средняя длительность сборки, с."
+description_en = "Average collection duration, s."
 
 [[queries]]
 label = "JVM (OTel 1.x): GC per second by ({{service_label}}, instance)"
@@ -84,6 +101,7 @@ unit = "per_second"
 query = 'sum by ({{service_label}}, instance) (rate(process_runtime_jvm_gc_duration_milliseconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}", "instance"]
 description = "Частота сборок мусора."
+description_en = "Garbage collection rate."
 
 [[queries]]
 label = "JVM (OTel 1.x): Threads by ({{service_label}}, instance)"
@@ -92,3 +110,4 @@ unit = "count"
 query = 'sum by ({{service_label}}, instance) (process_runtime_jvm_threads_count{ {{service_label}}!="", {{matchers}} })'
 keys = ["{{service_label}}", "instance"]
 description = "Потоки JVM."
+description_en = "JVM threads."

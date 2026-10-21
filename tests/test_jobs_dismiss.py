@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Clearing the job list: dismissed jobs leave the list, running ones stay, orphans of a restart become errors.
 
 The report_jobs table is simulated by FakeJobsTable, which understands the few statements JobStore sends.
@@ -84,7 +85,7 @@ class FakeCursor:
         rows = table.rows
         self.result = []
         if "information_schema.columns" in text:
-            self.result = ([("dismissed_at",)] if table.has_column else []) + [("owner",), ("runner",), ("started_at",)]
+            self.result = ([("dismissed_at",)] if table.has_column else []) + [("owner",), ("runner",), ("started_at",), ("message_ref",)]
         elif "ALTER TABLE" in text:
             if table.alter_fails:
                 raise psycopg2.ProgrammingError("must be owner of table report_jobs")

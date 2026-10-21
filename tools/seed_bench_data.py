@@ -1,4 +1,5 @@
-"""Synthetic data for the LoadLens performance bench (see docs/perf-baseline.md).
+# SPDX-License-Identifier: Apache-2.0
+"""Synthetic data for the LoadLens performance bench (see plans/perf-baseline.md).
 
 One command per sandbox (made by make_sandbox.py <N>: database ll_s<N> on 127.0.0.1:55432, app copy in
 %TEMP%/ll_ui_s<N>/app):
@@ -22,7 +23,8 @@ What it writes, straight into the database with psycopg2 (not through the applic
   uuids. Defaults (300 runs x 60 min x 36 series) give about 650 thousand rows; ``--runs 1000`` about 2.2
   million. Inserted with ``execute_values`` in pages of 5000 rows.
 * ``public.llm_reports`` (created by ``AI.db_store._ensure_llm_reports_table``): one ``final`` row per run with
-  the dashboard verdicts, ``test_type`` step/soak/spike/stress and a ``parsed`` load level in the field of
+  the dashboard verdicts (codes, 30 % as the old Russian labels to measure the read-time mapping),
+  ``test_type`` step/soak/spike/stress and a ``parsed`` load level in the field of
   its test type (some as text such as ``~1200``, which the SQL parser must skip), ``created_at`` spread over
   the last ``--days`` days, plus ``jvm``, ``kafka`` and ``hard_resources`` rows with text. 10 % of the runs
   were analysed twice (a second set of rows, later ``created_at``), as happens in production.
@@ -58,10 +60,17 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+from AI.verdicts import CODES as VERDICT_CODES, LEGACY, label as verdict_label  # noqa: E402  (no settings import)
 
 # Same values as loadlens_app.blueprints.dashboard.DASHBOARD_VERDICTS (tests/test_perf_bench.py checks it).
-DASHBOARD_VERDICTS = ("Успешно", "Есть риски", "Провал", "Недостаточно данных")
+DASHBOARD_VERDICTS = VERDICT_CODES
 VERDICT_WEIGHTS = (0.55, 0.25, 0.12, 0.08)
+# Share of verdicts written as the old Russian labels, as databases saved before the codes hold them:
+# the bench measures the read-time mapping (CASE) on mixed rows.
+LEGACY_LABEL_SHARE = 0.3
+LEGACY_LABELS = {code: text for text, code in LEGACY.items()}
 TEST_TYPES = ("step", "soak", "spike", "stress")
 # Where the analysis keeps the load level of each test type (the order of RUNS_MAX_RPS_FIELDS in dashboard.py).
 RPS_FIELD_BY_TEST_TYPE = {
@@ -167,9 +176,15 @@ def plan_runs(runs: int, services: int, minutes: int, seed: int, now: datetime, 
     return out
 
 
+def _stored_verdict(rng: random.Random) -> str:
+    """A verdict as a row stores it: a code, or (``LEGACY_LABEL_SHARE``) the old label of that code."""
+    code = rng.choices(DASHBOARD_VERDICTS, weights=VERDICT_WEIGHTS)[0]
+    return LEGACY_LABELS[code] if rng.random() < LEGACY_LABEL_SHARE else code
+
+
 def _analysis(rng: random.Random, created_at: datetime) -> Analysis:
-    verdict = rng.choices(DASHBOARD_VERDICTS, weights=VERDICT_WEIGHTS)[0]
-    sla_verdict = None if rng.random() < 0.3 else rng.choices(DASHBOARD_VERDICTS, weights=VERDICT_WEIGHTS)[0]
+    verdict = _stored_verdict(rng)
+    sla_verdict = None if rng.random() < 0.3 else _stored_verdict(rng)
     return Analysis(created_at, verdict, sla_verdict)
 
 
@@ -325,7 +340,7 @@ def report_rows(run: RunSpec, seed: int, area: str = "bench") -> list[tuple]:
     rows: list[tuple] = []
     for analysis in run.analyses:
         for domain in OTHER_DOMAINS:
-            verdict = rng.choices(DASHBOARD_VERDICTS, weights=VERDICT_WEIGHTS)[0]
+            verdict = _stored_verdict(rng)
             parsed = {
                 "verdict": verdict, "verdict_rationale": _paragraph(rng, 3), "confidence": round(rng.uniform(0.5, 0.95), 2),
                 "findings": _findings(rng, 2, f"{run.service}-api"), "recommended_actions": _actions(rng, 1, f"{run.service}-api"),
@@ -346,7 +361,7 @@ def report_rows(run: RunSpec, seed: int, area: str = "bench") -> list[tuple]:
             section: level,
         }
         checks = _sla_checks(rng, run)
-        sla_details = {"checks": checks, "summary": f"SLA verdict: {analysis.sla_verdict}"} if analysis.sla_verdict else None
+        sla_details = {"checks": checks, "summary": f"SLA verdict: {verdict_label(analysis.sla_verdict)}"} if analysis.sla_verdict else None
         rows.append((
             analysis.created_at, run.run_id, run.run_name, run.service, run.test_type, run.start_ms, run.end_ms, "final",
             json.dumps(parsed, ensure_ascii=False, indent=2), Json(parsed), Json(_scores(rng)), None, Json(system_context),

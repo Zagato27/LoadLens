@@ -1,4 +1,6 @@
-"""Install-wide accent color: shades for both themes, CSS variables and a recolored logo."""
+# SPDX-License-Identifier: Apache-2.0
+"""Install-wide appearance: the accent color (shades for both themes, CSS variables, a recolored logo) and the
+language of reports and prompts (``appearance.language``, see plans/i18n-plan.md section 5)."""
 
 from __future__ import annotations
 
@@ -7,11 +9,13 @@ import io
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from matplotlib.colors import hsv_to_rgb, rgb_to_hsv
 from PIL import Image
 
+from AI.i18n import DEFAULT as DEFAULT_LANGUAGE, SUPPORTED as SUPPORTED_LANGUAGES, normalize_lang, t
 from settings import CONFIG
 
 # Must match the accent block of both themes in static/css/app.css and the hue of templates/logo.png.
@@ -19,8 +23,9 @@ DEFAULT_ACCENT = "#6c5ce7"
 _HEX = 16
 _WHITE = (1.0, 1.0, 1.0)
 _INK = (0x1A / 255, 0x1F / 255, 0x24 / 255)
-_DARK_PAGE = (0x0E / 255, 0x10 / 255, 0x15 / 255)
-_LIGHT_PAGE = (0xF5 / 255, 0xF6 / 255, 0xF8 / 255)
+# Page backgrounds (--bg of both themes in static/css/app.css) the accent shades are fitted against.
+_DARK_PAGE = (0x13 / 255, 0x14 / 255, 0x16 / 255)
+_LIGHT_PAGE = (0xF7 / 255, 0xF6 / 255, 0xF3 / 255)
 _MIN_TEXT = 4.5
 _MIN_CHROME = 3.0
 _SOFT_ALPHA = {"dark": 0.16, "light": 0.12}
@@ -35,7 +40,32 @@ class AppearanceError(ValueError):
     """Accent value is not a ``#rrggbb`` color."""
 
     def __init__(self, raw: object) -> None:
-        super().__init__(f"Цвет акцента «{raw}» должен быть в формате #rrggbb")
+        super().__init__(t("server.appearance.bad_accent", value=raw))
+
+
+class AppearanceLanguageError(AppearanceError):
+    """``appearance.language`` is not a supported language, or ``language_switch`` is not a boolean."""
+
+    def __init__(self, raw: object, *, switch: bool = False) -> None:
+        if switch:
+            ValueError.__init__(self, t("server.appearance.bad_language_switch", value=raw))
+        else:
+            ValueError.__init__(self, t("server.appearance.bad_language", value=raw, allowed=", ".join(SUPPORTED_LANGUAGES)))
+
+
+def parse_language(raw: object) -> str:
+    """Code of a supported report language (``ru``, ``en``; ``EN`` and ``en-GB`` are accepted)."""
+    code = normalize_lang(raw)
+    if code is None:
+        raise AppearanceLanguageError(raw)
+    return code
+
+
+def parse_language_switch(raw: object) -> bool:
+    """``appearance.language_switch`` must be ``true`` or ``false``."""
+    if not isinstance(raw, bool):
+        raise AppearanceLanguageError(raw, switch=True)
+    return raw
 
 
 @dataclass(frozen=True)
@@ -92,9 +122,14 @@ def current_accent() -> str:
         return DEFAULT_ACCENT
 
 
-def template_appearance() -> dict[str, str]:
-    """Values ``base.html`` prints: a bad stored color falls back to purple and is reported."""
-    raw = (CONFIG.get("appearance") or {}).get("accent", DEFAULT_ACCENT)
+def template_appearance() -> dict[str, Any]:
+    """Values the templates print: a bad stored color falls back to purple and is reported.
+
+    ``language`` is the language of new reports (``ru`` when unset or unknown); ``language_switch`` is false only
+    when the emergency key ``appearance.language_switch`` turns the interface language switcher off.
+    """
+    appearance = CONFIG.get("appearance") or {}
+    raw = appearance.get("accent", DEFAULT_ACCENT)
     try:
         accent = parse_accent(raw)
         error = ""
@@ -102,7 +137,14 @@ def template_appearance() -> dict[str, str]:
         accent = DEFAULT_ACCENT
         error = str(exc)
     palette = accent_palette(accent)
-    return {"accent": accent, "key": accent[1:], "css": palette_css(palette), "error": error}
+    return {
+        "accent": accent,
+        "key": accent[1:],
+        "css": palette_css(palette),
+        "error": error,
+        "language": normalize_lang(appearance.get("language")) or DEFAULT_LANGUAGE,
+        "language_switch": appearance.get("language_switch") is not False,
+    }
 
 
 def palette_payload(accent: str) -> dict[str, object]:
@@ -193,9 +235,9 @@ def _warnings(accent: str) -> tuple[str, ...]:
     degrees = hue * 360
     notes: list[str] = []
     if _hue_distance(degrees, _STATUS_GREEN) <= _STATUS_SPAN:
-        notes.append("Цвет близок к зелёному статусу «ок» — статусы на экране будет сложнее отличить")
+        notes.append(t("server.appearance.near_green"))
     if _hue_distance(degrees, _STATUS_RED) <= _STATUS_SPAN:
-        notes.append("Цвет близок к красному статусу «провалы» — статусы на экране будет сложнее отличить")
+        notes.append(t("server.appearance.near_red"))
     return tuple(notes)
 
 
@@ -252,7 +294,8 @@ def _shift_logo(accent: str) -> bytes:
     hsv[..., 1] = np.where(colored, _scaled_saturation(hsv[..., 1], source[1], target[1]), hsv[..., 1])
     pixels[..., :3] = np.round(np.clip(hsv_to_rgb(hsv), 0, 1) * 255)
     buffer = io.BytesIO()
-    Image.fromarray(pixels.astype(np.uint8), "RGBA").save(buffer, format="PNG")
+    # The (H, W, 4) uint8 shape already means RGBA; the mode argument of fromarray is gone in Pillow 13.
+    Image.fromarray(pixels.astype(np.uint8)).save(buffer, format="PNG")
     return buffer.getvalue()
 
 
@@ -267,11 +310,14 @@ __all__ = [
     "AccentPalette",
     "AccentShades",
     "AppearanceError",
+    "AppearanceLanguageError",
     "accent_palette",
     "current_accent",
     "palette_css",
     "palette_payload",
     "parse_accent",
+    "parse_language",
+    "parse_language_switch",
     "recolored_logo",
     "template_appearance",
 ]

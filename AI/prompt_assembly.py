@@ -1,24 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0
 """Assembles the final LLM prompt: context guide + analysis guidance + domain text + response format.
 
 Numeric thresholds are never hard-coded in prompt files; ``build_analysis_guidance``
 derives them from the service SLA, the system context rules and the test type so
 the model judges the run against the customer's criteria only.
+
+Texts come from ``AI/prompts/<lang>/`` (``profiles/*.txt``, ``_no_sla.txt`` and ``guidance.*`` keys of
+``_strings.json``); ``lang=None`` means the current locale, which is the report language inside a run.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from AI.prompt_store import load_prompt, resolve_lang, text
 from AI.test_profile import TEST_TYPE_ALIASES, is_capacity_like, normalize_test_type, profile_for
 
-SLA_FIELDS: List[tuple[str, str, str]] = [
-    ("target_rps", "Целевой RPS (target_rps)", " RPS"),
-    ("max_error_rate_pct", "Максимальная доля ошибок", " %"),
-    ("max_p95_ms", "Максимальный p95 latency", " мс"),
-    ("max_p99_ms", "Максимальный p99 latency", " мс"),
-    ("max_cpu_pct", "Максимальная загрузка CPU", " %"),
-    ("max_memory_pct", "Максимальная загрузка памяти", " %"),
-]
+# SLA fields shown in the guidance, in this order; labels and units are ``guidance.sla_field.<key>`` /
+# ``guidance.sla_unit.<key>`` of _strings.json.
+SLA_FIELDS: List[str] = ["target_rps", "max_error_rate_pct", "max_p95_ms", "max_p99_ms", "max_cpu_pct", "max_memory_pct"]
 SLA_QUERY_KEYS: Dict[str, str] = {
     "target_rps": "max_performance_query",
     "max_error_rate_pct": "error_rate_query",
@@ -28,56 +28,21 @@ SLA_QUERY_KEYS: Dict[str, str] = {
     "max_memory_pct": "memory_query",
 }
 PEAK_DOMAINS = frozenset({"lt_framework"})
+TEST_TYPE_PROFILES = ("step", "soak", "spike", "stress")
 
-TEST_TYPE_OVERLAYS: Dict[str, str] = {
-    "step": (
-        "[Профиль теста: ступенчатый поиск максимальной производительности]\n"
-        "- Единица анализа — ступень нагрузки (load_steps / step_table). Сравнивай метрики между ступенями,\n"
-        "  а не только начало и конец теста.\n"
-        "- Максимальная производительность — последняя стабильная ступень (stable_max в lt_framework),\n"
-        "  а не кратковременный пик max. Для итога значение уже посчитано в designated_peak_performance.\n"
-        "- Интересует: на какой ступени началась деградация (рост latency/ошибок быстрее нагрузки),\n"
-        "  какие ресурсы упёрлись в предел, доля ошибок у порога и что произошло после него."
-    ),
-    "soak": (
-        "[Профиль теста: долговременная стабильность (soak)]\n"
-        "- Это тест удержания заданной нагрузки, а не поиск максимальной производительности.\n"
-        "  Не определяй peak_performance и не делай вывод о максимальном RPS.\n"
-        "- Удержание нагрузки и тренды посчитаны программно: hold_window (окно удержания без разгона) и\n"
-        "  stability_under_load (средний и минимальный RPS окна, trends — изменение p95, ошибок, CPU, памяти\n"
-        "  от начала к концу окна и наклон в час). Это источник чисел для выводов об удержании и дрейфе.\n"
-        "- Нагрузка постоянна, поэтому load_steps — равные интервалы времени. Ищи дрейф: монотонный рост\n"
-        "  latency, памяти, GC, очередей от интервала к интервалу (anomalies.kind = drift/shift).\n"
-        "- Рост метрики при неизменной нагрузке — признак утечки или накопления; отмечай его явно.\n"
-        "- Если нужно упомянуть производительность, формулируй это как стабильность под заданной нагрузкой."
-    ),
-    "spike": (
-        "[Профиль теста: всплески (spike)]\n"
-        "- Это не поиск максимальной производительности: peak_performance не определяй.\n"
-        "- Окна всплесков найдены программно: load_steps чередуют ступени «фон» и «всплеск», spike_windows и\n"
-        "  spike_analysis содержат уровень всплеска, рост p95 и ошибок относительно фона (overshoot) и время\n"
-        "  восстановления. Это источник чисел для выводов.\n"
-        "- Интересует реакция на резкое изменение нагрузки: перерегулирование latency, ошибки и просадки RPS\n"
-        "  в окне всплеска, рост очередей и время возврата к фоновому уровню.\n"
-        "- Сравнивай ступень всплеска со ступенями фона до и после неё; назови уязвимые компоненты."
-    ),
-    "stress": (
-        "[Профиль теста: стресс]\n"
-        "- Поведение за пределами проектной мощности. Ищи точку насыщения: ступень, после которой пропускная\n"
-        "  способность перестаёт расти, а latency и ошибки растут. Точка насыщения — последняя стабильная\n"
-        "  ступень, не кратковременный пик; значение уже посчитано в designated_peak_performance и saturation.\n"
-        "- Назови ограничивающий ресурс (saturation.limiting_resource, если он найден) и характер деградации\n"
-        "  (saturation.failure_mode): рост задержек, ошибки или падение пропускной способности."
-    ),
-}
 
-NO_SLA_GUIDANCE = (
-    "Числовых SLA для этого сервиса не задано. Не придумывай нормативы («общепринятые», «рекомендуемые»,\n"
-    "«по мировой практике» пороги использовать ЗАПРЕЩЕНО). Оценивай относительное изменение метрик по\n"
-    "ступеням (step_table.change_vs_first_pct, per_step), аномалии (anomalies) и отличие от baseline.\n"
-    "Severity назначай по величине и устойчивости изменения: рост быстрее нагрузки или рост при неизменной\n"
-    "нагрузке — риск; отсутствие изменений при росте нагрузки — норма."
-)
+def test_type_overlay(test_type: Optional[str], lang: Optional[str] = None) -> str:
+    """Profile block of a normalized test type (``profiles/<type>.txt``); the ``none`` block for other types."""
+    name = test_type if test_type in TEST_TYPE_PROFILES else "none"
+    return load_prompt(f"profiles/{name}.txt", lang).strip()
+
+
+def no_sla_guidance(lang: Optional[str] = None) -> str:
+    return load_prompt("_no_sla.txt", lang).strip()
+
+
+# Kept for callers of the ru tables; the run uses test_type_overlay(test_type, lang).
+TEST_TYPE_OVERLAYS: Dict[str, str] = {name: test_type_overlay(name, "ru") for name in TEST_TYPE_PROFILES}
 
 
 def _cfg_number(value: Any) -> Optional[float]:
@@ -95,85 +60,65 @@ def _cfg_flag(value: Any, default: bool) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-def sla_guidance_lines(sla_cfg: Dict[str, Any], domain: Optional[str] = None, mode: str = "capacity") -> List[str]:
+def sla_guidance_lines(
+    sla_cfg: Dict[str, Any],
+    domain: Optional[str] = None,
+    mode: str = "capacity",
+    lang: Optional[str] = None,
+) -> List[str]:
     """SLA thresholds of the service as prompt lines; empty when no numeric SLA is set.
 
     ``mode`` is the test-profile mode: the stable_max / «degradation after the target is fine»
     rules apply to step and stress tests only.
     """
+    code = resolve_lang(lang)
     lines: List[str] = []
-    for key, label, unit in SLA_FIELDS:
+    for key in SLA_FIELDS:
         value = _cfg_number(sla_cfg.get(key))
         if value is None:
             continue
         query = str(sla_cfg.get(SLA_QUERY_KEYS[key]) or "").strip()
-        source = (
-            f"проверяется программно по запросу «{query}»"
-            if query
-            else "запрос не выбран, программно не проверяется"
-        )
-        lines.append(f"- {label}: {value:g}{unit} — {source}")
+        source = text("guidance.sla_source_query", code, query=query) if query else text("guidance.sla_source_none", code)
+        lines.append(text(
+            "guidance.sla_line", code,
+            label=text(f"guidance.sla_field.{key}", code),
+            value=f"{value:g}",
+            unit=text(f"guidance.sla_unit.{key}", code),
+            source=source,
+        ))
     if not lines:
         return []
-    lines.append(
-        "- Каждый порог относится только к своему запросу. Не сравнивай с ним другие метрики: "
-        "среднее время обработки сервиса — не p95 нагрузочного инструмента, CPU процесса — не CPU узла."
-    )
+    lines.append(text("guidance.sla_scope", code))
     if not is_capacity_like(mode):
-        lines.extend(_non_capacity_target_lines(sla_cfg, domain, mode))
+        lines.extend(_non_capacity_target_lines(sla_cfg, domain, mode, code))
     elif domain is None or domain in PEAK_DOMAINS:
         perf_query = str(sla_cfg.get("max_performance_query") or "").strip()
         if perf_query:
-            lines.append(f"- Метрика максимальной производительности: «{perf_query}» (используется stable_max)")
+            lines.append(text("guidance.peak_query", code, query=perf_query))
         stable_min = _cfg_number(sla_cfg.get("min_stable_minutes"))
-        lines.append(f"- Минимальная длительность стабильной ступени: {stable_min if stable_min is not None else 5.0:g} мин")
+        lines.append(text("guidance.min_stable", code, minutes=f"{stable_min if stable_min is not None else 5.0:g}"))
         allow_fallback = _cfg_flag(sla_cfg.get("target_rps_allow_peak_fallback"), default=True)
-        lines.append(
-            "- Если stable_max отсутствует, для target_rps "
-            + ("разрешено использовать пиковый max" if allow_fallback else "пиковый max использовать ЗАПРЕЩЕНО")
-        )
-        lines.append(
-            "- Если target_rps достигнут (stable_max >= target_rps), критерий target_rps выполнен, даже если после него была деградация."
-        )
+        lines.append(text("guidance.peak_fallback_allowed" if allow_fallback else "guidance.peak_fallback_forbidden", code))
+        lines.append(text("guidance.target_reached", code))
     else:
-        lines.append(
-            "- Целевой RPS и максимальная производительность проверены программно на ступени из sla_step. "
-            "По метрикам этого домена их не оценивай и RPS сервисов с target_rps не сравнивай."
-        )
-    lines.append(
-        "- Единственный источник числовых порогов — этот блок и deterministic_sla в контексте. Не используй нормативы, которых здесь нет."
-    )
+        lines.append(text("guidance.domain_sla_step", code))
+    lines.append(text("guidance.only_source", code))
     return lines
 
 
-def _non_capacity_target_lines(sla_cfg: Dict[str, Any], domain: Optional[str], mode: str) -> List[str]:
+def _non_capacity_target_lines(sla_cfg: Dict[str, Any], domain: Optional[str], mode: str, lang: str) -> List[str]:
     """How target_rps and the SLA window are checked for soak and spike tests."""
     peak_domain = domain is None or domain in PEAK_DOMAINS
     if mode == "stability":
         if peak_domain:
             perf_query = str(sla_cfg.get("max_performance_query") or "").strip()
-            source = f" по запросу «{perf_query}»" if perf_query else ""
-            return [
-                "- Целевой RPS для soak — уровень, который нужно удерживать весь тест: проверяется программно по "
-                f"среднему и минимальному RPS окна удержания{source} (hold_window, stability_under_load).",
-                "- Пороги latency, ошибок и ресурсов проверены на окне удержания, без участка разгона. "
-                "Деградация к концу теста — нарушение, даже если в начале целевой уровень был достигнут.",
-            ]
-        return [
-            "- Целевой RPS и удержание нагрузки проверены программно на окне удержания (hold_window). "
-            "По метрикам этого домена их не оценивай и RPS сервисов с target_rps не сравнивай.",
-        ]
+            source = text("guidance.soak_query", lang, query=perf_query) if perf_query else ""
+            return [text("guidance.soak_target", lang, source=source), text("guidance.soak_thresholds", lang)]
+        return [text("guidance.soak_domain", lang)]
     if mode == "spike":
         if peak_domain:
-            return [
-                "- Целевой RPS для spike — уровень всплеска: проверяется программно в окне всплеска (spike_analysis).",
-                "- Пороги latency и ошибок проверены в окнах всплесков; восстановление после всплеска — отдельный "
-                "критерий recovery.",
-            ]
-        return [
-            "- Целевой RPS и восстановление проверены программно в окнах всплесков (spike_windows). "
-            "По метрикам этого домена их не оценивай и RPS сервисов с target_rps не сравнивай.",
-        ]
+            return [text("guidance.spike_target", lang), text("guidance.spike_thresholds", lang)]
+        return [text("guidance.spike_domain", lang)]
     return []
 
 
@@ -182,18 +127,19 @@ def _string_list(container: Any, key: str) -> List[str]:
     return [str(v).strip() for v in values if str(v).strip()]
 
 
-def system_context_rules(system_context: Optional[Dict[str, Any]]) -> List[str]:
+def system_context_rules(system_context: Optional[Dict[str, Any]], lang: Optional[str] = None) -> List[str]:
     """Customer rules from system_context.operational_context that affect severity and focus."""
+    code = resolve_lang(lang)
     operational = (system_context or {}).get("operational_context") if isinstance(system_context, dict) else None
     lines: List[str] = []
-    for rule in _string_list(operational, "normal_degradation_rules"):
-        lines.append(f"- Считается нормой (не понижай вердикт за это): {rule}")
-    for item in _string_list(operational, "analysis_focus"):
-        lines.append(f"- Фокус анализа заказчика: {item}")
-    for risk in _string_list(operational, "known_risks"):
-        lines.append(f"- Известный риск (проверь по данным): {risk}")
-    for constraint in _string_list(operational, "known_constraints"):
-        lines.append(f"- Известное ограничение: {constraint}")
+    for list_key, string_key in (
+        ("normal_degradation_rules", "guidance.rule_normal"),
+        ("analysis_focus", "guidance.rule_focus"),
+        ("known_risks", "guidance.rule_risk"),
+        ("known_constraints", "guidance.rule_constraint"),
+    ):
+        for rule in _string_list(operational, list_key):
+            lines.append(text(string_key, code, rule=rule))
     return lines
 
 
@@ -203,26 +149,24 @@ def build_analysis_guidance(
     test_type: Optional[str],
     domain: Optional[str] = None,
     stack_notes: Optional[Sequence[Tuple[str, str]]] = None,
+    lang: Optional[str] = None,
 ) -> str:
     """Prompt block with the customer's criteria: SLA, system-context rules and the test profile.
 
     ``stack_notes`` are (pack title, text) of the installed query packs that explain their metrics.
     """
-    sections: List[str] = ["ОРИЕНТИРЫ АНАЛИЗА (сформированы автоматически из настроек сервиса):"]
+    code = resolve_lang(lang)
+    sections: List[str] = [text("guidance.header", code)]
     profile = profile_for(test_type)
-    sla_lines = sla_guidance_lines(sla_cfg if isinstance(sla_cfg, dict) else {}, domain, profile.mode)
-    sections.append("SLA сервиса:\n" + ("\n".join(sla_lines) if sla_lines else NO_SLA_GUIDANCE))
-    rules = system_context_rules(system_context)
+    sla_lines = sla_guidance_lines(sla_cfg if isinstance(sla_cfg, dict) else {}, domain, profile.mode, code)
+    sections.append(text("guidance.sla_title", code) + "\n" + ("\n".join(sla_lines) if sla_lines else no_sla_guidance(code)))
+    rules = system_context_rules(system_context, code)
     if rules:
-        sections.append("Правила заказчика из описания системы:\n" + "\n".join(rules))
-    notes = [f"- {title}: {' '.join(str(text).split())}" for title, text in (stack_notes or []) if str(text).strip()]
+        sections.append(text("guidance.rules_title", code) + "\n" + "\n".join(rules))
+    notes = [f"- {title}: {' '.join(str(note).split())}" for title, note in (stack_notes or []) if str(note).strip()]
     if notes:
-        sections.append("Особенности метрик стека (из установленных пакетов запросов):\n" + "\n".join(notes))
-    overlay = TEST_TYPE_OVERLAYS.get(profile.test_type)
-    if overlay:
-        sections.append(overlay)
-    else:
-        sections.append("[Профиль теста не указан] Ступени в load_steps — равные интервалы времени; сравнивай метрики между интервалами.")
+        sections.append(text("guidance.stack_title", code) + "\n" + "\n".join(notes))
+    sections.append(test_type_overlay(profile.test_type, code))
     return "\n\n".join(sections)
 
 
@@ -237,7 +181,9 @@ __all__ = [
     "TEST_TYPE_OVERLAYS",
     "assemble_prompt",
     "build_analysis_guidance",
+    "no_sla_guidance",
     "normalize_test_type",
     "sla_guidance_lines",
     "system_context_rules",
+    "test_type_overlay",
 ]

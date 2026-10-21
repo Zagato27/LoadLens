@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Project areas for the settings page: overview, card edits, copies, service moves, overrides, deletion."""
 
 from __future__ import annotations
@@ -11,10 +12,12 @@ from typing import Optional
 import psycopg2
 from psycopg2 import sql
 
-from AI.db_store import _ensure_llm_reports_table, manual_verdicts_cte, manual_verdicts_ready
+from AI.db_store import _ensure_llm_reports_table, effective_verdict_sql, manual_verdicts_cte, manual_verdicts_ready
 from AI.pipeline import _has_meaningful_system_context
-from AI.query_packs import READINESS_SLA_FIELDS, installed_packs, load_catalog, missing_sla_references, resolve_sla_refs
-from loadlens_app.errors import log_failure
+from AI.verdicts import to_code
+from AI.query_packs import READINESS_SLA_FIELDS, installed_packs, load_catalog, localized, missing_sla_references, resolve_sla_refs
+from AI.i18n import t as translate
+from loadlens_app.errors import log_failure, with_error_id
 from loadlens_app.core import (
     _active_metrics_config,
     _deep_merge_dicts,
@@ -45,11 +48,11 @@ AREA_META_KEYS = frozenset({"title", "description", "services"})
 STATUS_INHERITED = "inherited"
 STATUS_SAME = "same"
 STATUS_OWN = "own"
-# The verdict in force: a manual one (report_verdicts) before the automatic one.
+# The verdict in force as a code: a manual one (report_verdicts) before the automatic one, old labels mapped.
 REPORT_ROWS_SQL = sql.SQL(
     "WITH {manual_cte} "
     "SELECT latest.service, latest.created_at, "
-    "COALESCE(mv.verdict, latest.sla_verdict, latest.verdict, 'Недостаточно данных') FROM ("
+    + effective_verdict_sql("latest") + " FROM ("
     "SELECT run_name, service, created_at, sla_verdict, verdict, "
     "ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC) AS rn "
     "FROM {table} WHERE domain = 'final' AND service = ANY(%s)) latest "
@@ -140,7 +143,7 @@ def _project_ids() -> list[str]:
 
 def _require_project(project_id: str) -> None:
     if project_id not in _project_ids():
-        raise ProjectError(f"Проект «{project_id}» не найден", 404)
+        raise ProjectError(translate("server.projects.not_found", project=project_id), 404)
 
 
 def _service_titles(project_id: str) -> dict[str, str]:
@@ -177,6 +180,7 @@ def _report_stats(service_ids: list[str]) -> dict[str, ReportStats]:
         conn.close()
     stats: dict[str, ReportStats] = {}
     for service, created_at, verdict in rows:
+        verdict = to_code(verdict)
         current = stats.get(service)
         newer = current is None or (
             created_at is not None and (current.last_report_at is None or created_at > current.last_report_at)
@@ -211,7 +215,7 @@ def _installed_query_packs(queries: dict) -> list[dict]:
                 "domain": domain,
                 "id": entry["id"],
                 "version": entry["version"],
-                "title": pack.title if pack else entry["id"],
+                "title": localized(pack, "title") if pack else entry["id"],
                 "outdated": bool(pack and entry["version"] < pack.version),
             })
     return out
@@ -297,7 +301,7 @@ def list_projects(active_project: str) -> ProjectsOverview:
         stats: Optional[dict[str, ReportStats]] = _report_stats(sorted({sid for titles in services.values() for sid in titles}))
         reports_error: Optional[str] = None
     except psycopg2.Error as exc:
-        stats, reports_error = None, f"Отчёты недоступны: база данных не отвечает. Код ошибки: {log_failure(exc, 'Отчёты недоступны')}"
+        stats, reports_error = None, with_error_id("server.projects.reports_unavailable", log_failure(exc, "Reports unavailable"))
     projects = [
         _project_summary(pid, entries.get(pid) if isinstance(entries.get(pid), dict) else {}, titles, stats)
         for pid, titles in services.items()
@@ -308,10 +312,10 @@ def list_projects(active_project: str) -> ProjectsOverview:
 def _validate_project_id(value: str) -> str:
     project_id = str(value or "").strip()
     if not project_id:
-        raise ProjectError("Укажите идентификатор проекта")
+        raise ProjectError(translate("server.projects.id_required"))
     if len(project_id) > PROJECT_ID_MAX_LEN or FORBIDDEN_ID_CHARS.search(project_id):
         raise ProjectError(
-            f"Идентификатор «{project_id}»: до {PROJECT_ID_MAX_LEN} символов, без пробелов, слэшей и знаков < >"
+            translate("server.projects.id_format", project=project_id, max=PROJECT_ID_MAX_LEN, signs="< >")
         )
     return project_id
 
@@ -319,22 +323,22 @@ def _validate_project_id(value: str) -> str:
 def _clean_text_field(value: str, limit: int, label: str) -> str:
     text = str(value or "").strip()
     if len(text) > limit:
-        raise ProjectError(f"{label}: не длиннее {limit} символов, сейчас {len(text)}")
+        raise ProjectError(translate("server.projects.field_too_long", label=label, limit=limit, length=len(text)))
     if any(ord(ch) < 32 and ch not in "\n\t" for ch in text):
-        raise ProjectError(f"{label}: недопустимые управляющие символы")
+        raise ProjectError(translate("server.projects.field_control_chars", label=label))
     return text
 
 
 def create_project(project_id: str, title: str, description: str, copy_from: str) -> str:
     """New project; with ``copy_from`` its settings are copied, services and reports are not."""
     new_id = _validate_project_id(project_id)
-    clean_title = _clean_text_field(title, TITLE_MAX_LEN, "Отображаемое имя")
-    clean_description = _clean_text_field(description, DESCRIPTION_MAX_LEN, "Описание")
+    clean_title = _clean_text_field(title, TITLE_MAX_LEN, translate("server.projects.field.title"))
+    clean_description = _clean_text_field(description, DESCRIPTION_MAX_LEN, translate("server.projects.field.description"))
     existing = set(_project_ids()) | set(_active_metrics_config().keys())
     if new_id in existing:
-        raise ProjectError(f"Проект «{new_id}» уже существует", 409)
+        raise ProjectError(translate("server.projects.exists", project=new_id), 409)
     if copy_from and copy_from not in existing:
-        raise ProjectError(f"Проект-источник «{copy_from}» не найден", 404)
+        raise ProjectError(translate("server.projects.source_not_found", project=copy_from), 404)
     copied = (
         {key: copy.deepcopy(value) for key, value in _area_entry(copy_from).items() if key not in AREA_META_KEYS}
         if copy_from else {}
@@ -350,8 +354,8 @@ def create_project(project_id: str, title: str, description: str, copy_from: str
 
 def update_project(project_id: str, title: str, description: str) -> None:
     _require_project(project_id)
-    clean_title = _clean_text_field(title, TITLE_MAX_LEN, "Отображаемое имя")
-    clean_description = _clean_text_field(description, DESCRIPTION_MAX_LEN, "Описание")
+    clean_title = _clean_text_field(title, TITLE_MAX_LEN, translate("server.projects.field.title"))
+    clean_description = _clean_text_field(description, DESCRIPTION_MAX_LEN, translate("server.projects.field.description"))
     runtime = _load_settings_runtime_data()
     entry = runtime.setdefault("per_area", {}).setdefault(project_id, {})
     entry["title"] = clean_title
@@ -394,15 +398,15 @@ def _move_service_metrics(project_id: str, service_id: str, target_id: str) -> N
 def move_service(project_id: str, service_id: str, target_id: str) -> int:
     """Moves a service with its settings and reports; returns the number of updated report rows."""
     if not target_id:
-        raise ProjectError("Укажите проект, в который перенести сервис")
+        raise ProjectError(translate("server.projects.target_required"))
     _require_project(project_id)
     _require_project(target_id)
     if target_id == project_id:
-        raise ProjectError(f"Сервис «{service_id}» уже в проекте «{project_id}»")
+        raise ProjectError(translate("server.projects.already_there", service=service_id, project=project_id))
     if service_id not in _service_titles(project_id):
-        raise ProjectError(f"Сервиса «{service_id}» нет в проекте «{project_id}»", 404)
+        raise ProjectError(translate("server.projects.service_missing", service=service_id, project=project_id), 404)
     if service_id in _service_titles(target_id):
-        raise ProjectError(f"В проекте «{target_id}» уже есть сервис «{service_id}»", 409)
+        raise ProjectError(translate("server.projects.target_has_service", project=target_id, service=service_id), 409)
     updated = _set_reports_area([service_id], target_id)
     _move_service_settings(project_id, service_id, target_id)
     _move_service_metrics(project_id, service_id, target_id)
@@ -425,7 +429,7 @@ def reset_area_section(project_id: str, section: str) -> bool:
     """Drops the project's own value of a section so the global one applies; returns whether it existed."""
     _require_project(project_id)
     if section not in AREA_SECTIONS:
-        raise ProjectError(f"Раздел «{section}» нельзя сбросить. Допустимо: {', '.join(AREA_SECTIONS)}")
+        raise ProjectError(translate("server.projects.section_not_resettable", section=section, allowed=", ".join(AREA_SECTIONS)))
     runtime = _load_settings_runtime_data()
     entry = (runtime.get("per_area") or {}).get(project_id)
     changed = isinstance(entry, dict) and entry.pop(section, None) is not None
@@ -439,12 +443,14 @@ def reset_service_section(project_id: str, service_id: str, section: str) -> boo
     """Drops a service override so the project value applies; returns whether it existed."""
     _require_project(project_id)
     if section not in SERVICE_SECTIONS:
-        raise ProjectError(f"Раздел «{section}» сервиса нельзя сбросить. Допустимо: {', '.join(SERVICE_SECTIONS)}")
+        raise ProjectError(
+            translate("server.projects.service_section_not_resettable", section=section, allowed=", ".join(SERVICE_SECTIONS))
+        )
     runtime = _load_settings_runtime_data()
     services = ((runtime.get("per_area") or {}).get(project_id) or {}).get("services") or {}
     entry = services.get(service_id)
     if not isinstance(entry, dict):
-        raise ProjectError(f"У сервиса «{service_id}» нет своих настроек в проекте «{project_id}»", 404)
+        raise ProjectError(translate("server.projects.no_own_settings", service=service_id, project=project_id), 404)
     changed = entry.pop(section, None) is not None
     if changed:
         _save_settings_runtime_data(runtime)

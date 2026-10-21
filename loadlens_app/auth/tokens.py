@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """API token generation and hashing.
 
 Tokens carry 256 bits of randomness, so a plain SHA-256 is enough for storage: only the digest

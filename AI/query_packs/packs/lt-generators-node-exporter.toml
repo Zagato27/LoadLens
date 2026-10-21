@@ -2,6 +2,7 @@ schema_version = 1
 id = "lt-generators-node-exporter"
 version = 1
 title = "Генераторы нагрузки: node_exporter"
+title_en = "Load generators: node_exporter"
 category = "infrastructure"
 stack = ["linux", "load-generator"]
 domain = "lt_generators"
@@ -12,20 +13,34 @@ description = """
 и TCP-соединения из node_exporter на генераторах. Отчёт видит по ним, не упёрся ли генератор в ресурс и можно \
 ли доверять поданной нагрузке и задержкам. Ограничьте матчеры хостами генераторов, а не тестируемой системы.
 """
+description_en = """
+Resources of the machines that run the load testing tool: CPU, memory, load per core, network and TCP \
+connections from node_exporter on the generators. With them the report sees whether a generator hit a resource \
+limit and whether the applied load and latencies can be trusted. Limit the matchers to the generator hosts, \
+not the system under test.
+"""
 requires_metrics = ["node_cpu_seconds_total", "node_memory_MemAvailable_bytes", "node_uname_info"]
 prompt_addendum = """
 Метрики генераторов нагрузки из node_exporter: CPU % — доля не-idle времени всех ядер, память % — \
 1 − MemAvailable/MemTotal, load1 на ядро выше 1 — очередь на CPU, TCP established — открытые соединения \
 инструмента. Это не тестируемая система: перегруженный генератор искажает нагрузку и задержки.
 """
+prompt_addendum_en = """
+Load generator metrics from node_exporter: CPU % is the non-idle share of all cores, memory % is 1 − \
+MemAvailable/MemTotal, load1 per core above 1 means a CPU queue, TCP established are the open connections of \
+the tool. This is not the system under test: an overloaded generator distorts the load and the latencies.
+"""
 
 [variables.matchers]
 title = "Матчеры генераторов"
+title_en = "Generator matchers"
 default = 'job=~".*loadgen.*"'
 help = "Только хосты генераторов, например job=\"loadgen\" или instance=~\"10.0.5.*\"."
+help_en = 'Generator hosts only, for example job="loadgen" or instance=~"10.0.5.*".'
 
 [variables.window]
 title = "Окно rate()"
+title_en = "rate() window"
 default = "1m"
 pattern = '^[1-9][0-9]*[smh]$'
 
@@ -37,6 +52,7 @@ required = true
 query = 'label_replace(100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle", {{matchers}} }[{{window}}]))) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
 keys = ["node"]
 description = "CPU генератора, %. Выше 80–85 % генератор сам добавляет задержку и недодаёт нагрузку."
+description_en = "Generator CPU, %. Above 80–85 % the generator itself adds latency and under-delivers the load."
 
 [[queries]]
 label = "Generators: Memory usage (%) by host"
@@ -46,6 +62,7 @@ required = true
 query = 'label_replace(100 * (1 - max by (instance) (node_memory_MemAvailable_bytes{ {{matchers}} }) / max by (instance) (node_memory_MemTotal_bytes{ {{matchers}} })) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
 keys = ["node"]
 description = "Память генератора без учёта кэша страниц, %."
+description_en = "Generator memory without the page cache, %."
 
 [[queries]]
 label = "Generators: load1 per core by host"
@@ -54,6 +71,7 @@ unit = "ratio"
 query = 'label_replace(max by (instance) (node_load1{ {{matchers}} }) / count by (instance) (node_cpu_seconds_total{mode="idle", {{matchers}} }) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
 keys = ["node"]
 description = "Очередь на CPU генератора на одно ядро."
+description_en = "Generator CPU queue per core."
 
 [[queries]]
 label = "Generators: Network receive (bytes/s) by host"
@@ -62,6 +80,7 @@ unit = "bytes_per_second"
 query = 'label_replace(sum by (instance) (rate(node_network_receive_bytes_total{device!~"lo|veth.*|docker.*|cali.*|flannel.*|cni.*|virbr.*|br-.*|vxlan.*|tunl.*", {{matchers}} }[{{window}}])) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
 keys = ["node"]
 description = "Входящий трафик генератора (ответы тестируемой системы)."
+description_en = "Incoming generator traffic (responses of the system under test)."
 
 [[queries]]
 label = "Generators: Network transmit (bytes/s) by host"
@@ -70,6 +89,7 @@ unit = "bytes_per_second"
 query = 'label_replace(sum by (instance) (rate(node_network_transmit_bytes_total{device!~"lo|veth.*|docker.*|cali.*|flannel.*|cni.*|virbr.*|br-.*|vxlan.*|tunl.*", {{matchers}} }[{{window}}])) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
 keys = ["node"]
 description = "Исходящий трафик генератора (запросы к тестируемой системе)."
+description_en = "Outgoing generator traffic (requests to the system under test)."
 
 [[queries]]
 label = "Generators: TCP established by host"
@@ -78,3 +98,4 @@ unit = "count"
 query = 'label_replace(max by (instance) (node_netstat_Tcp_CurrEstab{ {{matchers}} }) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
 keys = ["node"]
 description = "Открытые TCP-соединения генератора."
+description_en = "Open TCP connections of the generator."

@@ -1,0 +1,14 @@
+Domain Focus: lt_framework
+
+Evaluation Criteria Addendum
+- Look for RPS/throughput, error rate, latency percentiles, saturation point, peak_performance for capacity/step tests, drop point, signs of an unstable test environment.
+- For stability/soak tests do not require peak_performance: assess the load hold and the absence of cumulative degradation.
+- For spike tests do not require peak_performance: assess the growth of p95 and errors in the spike window relative to the background and the return to the background after it.
+- A good candidate does not confuse peak throughput with a short spike and is careful when speaking about stable performance.
+- Recommendations must be useful for the load scenario: profile, pacing, generators, target RPS, think time, checks.
+
+Evaluation Steps
+1. Check RPS, latency p95/p99, errors and the possible saturation point.
+2. Check whether the candidate describes peak_performance and the moment of degradation correctly, and only where this applies.
+3. Check whether problems of the load testing tool are separated from problems of the system under test.
+4. Check whether the recommendations lead to a better scenario and a better interpretation of the test results.

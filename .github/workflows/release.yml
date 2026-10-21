@@ -1,0 +1,80 @@
+# Release on a version tag: the test suite, the Docker image on GHCR (ghcr.io/<owner>/loadlens:<tag> and
+# :latest) and a GitHub Release whose notes are the CHANGELOG.md section of that version.
+# The owner starts it: python tools/release.py --version X.Y.Z, commit, git tag vX.Y.Z, git push origin vX.Y.Z.
+# A tag with a suffix (v1.1.0-rc1) is published as a pre-release and does not move :latest.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Configuration from the examples
+        run: |
+          cp settings.example.py settings.py
+          cp metrics_config.example.py metrics_config.py
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Version, tag and changelog agree
+        run: python tools/release.py --check --tag "${GITHUB_REF_NAME}"
+      - name: Run pytest
+        env:
+          # The JS tests fail instead of being skipped when node is missing.
+          LOADLENS_REQUIRE_NODE: "1"
+        run: python -m pytest -q
+      - name: Release notes from CHANGELOG.md
+        run: python tools/release.py --notes "${GITHUB_REF_NAME#v}" > release-notes.md
+      - name: Image name, version and build id
+        run: |
+          owner="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          echo "IMAGE=ghcr.io/${owner}/loadlens" >> "$GITHUB_ENV"
+          echo "TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          echo "BUILD=$(date -u +%Y-%m-%d)-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          case "${GITHUB_REF_NAME}" in
+            *-*) echo "PRERELEASE=1" >> "$GITHUB_ENV" ;;
+            *) echo "PRERELEASE=0" >> "$GITHUB_ENV" ;;
+          esac
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Build the image
+        run: |
+          docker build -f docker/Dockerfile \
+            --build-arg LOADLENS_VERSION="${VERSION}" \
+            --build-arg LOADLENS_BUILD="${BUILD}" \
+            -t "${IMAGE}:${TAG}" .
+          # The image has no settings.py, so nothing imports the package here: read the constants as text.
+          docker run --rm "${IMAGE}:${TAG}" sh -c 'grep -E "^__version__" loadlens_app/version.py; echo "build: ${LOADLENS_BUILD}"; ls LICENSE NOTICE THIRD_PARTY_NOTICES.md'
+      - name: Push the image
+        run: |
+          docker push "${IMAGE}:${TAG}"
+          if [ "${PRERELEASE}" = "0" ]; then
+            docker tag "${IMAGE}:${TAG}" "${IMAGE}:latest"
+            docker push "${IMAGE}:latest"
+          fi
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          extra=""
+          if [ "${PRERELEASE}" = "1" ]; then extra="--prerelease"; fi
+          printf '\n\nDocker image: `%s:%s` (build %s)\n' "${IMAGE}" "${TAG}" "${BUILD}" >> release-notes.md
+          gh release create "${TAG}" --title "LoadLens ${TAG}" --notes-file release-notes.md ${extra}

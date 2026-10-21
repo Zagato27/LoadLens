@@ -1,0 +1,648 @@
+{
+  "*": [
+    {
+      "literal": "Русский",
+      "reason": "language name, always shown in its own language"
+    }
+  ],
+  "AI/context_pack.py": [
+    {
+      "literal": "(?:запрос|query) «([^»]*)»",
+      "reason": "parses the query/series names out of the SLA check text of stored reports (ru and en)"
+    },
+    {
+      "literal": "(?:серия|series) «([^»]*)»",
+      "reason": "parses the query/series names out of the SLA check text of stored reports (ru and en)"
+    },
+    {
+      "literal": "нагруз",
+      "reason": "words of user query labels (any language) that pick the RPS, latency and aggregate queries"
+    },
+    {
+      "literal": "отклик",
+      "reason": "words of user query labels (any language) that pick the RPS, latency and aggregate queries"
+    },
+    {
+      "literal": "общ",
+      "reason": "words of user query labels (any language) that pick the RPS, latency and aggregate queries"
+    },
+    {
+      "literal": "итого",
+      "reason": "words of user query labels (any language) that pick the RPS, latency and aggregate queries"
+    }
+  ],
+  "AI/eval.py": [
+    {
+      "literal": "run_name обязателен",
+      "reason": "offline evaluation tool error (CLI usage, not localized)"
+    }
+  ],
+  "AI/report_markers.py": [
+    {
+      "literal": "(?:запрос|query) «([^»]*)»",
+      "reason": "parses the query/series names out of the SLA check text of stored ru reports (en alternatives in the same regex)"
+    },
+    {
+      "literal": "(?:серия|series) «([^»]*)»",
+      "reason": "parses the query/series names out of the SLA check text of stored ru reports (en alternatives in the same regex)"
+    }
+  ],
+  "AI/scoring.py": [
+    {
+      "literal": "[A-Za-zА-Яа-яЁё]",
+      "reason": "character class of a regex, not text"
+    },
+    {
+      "literal": "[А-Яа-яЁё]",
+      "reason": "character class of a regex, not text"
+    },
+    {
+      "literal": "[A-Za-zА-Яа-яЁё0-9._/-]+",
+      "reason": "character class of a regex, not text"
+    },
+    {
+      "literal": "крит",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "выс",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "сред",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "низ",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "нет",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "нет данных",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "да",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "истина",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "ложь",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "ступен",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "интервал",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "нагрузк",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "предыдущ",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "прошл",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "производительност",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "порог",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "целев",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "удерж",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "окно",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "всплеск",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "фон",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "восстанов",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "ошиб",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "насыщ",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "ресурс",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "памят",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "тренд",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "дрейф",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "рост",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "(?<![A-Za-zА-Яа-яЁё])(-?\\d+(?:[.,]\\d+)?)\\s*(%|ms|sec|secs|seconds|s|rps|qps)?\\b",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    }
+  ],
+  "AI/storage_state.py": [
+    {
+      "literal": "проверку подлинности",
+      "reason": "fragments of libpq errors of a server that answers in Russian"
+    },
+    {
+      "literal": "не существует",
+      "reason": "fragments of libpq errors of a server that answers in Russian"
+    }
+  ],
+  "AI/test_profile.py": [
+    {
+      "literal": "ступенчатый",
+      "reason": "test type aliases and soak markers accepted as input"
+    },
+    {
+      "literal": "поиск_максимума",
+      "reason": "test type aliases and soak markers accepted as input"
+    },
+    {
+      "literal": "поиск_максимальной_производительности",
+      "reason": "test type aliases and soak markers accepted as input"
+    },
+    {
+      "literal": "стабильность",
+      "reason": "test type aliases and soak markers accepted as input"
+    },
+    {
+      "literal": "стаб",
+      "reason": "test type aliases and soak markers accepted as input"
+    },
+    {
+      "literal": "длительный",
+      "reason": "test type aliases and soak markers accepted as input"
+    },
+    {
+      "literal": "длительная_нагрузка",
+      "reason": "test type aliases and soak markers accepted as input"
+    },
+    {
+      "literal": "долговременный",
+      "reason": "test type aliases and soak markers accepted as input"
+    },
+    {
+      "literal": "всплеск",
+      "reason": "test type aliases and soak markers accepted as input"
+    },
+    {
+      "literal": "всплески",
+      "reason": "test type aliases and soak markers accepted as input"
+    },
+    {
+      "literal": "стресс",
+      "reason": "test type aliases and soak markers accepted as input"
+    },
+    {
+      "literal": "стабил",
+      "reason": "test type aliases and soak markers accepted as input"
+    },
+    {
+      "literal": "длительн",
+      "reason": "test type aliases and soak markers accepted as input"
+    }
+  ],
+  "AI/verdicts.py": [
+    {
+      "literal": "(?<![0-9a-zа-я_])(?:",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": ")(?![0-9a-zа-я_])",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "Ё",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "Е",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "Есть риски",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "Недостаточно данных",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "Провал",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "Успешно",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "деград",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "е",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "замеч",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "критич",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "недостаточно",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "нестабил",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "нет данных",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "неудовлет",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "норма",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "ошибка",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "под вопрос",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "предуп",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "провал",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "риск",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "риск отказа",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "риск провала",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "риски отказа",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "риски провала",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "стаб",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "усп",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    },
+    {
+      "literal": "ё",
+      "reason": "verdict tables of stage 0: ru LABELS, LEGACY labels and input synonyms of stored values and LLM answers"
+    }
+  ],
+  "AI/verification.py": [
+    {
+      "literal": "(ступен[иьяе]|интервал[аеы]?|шаг[аеи]?|фон[аеу]?|всплеск[аеу]?|step|interval|background|spike)\\s*№?\\s*\\d+",
+      "reason": "regexes that read step references and units in ru and en LLM answers"
+    },
+    {
+      "literal": "(\\d)\\s*мс\\b",
+      "reason": "regexes that read step references and units in ru LLM answers"
+    },
+    {
+      "literal": "(\\d)\\s*с\\b",
+      "reason": "regexes that read step references and units in ru LLM answers"
+    }
+  ],
+  "confluence_manager/update_confluence_template.py": [
+    {
+      "literal": "Плейсхолдер не найден",
+      "reason": "return values of update_confluence_page compared by update_page.py (retry logic)"
+    },
+    {
+      "literal": "Ошибка: {e}",
+      "reason": "return values of update_confluence_page compared by update_page.py (retry logic)"
+    }
+  ],
+  "loadlens_app/context_import.py": [
+    {
+      "literal": "высокая",
+      "reason": "synonyms of values in imported ru documents and LLM answers"
+    },
+    {
+      "literal": "высокий",
+      "reason": "synonyms of values in imported ru documents and LLM answers"
+    },
+    {
+      "literal": "критичная",
+      "reason": "synonyms of values in imported ru documents and LLM answers"
+    },
+    {
+      "literal": "критическая",
+      "reason": "synonyms of values in imported ru documents and LLM answers"
+    },
+    {
+      "literal": "средняя",
+      "reason": "synonyms of values in imported ru documents and LLM answers"
+    },
+    {
+      "literal": "средний",
+      "reason": "synonyms of values in imported ru documents and LLM answers"
+    },
+    {
+      "literal": "низкая",
+      "reason": "synonyms of values in imported ru documents and LLM answers"
+    },
+    {
+      "literal": "низкий",
+      "reason": "synonyms of values in imported ru documents and LLM answers"
+    },
+    {
+      "literal": "синхронная",
+      "reason": "synonyms of values in imported ru documents and LLM answers"
+    },
+    {
+      "literal": "асинхронная",
+      "reason": "synonyms of values in imported ru documents and LLM answers"
+    },
+    {
+      "literal": "микросервисы",
+      "reason": "synonyms of values in imported ru documents and LLM answers"
+    },
+    {
+      "literal": "микросервисная",
+      "reason": "synonyms of values in imported ru documents and LLM answers"
+    },
+    {
+      "literal": "монолит",
+      "reason": "synonyms of values in imported ru documents and LLM answers"
+    },
+    {
+      "literal": "модульный монолит",
+      "reason": "synonyms of values in imported ru documents and LLM answers"
+    },
+    {
+      "literal": "событийная",
+      "reason": "synonyms of values in imported ru documents and LLM answers"
+    }
+  ],
+  "loadlens_app/data_sources_migration.py": [
+    {
+      "literal": "глобальные настройки",
+      "reason": "one-time legacy settings migration: warnings go to the log, the title suffix is stored as data"
+    },
+    {
+      "literal": "область {name}",
+      "reason": "one-time legacy settings migration: warnings go to the log, the title suffix is stored as data"
+    },
+    {
+      "literal": "метрик",
+      "reason": "one-time legacy settings migration: warnings go to the log, the title suffix is stored as data"
+    },
+    {
+      "literal": "метрик нагрузки",
+      "reason": "one-time legacy settings migration: warnings go to the log, the title suffix is stored as data"
+    },
+    {
+      "literal": "{place}: неизвестный тип источника {role} «{source_type or 'не задан'}», раздел не перенесён",
+      "reason": "one-time legacy settings migration: warnings go to the log, the title suffix is stored as data"
+    },
+    {
+      "literal": "не задан",
+      "reason": "one-time legacy settings migration: warnings go to the log, the title suffix is stored as data"
+    },
+    {
+      "literal": "{place}: у источника {role} нет адреса, раздел не перенесён",
+      "reason": "one-time legacy settings migration: warnings go to the log, the title suffix is stored as data"
+    },
+    {
+      "literal": "{place}: датасорс задан только числовым id={datasource.get('id')} и не перенесён",
+      "reason": "one-time legacy settings migration: warnings go to the log, the title suffix is stored as data"
+    },
+    {
+      "literal": "{place}: у Grafana не задан датасорс, укажите UID или имя",
+      "reason": "one-time legacy settings migration: warnings go to the log, the title suffix is stored as data"
+    },
+    {
+      "literal": "без адреса",
+      "reason": "one-time legacy settings migration: warnings go to the log, the title suffix is stored as data"
+    }
+  ],
+  "loadlens_app/migrations.py": [
+    {
+      "literal": "идентификаторы прогонов, сохранённых до появления run_id",
+      "reason": "migration titles for the CLI and logs (not localized, plan decision 6)"
+    },
+    {
+      "literal": "таблица run_index по metrics (полный проход один раз, затем досчёт)",
+      "reason": "migration titles for the CLI and logs (not localized, plan decision 6)"
+    },
+    {
+      "literal": "колонка max_rps итоговых отчётов, сохранённых до её появления",
+      "reason": "migration titles for the CLI and logs (not localized, plan decision 6)"
+    },
+    {
+      "literal": "индекс idx_metrics_run_name на таблице metrics",
+      "reason": "migration titles for the CLI and logs (not localized, plan decision 6)"
+    }
+  ],
+  "locales/en/palette.json": [
+    {
+      "literal": "Переключить на русский",
+      "reason": "the language action is labelled in the language it switches to (Switch to English / Переключить на русский)"
+    }
+  ],
+  "static/js/common.js": [
+    {
+      "literal": "Успешно",
+      "reason": "legacy ru verdict labels of stored reports (AI/verdicts.py LEGACY): parsed into codes, never shown"
+    },
+    {
+      "literal": "Есть риски",
+      "reason": "legacy ru verdict labels of stored reports (AI/verdicts.py LEGACY): parsed into codes, never shown"
+    },
+    {
+      "literal": "Провал",
+      "reason": "legacy ru verdict labels of stored reports (AI/verdicts.py LEGACY): parsed into codes, never shown"
+    },
+    {
+      "literal": "Недостаточно данных",
+      "reason": "legacy ru verdict labels of stored reports (AI/verdicts.py LEGACY): parsed into codes, never shown"
+    },
+    {
+      "literal": "/ё/g",
+      "reason": "verdict parsing folds ё into е"
+    },
+    {
+      "literal": "е",
+      "reason": "verdict parsing folds ё into е"
+    }
+  ],
+  "static/js/compare.js": [
+    {
+      "literal": "ошиб",
+      "reason": "keyword matched against metric names (Russian «Ошибки, %») for the trend direction, not shown"
+    }
+  ],
+  "static/js/palette.js": [
+    {
+      "literal": "главная обзор дэшборд дашборд dashboard home overview",
+      "reason": "PAGE_KEYWORDS: bilingual search words, the palette finds pages in both languages"
+    },
+    {
+      "literal": "запуск теста запустить нагрузку генератор launch run test",
+      "reason": "PAGE_KEYWORDS: bilingual search words, the palette finds pages in both languages"
+    },
+    {
+      "literal": "архив отчёты список история archive reports history",
+      "reason": "PAGE_KEYWORDS: bilingual search words, the palette finds pages in both languages"
+    },
+    {
+      "literal": "сравнение сравнить baseline compare",
+      "reason": "PAGE_KEYWORDS: bilingual search words, the palette finds pages in both languages"
+    },
+    {
+      "literal": "прогнозирование прогноз мощности usl forecasting capacity",
+      "reason": "PAGE_KEYWORDS: bilingual search words, the palette finds pages in both languages"
+    },
+    {
+      "literal": "настройки конфигурация источники сервисы settings configuration",
+      "reason": "PAGE_KEYWORDS: bilingual search words, the palette finds pages in both languages"
+    },
+    {
+      "literal": "профиль пароль токены api account profile password tokens",
+      "reason": "PAGE_KEYWORDS: bilingual search words, the palette finds pages in both languages"
+    },
+    {
+      "literal": "создать анализ new report",
+      "reason": "palette item keywords: bilingual search words"
+    },
+    {
+      "literal": "сменить тему оформление тёмная светлая theme dark light",
+      "reason": "palette item keywords: bilingual search words"
+    },
+    {
+      "literal": "тема системная авто оформление theme system auto",
+      "reason": "palette item keywords: bilingual search words"
+    },
+    {
+      "literal": "область проект area project ${x.id}",
+      "reason": "palette item keywords: bilingual search words"
+    },
+    {
+      "literal": "/ё/g",
+      "reason": "search normalization folds ё into е"
+    },
+    {
+      "literal": "е",
+      "reason": "search normalization folds ё into е"
+    },
+    {
+      "literal": "л",
+      "reason": "Ctrl+K on a Russian keyboard layout (event.key)"
+    },
+    {
+      "literal": "язык интерфейса русский английский language interface english russian",
+      "reason": "keywords of the language action: the palette finds it by words of both languages"
+    }
+  ],
+  "static/js/reports.js": [
+    {
+      "literal": "/(?:запрос|query) «([^»]*)»/",
+      "reason": "parses the query/series names out of the SLA check text of stored ru reports (en alternatives in the same regex)"
+    },
+    {
+      "literal": "/(?:серия|series) «([^»]*)»/",
+      "reason": "parses the query/series names out of the SLA check text of stored ru reports (en alternatives in the same regex)"
+    },
+    {
+      "literal": "общ",
+      "reason": "matches words of user query labels (Russian names of aggregate series and RPS/latency queries), not shown"
+    },
+    {
+      "literal": "итого",
+      "reason": "matches words of user query labels (Russian names of aggregate series and RPS/latency queries), not shown"
+    },
+    {
+      "literal": "нагруз",
+      "reason": "matches words of user query labels (Russian names of aggregate series and RPS/latency queries), not shown"
+    },
+    {
+      "literal": "отклик",
+      "reason": "matches words of user query labels (Russian names of aggregate series and RPS/latency queries), not shown"
+    }
+  ],
+  "update_page.py": [
+    {
+      "literal": "Ошибка",
+      "reason": "compares the return values of update_confluence_page (retry logic)"
+    },
+    {
+      "literal": "Плейсхолдер не найден",
+      "reason": "compares the return values of update_confluence_page (retry logic)"
+    }
+  ]
+}

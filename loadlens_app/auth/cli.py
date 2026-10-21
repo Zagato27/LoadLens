@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Command line for user administration: ``python -m loadlens_app.auth <command>``.
 
 Use it to create the first administrator or to recover access (lost password, locked account).

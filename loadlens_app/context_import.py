@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """System context from a document: text extraction, one LLM call, and merging into the current context.
 
 Nothing here stores anything: the settings page shows the result in the form and the user saves it.
@@ -17,6 +18,8 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from AI.i18n import get_locale, t
+from AI.prompt_store import text as _prompt_text
 from loadlens_app.core import _clean_string_list, _clean_text, _normalize_object_list
 
 logger = logging.getLogger(__name__)
@@ -29,11 +32,11 @@ MIN_TEXT_CHARS = 40
 MIN_LETTER_SHARE = 0.5
 MODES = ("fill", "replace")
 SUPPORTED_EXTENSIONS = {".pdf": "pdf", ".docx": "docx", ".md": "markdown", ".markdown": "markdown", ".txt": "text"}
-PROMPT_FILE = Path(__file__).resolve().parent.parent / "AI" / "prompts" / "context_import_prompt.txt"
-SYSTEM_PROMPT = (
-    "Вы переносите описание программной системы из документа в структуру JSON. "
-    "Используйте только сведения из документа и возвращайте только JSON."
-)
+# AI/prompts/<lang>/context_import_prompt.txt; the system prompt and the document delimiters are
+# ``context_import.*`` keys of _strings.json. The language is the global one at import time.
+PROMPT_FILE = "context_import_prompt.txt"
+# The ru system prompt (tools/stubs/llm_stub.py recognises import calls by it); calls use system_prompt(lang).
+SYSTEM_PROMPT = _prompt_text("context_import.system", "ru")
 
 # The context structure: plain strings, lists of objects (string and list fields) and lists of strings.
 STRING_FIELDS: dict[str, tuple[str, ...]] = {
@@ -70,27 +73,43 @@ ARCH_STYLES = {
     "serverless": "serverless",
 }
 
-FIELD_TITLES = {
-    "system.name": "Название системы",
-    "system.domain": "Предметная область",
-    "system.description": "Описание",
-    "system.test_goal": "Цель тестирования",
-    "architecture.style": "Архитектурный стиль",
-    "architecture.components": "Компоненты",
-    "architecture.dependencies": "Зависимости",
-    "architecture.data_stores": "Хранилища",
-    "load_model.entrypoints": "Точки входа",
-    "load_model.critical_user_flows": "Критичные сценарии",
-    "load_model.expected_hotspots": "Ожидаемые узкие места",
-    "operational_context.known_constraints": "Ограничения",
-    "operational_context.known_risks": "Известные риски",
-    "operational_context.normal_degradation_rules": "Нормальная деградация",
-    "operational_context.analysis_focus": "Фокус анализа",
+# Titles of the changed fields in the answer, in the language of the request (server.context_import.field.*).
+FIELD_TITLE_KEYS = {
+    "system.name": "server.context_import.field.system_name",
+    "system.domain": "server.context_import.field.system_domain",
+    "system.description": "server.context_import.field.system_description",
+    "system.test_goal": "server.context_import.field.system_test_goal",
+    "architecture.style": "server.context_import.field.architecture_style",
+    "architecture.components": "server.context_import.field.architecture_components",
+    "architecture.dependencies": "server.context_import.field.architecture_dependencies",
+    "architecture.data_stores": "server.context_import.field.architecture_data_stores",
+    "load_model.entrypoints": "server.context_import.field.load_model_entrypoints",
+    "load_model.critical_user_flows": "server.context_import.field.load_model_critical_user_flows",
+    "load_model.expected_hotspots": "server.context_import.field.load_model_expected_hotspots",
+    "operational_context.known_constraints": "server.context_import.field.operational_context_known_constraints",
+    "operational_context.known_risks": "server.context_import.field.operational_context_known_risks",
+    "operational_context.normal_degradation_rules": "server.context_import.field.operational_context_normal_degradation_rules",
+    "operational_context.analysis_focus": "server.context_import.field.operational_context_analysis_focus",
 }
 
 
+def field_title(path: str) -> str:
+    """Title of a context field in the current locale; an unknown path is returned as is."""
+    key = FIELD_TITLE_KEYS.get(path)
+    return t(key) if key else path
+
+
+def _thousands(value: int) -> str:
+    """``120 000`` in ru, ``120,000`` in en."""
+    text = f"{value:,}"
+    return text.replace(",", " ") if get_locale() == "ru" else text
+
+
 class ContextImportError(Exception):
-    """The import cannot go on; the message is safe to show to the user."""
+    """The import cannot go on; the message is safe to show to the user.
+
+    Raised inside the request, so the message is translated at raise time in the request's language.
+    """
 
     def __init__(self, message: str, status_code: int = 400, code: str = "bad_request") -> None:
         super().__init__(message)
@@ -123,16 +142,16 @@ def _pdf_text(data: bytes, warnings: list[str]) -> tuple[str, int]:
     try:
         reader = PdfReader(io.BytesIO(data))
         if reader.is_encrypted and not reader.decrypt(""):
-            raise ContextImportError("PDF защищён паролем: снимите защиту или вставьте текст вручную")
+            raise ContextImportError(t("server.context_import.pdf_encrypted"))
         pages = len(reader.pages)
         if pages > MAX_PDF_PAGES:
-            warnings.append(f"В PDF {pages} страниц, прочитаны первые {MAX_PDF_PAGES}")
+            warnings.append(t("server.context_import.pdf_pages", pages=pages, limit=MAX_PDF_PAGES))
         texts = [(page.extract_text() or "") for page in reader.pages[:MAX_PDF_PAGES]]
     except ContextImportError:
         raise
     except Exception as exc:  # damaged files raise many kinds of errors
         logger.info("context import: unreadable PDF", exc_info=True)
-        raise ContextImportError(f"Не удалось прочитать PDF: {str(exc)[:200]}") from exc
+        raise ContextImportError(t("server.context_import.pdf_unreadable", error=str(exc)[:200])) from exc
     return "\n\n".join(texts), pages
 
 
@@ -144,7 +163,7 @@ def _docx_text(data: bytes) -> str:
         document = docx.Document(io.BytesIO(data))
     except Exception as exc:  # not a .docx inside, or a damaged one
         logger.info("context import: unreadable Word document", exc_info=True)
-        raise ContextImportError(f"Не удалось прочитать документ Word: {str(exc)[:200]}") from exc
+        raise ContextImportError(t("server.context_import.docx_unreadable", error=str(exc)[:200])) from exc
     parts: list[str] = []
     # Paragraphs and tables in document order; tables often hold the list of components.
     for block in document.iter_inner_content():
@@ -176,15 +195,15 @@ def _finish(text: str, fmt: str, warnings: list[str], pages: Optional[int] = Non
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     if len(text) < MIN_TEXT_CHARS:
         if fmt == "pdf":
-            raise ContextImportError("В PDF нет текстового слоя (похоже на скан). Вставьте текст вручную")
-        raise ContextImportError("В документе почти нет текста: нужно хотя бы несколько предложений")
+            raise ContextImportError(t("server.context_import.pdf_no_text"))
+        raise ContextImportError(t("server.context_import.too_little_text"))
     visible = [ch for ch in text if not ch.isspace()]
     letters = sum(1 for ch in visible if ch.isalpha())
     if visible and letters / len(visible) < MIN_LETTER_SHARE:
-        warnings.append("Текст извлечён с искажениями: проверьте результат или вставьте текст вручную")
+        warnings.append(t("server.context_import.garbled"))
     truncated = len(text) > MAX_TEXT_CHARS
     if truncated:
-        warnings.append(f"Документ длиннее {MAX_TEXT_CHARS:,} символов, разобрано только начало".replace(",", " "))
+        warnings.append(t("server.context_import.truncated", limit=_thousands(MAX_TEXT_CHARS)))
         text = text[:MAX_TEXT_CHARS]
     return ExtractedText(text=text, format=fmt, chars=len(text), pages=pages, truncated=truncated, warnings=warnings)
 
@@ -195,27 +214,28 @@ def extract_text(filename: str, data: bytes) -> ExtractedText:
     fmt = SUPPORTED_EXTENSIONS.get(extension)
     if fmt is None:
         allowed = ", ".join(sorted({ext for ext in SUPPORTED_EXTENSIONS if ext != ".markdown"}))
-        raise ContextImportError(f"Формат «{extension or 'без расширения'}» не поддерживается. Допустимо: {allowed}", 415, "unsupported")
+        shown = extension or t("server.context_import.no_extension")
+        raise ContextImportError(t("server.context_import.unsupported_format", extension=shown, allowed=allowed), 415, "unsupported")
     if len(data) > MAX_FILE_BYTES:
-        raise ContextImportError(f"Файл больше {MAX_FILE_BYTES // (1024 * 1024)} МБ", 413, "too_large")
+        raise ContextImportError(t("server.context_import.too_large", mb=MAX_FILE_BYTES // (1024 * 1024)), 413, "too_large")
     warnings: list[str] = []
     if fmt == "pdf":
         if not data.startswith(b"%PDF"):
-            raise ContextImportError("Файл не похож на PDF")
+            raise ContextImportError(t("server.context_import.not_pdf"))
         text, pages = _pdf_text(data, warnings)
         return _finish(text, fmt, warnings, pages)
     if fmt == "docx":
         if not data.startswith(b"PK"):
-            raise ContextImportError("Файл не похож на документ Word (.docx). Старый формат .doc не поддерживается")
+            raise ContextImportError(t("server.context_import.not_docx"))
         return _finish(_docx_text(data), fmt, warnings)
     if b"\x00" in data[:4096]:
-        raise ContextImportError("Файл не похож на текстовый")
+        raise ContextImportError(t("server.context_import.not_text"))
     return _finish(_plain_text(data), fmt, warnings)
 
 
 def text_from_paste(text: object) -> ExtractedText:
     if not isinstance(text, str):
-        raise ContextImportError("Вставьте текст описания системы")
+        raise ContextImportError(t("server.context_import.paste_required"))
     return _finish(text, "text", [])
 
 
@@ -345,12 +365,37 @@ def parse_answer(raw: object) -> dict[str, Any]:
     if isinstance(obj, dict) and isinstance(obj.get("system_context"), dict):
         obj = obj["system_context"]
     if not isinstance(obj, dict) or not any(isinstance(obj.get(group), dict) for group in GROUPS):
-        raise ContextImportError("Модель вернула ответ не в формате контекста системы. Повторите или сократите документ", 502, "bad_answer")
+        raise ContextImportError(t("server.context_import.bad_answer"), 502, "bad_answer")
     return shape_context(obj)
 
 
-def _prompt() -> str:
-    return PROMPT_FILE.read_text(encoding="utf-8")
+def _import_language(lang: Optional[str] = None) -> str:
+    """``lang`` when supported, else the language of reports and prompts (``appearance.language``)."""
+    from AI.prompt_store import normalize_lang
+    from loadlens_app.i18n import report_language
+
+    return normalize_lang(lang) or report_language()
+
+
+def _prompt(lang: Optional[str] = None) -> str:
+    from AI.prompt_store import load_prompt
+
+    return load_prompt(PROMPT_FILE, _import_language(lang))
+
+
+def system_prompt(lang: Optional[str] = None) -> str:
+    """System prompt of the import call in ``lang`` (default: the language of reports)."""
+    from AI.prompt_store import text
+
+    return text("context_import.system", _import_language(lang))
+
+
+def document_block(document: str, lang: Optional[str] = None) -> str:
+    """The document between the delimiters the prompt of ``lang`` names (``<<<ДОКУМЕНТ`` / ``<<<DOCUMENT``)."""
+    from AI.prompt_store import text
+
+    code = _import_language(lang)
+    return f"{text('context_import.document_open', code)}\n{document}\n{text('context_import.document_close', code)}"
 
 
 def llm_for_scope(llm_section: object) -> tuple[str, dict[str, Any]]:
@@ -359,32 +404,37 @@ def llm_for_scope(llm_section: object) -> tuple[str, dict[str, Any]]:
     provider = str(llm.get("provider") or "").strip().lower()
     settings = llm.get(provider) if provider else None
     if not provider or not isinstance(settings, dict):
-        raise ContextImportError("Не настроен провайдер LLM: Настройки → LLM", 422, "missing_llm")
+        raise ContextImportError(t("server.context_import.missing_llm"), 422, "missing_llm")
     return provider, settings
 
 
-def ask_model(text: str, llm_section: object, use_structured: bool = False) -> dict[str, Any]:
-    """One model call for the document; returns the shaped context."""
+def ask_model(text: str, llm_section: object, use_structured: bool = False, lang: Optional[str] = None) -> dict[str, Any]:
+    """One model call for the document; returns the shaped context.
+
+    The prompt is in ``lang`` (default: the global language of reports at the moment of the import): the draft
+    is user data and is not translated later.
+    """
     from AI.providers import ask_llm_structured, ask_llm_with_text_data, usage_domain
 
     provider, settings = llm_for_scope(llm_section)
-    document = f"<<<ДОКУМЕНТ\n{text}\nДОКУМЕНТ>>>"
+    code = _import_language(lang)
+    document = document_block(text, code)
     try:
         with usage_domain("context_import"):
             if use_structured and provider == "gigachat":
-                raw: object = ask_llm_structured(_prompt(), document, SystemContextDraft, system_prompt=SYSTEM_PROMPT)
+                raw: object = ask_llm_structured(_prompt(code), document, SystemContextDraft, system_prompt=system_prompt(code))
             else:
                 raw = ask_llm_with_text_data(
-                    _prompt(),
+                    _prompt(code),
                     document,
                     llm_config={"provider": provider, provider: settings, "force_json": True},
-                    system_prompt=SYSTEM_PROMPT,
+                    system_prompt=system_prompt(code),
                 )
     except ContextImportError:
         raise
     except Exception as exc:
         logger.warning("context import: the model call failed: %s", exc)
-        raise ContextImportError(f"Модель {provider} не ответила: {str(exc)[:200]}", 502, "llm_failed") from exc
+        raise ContextImportError(t("server.context_import.llm_failed", provider=provider, error=str(exc)[:200]), 502, "llm_failed") from exc
     return parse_answer(raw)
 
 
@@ -412,7 +462,7 @@ def merge_context(current: object, draft: dict[str, Any], mode: str) -> tuple[di
     ``replace``: the draft replaces every field. ``enabled`` and ``schema_version`` stay as they were.
     """
     if mode not in MODES:
-        raise ContextImportError(f"mode: допустимо {', '.join(MODES)}")
+        raise ContextImportError(t("server.context_import.bad_mode", allowed=", ".join(MODES)))
     base = current if isinstance(current, dict) else {}
     before = shape_context(base)
     draft = shape_context(draft)
@@ -420,7 +470,7 @@ def merge_context(current: object, draft: dict[str, Any], mode: str) -> tuple[di
     changes: list[dict[str, Any]] = []
 
     def note(path: str, action: str, count: int = 0) -> None:
-        changes.append({"path": path, "title": FIELD_TITLES.get(path, path), "action": action, "count": count})
+        changes.append({"path": path, "title": field_title(path), "action": action, "count": count})
 
     for group, names in STRING_FIELDS.items():
         for name in names:

@@ -1,0 +1,25 @@
+TASK: analysis of application JVM metrics during a load test.
+
+DOMAIN DATA (sections that may be present):
+- Memory: heap used / heap max, non-heap — by application and instance.
+- Garbage collection: GC pauses (gc_pause), their frequency, actions and causes.
+- Process and system CPU, threads (live/daemon/peak), loaded classes.
+
+ANALYSIS FOCUS:
+1. Memory by step: whether heap used grows from step to step and comes back after GC. Growth within a step under
+   unchanged load (anomalies.kind=drift) or monotonic growth across step_table is a sign of a leak or accumulation.
+   Relate heap used to heap max of the same application if both sections are present.
+2. GC: how pauses and collection frequency change as the load grows. Pauses that grow faster than the load
+   (anomalies.kind=elasticity) are a risk for latency; link them to the step where this began.
+3. Process CPU: at which step CPU growth stops being proportional to the load; compare the instances of one
+   application with each other (unevenness is a separate finding).
+4. Threads and classes: growth of the number of threads or classes under unchanged load is a separate risk; stable
+   values are normal, one short finding about them is enough.
+5. If a baseline is given — state which series differ noticeably from the previous run (delta_mean_pct), especially
+   heap used, GC pause and CPU.
+
+EVIDENCE REQUIREMENTS:
+- In every finding: application/instance (component), the step or interval by label, a number from step_table.per_step
+  or top_series, and, if an SLA is set, the threshold from the analysis guidance block.
+- Do not describe metrics that did not change as separate findings — combine them into one with severity=low.
+- Do not draw conclusions about GC causes or leaks if the data shows no corresponding growth.

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Spike test analysis: bursts of the designated RPS, overshoot of latency and errors, recovery.
 
 Detection works on the designated RPS series (``sla.max_performance_query``). The background
@@ -22,6 +23,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 import pandas as pd
 
 from AI.context_pack import LoadStep, _series_from_labeled, _utc_numeric, format_iso, minutes_from, to_utc
+from AI.i18n import get_locale, t
+from AI.report_texts import LanguageTable, text_lang
 from AI.sla_evaluator import _labeled_frame, _worst_series_p95
 
 SPIKE_RATIO = 1.5
@@ -35,6 +38,20 @@ RECOVERY_TOLERANCE_PCT = 10.0
 RECOVERY_MAX_WINDOW_MIN = 15.0
 RPS_RECOVERY_WINDOW_MIN = 2.0
 MAX_SPIKES = 5
+
+# Notes of a spike by code (``spike.note_code``, texts under report.spike_note.*); readers render them in their
+# language and fall back to the stored ``note`` text of reports saved before the codes.
+SPIKE_NOTE_CODES = ("no_latency_after", "no_latency_query")
+SPIKE_NOTE_TEXTS = LanguageTable(SPIKE_NOTE_CODES, lambda code, lang: t(f"report.spike_note.{code}", locale=lang))
+
+
+def spike_note_text(code: Optional[str], lang: str = "ru") -> str:
+    """Text of a spike note code in ``lang`` (unknown languages: ru); '' without a code."""
+    if not code:
+        return ""
+    if str(code) not in SPIKE_NOTE_CODES:
+        return str(code)
+    return t(f"report.spike_note.{code}", locale=text_lang(lang))
 
 
 @dataclass(frozen=True)
@@ -51,7 +68,8 @@ class Spike:
 
     @property
     def label(self) -> str:
-        return f"всплеск {self.index} · ≈{self.level_rps:.0f} RPS"
+        """«всплеск 1 · ≈480 RPS» / «spike 1 · ≈480 RPS» in the language of the report being built."""
+        return t("report.step_label.spike", index=self.index, level=f"{self.level_rps:.0f}")
 
 
 @dataclass(frozen=True)
@@ -139,7 +157,7 @@ def _median_between(values: pd.Series, start: pd.Timestamp, end: pd.Timestamp) -
 
 
 def spike_load_steps(profile: SpikeProfile, start_ts: float, end_ts: float, shift_hours: int) -> List[LoadStep]:
-    """Contiguous «фон» / «всплеск» steps covering the run; empty when no spike was found."""
+    """Contiguous background / spike steps covering the run; empty when no spike was found."""
     if not profile.spikes:
         return []
     run_start = pd.Timestamp(start_ts, unit="s", tz="UTC")
@@ -164,7 +182,10 @@ def spike_load_steps(profile: SpikeProfile, start_ts: float, end_ts: float, shif
         else:
             background_no += 1
             level = _median_between(profile.values, start, end)
-            label = f"фон {background_no} · ≈{level:.0f} RPS" if level is not None else f"фон {background_no}"
+            label = (
+                t("report.step_label.background_level", index=background_no, level=f"{level:.0f}")
+                if level is not None else t("report.step_label.background", index=background_no)
+            )
         steps.append(LoadStep(
             index=len(steps) + 1, label=label, start=start, end=end,
             minute_from=minutes_from(start, start_ts), minute_to=minutes_from(end, start_ts),
@@ -223,7 +244,7 @@ def analyze_spikes(
     """Pack entry ``spike_profile``: per-spike overshoot and recovery; ``detected=False`` without spikes."""
     sla_cfg = sla_cfg if isinstance(sla_cfg, Mapping) else {}
     if profile is None:
-        return {"detected": False, "reason": "нет ряда RPS по запросу максимальной производительности", "spikes": []}
+        return {"detected": False, "reason": t("report.analysis.spike_no_series"), "spikes": []}
     common = {
         "baseline_rps": round(profile.baseline_rps, 2),
         "threshold_rps": round(profile.threshold_rps, 2),
@@ -236,9 +257,9 @@ def analyze_spikes(
     if not profile.spikes:
         return {
             "detected": False,
-            "reason": (
-                f"RPS не поднимался до порога всплеска {profile.threshold_rps:.0f} "
-                f"(фон {profile.baseline_rps:.0f} × {SPIKE_RATIO:g}) дольше {SPIKE_MIN_DURATION_SEC:.0f} с"
+            "reason": t(
+                "report.analysis.spike_below_threshold", threshold=f"{profile.threshold_rps:.0f}",
+                background=f"{profile.baseline_rps:.0f}", ratio=f"{SPIKE_RATIO:g}", seconds=f"{SPIKE_MIN_DURATION_SEC:.0f}",
             ),
             "spikes": [],
             **common,
@@ -266,11 +287,11 @@ def analyze_spikes(
             abs(rps_after - profile.baseline_rps) <= max(profile.baseline_rps * RECOVERY_TOLERANCE_PCT / 100.0, 1.0)
             if rps_after is not None else None
         )
-        note = ""
+        note_code = ""
         if recovered is None and latency is not None and pre_p95 is not None:
-            note = "после всплеска нет точек задержки: тест закончился раньше окна восстановления"
+            note_code = "no_latency_after"
         elif latency is None:
-            note = "запрос p95/p99 не выбран в SLA: рост задержек и восстановление не оцениваются"
+            note_code = "no_latency_query"
         out.append({
             "index": spike.index,
             "label": spike.label,
@@ -299,7 +320,8 @@ def analyze_spikes(
             "rps_after": round(rps_after, 2) if rps_after is not None else None,
             "rps_recovered": rps_recovered,
             "latency_query": latency_query or None,
-            "note": note,
+            "note": spike_note_text(note_code, get_locale()),
+            "note_code": note_code or None,
         })
     return {"detected": True, "spikes": out, **common}
 
@@ -342,6 +364,8 @@ def spike_windows_ctx(spike_profile: Optional[Mapping[str, Any]]) -> List[Dict[s
 __all__ = [
     "RECOVERY_MAX_WINDOW_MIN",
     "RECOVERY_TOLERANCE_PCT",
+    "SPIKE_NOTE_CODES",
+    "SPIKE_NOTE_TEXTS",
     "SPIKE_RATIO",
     "Spike",
     "SpikeProfile",
@@ -350,5 +374,6 @@ __all__ = [
     "detect_spikes",
     "detect_spikes_from_labeled",
     "spike_load_steps",
+    "spike_note_text",
     "spike_windows_ctx",
 ]

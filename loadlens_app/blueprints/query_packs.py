@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Query packs in the settings: catalog, preview of the changes, check against the sources, apply.
 
 Every endpoint works on the scope the «Запросы» section edits: global (no area), an area, or a
@@ -12,6 +13,7 @@ from typing import Any, Mapping
 
 from flask import Blueprint, g, jsonify, request
 
+from AI.i18n import t
 from AI.query_packs import DerivedRowError, add_summed_rps
 from loadlens_app.blueprints.config_api import has_own_section, scope_view, store_section
 from loadlens_app.config_schema import QueryConfigError, validate_queries
@@ -32,13 +34,13 @@ def _scope(source: Mapping[str, Any]) -> tuple[str, str]:
     area = str(source.get("area") or "").strip()
     service = str(source.get("service") or "").strip()
     if area and area not in {item["id"] for item in _list_project_areas()}:
-        raise PackRequestError(f"Область «{area}» не найдена", 404)
+        raise PackRequestError(t("packs.error.area_not_found", area=area), 404)
     if service:
         if not area:
-            raise PackRequestError("Сервис задаётся вместе с областью")
+            raise PackRequestError(t("packs.error.service_needs_area"))
         known = set(_services_map_for_area(area)) | set(_metrics_services_for_area(area))
         if service not in known:
-            raise PackRequestError(f"Сервис «{service}» не найден в области «{area}»", 404)
+            raise PackRequestError(t("packs.error.service_not_found", service=service, area=area), 404)
     return area, service
 
 
@@ -59,7 +61,7 @@ def _state(area: str, service: str) -> ScopeState:
 def _body() -> dict:
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
-        raise PackRequestError("Ожидается JSON-объект")
+        raise PackRequestError(t("packs.error.json_expected"))
     return body
 
 
@@ -87,7 +89,7 @@ def check_query_pack():
         start_ts = parse_preview_ts(body.get("start"))
         end_ts = parse_preview_ts(body.get("end"))
     except ValueError as exc:
-        raise PackRequestError("Некорректное окно проверки") from exc
+        raise PackRequestError(t("packs.error.check_window")) from exc
     g.audit_extra = {"pack": str(body.get("pack_id") or "")[:80]}
     return jsonify(check_pack(_state(area, service), body, start_ts, end_ts))
 

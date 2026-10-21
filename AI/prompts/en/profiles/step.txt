@@ -1,0 +1,7 @@
+[Test profile: step search for the maximum throughput]
+- The unit of analysis is a load step (load_steps / step_table). Compare metrics between steps,
+  not only the start and the end of the test.
+- The maximum throughput is the last stable step (stable_max in lt_framework),
+  not a short max peak. For the final analysis the value is already computed in designated_peak_performance.
+- Of interest: on which step degradation began (latency/errors growing faster than the load),
+  which resources hit their limit, the error rate at the threshold and what happened after it.

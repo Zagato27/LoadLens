@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Command templates of load tools and the command line of one test instance.
 
 A template is a command with placeholders, for example ``{exe} run --tag testid={run_tag} {params} {script}``.
@@ -18,6 +19,10 @@ import re
 import shlex
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
+
+from AI.i18n import SUPPORTED
+
+from .messages import LtError, msg, ru_text, t
 
 PLACEHOLDER_RE = re.compile(r"\{([a-z_]+)\}")
 PLACEHOLDERS = frozenset({
@@ -52,6 +57,8 @@ _CLASS_SOURCE_ROOTS = (
 )
 _CLASS_SUFFIXES = (".java", ".scala", ".kt")
 
+# Help texts and the Gatling title are lt.tool.* messages: stored here (and in the settings) in ru, shown in the
+# reader's language while the settings keep the built-in text (see ToolTemplate.display_title).
 DEFAULT_TOOLS: dict[str, dict[str, Any]] = {
     "k6": {
         "title": "k6",
@@ -69,11 +76,7 @@ DEFAULT_TOOLS: dict[str, dict[str, Any]] = {
         "status_command": "{exe} status --address 127.0.0.1:{control_port}",
         "image": "grafana/k6:0.54.0",
         "run_filter_packs": ["lt-k6-prometheus-rw", "lt-k6-prometheus-native", "lt-k6-influxql"],
-        "help": (
-            "Вывод метрик задайте в параметрах: --out experimental-prometheus-rw (адрес — в переменной "
-            "K6_PROMETHEUS_RW_SERVER_URL) или --out influxdb=http://…/k6. Тег testid с именем прогона "
-            "LoadLens добавляет сам. Код 99 — пороги thresholds не пройдены, отчёт всё равно строится."
-        ),
+        "help": ru_text("lt.tool.k6.help"),
     },
     "jmeter": {
         "title": "JMeter",
@@ -94,10 +97,7 @@ DEFAULT_TOOLS: dict[str, dict[str, Any]] = {
         # Shutdown lets the samplers finish and the Backend Listener flush; SIGTERM would cut the last batch.
         "stop_command": "{exe_dir}shutdown.sh {control_port}",
         "run_filter_packs": ["lt-jmeter-influxql"],
-        "help": (
-            "Режим без GUI. Чтобы LoadLens отделил метрики прогона, поле application в Backend Listener "
-            "должно читать свойство: ${__P(application,my-app)}. Свойства теста передавайте как -Jимя=значение."
-        ),
+        "help": ru_text("lt.tool.jmeter.help"),
     },
     "locust": {
         "title": "Locust",
@@ -113,13 +113,10 @@ DEFAULT_TOOLS: dict[str, dict[str, Any]] = {
         "grace_seconds": 30,
         "version_command": "{exe} --version",
         "image": "locustio/locust:2.31.8",
-        "help": (
-            "Задайте --users, --spawn-rate и --run-time, иначе тест идёт до остановки или лимита длительности. "
-            "Метрики Locust приходят через locust_exporter и отделяются только окном прогона."
-        ),
+        "help": ru_text("lt.tool.locust.help"),
     },
     "gatling": {
-        "title": "Gatling (бандл)",
+        "title": ru_text("lt.tool.gatling.title"),
         "executable": "/opt/gatling/bin/gatling.sh",
         "command": "{exe} -rm local -s {script} -rd {run_tag} {params}",
         "env": {},
@@ -131,11 +128,7 @@ DEFAULT_TOOLS: dict[str, dict[str, Any]] = {
         "stop_signal": "TERM",
         "grace_seconds": 20,
         "version_command": "",
-        "help": (
-            "Бандл Gatling до 3.10 включительно; каталог скриптов — user-files/simulations бандла. JVM-свойства "
-            "симуляции передавайте в переменной JAVA_OPTS. Метрики Gatling отделяются окном прогона; как "
-            "отделить их тегом при записи в VictoriaMetrics — в docs/load-tests.md. Код 2 — не прошли assertions."
-        ),
+        "help": ru_text("lt.tool.gatling.help"),
     },
     "gatling_maven": {
         "title": "Gatling (Maven)",
@@ -150,19 +143,43 @@ DEFAULT_TOOLS: dict[str, dict[str, Any]] = {
         "stop_signal": "TERM",
         "grace_seconds": 30,
         "version_command": "",
-        "help": (
-            "Проект с gatling-maven-plugin, так устроены и бандлы Gatling 3.11+. Каталог скриптов — корень "
-            "проекта с pom.xml и mvnw. Свойства симуляции передавайте как -Dимя=значение."
-        ),
+        "help": ru_text("lt.tool.gatling_maven.help"),
     },
 }
 
 
-class ToolConfigError(ValueError):
+# Built-in texts that are dictionary messages: (tool, field) -> key.
+DEFAULT_TEXT_KEYS = {
+    ("k6", "help"): "lt.tool.k6.help",
+    ("jmeter", "help"): "lt.tool.jmeter.help",
+    ("locust", "help"): "lt.tool.locust.help",
+    ("gatling", "title"): "lt.tool.gatling.title",
+    ("gatling", "help"): "lt.tool.gatling.help",
+    ("gatling_maven", "help"): "lt.tool.gatling_maven.help",
+}
+
+
+def shown_default(tool_id: str, field_name: str, value: Any) -> Any:
+    """A built-in title or help in the reader's language; a value changed in the settings stays as it is."""
+    key = DEFAULT_TEXT_KEYS.get((tool_id, field_name))
+    if key and isinstance(value, str) and value == str(DEFAULT_TOOLS.get(tool_id, {}).get(field_name) or "").strip():
+        return t(key)
+    return value
+
+
+def _is_default(tool_id: str, field_name: str, value: Any, base: Mapping[str, Any]) -> bool:
+    """The built-in value, in any language (a form may send a translated built-in text back)."""
+    if base.get(field_name) == value:
+        return True
+    key = DEFAULT_TEXT_KEYS.get((tool_id, field_name))
+    return bool(key) and isinstance(value, str) and any(value == t(key, locale=lang) for lang in SUPPORTED)
+
+
+class ToolConfigError(LtError, ValueError):
     """A tool template in the settings is not usable; the message names the tool and the field."""
 
 
-class ToolInputError(ValueError):
+class ToolInputError(LtError, ValueError):
     """Parameters, environment or script of an instance cannot be used; the message is for the user."""
 
 
@@ -190,11 +207,20 @@ class ToolTemplate:
     status_command: str = ""
     help: str = ""
 
+    @property
+    def display_title(self) -> str:
+        """The title for people: a built-in one in the reader's language."""
+        return shown_default(self.id, "title", self.title)
+
+    @property
+    def display_help(self) -> str:
+        return shown_default(self.id, "help", self.help)
+
     def to_public(self) -> dict[str, Any]:
         """What the launch form needs: no defaults of other tools, nothing secret."""
         return {
             "id": self.id,
-            "title": self.title,
+            "title": self.display_title,
             "script_kind": self.script_kind,
             "scripts_glob": list(self.scripts_glob),
             "command": self.command,
@@ -206,7 +232,7 @@ class ToolTemplate:
             "run_filter_packs": list(self.run_filter_packs),
             "image": self.image,
             "soft_stop": bool(self.stop_command),
-            "help": self.help,
+            "help": self.display_help,
         }
 
 
@@ -261,18 +287,18 @@ class CommandLine:
 # ---- configuration -----------------------------------------------------------------------------
 
 
-def _int_list(value: Any, where: str) -> tuple[int, ...]:
+def _int_list(value: Any, where: Any) -> tuple[int, ...]:
     if value in (None, ""):
         return ()
     if not isinstance(value, (list, tuple)):
-        raise ToolConfigError(f"{where}: ожидается список кодов выхода")
+        raise ToolConfigError("lt.tool_config.exit_codes_list", where=where)
     out: list[int] = []
     for item in value:
         if isinstance(item, bool) or not isinstance(item, (int, str)) or not str(item).strip().lstrip("-").isdigit():
-            raise ToolConfigError(f"{where}: «{item}» — не код выхода")
+            raise ToolConfigError("lt.tool_config.not_exit_code", where=where, item=item)
         code = int(item)
         if not 0 <= code <= 255:
-            raise ToolConfigError(f"{where}: код выхода {code} вне диапазона 0–255")
+            raise ToolConfigError("lt.tool_config.exit_code_range", where=where, code=code)
         out.append(code)
     return tuple(dict.fromkeys(out))
 
@@ -281,86 +307,92 @@ def _template_names(text: str) -> set[str]:
     return set(PLACEHOLDER_RE.findall(text or ""))
 
 
-def _check_placeholders(text: str, where: str, allow_params: bool) -> None:
+def _check_placeholders(text: str, where: Any, allow_params: bool) -> None:
     unknown = _template_names(text) - PLACEHOLDERS
     if unknown:
-        raise ToolConfigError(f"{where}: неизвестные подстановки {', '.join('{' + n + '}' for n in sorted(unknown))}")
+        raise ToolConfigError("lt.tool_config.unknown_placeholders", where=where,
+                              names=", ".join("{" + n + "}" for n in sorted(unknown)))
     if not allow_params and "params" in _template_names(text):
-        raise ToolConfigError(f"{where}: {{params}} допустим только в команде")
+        raise ToolConfigError("lt.tool_config.params_only_in_command", where=where, token="{params}")
+
+
+def _field(where: Any, name: Any) -> Any:
+    """The tool and the field of the template ("Tool k6, command") as a message parameter."""
+    return msg("lt.tool_config.where_field", where=where, field=name)
 
 
 def parse_tool(tool_id: str, raw: Mapping[str, Any]) -> ToolTemplate:
     """Validated template; raises :class:`ToolConfigError` with the tool and field in the message."""
-    where = f"Инструмент «{tool_id}»"
+    where = msg("lt.tool_config.where", tool=tool_id)
     if not TOOL_ID_RE.fullmatch(tool_id):
-        raise ToolConfigError(f"{where}: идентификатор — латиница в нижнем регистре, цифры, дефис и подчёркивание")
+        raise ToolConfigError("lt.config.bad_id", where=where)
     if not isinstance(raw, Mapping):
-        raise ToolConfigError(f"{where}: ожидается объект")
+        raise ToolConfigError("lt.config.object_expected", where=where)
     command = str(raw.get("command") or "").strip()
     if not command:
-        raise ToolConfigError(f"{where}: команда не задана")
+        raise ToolConfigError("lt.tool_config.no_command", where=where)
     try:
         tokens = shlex.split(command, posix=True)
     except ValueError as exc:
-        raise ToolConfigError(f"{where}: команда не разбирается на аргументы ({exc})") from exc
+        raise ToolConfigError("lt.tool_config.command_unparsable", where=where, error=str(exc)) from exc
     if not tokens:
-        raise ToolConfigError(f"{where}: команда не задана")
-    _check_placeholders(command, f"{where}, команда", allow_params=True)
+        raise ToolConfigError("lt.tool_config.no_command", where=where)
+    _check_placeholders(command, _field(where, msg("lt.tool_config.field_command")), allow_params=True)
     params_tokens = [token for token in tokens if "{params}" in token]
     if len(params_tokens) > 1 or (params_tokens and params_tokens[0] != "{params}"):
-        raise ToolConfigError(f"{where}: {{params}} должен стоять в команде один раз отдельным аргументом")
+        raise ToolConfigError("lt.tool_config.params_once", where=where, token="{params}")
     env_raw = raw.get("env") or {}
     if not isinstance(env_raw, Mapping):
-        raise ToolConfigError(f"{where}: env — объект «переменная: значение»")
+        raise ToolConfigError("lt.tool_config.env_object", where=where)
     env: dict[str, str] = {}
     for name, value in env_raw.items():
         if not ENV_NAME_RE.fullmatch(str(name)):
-            raise ToolConfigError(f"{where}: недопустимое имя переменной окружения «{name}»")
+            raise ToolConfigError("lt.config.bad_env_name", where=where, name=name)
         text = "" if value is None else str(value)
-        _check_placeholders(text, f"{where}, env.{name}", allow_params=False)
+        _check_placeholders(text, _field(where, f"env.{name}"), allow_params=False)
         env[str(name)] = text
     cwd = str(raw.get("cwd") or "{script_dir}").strip()
-    _check_placeholders(cwd, f"{where}, cwd", allow_params=False)
+    _check_placeholders(cwd, _field(where, "cwd"), allow_params=False)
     kind = str(raw.get("script_kind") or "file")
     if kind not in SCRIPT_KINDS:
-        raise ToolConfigError(f"{where}: script_kind — одно из {', '.join(SCRIPT_KINDS)}")
+        raise ToolConfigError("lt.tool_config.script_kind", where=where, kinds=", ".join(SCRIPT_KINDS))
     globs_raw = raw.get("scripts_glob") or []
     if isinstance(globs_raw, str):
         globs_raw = [globs_raw]
     if not isinstance(globs_raw, (list, tuple)) or len(globs_raw) > 10:
-        raise ToolConfigError(f"{where}: scripts_glob — список до 10 масок")
+        raise ToolConfigError("lt.tool_config.scripts_glob", where=where)
     globs = tuple(str(item) for item in globs_raw)
     for pattern in globs:
         if not GLOB_RE.fullmatch(pattern):
-            raise ToolConfigError(f"{where}: маска «{pattern}» — только буквы, цифры, точка, дефис, * и ?")
+            raise ToolConfigError("lt.tool_config.bad_glob", where=where, pattern=pattern)
     signal = str(raw.get("stop_signal") or "TERM").upper().removeprefix("SIG")
     if signal not in STOP_SIGNALS:
-        raise ToolConfigError(f"{where}: stop_signal — одно из {', '.join(STOP_SIGNALS)}")
+        raise ToolConfigError("lt.tool_config.stop_signal", where=where, signals=", ".join(STOP_SIGNALS))
     try:
         grace = int(raw.get("grace_seconds", 30))
     except (TypeError, ValueError) as exc:
-        raise ToolConfigError(f"{where}: grace_seconds — целое число секунд") from exc
+        raise ToolConfigError("lt.tool_config.grace_int", where=where) from exc
     if not 1 <= grace <= 600:
-        raise ToolConfigError(f"{where}: grace_seconds — от 1 до 600")
+        raise ToolConfigError("lt.tool_config.grace_range", where=where)
     aux: dict[str, str] = {}
     for key in ("version_command", "stop_command", "status_command"):
         text = str(raw.get(key) or "").strip()
         if text:
-            _check_placeholders(text, f"{where}, {key}", allow_params=False)
+            _check_placeholders(text, _field(where, key), allow_params=False)
             try:
                 shlex.split(text, posix=True)
             except ValueError as exc:
-                raise ToolConfigError(f"{where}: {key} не разбирается ({exc})") from exc
+                raise ToolConfigError("lt.tool_config.aux_unparsable", where=where, key=key, error=str(exc)) from exc
         aux[key] = text
     image = str(raw.get("image") or "").strip()
     if any(ch.isspace() for ch in image):
-        raise ToolConfigError(f"{where}: недопустимое имя образа «{image}»")
+        raise ToolConfigError("lt.tool_config.bad_image", where=where, image=image)
     packs_raw = raw.get("run_filter_packs") or []
     if not isinstance(packs_raw, (list, tuple)) or not all(isinstance(item, str) for item in packs_raw):
-        raise ToolConfigError(f"{where}: run_filter_packs — список идентификаторов пакетов запросов")
+        raise ToolConfigError("lt.tool_config.run_filter_packs", where=where)
     executable = str(raw.get("executable") or "").strip()
     if "{exe}" in command and not executable:
-        raise ToolConfigError(f"{where}: команда использует {{exe}}, а executable не задан")
+        raise ToolConfigError("lt.tool_config.exe_missing", where=where, token="{exe}")
     return ToolTemplate(
         id=tool_id,
         title=str(raw.get("title") or tool_id).strip()[:80] or tool_id,
@@ -370,8 +402,8 @@ def parse_tool(tool_id: str, raw: Mapping[str, Any]) -> ToolTemplate:
         cwd=cwd,
         script_kind=kind,
         scripts_glob=globs,
-        success_exit_codes=_int_list(raw.get("success_exit_codes", [0]), f"{where}, success_exit_codes") or (0,),
-        failed_checks_exit_codes=_int_list(raw.get("failed_checks_exit_codes"), f"{where}, failed_checks_exit_codes"),
+        success_exit_codes=_int_list(raw.get("success_exit_codes", [0]), _field(where, "success_exit_codes")) or (0,),
+        failed_checks_exit_codes=_int_list(raw.get("failed_checks_exit_codes"), _field(where, "failed_checks_exit_codes")),
         stop_signal=signal,
         grace_seconds=grace,
         version_command=aux["version_command"],
@@ -409,10 +441,10 @@ def effective_tools(config: Mapping[str, Any]) -> dict[str, ToolTemplate]:
 def validate_tools_section(payload: Mapping[str, Any]) -> None:
     """Raises :class:`ToolConfigError` for the first tool of ``load_tools`` that cannot be used."""
     if not isinstance(payload, Mapping):
-        raise ToolConfigError("load_tools — объект «инструмент: шаблон»")
+        raise ToolConfigError("lt.tool_config.section_object")
     for tool_id, raw in payload.items():
         if not isinstance(raw, Mapping):
-            raise ToolConfigError(f"Инструмент «{tool_id}»: ожидается объект")
+            raise ToolConfigError("lt.config.object_expected", where=msg("lt.tool_config.where", tool=tool_id))
     for tool_id, raw in merged_tool_configs({"load_tools": payload}).items():
         parse_tool(tool_id, raw)
 
@@ -434,7 +466,7 @@ def tools_overrides(payload: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
         diff = {
             key: copy.deepcopy(value)
             for key, value in raw.items()
-            if base.get(key) != value and not (key == "enabled" and value is True and "enabled" not in base)
+            if not _is_default(str(tool_id), key, value, base) and not (key == "enabled" and value is True and "enabled" not in base)
         }
         if diff:
             out[str(tool_id)] = diff
@@ -462,16 +494,16 @@ def parse_params(text: Any) -> list[str]:
     else:
         raw = str(text)
         if len(raw) > MAX_PARAMS_CHARS:
-            raise ToolInputError(f"Параметры длиннее {MAX_PARAMS_CHARS} символов")
+            raise ToolInputError("lt.tool_input.params_too_long", max=MAX_PARAMS_CHARS)
         try:
             args = shlex.split(raw.replace("\r\n", "\n").replace("\n", " "), posix=True)
         except ValueError as exc:
-            raise ToolInputError(f"Параметры не разбираются: проверьте парные кавычки ({exc})") from exc
+            raise ToolInputError("lt.tool_input.params_unparsable", error=str(exc)) from exc
     if len(args) > MAX_ARGS:
-        raise ToolInputError(f"Больше {MAX_ARGS} аргументов в параметрах")
+        raise ToolInputError("lt.tool_input.too_many_args", max=MAX_ARGS)
     for arg in args:
         if _CONTROL_RE.search(arg):
-            raise ToolInputError("Параметры содержат управляющие символы")
+            raise ToolInputError("lt.tool_input.params_control")
     return args
 
 
@@ -489,18 +521,18 @@ def parse_env(value: Any) -> dict[str, str]:
                 continue
             name, sep, rest = stripped.partition("=")
             if not sep:
-                raise ToolInputError(f"Строка окружения «{stripped[:40]}»: ожидается ИМЯ=значение")
+                raise ToolInputError("lt.tool_input.env_line", line=stripped[:40])
             pairs.append((name.strip(), rest))
     else:
-        raise ToolInputError("Окружение — строки ИМЯ=значение")
+        raise ToolInputError("lt.tool_input.env_lines")
     if len(pairs) > MAX_ENV_VARS:
-        raise ToolInputError(f"Больше {MAX_ENV_VARS} переменных окружения")
+        raise ToolInputError("lt.tool_input.too_many_env", max=MAX_ENV_VARS)
     env: dict[str, str] = {}
     for name, val in pairs:
         if not ENV_NAME_RE.fullmatch(name):
-            raise ToolInputError(f"Недопустимое имя переменной окружения «{name[:40]}»")
+            raise ToolInputError("lt.tool_input.bad_env_name", name=name[:40])
         if len(val) > MAX_ENV_VALUE_CHARS or _CONTROL_RE.search(val):
-            raise ToolInputError(f"Значение переменной {name} слишком длинное или содержит управляющие символы")
+            raise ToolInputError("lt.tool_input.bad_env_value", name=name)
         env[name] = val
     return env
 
@@ -524,10 +556,10 @@ def check_instance_env(env: Mapping[str, str], generator_env: Mapping[str, str])
     """
     reserved = sorted(name for name in env if name.upper() in RESERVED_ENV_NAMES or name.startswith("LD_"))
     if reserved:
-        raise ToolInputError(f"Переменные {', '.join(reserved)} нельзя задавать у инстанса")
+        raise ToolInputError("lt.tool_input.reserved_env", names=", ".join(reserved))
     fixed = sorted(name for name in env if name in generator_env)
     if fixed:
-        raise ToolInputError(f"Переменные {', '.join(fixed)} заданы в настройках генератора, у инстанса их не переопределить")
+        raise ToolInputError("lt.tool_input.fixed_env", names=", ".join(fixed))
 
 
 def public_url(url: str) -> str:
@@ -557,25 +589,28 @@ def resolve_script(tool: ToolTemplate, script: Any, scripts_dir: str, allow_rela
     text = str(script or "").strip()
     if tool.script_kind == "none":
         return "", scripts_dir
+    title = tool.display_title
     if not text:
-        raise ToolInputError(f"{tool.title}: укажите {'класс симуляции' if tool.script_kind == 'class' else 'скрипт'}")
+        if tool.script_kind == "class":
+            raise ToolInputError("lt.tool_input.no_class", tool=title)
+        raise ToolInputError("lt.tool_input.no_script", tool=title)
     if len(text) > MAX_SCRIPT_CHARS or _CONTROL_RE.search(text):
-        raise ToolInputError(f"{tool.title}: недопустимое имя скрипта")
+        raise ToolInputError("lt.tool_input.bad_script", tool=title)
     if tool.script_kind == "class":
         if not CLASS_RE.fullmatch(text):
-            raise ToolInputError(f"{tool.title}: «{text}» — не имя класса (например computerdatabase.BasicSimulation)")
+            raise ToolInputError("lt.tool_input.not_class", tool=title, text=text)
         return text, scripts_dir
     path = posixpath.normpath(text if is_absolute_path(text) else posixpath.join(scripts_dir or "", text))
     if scripts_dir:
         root = posixpath.normpath(scripts_dir)
         inside = path == root or path.startswith(root.rstrip("/") + "/")
         if not inside:
-            raise ToolInputError(f"{tool.title}: скрипт «{text}» вне каталога скриптов генератора {scripts_dir}")
+            raise ToolInputError("lt.tool_input.outside_scripts", tool=title, text=text, dir=scripts_dir)
     if not is_absolute_path(path):
         if not allow_relative:
-            raise ToolInputError(f"{tool.title}: каталог скриптов генератора не задан, укажите абсолютный путь к скрипту")
+            raise ToolInputError("lt.tool_input.no_scripts_dir", tool=title)
         if path == ".." or path.startswith("../"):
-            raise ToolInputError(f"{tool.title}: скрипт «{text}» вне каталога задачи")
+            raise ToolInputError("lt.tool_input.outside_job", tool=title, text=text)
         return path, posixpath.dirname(path) or "."
     return path, posixpath.dirname(path) or "/"
 
@@ -616,7 +651,7 @@ def _substitute(text: str, values: Mapping[str, str]) -> str:
     def replace(match: re.Match) -> str:
         name = match.group(1)
         if name not in values:
-            raise ToolConfigError(f"неизвестная подстановка {{{name}}}")
+            raise ToolConfigError("lt.tool_config.unknown_placeholder", token="{" + name + "}")
         return values[name]
 
     return PLACEHOLDER_RE.sub(replace, text)
@@ -664,6 +699,7 @@ def render_aux_command(text: str, ctx: RenderContext) -> tuple[str, ...]:
 __all__ = [
     "CLASS_RE",
     "CommandLine",
+    "DEFAULT_TEXT_KEYS",
     "DEFAULT_TOOLS",
     "PLACEHOLDERS",
     "RenderContext",
@@ -686,6 +722,7 @@ __all__ = [
     "render_command",
     "render_version_command",
     "resolve_script",
+    "shown_default",
     "tools_overrides",
     "validate_tools_section",
 ]

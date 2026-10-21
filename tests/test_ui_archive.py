@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Archive API (ui-plan stage 3): /runs normalization, new fields and sorting; /compare_baseline lookup.
 
 The database is faked: RecordingConnection logs every statement and serves scripted fetch results.
@@ -110,6 +111,8 @@ def test_runs_rows_carry_project_area_max_rps_and_type_key(client, monkeypatch):
 
     assert resp.status_code == 200
     first, second = resp.get_json()
+    assert (first["verdict"], first["llm_verdict"], first["sla_verdict"]) == ("pass", "pass", None)  # legacy rows read as codes
+    assert second["verdict"] == "fail" and second["llm_verdict"] is None
     assert first["project_area"] == "devstack"
     assert first["max_rps"] == 1234.5
     assert first["test_type"] == "Stability" and first["test_type_key"] == "soak"
@@ -177,7 +180,8 @@ def test_runs_sorts_by_max_rps_with_nulls_last_and_a_tiebreak(client, monkeypatc
     [
         ({"sort": "run_name", "dir": "desc"}, "ORDER BY run_name DESC OFFSET"),
         ({"sort": "bogus; DROP TABLE x"}, "ORDER BY end_time DESC, run_name ASC"),
-        ({"sort": "verdict", "dir": "sideways"}, "ORDER BY verdict DESC, run_name ASC"),
+        # By severity (pass, risk, fail, no_data), not by the text of a label.
+        ({"sort": "verdict", "dir": "sideways"}, "ORDER BY verdict_rank DESC, run_name ASC"),
         ({"sort": "test_type", "dir": "asc"}, "ORDER BY test_type ASC, run_name ASC"),
     ],
 )
@@ -189,6 +193,19 @@ def test_runs_sort_is_whitelisted(client, monkeypatch, args, order):
     page_sql, _ = conn.log[0]
     assert order in page_sql
     assert "DROP" not in page_sql
+
+
+def test_runs_verdict_rank_and_filter_map_old_labels(client, monkeypatch):
+    from AI.verdicts import code_sql, rank_sql
+
+    conn = use_conn(monkeypatch, "dashboard", RecordingConnection(fetchone_results=[(0,)], fetchall_results=[[]]))
+    assert client.get("/runs", query_string={"sort": "verdict", "dir": "asc", "verdict": "Есть риски"}).status_code == 200
+    page_sql, params = conn.log[0]
+    joined = "COALESCE(CASE WHEN f.run_name IS NOT NULL THEN mv.verdict END, f.verdict)"
+    assert f"{code_sql(joined)} AS verdict" in page_sql and f"{rank_sql(joined)} AS verdict_rank" in page_sql
+    assert "ORDER BY verdict_rank ASC, run_name ASC" in page_sql
+    assert "verdict = %s" in page_sql and params[-3] == "risk"  # a shared link with the old label still filters
+    assert ", 'Недостаточно данных')" not in page_sql  # no label fallback: NULL maps to no_data in the CASE
 
 
 def test_runs_sql_literal_escapes_quotes_and_percent():
@@ -222,7 +239,7 @@ def test_compare_baseline_uses_service_area_type_and_time_of_the_run(client, mon
 
     assert resp.status_code == 200
     assert resp.get_json() == {
-        "run_name": "nightly-0", "service": "checkout", "verdict": "Успешно",
+        "run_name": "nightly-0", "service": "checkout", "verdict": "pass",
         "created_at": END.isoformat(), "mode": "previous",
     }
     assert calls == [{
@@ -300,7 +317,8 @@ def test_compare_baseline_sql_against_find_previous_run(client, monkeypatch):
 
     assert resp.status_code == 200 and resp.get_json()["run_name"] == "nightly-0"
     baseline_sql, params = conn.log[1]
-    assert "= 'Успешно'" in baseline_sql
+    assert "= 'pass'" in baseline_sql and "WHEN 'Успешно' THEN 'pass'" in baseline_sql
+    assert resp.get_json()["verdict"] == "pass"
     assert "LOWER(TRIM(COALESCE(r.test_type, ''))) = ANY(%s)" in baseline_sql
     assert "r.project_area = %s" in baseline_sql
     assert params[0] == "checkout" and params[1] == "nightly-1" and params[2] == created

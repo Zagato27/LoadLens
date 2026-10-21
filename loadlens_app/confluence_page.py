@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Text of a Confluence page for the system context import.
 
 The page is read with the saved ``confluence`` connection (the one that publishes reports). A link is
@@ -18,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import parse_qs, unquote, unquote_plus, urljoin, urlsplit
 
+from AI.i18n import t
 from loadlens_app.context_import import ContextImportError, ExtractedText, _finish
 
 logger = logging.getLogger(__name__)
@@ -47,19 +49,16 @@ def page_ref(url: str, base_url: str) -> PageRef:
     """Which page a link names; refuses links outside the configured Confluence."""
     link = (url or "").strip()
     if not link:
-        raise ContextImportError("Вставьте ссылку на страницу Confluence")
+        raise ContextImportError(t("server.confluence_page.link_required"))
     try:
         parts, base = urlsplit(link), urlsplit(base_url)
     except ValueError as exc:
-        raise ContextImportError("Ссылка на страницу Confluence некорректна") from exc
+        raise ContextImportError(t("server.confluence_page.link_invalid")) from exc
     if parts.scheme not in ("http", "https") or not parts.hostname:
-        raise ContextImportError("Нужна полная ссылка на страницу, например https://confluence.example.ru/pages/viewpage.action?pageId=123")
+        raise ContextImportError(t("server.confluence_page.link_full"))
     base_path = base.path.rstrip("/")
     if _origin(parts) != _origin(base) or not (parts.path == base_path or parts.path.startswith(base_path + "/")):
-        raise ContextImportError(
-            f"Страница должна быть в Confluence из настроек ({base.scheme}://{base.netloc}{base_path}). "
-            "Другие адреса не открываются: учётная запись Confluence передаётся только туда"
-        )
+        raise ContextImportError(t("server.confluence_page.foreign_host", base=f"{base.scheme}://{base.netloc}{base_path}"))
     path = parts.path[len(base_path):] or "/"
     query = parse_qs(parts.query)
     page_id = (query.get("pageId") or [""])[0].strip()
@@ -77,7 +76,7 @@ def page_ref(url: str, base_url: str) -> PageRef:
     match = _SHORT_LINK.match(path)
     if match:
         return PageRef(short_code=match.group(1))
-    raise ContextImportError("По ссылке не удалось определить страницу: откройте страницу в Confluence и скопируйте адрес из браузера")
+    raise ContextImportError(t("server.confluence_page.page_unknown"))
 
 
 def html_to_text(markup: str) -> str:
@@ -113,16 +112,16 @@ def _client():
     cfg = confluence_config()
     base_url = str(cfg.get("base_url") or "").strip()
     if not base_url or not str(cfg.get("username") or "").strip():
-        raise ContextImportError("Подключение Confluence не настроено: Настройки → Подключения → Confluence", 422, "missing_confluence")
+        raise ContextImportError(t("server.confluence_page.not_configured"), 422, "missing_confluence")
     return ConfluenceClient(cfg)
 
 
 def _failure(status: int) -> ContextImportError:
     if status in (401, 403):
-        return ContextImportError(f"Учётная запись Confluence из настроек не может прочитать эту страницу (HTTP {status})", 403, "confluence_forbidden")
+        return ContextImportError(t("server.confluence_page.forbidden", status=status), 403, "confluence_forbidden")
     if status == 404:
-        return ContextImportError("Страница Confluence не найдена или недоступна учётной записи из настроек", 404, "not_found")
-    return ContextImportError(f"Confluence ответил ошибкой HTTP {status}", 502, "confluence_failed")
+        return ContextImportError(t("server.confluence_page.not_found"), 404, "not_found")
+    return ContextImportError(t("server.confluence_page.http_error", status=status), 502, "confluence_failed")
 
 
 def _call(client, path: str, action: str, **kwargs: Any):
@@ -132,7 +131,7 @@ def _call(client, path: str, action: str, **kwargs: Any):
         raise
     except Exception as exc:  # network, TLS, timeouts
         logger.warning("context import: Confluence %s failed: %s", action, exc)
-        raise ContextImportError(f"Confluence не ответил: {str(exc)[:200]}", 502, "confluence_failed") from exc
+        raise ContextImportError(t("server.confluence_page.no_answer", error=str(exc)[:200]), 502, "confluence_failed") from exc
 
 
 def _resolve_short_link(client, code: str) -> PageRef:
@@ -142,7 +141,7 @@ def _resolve_short_link(client, code: str) -> PageRef:
         raise _failure(response.status_code if response.status_code >= 400 else 404)
     ref = page_ref(urljoin(client.base_url + "/", location), client.base_url)
     if ref.short_code:
-        raise ContextImportError("Короткая ссылка Confluence ведёт на другую короткую ссылку: откройте страницу и скопируйте полный адрес")
+        raise ContextImportError(t("server.confluence_page.short_link_loop"))
     return ref
 
 
@@ -166,7 +165,7 @@ def _fetch(client, ref: PageRef) -> dict[str, Any]:
         if page is None:
             raise _failure(404)
     if not isinstance(page, dict):
-        raise ContextImportError("Confluence вернул неожиданный ответ", 502, "confluence_failed")
+        raise ContextImportError(t("server.confluence_page.unexpected"), 502, "confluence_failed")
     return page
 
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import xml.etree.ElementTree as ET
 
 import pytest
@@ -224,3 +225,43 @@ def test_sla_criteria_block_reads_older_reports_and_empty_sla():
     assert "Доля ошибок, %" in body and "<td>1</td><td>0.25</td>" in body
     assert "не заданы" in sla_criteria_block({"domain": "final"})
 
+
+
+def _report_rows(coded: bool) -> list[dict]:
+    """One soak report as a new run stores it (verdict codes, codes of notes, no label_ru) or as an old one did."""
+    labels = {"pass": "Успешно", "risk": "Есть риски", "fail": "Провал"}
+
+    def v(code: str) -> str:
+        return code if coded else labels[code]
+
+    profile = {"mode": "stability", "test_type": "soak", "normalized_test_type": "soak"}
+    hold = {"start_iso": "2024-03-09T19:04:00+03:00", "end_iso": "2024-03-09T20:00:00+03:00", "duration_min": 56}
+    if coded:
+        hold.update(note_codes=["early_drop"], note="RPS упал задолго до конца теста: падение включено в окно удержания")
+    else:
+        profile["label_ru"] = "Долговременный (soak)"
+        hold["note"] = "RPS упал задолго до конца теста: падение включено в окно удержания"
+    final = {
+        "domain": "final", "test_type": "soak", "start_ms": 1710000000000, "end_ms": 1710003600000,
+        "verdict": v("risk"), "llm_verdict": v("fail"), "sla_verdict": v("risk"),
+        "parsed": {
+            "verdict": v("risk"), "verdict_rationale": "Удержание выполнено, p95 растёт.", "test_profile": profile,
+            "stability_under_load": {"target_rps": 290, "actual_rps": 299.8, "hold": hold,
+                                     "sla_summary": "SLA verdict: Есть риски. Пройдено: target_rps"},
+            "findings": [], "recommended_actions": [],
+        },
+        "sla_details": SLA_FINAL["sla_details"],
+    }
+    jvm = {"domain": "jvm", "verdict": v("pass"), "llm_verdict": v("pass"), "parsed": {"verdict": v("pass"), "findings": [{"summary": "Heap"}]}}
+    return [final, jvm]
+
+
+def test_old_and_new_reports_publish_the_same_page():
+    kwargs = {"run_name": "soak-1", "service": "NSI", "source_url": "http://localhost/reports/NSI/soak-1", "engineer_html": "", "charts": []}
+    old = build_page_body(llm_rows=_report_rows(False), **kwargs)
+    new = build_page_body(llm_rows=_report_rows(True), **kwargs)
+    _well_formed(new)
+    assert new == old
+    assert "<th>Вердикт</th><td>Есть риски</td>" in new and "<th>Вердикт LLM</th><td>Провал</td>" in new
+    assert "Долговременный (soak)" in new and "RPS упал задолго до конца теста" in new
+    assert "SLA verdict: Есть риски" in new

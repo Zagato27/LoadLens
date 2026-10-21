@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import copy
 import json
 import sys
@@ -636,7 +637,7 @@ def test_runs_applies_filters_and_reports_total(client, monkeypatch):
     assert resp.headers["X-Total-Count"] == "37"
     body = resp.get_json()
     assert body[0]["run_name"] == "nightly-1"
-    assert body[0]["verdict"] == "Провал"
+    assert body[0]["verdict"] == "fail" and body[0]["llm_verdict"] == "risk" and body[0]["sla_verdict"] == "fail"
     assert body[0]["test_type"] == "step"
     assert body[0]["run_id"] == "rid-1"
 
@@ -645,7 +646,12 @@ def test_runs_applies_filters_and_reports_total(client, monkeypatch):
     assert "COUNT(*) OVER ()" in page_sql
     assert "service = %s AND verdict = %s AND test_type = %s" in page_sql
     assert "OFFSET %s LIMIT %s" in page_sql
-    assert page_params == ("%night%", "%night%", "demo", "Провал", "step", 20, 20)
+    assert page_params == ("%night%", "%night%", "demo", "fail", "step", 20, 20)  # the old label selects its code
+
+    second = RecordingConnection(fetchone_results=[(37,)], fetchall_results=[page_rows])
+    monkeypatch.setattr(dashboard, "_ts_conn", lambda: second)
+    client.get("/runs", query_string={"verdict": "risk"})
+    assert second.log[0][1][-3] == "risk"
 
 
 def test_runs_sorts_by_report_created_at(client, monkeypatch):
@@ -1231,6 +1237,8 @@ def test_llm_reports_returns_system_context(client, monkeypatch):
     assert isinstance(data, list)
     assert data[0]["domain"] == "final"
     assert data[0]["test_type"] == "step"
+    assert data[0]["verdict"] == "pass" and data[0]["llm_verdict"] == "pass" and data[0]["sla_verdict"] == "pass"
+    assert data[0]["parsed"]["verdict"] == "pass"  # saved with the old label, read as the code
     assert "стабильными метриками" in data[0]["parsed"]["verdict_rationale"]
     assert data[0]["system_context"]["system"]["name"] == "Checkout Platform"
 
@@ -1245,19 +1253,21 @@ def test_dashboard_data_groups_services(client, monkeypatch):
     conn = RecordingConnection(
         fetchone_results=[("nightly-1", "demo", 1, 2, "Есть риски", "Успешно", "Есть риски", now), (3,)],
         fetchall_results=[
-            [("Успешно", 2), ("Провал", 1)],
-            [("demo", "nightly-1", "Есть риски", now, "226.5", "step"), ("demo", "old", "Успешно", earlier, None, "soak"), ("billing", "spike", "Провал", earlier, "120", "spike")],
+            [("Успешно", 2), ("pass", 1), ("Провал", 1)],
+            [("demo", "nightly-1", "risk", now, "226.5", "step"), ("demo", "old", "Успешно", earlier, None, "soak"), ("billing", "spike", "Провал", earlier, "120", "spike")],
             [("nightly-1", "demo", "Есть риски", now, "step", 1, 2)],
         ],
     )
     monkeypatch.setattr(dashboard, "_ts_conn", lambda: conn)
     data = client.get("/dashboard_data").get_json()
     assert data["runs_total"] == 3
-    assert data["verdict_counts"]["Успешно"] == 2
+    assert data["verdict_counts"] == {"pass": 3, "risk": 0, "fail": 1, "no_data": 0}
+    assert data["last_run"]["verdict"] == "risk" and data["last_run"]["llm_verdict"] == "pass"
     services = {s["service"]: s for s in data["services"]}
     assert services["demo"]["last_run"] == "nightly-1"
     assert services["demo"]["max_rps"] == pytest.approx(226.5)
-    assert services["demo"]["recent_verdicts"] == ["Есть риски", "Успешно"]
+    assert services["demo"]["recent_verdicts"] == ["risk", "pass"]
+    assert services["billing"]["verdict"] == "fail" and data["recent_runs"][0]["verdict"] == "risk"
     assert services["billing"]["max_rps"] == pytest.approx(120.0)
     assert data["recent_runs"][0]["run_name"] == "nightly-1"
 
@@ -1307,7 +1317,9 @@ def test_seed_demo_run_writes_all_domains(monkeypatch):
     results, run_meta = saved["llm"]
     assert run_meta["test_type"] == "step" and run_meta["service"] == demo_data.DEMO_SERVICE
     assert results["final_parsed"]["peak_performance"]["max_rps"] == pytest.approx(249.3)
-    assert results["sla_verdict"] == "Есть риски"
+    assert results["sla_verdict"] == "risk"
+    assert results["sla_summary"] == "SLA verdict: Есть риски. Пройдено: target_rps, error_rate; Нарушено: p95_latency"
+    assert {results[f"{key}_parsed"]["verdict"] for key in ("jvm", "database", "ms", "hard_resources", "lt_framework", "final")} <= {"pass", "risk", "no_data"}
     assert {c["name"] for c in results["sla_checks"]} == {"target_rps", "p95_latency", "error_rate"}
     assert results["system_context"]["system"]["name"].startswith("Checkout Platform")
     assert len(results["contexts"]["final"]["load_steps"]) == 5
@@ -1365,15 +1377,15 @@ def test_compare_baseline(client, monkeypatch):
     resp = client.get("/compare_baseline", query_string={"run_name": "nightly-1"})
     assert resp.status_code == 200
     data = resp.get_json()
-    assert data["run_name"] == "release-2.4" and data["mode"] == "previous_success"
-    assert "= 'Успешно'" in conn.log[1][0]
+    assert data["run_name"] == "release-2.4" and data["mode"] == "previous_success" and data["verdict"] == "pass"
+    assert "= 'pass'" in conn.log[1][0]
 
     empty = RecordingConnection(fetchone_results=[("demo", run_created, "", ""), None])
     monkeypatch.setattr(compare, "_ts_conn", lambda: empty)
     resp = client.get("/compare_baseline", query_string={"run_name": "nightly-1", "mode": "previous"})
     assert resp.status_code == 404
     assert "предыдущий прогон" in resp.get_json()["error"]
-    assert "= 'Успешно'" not in empty.log[1][0]
+    assert "= 'pass'" not in empty.log[1][0]
 
     resp = client.get("/compare_baseline", query_string={"run_name": "nightly-1", "mode": "best"})
     assert resp.status_code == 400
@@ -1620,7 +1632,7 @@ def test_self_consistency_sequential_mode_limits_candidates(monkeypatch):
 
     text, parsed, scores = scoring.llm_two_pass_self_consistency("prompt", "{}", k=5, return_scores=True, domain_key="jvm")
     assert len(calls) == 2
-    assert parsed is not None and parsed.verdict == "Успешно"
+    assert parsed is not None and parsed.verdict == "pass"
     assert scores["final_score"] == 1.0
 
 
@@ -1661,7 +1673,7 @@ def test_parse_llm_analysis_preserves_verdict_rationale():
     )
     parsed = parse_llm_analysis_strict(raw)
     assert parsed is not None
-    assert parsed.verdict == "Есть риски"
+    assert parsed.verdict == "risk"  # the model answers with the label, the analysis keeps the code
     assert "локальных деградаций" in (parsed.verdict_rationale or "")
 
 
@@ -1806,7 +1818,8 @@ def test_reconcile_sla_downgrades_stability_resource_failures_to_risk():
         },
         {"mode": "stability"},
     )
-    assert result["verdict"] == "Есть риски"
+    assert result["verdict"] == "risk"
+    assert result["summary"].startswith("SLA verdict: Есть риски. ") and "не переводят тест в «Провал»." in result["summary"]
     assert result["test_mode"] == "stability"
     assert result["checks"][2]["category"] == "secondary"
 
@@ -1833,7 +1846,7 @@ def test_upload_from_llm_reports_progress_and_passes_deterministic_sla(monkeypat
         "sla": {"target_rps": 200, "max_performance_query": "LT (InfluxQL): RPS sum by all groups", "target_rps_allow_peak_fallback": True},
     }
 
-    monkeypatch.setattr(pipeline_module, "read_prompt_from_file", lambda filename: "overall prompt" if "overall" in str(filename) else "domain prompt")
+    monkeypatch.setattr(pipeline_module, "load_prompt", lambda name, lang=None: "overall prompt" if "overall" in str(name) else "domain prompt")
     monkeypatch.setattr(pipeline_module, "fetch_and_aggregate_with_label_keys", lambda *args, **kwargs: [lt_df])
     monkeypatch.setattr(
         pipeline_module,
@@ -1847,7 +1860,7 @@ def test_upload_from_llm_reports_progress_and_passes_deterministic_sla(monkeypat
         },
     )
 
-    def fake_evaluate_sla(domain_data, sla_cfg, test_profile=None):
+    def fake_evaluate_sla(domain_data, sla_cfg, test_profile=None, lang="ru"):
         state["sla_called"] = True
         return {
             "verdict": "Успешно",
@@ -1891,9 +1904,12 @@ def test_upload_from_llm_reports_progress_and_passes_deterministic_sla(monkeypat
     assert captured["lt"]["sla_step"]["rps"] == pytest.approx(226.5)
     assert ctx["designated_peak_performance"]["stable_max"] == pytest.approx(226.5)
     assert ctx["designated_peak_performance"]["series"] == "sum_all"
-    assert ctx["deterministic_sla"]["verdict"] == "Успешно"
+    assert ctx["deterministic_sla"]["verdict"] == "pass"
+    assert "verdict_label" not in ctx["deterministic_sla"]  # the prompts ask for codes; no label in the context
+    assert ctx["test_profile"]["label"] and result["report_language"] == "ru"
+    assert result["final_parsed"]["report_language"] == "ru"
     assert ctx["deterministic_sla"]["target_rps_check"]["passed"] is True
-    assert result["sla_verdict"] == "Успешно"
+    assert result["sla_verdict"] == "pass" and result["final_parsed"]["verdict"] == "pass"
     assert result["final_parsed"]["peak_performance"]["max_rps"] == pytest.approx(226.5)
     # lt_framework keeps its own peak, other domains never carry one
     assert "peak_performance" in result["lt_framework_parsed"]
@@ -2041,6 +2057,11 @@ def _patch_projects_db(monkeypatch, conn):
 
 
 def test_projects_overview_shows_reports_readiness_and_overrides(client, monkeypatch):
+    # Readiness resolves SLA references against the global queries: a reference to a missing label is replaced by
+    # the role query of the settings in use. Pin the global queries so "LT RPS" exists whatever settings.py holds.
+    monkeypatch.setitem(core.CONFIG, "queries", {
+        "lt_framework": {"labels": ["LT RPS"], "promql_queries": ["sum(rate(requests_total[1m]))"], "label_keys_list": [[]]},
+    })
     _write_project_runtime({
         "alpha": {
             "title": "Альфа",
@@ -2057,7 +2078,7 @@ def test_projects_overview_shows_reports_readiness_and_overrides(client, monkeyp
 
     data = client.get("/projects").get_json()
     alpha = next(p for p in data["projects"] if p["id"] == "alpha")
-    assert alpha["title"] == "Альфа" and alpha["reports"] == 2 and alpha["last_verdict"] == "Провал"
+    assert alpha["title"] == "Альфа" and alpha["reports"] == 2 and alpha["last_verdict"] == "fail"
     assert alpha["readiness"]["target_rps"] == 100 and alpha["readiness"]["performance_query"] == "LT RPS"
     statuses = {o["section"]: o for o in alpha["overrides"]}
     assert statuses["llm"]["status"] == "same"

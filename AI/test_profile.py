@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Single source of truth for load-test types and their analysis profiles.
 
 A run carries a free-form ``test_type`` string (UI sends step/soak/spike/stress, the API
@@ -17,6 +18,9 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Mapping, Optional
+
+from AI.i18n import t
+from AI.report_texts import LanguageTable, text_lang
 
 TEST_TYPES = ("step", "soak", "spike", "stress")
 MODES = ("capacity", "stability", "spike", "stress")
@@ -38,6 +42,42 @@ TEST_TYPE_ALIASES: Dict[str, tuple[str, ...]] = {
 SOAK_MARKERS = ("stabil", "soak", "endurance", "longevity", "reliability", "стабил", "длительн")
 
 
+DEFAULT_LANG = "ru"
+# Dictionary keys of the visible texts of each type: the label (common.test_type.*, also LL.TEST_TYPE_LABELS in
+# static/js/common.js), the name of its RPS figure (report.peak_label.*) and the focus of the analysis
+# (report.focus.*). Readers build them from ``normalized_test_type``; reports saved before kept ``label_ru``.
+TEST_TYPE_FIELDS = ("label", "peak_label", "focus")
+
+
+def _field_text(key: str, field: str, lang: str) -> str:
+    if field == "label":
+        return t(f"common.test_type.{key}", locale=lang)
+    if field == "peak_label":
+        return t(f"report.peak_label.{key}", locale=lang)
+    return t(f"report.focus.{key}", locale=lang)
+
+
+# {lang: {type: {"label", "peak_label", "focus"}}}, rendered from the dictionaries on access.
+TEST_TYPE_TEXTS = LanguageTable(TEST_TYPES, lambda key, lang: {field: _field_text(key, field, lang) for field in TEST_TYPE_FIELDS})
+
+
+def test_type_text(key: Optional[str], field: str, lang: Optional[str] = DEFAULT_LANG) -> str:
+    """``label`` / ``peak_label`` / ``focus`` of a normalized test type in ``lang``; '' for an unknown type."""
+    code = str(key or "").strip().lower()
+    if code not in TEST_TYPES or field not in TEST_TYPE_FIELDS:
+        return ""
+    return _field_text(code, field, text_lang(lang))
+
+
+def test_type_label(key: Optional[str], lang: Optional[str] = DEFAULT_LANG) -> str:
+    """Visible name of a normalized test type (step/soak/spike/stress); '' for an unknown type."""
+    return test_type_text(key, "label", lang)
+
+
+test_type_text.__test__ = False  # type: ignore[attr-defined]  # not pytest tests despite the names
+test_type_label.__test__ = False  # type: ignore[attr-defined]
+
+
 @dataclass(frozen=True)
 class TestProfile:
     """How a run of a given test type is analysed and presented."""
@@ -47,64 +87,91 @@ class TestProfile:
     test_type: str
     raw_test_type: str
     mode: str
-    label_ru: str
     peak_performance_applicable: bool
-    peak_label_ru: str
     step_detection_default: bool
     step_detection_configurable: bool
     forecast_allowed: bool
-    focus: str
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Profile as stored in contexts and the final payload; ``test_type`` keeps the raw value."""
+    @property
+    def _text_key(self) -> str:
+        # Unknown types are analysed with the step profile and named like it.
+        return self.test_type or "step"
+
+    def label(self, lang: Optional[str] = DEFAULT_LANG) -> str:
+        return test_type_text(self._text_key, "label", lang)
+
+    def peak_label(self, lang: Optional[str] = DEFAULT_LANG) -> str:
+        return test_type_text(self._text_key, "peak_label", lang)
+
+    def focus(self, lang: Optional[str] = DEFAULT_LANG) -> str:
+        return test_type_text(self._text_key, "focus", lang)
+
+    def to_dict(self, lang: Optional[str] = DEFAULT_LANG) -> Dict[str, Any]:
+        """Profile as stored in contexts and the final payload; ``test_type`` keeps the raw value.
+
+        ``label`` and ``focus`` are for the model context in the language of the report; readers name the
+        type by ``normalized_test_type``.
+        """
         data = asdict(self)
         data["test_type"] = self.raw_test_type
         data["normalized_test_type"] = self.test_type
+        data["label"] = self.label(lang)
+        data["focus"] = self.focus(lang)
         return data
 
 
 _PROFILE_FIELDS: Dict[str, Dict[str, Any]] = {
     "step": {
         "mode": "capacity",
-        "label_ru": "Ступенчатый (max perf)",
         "peak_performance_applicable": True,
-        "peak_label_ru": "Максимальный RPS",
         "step_detection_default": True,
         "step_detection_configurable": True,
         "forecast_allowed": True,
-        "focus": "Определить максимальную устойчивую производительность и момент деградации.",
     },
     "soak": {
         "mode": "stability",
-        "label_ru": "Долговременный (soak)",
         "peak_performance_applicable": False,
-        "peak_label_ru": "Удерживаемый RPS",
         "step_detection_default": False,
         "step_detection_configurable": False,
         "forecast_allowed": False,
-        "focus": "Оценить удержание заданной нагрузки на всем интервале без накопления деградации.",
     },
     "spike": {
         "mode": "spike",
-        "label_ru": "Всплески (spike)",
         "peak_performance_applicable": False,
-        "peak_label_ru": "Уровень всплеска",
         "step_detection_default": False,
         "step_detection_configurable": False,
         "forecast_allowed": False,
-        "focus": "Оценить реакцию на резкий рост нагрузки: рост задержек и ошибок в окне всплеска и время восстановления.",
     },
     "stress": {
         "mode": "stress",
-        "label_ru": "Стресс",
         "peak_performance_applicable": True,
-        "peak_label_ru": "Точка насыщения",
         "step_detection_default": True,
         "step_detection_configurable": True,
         "forecast_allowed": True,
-        "focus": "Найти точку насыщения, характер деградации и ограничивающий ресурс.",
     },
 }
+
+
+def stored_type_label(profile: Any, lang: Optional[str] = DEFAULT_LANG) -> str:
+    """Name of the type of a stored ``test_profile``: by ``normalized_test_type``, else the saved
+    ``label_ru`` / ``label`` of an old report, else ''."""
+    if not isinstance(profile, Mapping):
+        return ""
+    label = test_type_label(profile.get("normalized_test_type"), lang)
+    if label:
+        return label
+    for key in ("label_ru", "label"):
+        text = str(profile.get(key) or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def stored_type_focus(profile: Any, lang: Optional[str] = DEFAULT_LANG, fallback_key: str = "") -> str:
+    """Focus of a stored ``test_profile`` (or of ``fallback_key`` when it has no known type); '' if unknown."""
+    profile = profile if isinstance(profile, Mapping) else {}
+    key = str(profile.get("normalized_test_type") or "").strip().lower() or fallback_key
+    return test_type_text(key, "focus", lang)
 
 
 def _canonical(raw: Optional[str]) -> str:
@@ -176,10 +243,16 @@ __all__ = [
     "SOAK_MARKERS",
     "TEST_TYPES",
     "TEST_TYPE_ALIASES",
+    "TEST_TYPE_FIELDS",
+    "TEST_TYPE_TEXTS",
     "TestProfile",
     "is_capacity_like",
     "mode_of",
     "normalize_test_type",
     "profile_for",
     "resolve_step_detection",
+    "stored_type_focus",
+    "stored_type_label",
+    "test_type_label",
+    "test_type_text",
 ]

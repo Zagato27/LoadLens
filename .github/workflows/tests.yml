@@ -1,0 +1,39 @@
+# The offline test suite: Python tests and the front-end tests that run under Node (tests/js_harness.py).
+# Tests never reach external systems; tests/conftest.py refuses database connections outside 127.0.0.1.
+# The e2e scripts of tools/e2e_jobs need Docker and Playwright and are run by hand before a release.
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Configuration from the examples
+        run: |
+          cp settings.example.py settings.py
+          cp metrics_config.example.py metrics_config.py
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Run pytest
+        env:
+          # The JS tests fail instead of being skipped when node is missing.
+          LOADLENS_REQUIRE_NODE: "1"
+        run: python -m pytest -q

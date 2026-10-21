@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
 """Accent color for every page: CSS variables, the logo and a preview for the settings form."""
 
 from __future__ import annotations
 
 from flask import Blueprint, Response, jsonify, request
 
+from AI.i18n import t as translate
 from loadlens_app.appearance import AppearanceError, current_accent, palette_payload, parse_accent, recolored_logo, template_appearance
 
 appearance_bp = Blueprint("appearance", __name__)
@@ -23,7 +25,7 @@ def logo() -> Response | tuple[Response, int]:
     except AppearanceError:
         # Public endpoint: answer with JSON and never echo the value. The former text/html body
         # carried the raw parameter and executed injected markup (reflected XSS).
-        return jsonify({"error": "Параметр c должен быть цветом в формате rrggbb"}), 400
+        return jsonify({"error": translate("api.appearance.bad_color")}), 400
     return Response(recolored_logo(accent), mimetype="image/png")
 
 

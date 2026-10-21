@@ -1,25 +1,27 @@
+{% set i18n_ns = ['recovery'] %}{% macro code(text) %}<code>{{ text }}</code>{% endmacro -%}
 <!DOCTYPE html>
-<html lang="ru" data-theme="dark">
+<html lang="{{ locale }}" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <meta name="csrf-token" content="{{ csrf_token }}" />
-  <title>Восстановление подключения — LoadLens</title>
+  <title>{{ t('recovery.page.title') }} — LoadLens</title>
   <script nonce="{{ csp_nonce }}">
-    // Apply the saved theme before first paint to avoid a flash (same logic as base.html).
-    // ui.js is not loaded here, so "system" keeps following the OS setting from this script.
+    // Apply the theme before first paint to avoid a flash (same logic as base.html): a stored "light" or "dark"
+    // wins, anything else follows the OS setting. ui.js is not loaded here, so this script keeps following it.
     (function () {
+      var root = document.documentElement;
+      var saved = null;
+      try { saved = localStorage.getItem('loadlens.theme'); } catch (e) {}
+      if (saved === 'light' || saved === 'dark') {
+        root.setAttribute('data-theme', saved);
+        return;
+      }
       try {
-        var root = document.documentElement;
-        var saved = localStorage.getItem('loadlens.theme');
-        if (saved === 'system') {
-          var query = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null;
-          var follow = function () { root.setAttribute('data-theme', query && query.matches ? 'light' : 'dark'); };
-          follow();
-          if (query && query.addEventListener) query.addEventListener('change', follow);
-        } else if (saved === 'light' || saved === 'dark') {
-          root.setAttribute('data-theme', saved);
-        }
+        var query = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null;
+        var follow = function () { root.setAttribute('data-theme', query && query.matches ? 'light' : 'dark'); };
+        follow();
+        if (query && query.addEventListener) query.addEventListener('change', follow);
       } catch (e) {}
     })();
   </script>
@@ -36,55 +38,55 @@
       </div>
       <div class="page-actions">
         {% if in_recovery %}
-        <form method="post" action="/logout"><button type="submit" class="btn">Выйти</button></form>
+        <form method="post" action="/logout"><button type="submit" class="btn">{{ t('recovery.page.logout') }}</button></form>
         {% else %}
-        <a class="btn" href="/settings#connections">Все настройки</a>
+        <a class="btn" href="/settings#connections">{{ t('recovery.page.all_settings') }}</a>
         {% endif %}
       </div>
     </div>
-    <h1>Восстановление подключения к хранилищу</h1>
+    <h1>{{ t('recovery.page.heading') }}</h1>
 
     <div class="banner banner-fail" id="storageState" role="status" aria-live="polite">
       <div>
-        <div class="banner-title" id="storageTitle">{{ storage.title if storage.available is false else "Проверяем подключение…" }}</div>
+        <div class="banner-title" id="storageTitle">{{ storage.title if storage.available is false else t('recovery.state.checking') }}</div>
         <div id="storageHint">{{ storage.hint if storage.available is false else "" }}</div>
         <dl class="outage-details" id="storageDetails"{% if not storage.address %} hidden{% endif %}>
-          <dt>Адрес</dt><dd><code id="storageAddress">{{ storage.address }}</code></dd>
-          <dt>Ответ</dt><dd><code id="storageMessage">{{ storage.message }}</code></dd>
+          <dt>{{ t('recovery.details.address') }}</dt><dd><code id="storageAddress">{{ storage.address }}</code></dd>
+          <dt>{{ t('recovery.details.response') }}</dt><dd><code id="storageMessage">{{ storage.message }}</code></dd>
         </dl>
       </div>
     </div>
 
     <section class="card" aria-labelledby="storageFormTitle">
-      <h3 id="storageFormTitle">Хранилище <span class="muted">storage.timescale</span></h3>
+      <h3 id="storageFormTitle">{{ t('recovery.form.title') }} <span class="muted mono">storage.timescale</span></h3>
       <form id="storageForm" novalidate>
         <div class="form-grid recovery-grid">
           <div>
-            <label for="rcHost">Сервер</label>
+            <label for="rcHost">{{ t('recovery.form.host') }}</label>
             <input id="rcHost" name="host" type="text" autocomplete="off" spellcheck="false" required />
           </div>
           <div>
-            <label for="rcPort">Порт</label>
+            <label for="rcPort">{{ t('recovery.form.port') }}</label>
             <input id="rcPort" name="port" type="number" min="1" max="65535" placeholder="5432" />
           </div>
           <div>
-            <label for="rcDb">База данных</label>
+            <label for="rcDb">{{ t('recovery.form.dbname') }}</label>
             <input id="rcDb" name="dbname" type="text" autocomplete="off" spellcheck="false" required />
           </div>
           <div>
-            <label for="rcSchema">Схема</label>
+            <label for="rcSchema">{{ t('recovery.form.schema') }}</label>
             <input id="rcSchema" name="schema" type="text" autocomplete="off" spellcheck="false" placeholder="public" />
           </div>
           <div>
-            <label for="rcUser">Пользователь</label>
+            <label for="rcUser">{{ t('recovery.form.user') }}</label>
             <input id="rcUser" name="user" type="text" autocomplete="off" spellcheck="false" required />
           </div>
           <div>
-            <label for="rcPassword">Пароль</label>
+            <label for="rcPassword">{{ t('recovery.form.password') }}</label>
             <input id="rcPassword" name="password" type="password" autocomplete="new-password" />
           </div>
           <div>
-            <label for="rcSsl">Режим SSL</label>
+            <label for="rcSsl">{{ t('recovery.form.sslmode') }}</label>
             <select id="rcSsl" name="sslmode">
               <option value="disable">disable</option>
               <option value="allow">allow</option>
@@ -95,15 +97,15 @@
             </select>
           </div>
           <div>
-            <label for="rcTimeout">Таймаут подключения, с</label>
+            <label for="rcTimeout">{{ t('recovery.form.timeout') }}</label>
             <input id="rcTimeout" name="connect_timeout_sec" type="number" min="2" max="60" placeholder="5" />
           </div>
         </div>
-        <p class="field-hint">Сохранённый пароль показан маской. Он подставится, только если сервер, порт, база и пользователь не изменились. Для нового адреса введите пароль заново.</p>
-        <p class="field-hint warn" id="dsnNote" hidden>В конфигурации задана строка подключения <code>dsn</code>. После сохранения её заменят поля этой формы.</p>
+        <p class="field-hint">{{ t('recovery.form.password_hint') }}</p>
+        <p class="field-hint warn" id="dsnNote" hidden>{{ t('recovery.form.dsn_note', dsn=code('dsn')) }}</p>
         <div class="page-actions">
-          <button type="button" class="btn" id="checkBtn">Проверить соединение</button>
-          <button type="submit" class="btn btn-primary" id="saveBtn">Сохранить</button>
+          <button type="button" class="btn" id="checkBtn">{{ t('recovery.form.check') }}</button>
+          <button type="submit" class="btn btn-primary" id="saveBtn">{{ t('recovery.form.save') }}</button>
         </div>
         <div class="recovery-result" id="formResult" role="status" aria-live="polite" hidden></div>
       </form>
@@ -111,12 +113,15 @@
 
     <p class="auth-note recovery-note">
       {% if in_recovery %}
-      Аварийная сессия: доступна только эта страница. Она действует до {{ session_minutes }} минут и завершится сама, как только хранилище ответит. Все действия пишутся в журнал приложения.
+      {{ tn('recovery.note.session', session_minutes) }}
       {% else %}
-      Изменения пишутся в журнал действий, а пока хранилище недоступно, в журнал приложения.
+      {{ t('recovery.note.audit') }}
       {% endif %}
     </p>
+    {% include "_lang_switch.html" %}
   </main>
+  {{ i18n_script(i18n_ns|default([])) }}
+  <script defer src="{{ url_for('static', filename='js/i18n.js') }}"></script>
   <script defer src="{{ url_for('static', filename='js/recovery.js') }}"></script>
 </body>
 </html>

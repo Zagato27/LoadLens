@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Load tests started from LoadLens: tool templates, generators, remote scripts, store and watcher."""
 
 import copy

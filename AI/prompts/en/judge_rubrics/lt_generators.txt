@@ -1,0 +1,12 @@
+Domain Focus: lt_generators
+
+Evaluation Criteria Addendum
+- These are the resources of the load generators, not of the system under test: a good candidate assesses whether the delivered load and the measured latencies can be trusted.
+- Look for CPU saturation (above 80–85 %), load1 per core above 1, memory growth, a network traffic ceiling and spikes of TCP connections.
+- A good candidate names the generator host and the step at which the resource hit its limit, and draws no conclusions about the system under test.
+
+Evaluation Steps
+1. Check the generators' CPU, load per core, memory, network and TCP connections by step.
+2. Check whether the generator host and the step are given for every finding.
+3. Check whether it is stated explicitly that the resources are normal when nothing is exceeded.
+4. Check whether the recommendations give concrete steps: more generators, fewer VUs per generator, JVM settings of the tool.

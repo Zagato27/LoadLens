@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Runs one metrics query against the configured source and reports whether it returned series."""
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import pandas as pd
 import requests
 
 from AI.data_sources import DataSourceConfigError, resolve_domain_source, source_accepts_language
+from AI.i18n import get_locale, t
 from AI.pipeline import (
     _convert_pd_offset_to_influx_interval,
     _epoch_seconds,
@@ -38,11 +40,28 @@ def parse_preview_ts(value: Any) -> float | None:
 
 
 PREVIEW_WINDOW_SEC = 15 * 60
-WINDOW_LABEL = "последние 15 минут"
 APP_DOMAINS = frozenset({"jvm", "database", "kafka", "microservices", "hard_resources", "lt_generators"})
 LT_DOMAIN = "lt_framework"
 QUERY_LANGS = frozenset({"promql", "influxql", "flux"})
 _SAMPLE_LIMIT = 5
+# Codes of QueryPreview: the request itself is wrong (the API answers 400), the rest are results.
+CODE_OK = "ok"
+CODE_EMPTY_QUERY = "empty_query"
+CODE_UNKNOWN_DOMAIN = "unknown_domain"
+CODE_MISSING_LANGUAGE = "missing_language"
+CODE_LANGUAGE_REJECTED = "language_rejected"
+CODE_SOURCE_CONFIG = "source_config"
+CODE_BAD_WINDOW = "bad_window"
+CODE_NO_SERIES = "no_series"
+CODE_QUERY_ERROR = "query_error"
+CODE_SOURCE_ERROR = "source_error"
+CODE_UNSUPPORTED_SOURCE = "unsupported_source"
+INPUT_ERROR_CODES = frozenset({CODE_EMPTY_QUERY, CODE_UNKNOWN_DOMAIN, CODE_MISSING_LANGUAGE, CODE_LANGUAGE_REJECTED})
+
+
+def window_last_15() -> str:
+    """Label of the default window (the last 15 minutes) in the current locale."""
+    return t("server.preview.window_last_15")
 
 
 @dataclass
@@ -52,11 +71,14 @@ class QueryPreview:
     series_count: int = 0
     point_count: int = 0
     series: list[str] = field(default_factory=list)
-    window: str = WINDOW_LABEL
+    window: str = field(default_factory=window_last_15)
+    # What happened, independent of the message language (CODE_*); empty when not set.
+    code: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "ok": self.ok,
+            "code": self.code,
             "message": self.message,
             "series_count": self.series_count,
             "point_count": self.point_count,
@@ -81,25 +103,25 @@ def preview_metric_query(
     """
     text = str(query or "").strip()
     if not text:
-        return QueryPreview(ok=False, message="Запрос пустой")
+        return QueryPreview(ok=False, message=t("server.preview.empty_query"), code=CODE_EMPTY_QUERY)
     domain_name = str(domain or "").strip()
     if domain_name not in APP_DOMAINS and domain_name != LT_DOMAIN:
-        return QueryPreview(ok=False, message=f"Неизвестный домен «{domain_name}»")
+        return QueryPreview(ok=False, message=t("server.preview.unknown_domain", domain=domain_name), code=CODE_UNKNOWN_DOMAIN)
     language = str(lang or "").strip().lower()
     if language not in QUERY_LANGS:
-        return QueryPreview(ok=False, message="Укажите язык запроса: promql, influxql или flux")
+        return QueryPreview(ok=False, message=t("server.preview.language_required"), code=CODE_MISSING_LANGUAGE)
 
     try:
         source = _source_for_domain(cfg, domain_name)
     except DataSourceConfigError as exc:
-        return QueryPreview(ok=False, message=str(exc))
+        return QueryPreview(ok=False, message=str(exc), code=CODE_SOURCE_CONFIG)
     rejected = _language_rejection(str(source.get("type") or "").lower(), language)
     if rejected:
-        return QueryPreview(ok=False, message=rejected)
+        return QueryPreview(ok=False, message=rejected, code=CODE_LANGUAGE_REJECTED)
     end = float(end_ts) if end_ts is not None else time.time()
     start = float(start_ts) if start_ts is not None else end - PREVIEW_WINDOW_SEC
     if end <= start:
-        return QueryPreview(ok=False, message="Окончание окна должно быть позже начала")
+        return QueryPreview(ok=False, message=t("server.preview.bad_window"), code=CODE_BAD_WINDOW)
     window = _window_label(start, end)
     step = str(((cfg.get("default_params") or {}).get("step")) or "30s")
     keys = [str(item) for item in (label_keys or []) if str(item).strip()]
@@ -119,12 +141,12 @@ def preview_metric_query(
         else:
             result = _run_flux(source, text, start, end, keys)
     except Exception as exc:
-        return QueryPreview(ok=False, message=_source_error(exc), window=window)
+        return QueryPreview(ok=False, message=_source_error(exc), window=window, code=CODE_SOURCE_ERROR)
     result.window = window
     if result.ok:
-        result.message = f"{result.series_count} серий, {result.point_count} точек, {window}"
-    elif result.message.startswith("За последние 15 минут") or result.message.startswith("За "):
-        result.message = f"За окно {window} серий нет"
+        result.message = t("server.preview.found", series=result.series_count, points=result.point_count, window=window)
+    elif result.code == CODE_NO_SERIES:
+        result.message = t("server.preview.no_series_window", window=window)
     return result
 
 
@@ -179,8 +201,8 @@ def fetch_points(
             ef_config={"metrics_source": source, "default_params": cfg.get("default_params") or {}},
         )
         if not isinstance(payload, dict) or payload.get("status") != "success":
-            error = str((payload or {}).get("error") or "Prometheus вернул ошибку") if isinstance(payload, dict) else "Prometheus вернул ошибку"
-            raise RuntimeError(error)
+            error = str((payload or {}).get("error") or "") if isinstance(payload, dict) else ""
+            raise RuntimeError(error or t("server.preview.prometheus_error"))
         for series in ((payload.get("data") or {}).get("result") or []):
             metric = series.get("metric") if isinstance(series.get("metric"), dict) else {}
             name = "|".join(f"{key}={metric.get(key, '')}" for key in keys) if keys else "series"
@@ -193,7 +215,7 @@ def fetch_points(
         return out
     if language == "influxql":
         if str(source.get("type") or "").lower() != "grafana_proxy":
-            raise ValueError("InfluxQL выполняется через источник Grafana proxy")
+            raise ValueError(t("server.preview.influxql_grafana_only"))
         interval = step if re.fullmatch(r"\d+[smh]", str(step or "")) else _convert_pd_offset_to_influx_interval(step)
         rendered = _render_influxql_template(query, start_ts, end_ts, interval)
         influx = source.get("influxdb") if isinstance(source.get("influxdb"), dict) else {}
@@ -223,12 +245,14 @@ def fetch_points(
             name = _flux_series_name(row, keys) if keys else "series"
             out.setdefault(name, []).append((ts, value))
         return out
-    raise ValueError("Укажите язык запроса: promql, influxql или flux")
+    raise ValueError(t("server.preview.language_required"))
 
 
 def _window_label(start_ts: float, end_ts: float) -> str:
-    start = time.strftime("%d.%m %H:%M", time.localtime(start_ts))
-    end = time.strftime("%d.%m %H:%M", time.localtime(end_ts))
+    # Day and month in the order of the locale: 18.10 in ru, 18/10 in en (en-GB).
+    pattern = "%d/%m %H:%M" if get_locale() == "en" else "%d.%m %H:%M"
+    start = time.strftime(pattern, time.localtime(start_ts))
+    end = time.strftime(pattern, time.localtime(end_ts))
     return f"{start}–{end}"
 
 
@@ -236,10 +260,10 @@ def _language_rejection(source_type: str, language: str) -> str:
     if source_accepts_language(source_type, language):
         return ""
     if source_type == "prometheus":
-        return "Этот источник выполняет только PromQL"
+        return t("server.preview.promql_only")
     if source_type == "influxdb":
-        return "Этот источник выполняет только Flux"
-    return f"Источник типа {source_type or 'не задан'} не выполняет {language}"
+        return t("server.preview.flux_only")
+    return t("server.preview.language_unsupported", type=source_type or t("server.common.unset"), language=language)
 
 
 def _source_for_domain(cfg: dict[str, Any], domain: str) -> dict[str, Any]:
@@ -251,7 +275,7 @@ def _source_for_domain(cfg: dict[str, Any], domain: str) -> dict[str, Any]:
 def _source_error(exc: Exception) -> str:
     """HTTP errors name the request that failed (e.g. the datasource lookup or the query itself)."""
     if getattr(getattr(exc, "response", None), "status_code", None) is not None:
-        return f"Источник ответил {_http_error_text(exc)}"
+        return t("server.preview.source_http_error", error=_http_error_text(exc))
     text = str(exc).strip()
     return text or exc.__class__.__name__
 
@@ -259,16 +283,23 @@ def _source_error(exc: Exception) -> str:
 def _finish(names: list[str], point_count: int) -> QueryPreview:
     unique = list(dict.fromkeys(name for name in names if name))
     if not unique or point_count <= 0:
-        return QueryPreview(ok=False, message=f"За {WINDOW_LABEL} серий нет", window=WINDOW_LABEL)
+        return _no_series()
     shown = unique[:_SAMPLE_LIMIT]
+    window = window_last_15()
     return QueryPreview(
         ok=True,
-        message=f"{len(unique)} серий, {point_count} точек за {WINDOW_LABEL}",
+        message=t("server.preview.found_for", series=len(unique), points=point_count, window=window),
         series_count=len(unique),
         point_count=point_count,
         series=shown,
-        window=WINDOW_LABEL,
+        window=window,
+        code=CODE_OK,
     )
+
+
+def _no_series() -> QueryPreview:
+    window = window_last_15()
+    return QueryPreview(ok=False, message=t("server.preview.no_series", window=window), window=window, code=CODE_NO_SERIES)
 
 
 def _from_prometheus(payload: dict[str, Any], label_keys: list[str]) -> QueryPreview:
@@ -276,7 +307,7 @@ def _from_prometheus(payload: dict[str, Any], label_keys: list[str]) -> QueryPre
         error = ""
         if isinstance(payload, dict):
             error = str(payload.get("error") or payload.get("errorType") or payload.get("status") or "")
-        return QueryPreview(ok=False, message=error or "Prometheus вернул ошибку", window=WINDOW_LABEL)
+        return QueryPreview(ok=False, message=error or t("server.preview.prometheus_error"), code=CODE_QUERY_ERROR)
     result = ((payload.get("data") or {}).get("result") or []) if isinstance(payload.get("data"), dict) else []
     names: list[str] = []
     points = 0
@@ -303,7 +334,7 @@ def _run_influxql(
     label_keys: list[str],
 ) -> QueryPreview:
     if str(source.get("type") or "").lower() != "grafana_proxy":
-        return QueryPreview(ok=False, message="InfluxQL выполняется через источник Grafana proxy", window=WINDOW_LABEL)
+        return QueryPreview(ok=False, message=t("server.preview.influxql_grafana_only"), code=CODE_UNSUPPORTED_SOURCE)
     rendered = _render_influxql_template(query, start_ts, end_ts, _convert_pd_offset_to_influx_interval(step))
     influx = source.get("influxdb") if isinstance(source.get("influxdb"), dict) else {}
     payload = fetch_influxql_via_grafana(
@@ -315,7 +346,7 @@ def _run_influxql(
     )
     result = ((payload or {}).get("results") or [{}])[0] if isinstance(payload, dict) else {}
     if isinstance(result, dict) and result.get("error"):
-        return QueryPreview(ok=False, message=str(result.get("error")), window=WINDOW_LABEL)
+        return QueryPreview(ok=False, message=str(result.get("error")), code=CODE_QUERY_ERROR)
     series_list = result.get("series") if isinstance(result, dict) else None
     names: list[str] = []
     points = 0
@@ -344,10 +375,10 @@ def _run_flux(
     csv_text = _fetch_flux_csv(source, query, start_ts, end_ts)
     frame = pd.read_csv(io.StringIO(csv_text), comment="#")
     if "_time" not in frame.columns or "_value" not in frame.columns:
-        return QueryPreview(ok=False, message=f"За {WINDOW_LABEL} серий нет", window=WINDOW_LABEL)
+        return _no_series()
     frame = frame.dropna(subset=["_time", "_value"])
     if frame.empty:
-        return QueryPreview(ok=False, message=f"За {WINDOW_LABEL} серий нет", window=WINDOW_LABEL)
+        return _no_series()
     names = [_flux_series_name(row, label_keys) for _, row in frame.iterrows()]
     return _finish(names, int(frame.shape[0]))
 
@@ -369,10 +400,10 @@ def _fetch_flux_csv(source: dict[str, Any], query: str, start_ts: float, end_ts:
     if source_type == "grafana_proxy":
         return fetch_influx_data_via_grafana(source.get("grafana") or {}, rendered, start_ts=start_ts, end_ts=end_ts)
     if source_type != "influxdb":
-        raise RuntimeError("Flux выполняется для источника InfluxDB или Grafana proxy")
+        raise RuntimeError(t("server.preview.flux_source"))
     url = str(influx.get("url") or "").rstrip("/")
     if not url:
-        raise RuntimeError("В источнике InfluxDB не задан url")
+        raise RuntimeError(t("server.preview.influxdb_url_missing"))
     response = requests.post(
         f"{url}/api/v2/query",
         params={"org": influx.get("org") or ""},

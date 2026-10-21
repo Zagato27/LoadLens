@@ -1,9 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
 """Shared helpers of the end-to-end checks of background jobs in tools/e2e_jobs/ (not a check itself).
 
-Every check runs against a sandbox made by make_sandbox.py <N> (docs/perf-plan.md, section 1): the app copy
+Every check runs against a sandbox made by make_sandbox.py <N> (plans/perf-plan.md, section 1): the app copy
 in %TEMP%/ll_ui_s<N>/app, its runner %TEMP%/ll_ui_s<N>/run_app.py on 127.0.0.1:<5070+N>, the database
 ll_s<N> on 127.0.0.1:55432 and the Redis database <N> on 127.0.0.1:16379. Prepare it once as described in
-docs/perf-baseline.md, "Этап 3" (seed, migrations, --runtime-only, --setup-stubs).
+plans/perf-baseline.md, "Этап 3" (seed, migrations, --runtime-only, --setup-stubs).
 
 The checks start what they need themselves and stop it at the end:
 
@@ -91,7 +92,7 @@ class Sandbox:
         self.redis_url = f"redis://127.0.0.1:{REDIS_PORT}/{n}"
         self.dbname = f"ll_s{n}"
         if not self.runner.is_file() or not (self.app_dir / "settings.py").is_file():
-            raise SystemExit(f"sandbox {n} not found: run make_sandbox.py {n} and the preparation of docs/perf-baseline.md first")
+            raise SystemExit(f"sandbox {n} not found: run make_sandbox.py {n} and the preparation of plans/perf-baseline.md first")
 
     def env(self, mode: str, **extra: Any) -> dict:
         """Environment of a server or worker of this sandbox: ``mode`` is ``thread`` or ``celery``."""

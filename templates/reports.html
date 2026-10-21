@@ -1,80 +1,70 @@
 {% extends "base.html" %}
 {% set active_nav = 'archive' %}
-{% block title %}Отчёт{% endblock %}
+{% set i18n_ns = ['charts', 'report'] %}
+{% block title %}{{ t('report.page.doc_title') }}{% endblock %}
 {% block head %}
 <script defer src="{{ url_for('static', filename='vendor/chart.umd.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/purify.min.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script>
-<style>
-  .report-title-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .report-title-row h1 { margin: 0; }
-  #renameReport { height: 32px; padding: 0 10px; white-space: nowrap; }
-  .report-rename-form { display: none; align-items: center; gap: 8px; margin: 8px 0 0; flex-wrap: wrap; }
-  .report-rename-form input { height: 36px; min-width: 280px; max-width: 100%; }
-  #renameReportStatus { color: var(--text-muted); font-size: 13px; }
-  #publishConfluence { white-space: nowrap; }
-  #pageTimeRange { margin: 6px 0 12px; font-size: 14px; color: var(--text-muted); }
-</style>
 {% endblock %}
 {% block content %}
-  <nav id="reportBreadcrumbs" class="breadcrumbs" aria-label="Навигация по разделу">
-    <a href="/reports">Архив</a>
+  <nav id="reportBreadcrumbs" class="breadcrumbs rep-crumbs" aria-label="{{ t('report.page.breadcrumbs_aria') }}">
+    <a href="/reports">{{ t('report.page.breadcrumb_archive') }}</a>
   </nav>
-  <div class="page-header">
-    <div>
+  <div class="page-header rep-head">
+    <div class="rep-head-main">
       <div class="report-title-row">
-        <h1 id="pageTitle">Отчет по тесту</h1>
-        <button type="button" id="renameReport" class="btn btn-sm" data-min-role="engineer">Переименовать</button>
+        <h1 id="pageTitle">{{ t('report.page.title') }}</h1>
       </div>
       <div id="renameReportForm" class="report-rename-form">
-        <input type="text" id="renameReportInput" maxlength="200" placeholder="Название отчёта" aria-label="Новое название отчёта" />
-        <button type="button" id="renameReportSave" class="btn btn-primary">Сохранить</button>
-        <button type="button" id="renameReportCancel" class="btn">Отмена</button>
+        <input type="text" id="renameReportInput" maxlength="200" placeholder="{{ t('report.rename.placeholder') }}" aria-label="{{ t('report.rename.aria') }}" />
+        <button type="button" id="renameReportSave" class="btn btn-primary">{{ t('common.action.save') }}</button>
+        <button type="button" id="renameReportCancel" class="btn">{{ t('common.action.cancel') }}</button>
         <span id="renameReportStatus"></span>
       </div>
-      <div id="pageTimeRange">Время теста: —</div>
+      <div id="pageTimeRange">{{ t('report.page.time_range_empty') }}</div>
     </div>
-    <div class="page-actions">
-      <button type="button" id="printReport" class="btn" title="Все вкладки, графики в светлой теме; в диалоге печати можно выбрать «Сохранить как PDF»">Печать / PDF</button>
-      <a id="forecastLink" class="btn" href="#" hidden>Прогноз мощностей</a>
-      <button type="button" id="publishConfluence" class="btn" data-min-role="engineer">Добавить отчет в Confluence</button>
-      <a id="confluencePageLink" href="#" target="_blank" rel="noopener noreferrer" style="display:none;">Открыть в Confluence</a>
+    <div class="page-actions rep-actions">
+      <button type="button" id="renameReport" class="btn" data-min-role="engineer">{{ t('report.rename.button') }}</button>
+      <a id="forecastLink" class="btn" href="#" hidden>{{ t('report.page.forecast_link') }}</a>
+      <button type="button" id="printReport" class="btn" title="{{ t('report.print.title_hint') }}">{{ t('report.print.button') }}</button>
+      <button type="button" id="publishConfluence" class="btn btn-primary" data-min-role="engineer">{{ t('report.confluence.add') }}</button>
+      <a id="confluencePageLink" class="link" href="#" target="_blank" rel="noopener noreferrer" style="display:none;">{{ t('report.confluence.open') }}</a>
       <span id="confluenceStatus" class="dim"></span>
     </div>
   </div>
-  <section id="reportHero" class="report-hero" aria-live="polite">
-    <div class="hero-card"><div class="skeleton skeleton-line w-40"></div><div class="skeleton skeleton-block"></div></div>
-    <div class="hero-card"><div class="skeleton skeleton-line w-40"></div><div class="skeleton skeleton-block"></div></div>
+  <section id="reportHero" class="rep-hero" aria-live="polite">
+    <div class="rep-hero-loading"><div class="skeleton skeleton-line w-40"></div><div class="skeleton skeleton-block"></div></div>
   </section>
-  <div id="reportSteps" class="report-steps" hidden></div>
-  <div id="rep-llm-tabs" style="margin:12px 0;"></div>
-  <div id="engineerBox" class="editor-card">
-    <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px;">
-      <h3 style="margin:0;">Итоги от инженера</h3>
-      <div style="display:flex; align-items:center; gap:8px;">
+  <section id="reportSteps" class="rep-timeline" hidden></section>
+  <div id="rep-llm-tabs" class="rep-analysis"></div>
+  <div id="engineerBox" class="editor-card rep-engineer">
+    <div class="rep-engineer-head">
+      <h3 style="margin:0;">{{ t('report.engineer.title') }}</h3>
+      <div class="rep-engineer-tools">
         <small id="engineerUpdated" class="dim"></small>
-        <button type="button" id="editEngineer" class="btn btn-sm" data-min-role="engineer">Редактировать</button>
+        <button type="button" id="editEngineer" class="btn btn-sm" data-min-role="engineer">{{ t('report.engineer.edit') }}</button>
       </div>
     </div>
-    <div class="editor-toolbar" id="engineerToolbar" style="display:none;" role="toolbar" aria-label="Форматирование">
-      <button type="button" data-cmd="bold" aria-label="Полужирный"><b>B</b></button>
-      <button type="button" data-cmd="italic" aria-label="Курсив"><i>I</i></button>
-      <button type="button" data-cmd="underline" aria-label="Подчёркнутый"><u>U</u></button>
-      <button type="button" data-cmd="insertUnorderedList">• Список</button>
-      <button type="button" data-cmd="insertOrderedList">1. Список</button>
+    <div class="editor-toolbar" id="engineerToolbar" style="display:none;" role="toolbar" aria-label="{{ t('report.engineer.toolbar_aria') }}">
+      <button type="button" data-cmd="bold" aria-label="{{ t('report.engineer.bold') }}"><b>B</b></button>
+      <button type="button" data-cmd="italic" aria-label="{{ t('report.engineer.italic') }}"><i>I</i></button>
+      <button type="button" data-cmd="underline" aria-label="{{ t('report.engineer.underline') }}"><u>U</u></button>
+      <button type="button" data-cmd="insertUnorderedList">• {{ t('report.engineer.list') }}</button>
+      <button type="button" data-cmd="insertOrderedList">1. {{ t('report.engineer.list') }}</button>
       <button type="button" data-cmd="h3">H3</button>
       <button type="button" data-cmd="h4">H4</button>
-      <button type="button" id="cmdLink">Ссылка</button>
+      <button type="button" id="cmdLink">{{ t('report.engineer.link') }}</button>
     </div>
-    <div id="engineerEditor" class="editor-area" contenteditable="false" spellcheck="false" aria-label="Итоги от инженера"></div>
+    <div id="engineerEditor" class="editor-area" contenteditable="false" spellcheck="false" aria-label="{{ t('report.engineer.title') }}"></div>
     <div class="editor-actions">
-      <button type="button" id="saveEngineer" class="btn btn-primary" style="display:none;">Сохранить</button>
+      <button type="button" id="saveEngineer" class="btn btn-primary" style="display:none;">{{ t('common.action.save') }}</button>
       <span id="engineerStatus" class="dim"></span>
     </div>
   </div>
-  <h3 class="section-title">Графики метрик</h3>
+  <h3 class="section-title">{{ t('report.charts.section_title') }}</h3>
   <div id="rep-domain-tabs"></div>
-  <div id="systemContextBox" class="editor-card" style="display:none;"></div>
+  <div id="systemContextBox" class="editor-card rep-context" style="display:none;"></div>
 {% endblock %}
 {% block scripts %}
 <script defer src="{{ url_for('static', filename='js/charts.js') }}"></script>

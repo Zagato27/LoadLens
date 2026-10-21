@@ -1,6 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
 """Scenario 4: the worker dies in the middle of a report; the job becomes an error, the page stops polling.
 
-How to run (sandbox prepared as in docs/perf-baseline.md, "Этап 3"; nothing listening on 127.0.0.1:5070+N):
+How to run (sandbox prepared as in plans/perf-baseline.md, "Этап 3"; nothing listening on 127.0.0.1:5070+N):
 
     C:/Python312/python.exe -X utf8 tools/e2e_jobs/s4_worker_killed.py --sandbox 6
 

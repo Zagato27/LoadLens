@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Blueprint registration utilities."""
 
 from flask import Flask
@@ -6,6 +7,7 @@ from loadlens_app.core import RuntimeConfigError
 from AI.storage_state import StorageUnavailableError
 from loadlens_app.errors import internal_error, storage_unavailable
 
+from .about import about_bp
 from .appearance import appearance_bp
 from .compare import compare_bp
 from .config_api import config_bp
@@ -19,7 +21,7 @@ from .settings import settings_bp
 
 BLUEPRINTS = (
     dashboard_bp, compare_bp, settings_bp, config_bp, projects_bp, forecast_bp, appearance_bp, query_packs_bp,
-    recovery_bp, load_tests_bp,
+    recovery_bp, load_tests_bp, about_bp,
 )
 
 
@@ -30,7 +32,7 @@ def register_blueprints(app: Flask) -> None:
     # A damaged runtime settings file stops every change instead of being overwritten with defaults.
     app.register_error_handler(
         RuntimeConfigError,
-        lambda exc: internal_error(exc, "Файл runtime-настроек повреждён, изменения не сохранены"),
+        lambda exc: internal_error(exc, "api.error.runtime_config_broken"),
     )
     # A storage outage that reached Flask uncaught: the outage page or a JSON 503, not a 500.
     app.register_error_handler(StorageUnavailableError, lambda exc: storage_unavailable())

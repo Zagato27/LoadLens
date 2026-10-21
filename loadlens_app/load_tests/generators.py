@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Load generators from ``CONFIG["load_generators"]``: where an instance runs and how LoadLens reaches it.
 
 Types:
@@ -16,18 +17,16 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
+from .messages import LtError, Titles, msg
 from .tools import ENV_NAME_RE, ToolTemplate, is_absolute_path, public_url
 
 GENERATOR_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
 GENERATOR_TYPES = ("ssh", "docker", "kubernetes", "gitlab", "jenkins", "manual")
-GENERATOR_TYPE_TITLES = {
-    "ssh": "SSH",
-    "docker": "Docker",
-    "kubernetes": "Kubernetes",
-    "gitlab": "GitLab CI",
-    "jenkins": "Jenkins",
-    "manual": "Вручную",
-}
+# Product names stay as they are; "manual" is a dictionary message in the reader's language.
+GENERATOR_TYPE_TITLES = Titles(
+    {"manual": "lt.generator_type.manual"},
+    fixed={"ssh": "SSH", "docker": "Docker", "kubernetes": "Kubernetes", "gitlab": "GitLab CI", "jenkins": "Jenkins"},
+)
 CONTAINER_TYPES = ("docker", "kubernetes")
 CI_TYPES = ("gitlab", "jenkins")
 DEFAULT_SSH_PORT = 22
@@ -39,7 +38,7 @@ LABEL_KEY_RE = re.compile(r"^([a-z0-9]([-a-z0-9.]*[a-z0-9])?/)?[A-Za-z0-9]([-A-Z
 LABEL_VALUE_RE = re.compile(r"^([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)?$")
 
 
-class GeneratorConfigError(ValueError):
+class GeneratorConfigError(LtError, ValueError):
     """A generator in the settings is not usable; the message names it."""
 
 
@@ -273,31 +272,32 @@ def _flag(raw: Mapping[str, Any], key: str, default: bool) -> bool:
     return bool(value)
 
 
-def _port(value: Any, where: str) -> int:
+def _port(value: Any, where: Any) -> int:
     if value in (None, ""):
         return DEFAULT_SSH_PORT
     try:
         port = int(value)
     except (TypeError, ValueError) as exc:
-        raise GeneratorConfigError(f"{where}: порт — число") from exc
+        raise GeneratorConfigError("lt.gen_config.port_number", where=where) from exc
     if not 1 <= port <= 65535:
-        raise GeneratorConfigError(f"{where}: порт вне диапазона 1–65535")
+        raise GeneratorConfigError("lt.gen_config.port_range", where=where)
     return port
 
 
-def _dir(value: str, where: str, label: str, required: bool, default: str = "") -> str:
+def _dir(value: str, where: Any, label: Any, required: bool, default: str = "") -> str:
+    """``label`` names the directory (a dictionary message) in the errors."""
     if not value:
         if required and not default:
-            raise GeneratorConfigError(f"{where}: укажите {label} (абсолютный путь на генераторе)")
+            raise GeneratorConfigError("lt.gen_config.dir_required", where=where, label=label)
         return default
     if not is_absolute_path(value) or "\n" in value or "\x00" in value:
-        raise GeneratorConfigError(f"{where}: {label} — абсолютный путь, например /opt/loadlens")
+        raise GeneratorConfigError("lt.gen_config.dir_absolute", where=where, label=label)
     return value.rstrip("/") or "/"
 
 
-def _url(value: str, where: str, label: str, schemes: tuple[str, ...] = ("http", "https")) -> str:
+def _url(value: str, where: Any, label: Any, schemes: tuple[str, ...] = ("http", "https")) -> str:
     if not re.match(rf"^({'|'.join(schemes)})://[^\s/?#]+", value or ""):
-        raise GeneratorConfigError(f"{where}: {label} — адрес вида {schemes[-1]}://host:port")
+        raise GeneratorConfigError("lt.gen_config.url", where=where, label=label, scheme=schemes[-1])
     return value.rstrip("/")
 
 
@@ -310,14 +310,14 @@ def _parse_ssh(raw: Mapping[str, Any], where: str) -> SshSettings:
     ssh_raw = _section(raw, "ssh")
     host = _text(ssh_raw, "host")
     if not host or any(ch.isspace() for ch in host) or host.startswith("-"):
-        raise GeneratorConfigError(f"{where}: укажите адрес SSH (host)")
+        raise GeneratorConfigError("lt.gen_config.ssh_host", where=where)
     username = _text(ssh_raw, "username")
     if not username:
-        raise GeneratorConfigError(f"{where}: укажите пользователя SSH")
+        raise GeneratorConfigError("lt.gen_config.ssh_user", where=where)
     private_key = str(ssh_raw.get("private_key") or "").strip()
     password = str(ssh_raw.get("password") or "")
     if not private_key and not password:
-        raise GeneratorConfigError(f"{where}: нужен приватный ключ или пароль SSH")
+        raise GeneratorConfigError("lt.gen_config.ssh_credentials", where=where)
     try:
         timeout = int(ssh_raw.get("connect_timeout") or 10)
     except (TypeError, ValueError):
@@ -336,35 +336,35 @@ def _parse_ssh(raw: Mapping[str, Any], where: str) -> SshSettings:
 
 def _parse_docker(raw: Mapping[str, Any], where: str) -> DockerSettings:
     docker_raw = _section(raw, "docker")
-    url = _url(_text(docker_raw, "url"), where, "адрес Docker API")
+    url = _url(_text(docker_raw, "url"), where, msg("lt.gen_config.label.docker_url"))
     client_cert = str(docker_raw.get("client_cert") or "").strip()
     client_key = str(docker_raw.get("client_key") or "").strip()
     if bool(client_cert) != bool(client_key):
-        raise GeneratorConfigError(f"{where}: клиентский сертификат и ключ задаются вместе")
+        raise GeneratorConfigError("lt.gen_config.client_cert_pair", where=where)
     network = _text(raw, "network")
     if network and not VOLUME_NAME_RE.fullmatch(network):
-        raise GeneratorConfigError(f"{where}: недопустимое имя сети Docker «{network}»")
+        raise GeneratorConfigError("lt.gen_config.bad_network", where=where, network=network)
     mounts: list[Mount] = []
     raw_mounts = raw.get("mounts") or []
     if not isinstance(raw_mounts, list):
-        raise GeneratorConfigError(f"{where}: mounts — список {{source, target, read_only}}")
+        raise GeneratorConfigError("lt.gen_config.mounts_list", where=where, shape="{source, target, read_only}")
     for item in raw_mounts:
         if not isinstance(item, Mapping):
-            raise GeneratorConfigError(f"{where}: mounts — список {{source, target, read_only}}")
+            raise GeneratorConfigError("lt.gen_config.mounts_list", where=where, shape="{source, target, read_only}")
         source, target = _text(item, "source"), _text(item, "target")
         if not (VOLUME_NAME_RE.fullmatch(source) or is_absolute_path(source)) or "\n" in source:
-            raise GeneratorConfigError(f"{where}: источник монтирования «{source}» — имя тома или абсолютный путь на Docker-хосте")
+            raise GeneratorConfigError("lt.gen_config.mount_source", where=where, source=source)
         if not is_absolute_path(target):
-            raise GeneratorConfigError(f"{where}: точка монтирования «{target}» — абсолютный путь в контейнере")
+            raise GeneratorConfigError("lt.gen_config.mount_target", where=where, target=target)
         mounts.append(Mount(source=source, target=target.rstrip("/") or "/", read_only=_flag(item, "read_only", True)))
     resources = _section(raw, "resources")
     try:
         cpus = float(resources.get("cpus") or 0)
         memory_mb = int(resources.get("memory_mb") or 0)
     except (TypeError, ValueError) as exc:
-        raise GeneratorConfigError(f"{where}: resources.cpus и resources.memory_mb — числа") from exc
+        raise GeneratorConfigError("lt.gen_config.docker_resources", where=where) from exc
     if cpus < 0 or memory_mb < 0:
-        raise GeneratorConfigError(f"{where}: ресурсы контейнера не могут быть отрицательными")
+        raise GeneratorConfigError("lt.gen_config.negative_resources", where=where)
     return DockerSettings(
         url=url,
         ca_cert=str(docker_raw.get("ca_cert") or "").strip(),
@@ -385,37 +385,38 @@ def _parse_kubernetes(raw: Mapping[str, Any], where: str) -> KubernetesSettings:
     api_url = _text(k8s_raw, "api_url")
     token = str(k8s_raw.get("token") or "").strip()
     if not in_cluster:
-        api_url = _url(api_url, where, "адрес Kubernetes API", ("https", "http"))
+        api_url = _url(api_url, where, msg("lt.gen_config.label.k8s_url"), ("https", "http"))
         if not token:
-            raise GeneratorConfigError(f"{where}: нужен токен сервисного аккаунта Kubernetes или in_cluster")
+            raise GeneratorConfigError("lt.gen_config.k8s_token", where=where)
     namespace = _text(raw, "namespace") or "default"
     if not DNS_LABEL_RE.fullmatch(namespace):
-        raise GeneratorConfigError(f"{where}: недопустимое пространство имён «{namespace}»")
+        raise GeneratorConfigError("lt.gen_config.bad_namespace", where=where, namespace=namespace)
     scripts = _section(raw, "scripts")
     config_map, pvc = _text(scripts, "config_map"), _text(scripts, "pvc")
-    for value, label in ((config_map, "ConfigMap скриптов"), (pvc, "PVC скриптов"), (_text(raw, "service_account"), "сервисный аккаунт"),
-                         (_text(raw, "image_pull_secret"), "секрет реестра")):
+    for value, label in ((config_map, "lt.gen_config.label.scripts_config_map"), (pvc, "lt.gen_config.label.scripts_pvc"),
+                         (_text(raw, "service_account"), "lt.gen_config.label.service_account"),
+                         (_text(raw, "image_pull_secret"), "lt.gen_config.label.pull_secret")):
         if value and not re.fullmatch(r"^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$", value):
-            raise GeneratorConfigError(f"{where}: недопустимое имя ({label}) «{value}»")
+            raise GeneratorConfigError("lt.gen_config.bad_k8s_name", where=where, label=msg(label), value=value)
     if config_map and pvc:
-        raise GeneratorConfigError(f"{where}: скрипты берутся либо из ConfigMap, либо из PVC")
+        raise GeneratorConfigError("lt.gen_config.scripts_source", where=where)
     selector_raw = raw.get("node_selector") or {}
     if not isinstance(selector_raw, Mapping):
-        raise GeneratorConfigError(f"{where}: node_selector — объект «метка: значение»")
+        raise GeneratorConfigError("lt.gen_config.node_selector_object", where=where)
     selector: dict[str, str] = {}
     for key, value in selector_raw.items():
         if not LABEL_KEY_RE.fullmatch(str(key)) or not LABEL_VALUE_RE.fullmatch(str(value)):
-            raise GeneratorConfigError(f"{where}: недопустимая метка узла «{key}={value}»")
+            raise GeneratorConfigError("lt.gen_config.bad_node_label", where=where, label=f"{key}={value}")
         selector[str(key)] = str(value)
     resources = _section(raw, "resources")
     cpu, memory = _text(resources, "cpu"), _text(resources, "memory")
     for value, label in ((cpu, "cpu"), (memory, "memory")):
         if value and not QUANTITY_RE.fullmatch(value):
-            raise GeneratorConfigError(f"{where}: resources.{label} — количество Kubernetes, например 2 или 2Gi")
+            raise GeneratorConfigError("lt.gen_config.k8s_quantity", where=where, name=label)
     try:
         ttl = int(raw.get("ttl_seconds") or 3600)
     except (TypeError, ValueError) as exc:
-        raise GeneratorConfigError(f"{where}: ttl_seconds — целое число") from exc
+        raise GeneratorConfigError("lt.gen_config.ttl_int", where=where) from exc
     return KubernetesSettings(
         api_url=api_url,
         token=token,
@@ -444,7 +445,7 @@ def _parse_param_options(raw: Mapping[str, Any], where: str) -> dict[str, tuple[
     if value in (None, "", {}):
         return {}
     if not isinstance(value, Mapping):
-        raise GeneratorConfigError(f"{where}: param_options — «параметр: варианты через запятую»")
+        raise GeneratorConfigError("lt.gen_config.param_options", where=where)
     out: dict[str, tuple[str, ...]] = {}
     for name, options in value.items():
         if isinstance(options, str):
@@ -452,24 +453,24 @@ def _parse_param_options(raw: Mapping[str, Any], where: str) -> dict[str, tuple[
         elif isinstance(options, (list, tuple)):
             items = [str(item).strip() for item in options]
         else:
-            raise GeneratorConfigError(f"{where}: варианты параметра «{name}» — список или строка через запятую")
+            raise GeneratorConfigError("lt.gen_config.options_type", where=where, name=name)
         items = [item for item in items if item]
         if not PARAM_NAME_RE.fullmatch(str(name)) or not items:
-            raise GeneratorConfigError(f"{where}: варианты параметра «{name}»: нужно имя параметра и хотя бы один вариант")
+            raise GeneratorConfigError("lt.gen_config.options_empty", where=where, name=name)
         if any(len(item) > 200 or "\n" in item for item in items):
-            raise GeneratorConfigError(f"{where}: варианты параметра «{name}» длиннее 200 символов или многострочные")
+            raise GeneratorConfigError("lt.gen_config.options_long", where=where, name=name)
         out[str(name)] = tuple(dict.fromkeys(items))[:MAX_PARAM_OPTIONS]
     return out
 
 
 def _parse_ci(raw: Mapping[str, Any], kind: str, where: str) -> CiSettings:
     ci_raw = _section(raw, kind)
-    url = _url(_text(ci_raw, "url"), where, f"адрес {GENERATOR_TYPE_TITLES[kind]}")
+    url = _url(_text(ci_raw, "url"), where, msg("lt.gen_config.label.ci_url", system=GENERATOR_TYPE_TITLES[kind]))
     loadlens_text = _text(raw, "loadlens_url")
-    loadlens_url = _url(loadlens_text, where, "адрес LoadLens для событий пайплайна") if loadlens_text else ""
+    loadlens_url = _url(loadlens_text, where, msg("lt.gen_config.label.loadlens_url")) if loadlens_text else ""
     ref = _text(ci_raw, "ref")
     if any(ch.isspace() for ch in ref) or len(ref) > 200:
-        raise GeneratorConfigError(f"{where}: недопустимая ветка «{ref[:40]}»")
+        raise GeneratorConfigError("lt.gen_config.bad_ref", where=where, ref=ref[:40])
     common: dict[str, Any] = dict(
         verify=_flag(ci_raw, "verify", True),
         loadlens_url=loadlens_url,
@@ -479,43 +480,43 @@ def _parse_ci(raw: Mapping[str, Any], kind: str, where: str) -> CiSettings:
     if kind == "gitlab":
         project = _text(ci_raw, "project")
         if not project or any(ch.isspace() for ch in project):
-            raise GeneratorConfigError(f"{where}: укажите проект GitLab (id или путь group/project)")
+            raise GeneratorConfigError("lt.gen_config.gitlab_project", where=where)
         trigger = str(ci_raw.get("trigger_token") or "").strip()
         api_token = str(ci_raw.get("api_token") or "").strip()
         if not trigger and not api_token:
-            raise GeneratorConfigError(f"{where}: нужен API-токен GitLab (или хотя бы токен триггера пайплайна)")
+            raise GeneratorConfigError("lt.gen_config.gitlab_token", where=where)
         inputs_mode = _text(ci_raw, "inputs") or "auto"
         if inputs_mode not in ("auto", "on", "off"):
-            raise GeneratorConfigError(f"{where}: inputs — auto, on или off")
+            raise GeneratorConfigError("lt.gen_config.gitlab_inputs", where=where)
         # The trigger API needs a branch; with an API token "" means the project's default branch.
         return CiSettings(kind=kind, url=url, project=project, ref=ref or ("" if api_token else "main"),
                           trigger_token=trigger, api_token=api_token, inputs_mode=inputs_mode, **common)
     job = _text(ci_raw, "job").strip("/")
     if not job or not re.fullmatch(r"[A-Za-z0-9._ -]+(/[A-Za-z0-9._ -]+)*", job):
-        raise GeneratorConfigError(f"{where}: укажите задачу Jenkins, например perf/load-test")
+        raise GeneratorConfigError("lt.gen_config.jenkins_job", where=where)
     username = _text(ci_raw, "username")
     api_token = str(ci_raw.get("api_token") or "").strip()
     if not username or not api_token:
-        raise GeneratorConfigError(f"{where}: нужны пользователь и API-токен Jenkins")
+        raise GeneratorConfigError("lt.gen_config.jenkins_credentials", where=where)
     return CiSettings(kind=kind, url=url, job=job, ref=ref, username=username, api_token=api_token, **common)
 
 
 def parse_generator(generator_id: str, raw: Mapping[str, Any]) -> Generator:
-    where = f"Генератор «{generator_id}»"
+    where = msg("lt.gen_config.where", generator=generator_id)
     if not GENERATOR_ID_RE.fullmatch(generator_id):
-        raise GeneratorConfigError(f"{where}: идентификатор — латиница в нижнем регистре, цифры, дефис и подчёркивание")
+        raise GeneratorConfigError("lt.config.bad_id", where=where)
     if not isinstance(raw, Mapping):
-        raise GeneratorConfigError(f"{where}: ожидается объект")
+        raise GeneratorConfigError("lt.config.object_expected", where=where)
     gtype = _text(raw, "type") or "ssh"
     if gtype not in GENERATOR_TYPES:
-        raise GeneratorConfigError(f"{where}: тип — одно из {', '.join(GENERATOR_TYPES)}")
+        raise GeneratorConfigError("lt.gen_config.type_one_of", where=where, types=", ".join(GENERATOR_TYPES))
     title = (_text(raw, "title") or generator_id)[:80]
     try:
         max_parallel = int(raw.get("max_parallel") or 0)
     except (TypeError, ValueError) as exc:
-        raise GeneratorConfigError(f"{where}: max_parallel — целое число") from exc
+        raise GeneratorConfigError("lt.gen_config.max_parallel_int", where=where) from exc
     if not 0 <= max_parallel <= MAX_PARALLEL_CAP:
-        raise GeneratorConfigError(f"{where}: max_parallel — от 0 (без лимита) до {MAX_PARALLEL_CAP}")
+        raise GeneratorConfigError("lt.gen_config.max_parallel_range", where=where, max=MAX_PARALLEL_CAP)
     verified = raw.get("verified") if isinstance(raw.get("verified"), Mapping) else {}
     verified_at, verified_target = _text(verified, "at")[:40], _text(verified, "target")[:500]
     if gtype == "manual":
@@ -527,10 +528,11 @@ def parse_generator(generator_id: str, raw: Mapping[str, Any]) -> Generator:
         entry = entry if isinstance(entry, Mapping) else {"executable": entry} if isinstance(entry, str) else {}
         executable, image = _text(entry, "executable"), _text(entry, "image")
         if "\n" in executable or "\x00" in executable or any(ch.isspace() for ch in image):
-            raise GeneratorConfigError(f"{where}: недопустимый путь или образ для {tool_id}")
+            raise GeneratorConfigError("lt.gen_config.bad_tool_entry", where=where, tool=tool_id)
         tools[str(tool_id)] = GeneratorTool(
             executable=executable,
-            scripts_dir=_dir(_text(entry, "scripts_dir"), where, f"каталог скриптов {tool_id}", required=False)
+            scripts_dir=_dir(_text(entry, "scripts_dir"), where, msg("lt.gen_config.label.tool_scripts_dir", tool=tool_id),
+                             required=False)
             if gtype not in CI_TYPES else _text(entry, "scripts_dir"),
             image=image,
         )
@@ -538,7 +540,7 @@ def parse_generator(generator_id: str, raw: Mapping[str, Any]) -> Generator:
     env: dict[str, str] = {}
     for name, value in env_raw.items():
         if not ENV_NAME_RE.fullmatch(str(name)):
-            raise GeneratorConfigError(f"{where}: недопустимое имя переменной окружения «{name}»")
+            raise GeneratorConfigError("lt.config.bad_env_name", where=where, name=name)
         env[str(name)] = "" if value is None else str(value)
     common: dict[str, Any] = dict(id=generator_id, title=title, type=gtype, tools=tools, max_parallel=max_parallel, env=env,
                                   verified_at=verified_at, verified_target=verified_target)
@@ -546,15 +548,16 @@ def parse_generator(generator_id: str, raw: Mapping[str, Any]) -> Generator:
         return Generator(
             **common,
             ssh=_parse_ssh(raw, where),
-            work_dir=_dir(_text(raw, "work_dir"), where, "рабочий каталог", required=True),
-            scripts_dir=_dir(_text(raw, "scripts_dir"), where, "каталог скриптов", required=False),
+            work_dir=_dir(_text(raw, "work_dir"), where, msg("lt.gen_config.label.work_dir"), required=True),
+            scripts_dir=_dir(_text(raw, "scripts_dir"), where, msg("lt.gen_config.label.scripts_dir"), required=False),
         )
     if gtype == "docker":
         return Generator(
             **common,
             docker=_parse_docker(raw, where),
-            work_dir=_dir(_text(raw, "work_dir"), where, "рабочий каталог в контейнере", required=False, default="/tmp"),
-            scripts_dir=_dir(_text(raw, "scripts_dir"), where, "каталог скриптов в контейнере", required=False),
+            work_dir=_dir(_text(raw, "work_dir"), where, msg("lt.gen_config.label.container_work_dir"), required=False,
+                          default="/tmp"),
+            scripts_dir=_dir(_text(raw, "scripts_dir"), where, msg("lt.gen_config.label.container_scripts_dir"), required=False),
         )
     if gtype == "kubernetes":
         k8s = _parse_kubernetes(raw, where)
@@ -562,8 +565,10 @@ def parse_generator(generator_id: str, raw: Mapping[str, Any]) -> Generator:
         return Generator(
             **common,
             kubernetes=k8s,
-            work_dir=_dir(_text(raw, "work_dir"), where, "рабочий каталог в контейнере", required=False, default="/tmp"),
-            scripts_dir=_dir(_text(raw, "scripts_dir"), where, "каталог скриптов в контейнере", required=False, default=default_scripts),
+            work_dir=_dir(_text(raw, "work_dir"), where, msg("lt.gen_config.label.container_work_dir"), required=False,
+                          default="/tmp"),
+            scripts_dir=_dir(_text(raw, "scripts_dir"), where, msg("lt.gen_config.label.container_scripts_dir"), required=False,
+                             default=default_scripts),
         )
     # CI: the pipeline holds the tool, the scripts and their settings.
     common["tools"] = {}
@@ -584,7 +589,7 @@ def configured_generators(config: Mapping[str, Any]) -> dict[str, Generator]:
 
 def validate_generators_section(payload: Mapping[str, Any]) -> None:
     if not isinstance(payload, Mapping):
-        raise GeneratorConfigError("load_generators — объект «генератор: настройки»")
+        raise GeneratorConfigError("lt.gen_config.section_object")
     for generator_id, entry in payload.items():
         parse_generator(str(generator_id), entry)
 

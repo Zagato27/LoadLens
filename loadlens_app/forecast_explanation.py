@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """LLM explanation of the forecast limit: built on request, cached per run until its inputs change."""
 
 from __future__ import annotations
@@ -9,13 +10,21 @@ import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Iterator, Literal, Optional
 
 from pydantic import ValidationError
 
 from AI.context_pack import to_utc
-from AI.db_store import RunAnalyses, StoredExplanation, StoredFinding, load_forecast_explanation, load_run_analyses, save_forecast_explanation
+from AI.db_store import (
+    RunAnalyses,
+    StoredExplanation,
+    StoredFinding,
+    load_final_report,
+    load_forecast_explanation,
+    load_run_analyses,
+    save_forecast_explanation,
+)
+from AI.i18n import msg, render_ref, t, with_locale
 from AI.limit_explanation import (
     ExplanationCheck,
     LimitExplanation,
@@ -25,18 +34,20 @@ from AI.limit_explanation import (
     parse_explanation,
     related_findings,
 )
+from AI.prompt_store import load_prompt
+from AI.prompt_store import text as prompt_text
 from AI.providers import ask_llm_with_text_data, usage_domain
 from loadlens_app.core import _ts_conn
 from loadlens_app.forecast import ForecastReport, _storage, build_forecast
+from loadlens_app.i18n import stored_report_language
 from loadlens_app.limits import consume_llm
 from settings import CONFIG
 
-PROMPT_PATH = Path(__file__).resolve().parent.parent / "AI" / "prompts" / "forecast_limit_prompt.txt"
-SYSTEM_PROMPT = "Вы инженер по производительности. Отвечайте строго в JSON по заданной схеме, все тексты — на русском языке."
+# AI/prompts/<lang>/forecast_limit_prompt.txt; the system prompt is ``forecast.system`` of _strings.json.
+PROMPT_FILE = "forecast_limit_prompt.txt"
 DEFAULT_TABLE = "forecast_explanations"
 DEFAULT_HEADROOM_PCT = 20.0
 MIN_REGENERATE_SEC = 30.0
-OLD_FORMAT_MESSAGE = "Разбор сделан в прежнем формате — обновите его"
 TOP_SERVICES = 5
 MAX_SYSTEM_ITEMS = 20
 
@@ -44,12 +55,19 @@ ViewStatus = Literal["unavailable", "missing", "ready", "stale"]
 
 
 class ExplanationError(Exception):
-    """The explanation cannot be built; ``code`` tells the page why."""
+    """The explanation cannot be built; ``code`` tells the page why.
+
+    ``message`` is usually a :func:`AI.i18n.msg`: ``str()`` renders it again in the locale where it is shown.
+    """
 
     def __init__(self, message: str, status_code: int, code: str) -> None:
         super().__init__(message)
+        self.message = message
         self.status_code = status_code
         self.code = code
+
+    def __str__(self) -> str:
+        return render_ref(self.message, str(self.message))
 
 
 @dataclass(frozen=True)
@@ -70,6 +88,8 @@ class ExplanationContext:
     inputs_hash: str
     llm: Optional[LlmChoice]
     llm_problem: str
+    # Language of the report the forecast belongs to: prompt, facts and the model answer.
+    lang: str = "ru"
 
 
 @dataclass(frozen=True)
@@ -107,11 +127,11 @@ def _generation_slot(run_id: str) -> Iterator[None]:
     now = time.monotonic()
     with _slots_lock:
         if run_id in _running:
-            raise ExplanationError("Разбор этого отчёта уже выполняется", 409, "busy")
+            raise ExplanationError(msg("capacity.explain.busy"), 409, "busy")
         last = _last_started.get(run_id)
         if last is not None and now - last < MIN_REGENERATE_SEC:
             wait = int(MIN_REGENERATE_SEC - (now - last)) + 1
-            raise ExplanationError(f"Повторный разбор возможен через {wait} с", 429, "too_often")
+            raise ExplanationError(msg("capacity.explain.too_often", wait=wait), 429, "too_often")
         _running.add(run_id)
         _last_started[run_id] = now
     try:
@@ -137,11 +157,11 @@ def _limit_window(forecast: ForecastReport) -> Optional[LimitWindow]:
     return None
 
 
-def _limit_facts(forecast: ForecastReport) -> dict[str, Any]:
+def _limit_facts(forecast: ForecastReport, lang: str = "ru") -> dict[str, Any]:
     info = forecast.instability
     if info is not None:
         return {
-            "kind": "провалы времени отклика",
+            "kind": prompt_text("forecast.kind_stalls", lang),
             "rps": round(info.onset_rps),
             "onset_time": _hhmm(info.onset_iso),
             "onset_step": info.onset_label,
@@ -151,7 +171,7 @@ def _limit_facts(forecast: ForecastReport) -> dict[str, Any]:
             "worst_p95_ms": round(info.worst_p95_ms) if info.worst_p95_ms is not None else None,
             "period_min": info.period_min,
         }
-    return {"kind": "потолок модели USL", "rps": round(forecast.limit.rps) if forecast.limit.rps is not None else None}
+    return {"kind": prompt_text("forecast.kind_usl", lang), "rps": round(forecast.limit.rps) if forecast.limit.rps is not None else None}
 
 
 def _cpu_facts(forecast: ForecastReport) -> dict[str, Any]:
@@ -174,7 +194,7 @@ def _step_fact(step: Any) -> dict[str, Any]:
     return {"step": step.label, "rps": round(step.rps), "mean_ms": round(step.response_ms, 1), "stall_points": step.stalls}
 
 
-def _facts(forecast: ForecastReport) -> dict[str, Any]:
+def _facts(forecast: ForecastReport, lang: str = "ru") -> dict[str, Any]:
     steps = [step for step in forecast.steps if not step.after_drop]
     return {
         "test": {
@@ -183,7 +203,7 @@ def _facts(forecast: ForecastReport) -> dict[str, Any]:
             "window": f"{_hhmm(forecast.window_start_iso)}–{_hhmm(forecast.cutoff_iso)}",
             "point_minutes": forecast.bin_minutes,
         },
-        "limit": _limit_facts(forecast),
+        "limit": _limit_facts(forecast, lang),
         "steps": [_step_fact(step) for step in steps],
         "cpu": _cpu_facts(forecast),
         "usl": {"ceiling_rps": round(forecast.fit.x_max) if forecast.fit.x_max is not None else None, "r2": round(forecast.fit.r2, 2)},
@@ -212,7 +232,7 @@ def _llm_choice() -> tuple[Optional[LlmChoice], str]:
     provider = str(llm.get("provider") or "").strip().lower()
     settings = llm.get(provider) if provider else None
     if not provider or not isinstance(settings, dict):
-        return None, "Не настроен провайдер LLM: Настройки → LLM"
+        return None, t("capacity.explain.no_llm")
     return LlmChoice(provider=provider, settings=settings), ""
 
 
@@ -230,21 +250,42 @@ def _analyses(run_id: str) -> RunAnalyses:
         conn.close()
 
 
+def _report_language(run_id: str) -> str:
+    """Language of the report of the run (``sla_details.report_language``); ``ru`` for older reports."""
+    schema, llm_table, _ = _storage_names()
+    try:
+        conn = _ts_conn()
+        try:
+            report = load_final_report(conn, schema, llm_table, run_id)
+        finally:
+            conn.close()
+    except Exception:
+        return "ru"
+    return stored_report_language(report) if report is not None else "ru"
+
+
 def _context(run_id: str) -> ExplanationContext:
-    forecast = build_forecast(run_id, None, DEFAULT_HEADROOM_PCT)
+    """Inputs of the explanation in the language of the report: its hash covers the prompt text of that language,
+    so a change of the global language does not make the explanations of older reports stale.
+
+    The forecast is built in that language too: its texts (plan messages) go into the facts and the hash, so the
+    locale of the person who opens the page does not change them."""
+    lang = _report_language(run_id)
+    with with_locale(lang):
+        forecast = build_forecast(run_id, None, DEFAULT_HEADROOM_PCT)
     window = _limit_window(forecast)
     analyses = _analyses(run_id)
     plan = forecast.resources
     services = [name for name in (plan.limit_cause, plan.bottleneck, plan.limit_service) if name]
     findings = related_findings(analyses.findings, window, services) if window is not None else []
-    payload = {"facts": _facts(forecast), "findings": [finding_payload(item) for item in findings], "system": _compact_system(analyses.system_context)}
-    digest = hashlib.sha256(json.dumps({"prompt": _prompt(), "payload": payload}, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    payload = {"facts": _facts(forecast, lang), "findings": [finding_payload(item) for item in findings], "system": _compact_system(analyses.system_context)}
+    digest = hashlib.sha256(json.dumps({"prompt": _prompt(lang), "payload": payload}, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
     llm, llm_problem = _llm_choice()
-    return ExplanationContext(window, findings, payload, digest, llm, llm_problem)
+    return ExplanationContext(window, findings, payload, digest, llm, llm_problem, lang)
 
 
-def _prompt() -> str:
-    return PROMPT_PATH.read_text(encoding="utf-8")
+def _prompt(lang: str = "ru") -> str:
+    return load_prompt(PROMPT_FILE, lang)
 
 
 def _load_cached(run_id: str) -> Optional[StoredExplanation]:
@@ -273,10 +314,10 @@ def _cached_view(status: ViewStatus, context: ExplanationContext, stored: Stored
         explanation = LimitExplanation.model_validate(payload["explanation"])
         check = ExplanationCheck(**payload["check"])
     except (KeyError, TypeError, ValidationError):
-        return ExplanationView("stale", OLD_FORMAT_MESSAGE, context.findings, None, None, model, generated_at, context.llm_problem)
+        return ExplanationView("stale", t("capacity.explain.old_format"), context.findings, None, None, model, generated_at, context.llm_problem)
     return ExplanationView(
         status=status,
-        message="Данные отчёта или настройки прогноза изменились после разбора — обновите его" if status == "stale" else "",
+        message=t("capacity.explain.stale") if status == "stale" else "",
         findings=context.findings,
         explanation=explanation,
         check=check,
@@ -290,7 +331,7 @@ def explanation_view(run_id: str) -> ExplanationView:
     """Related findings of the limit and the cached explanation, if any."""
     context = _context(run_id)
     if context.window is None:
-        return ExplanationView("unavailable", "Предел по данным не виден — разбирать нечего", [], None, None, "", None, "")
+        return ExplanationView("unavailable", t("capacity.explain.no_limit"), [], None, None, "", None, "")
     stored = _load_cached(run_id)
     if stored is None:
         model = context.llm.model if context.llm is not None else ""
@@ -305,13 +346,15 @@ def _ask_model(context: ExplanationContext) -> str:
     try:
         with usage_domain("forecast"):
             return ask_llm_with_text_data(
-                _prompt(),
+                _prompt(context.lang),
                 json.dumps(context.payload, ensure_ascii=False),
                 llm_config={"force_json": True},
-                system_prompt=SYSTEM_PROMPT,
+                system_prompt=prompt_text("forecast.system", context.lang),
             )
     except Exception as exc:
-        raise ExplanationError(f"Модель {llm.provider} / {llm.model} не ответила: {exc}", 502, "llm_failed") from exc
+        raise ExplanationError(
+            msg("capacity.explain.llm_failed", provider=llm.provider, model=llm.model, error=str(exc)), 502, "llm_failed"
+        ) from exc
 
 
 def generate_explanation(run_id: str, budget_owner: Optional[str] = None) -> ExplanationView:
@@ -322,12 +365,13 @@ def generate_explanation(run_id: str, budget_owner: Optional[str] = None) -> Exp
     with _generation_slot(run_id):
         context = _context(run_id)
         if context.window is None:
-            raise ExplanationError("Предел по данным не виден — разбирать нечего", 422, "no_limit")
+            raise ExplanationError(msg("capacity.explain.no_limit"), 422, "no_limit")
         if budget_owner is not None and context.llm is not None:
             consume_llm(budget_owner, "explanation")
-        raw = _ask_model(context)
-        explanation = parse_explanation(raw)
-        check = check_explanation(explanation, context.payload["facts"], context.findings)
+        with with_locale(context.lang):
+            raw = _ask_model(context)
+            explanation = parse_explanation(raw)
+            check = check_explanation(explanation, context.payload["facts"], context.findings)
         payload = {
             "explanation": explanation.model_dump(),
             "check": asdict(check),

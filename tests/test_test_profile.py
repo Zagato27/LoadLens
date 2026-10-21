@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Single test-profile source: aliases, modes, step detection, prompt guidance, baseline filter."""
 
 import sys

@@ -1,0 +1,29 @@
+TASK: verification pass over the final load test report.
+
+In the input JSON:
+- analysis — the final report (verdict, verdict_rationale, findings[], recommended_actions[]). Every finding has
+  verification.status: verified — the numbers are confirmed by the collected metrics; qualitative — there are no numbers;
+  unverified — the numbers in the finding were NOT found in the data (listed in unverified_numbers).
+- unverified_findings — the findings with status unverified and their unconfirmed numbers.
+- context — compact test data: load_steps, timeline (metric × step), deterministic_sla,
+  designated_peak_performance, baseline.
+
+WHAT TO DO:
+1. Revise verdict and verdict_rationale relying ONLY on the findings with status verified and qualitative and on
+   deterministic_sla. Unverified findings cannot be grounds for the verdict.
+2. If, after excluding the unverified findings, no grounds for "fail"/"risk" remain and deterministic_sla does not
+   contradict this, soften the verdict. If the grounds are no longer sufficient for any conclusion — "no_data".
+   The verdict must not contradict deterministic_sla.verdict; whether target_rps was reached comes only from
+   deterministic_sla.target_rps_check.
+3. Do NOT delete unverified findings: keep them in findings without changing the id/summary/evidence_* fields, but append
+   the note " (not confirmed by data)" to the end of summary if it is not there yet. Do not add new numbers to such findings.
+4. Carry over the other findings, recommendations and peak_performance unchanged. Do not add new findings or numbers
+   that are not in context.
+5. verdict_rationale is mandatory: rewrite it so that it names the chosen status (start with Status "<label>": ...), only
+   confirmed facts (with numbers from context) and deterministic_sla. An empty rationale is not allowed; if needed, add one
+   phrase about how many findings are not confirmed by data.
+
+RESPONSE FORMAT: STRICTLY one JSON object of the same schema as analysis (verdict, verdict_rationale, confidence, findings[],
+recommended_actions[], affected_components[], peak_performance?). verdict is a code: "pass" — passed, "risk" — risks found,
+"fail" — failed, "no_data" — insufficient data; <label> is Passed, Risks found, Failed or Insufficient data respectively.
+All text fields in English. No text outside JSON.

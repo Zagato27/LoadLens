@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Saved launch forms ("presets") per service in ``load_test_presets``.
 
 A preset keeps the instances and options of a launch form so a team repeats the same test with one click.
@@ -16,6 +17,7 @@ from typing import Any, Mapping, Optional
 
 from psycopg2 import sql
 
+from .messages import LtError
 from .store import _parse_dt, utcnow
 from .tools import parse_env
 
@@ -28,9 +30,11 @@ OPTION_KEYS = ("test_type", "max_duration_min", "auto_report", "use_llm")
 MASK = "***"
 
 
-class PresetError(ValueError):
-    def __init__(self, message: str, status: int = 400) -> None:
-        super().__init__(message)
+class PresetError(LtError, ValueError):
+    """A preset cannot be saved; ``message`` is an lt.* key with ``params``, a localized error or a ready text."""
+
+    def __init__(self, message: Any, status: int = 400, **params: Any) -> None:
+        super().__init__(message, **params)
         self.status = status
 
 
@@ -73,20 +77,20 @@ def clean_spec(form: Mapping[str, Any]) -> dict[str, Any]:
     Pipeline parameters keep their values except the password ones (``ci_secret`` of the form) and masked ones.
     """
     if not isinstance(form, Mapping):
-        raise PresetError("spec — объект формы запуска")
+        raise PresetError("lt.preset.spec_object")
     instances = form.get("instances")
     if not isinstance(instances, list) or not instances:
-        raise PresetError("В пресете нужен хотя бы один инстанс")
+        raise PresetError("lt.preset.no_instances")
     out: dict[str, Any] = {key: form.get(key) for key in OPTION_KEYS if key in form}
     cleaned = []
     for raw in instances[:50]:
         if not isinstance(raw, Mapping):
-            raise PresetError("Инстанс пресета — объект")
+            raise PresetError("lt.preset.instance_object")
         item = {key: raw.get(key) for key in INSTANCE_KEYS if raw.get(key) not in (None, "")}
         try:
             names = list(parse_env(raw.get("env")))
         except ValueError as exc:
-            raise PresetError(str(exc)) from exc
+            raise PresetError(exc) from exc
         item["env"] = "\n".join(f"{name}=" for name in names)
         params = raw.get("ci_params")
         if isinstance(params, Mapping) and params:
@@ -98,7 +102,7 @@ def clean_spec(form: Mapping[str, Any]) -> dict[str, Any]:
         cleaned.append(item)
     out["instances"] = cleaned
     if len(json.dumps(out, ensure_ascii=False).encode("utf-8")) > MAX_SPEC_BYTES:
-        raise PresetError("Пресет слишком большой")
+        raise PresetError("lt.preset.too_big")
     return out
 
 
@@ -296,14 +300,13 @@ def save_preset(name: str, service: str, project_area: str, form: Mapping[str, A
     """Stores the form as a preset of the service; a preset of the same name is replaced by its author or an admin."""
     name = str(name or "").strip()
     if not name or len(name) > MAX_NAME_CHARS:
-        raise PresetError(f"Название пресета — от 1 до {MAX_NAME_CHARS} символов")
+        raise PresetError("lt.preset.name_length", max=MAX_NAME_CHARS)
     store = get_presets()
     existing = next((p for p in store.list([service]) if p.name == name), None)
     if existing is not None and existing.owner and existing.owner != owner and not is_admin:
-        raise PresetError(f"Пресет «{name}» сохранил {existing.owner}: заменить его может автор или администратор, "
-                          "сохраните под другим названием", 403)
+        raise PresetError("lt.preset.owned", 403, name=name, owner=existing.owner)
     if existing is None and store.count(service) >= MAX_PRESETS_PER_SERVICE:
-        raise PresetError(f"У сервиса уже {MAX_PRESETS_PER_SERVICE} пресетов: удалите ненужные", 409)
+        raise PresetError("lt.preset.too_many", 409, max=MAX_PRESETS_PER_SERVICE)
     record = PresetRecord(preset_id=uuid.uuid4().hex, name=name, service=service, project_area=project_area,
                           spec=clean_spec(form), owner=owner)
     return store.save(record)

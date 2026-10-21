@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Soak (stability) analysis: the window the target load was held in and metric trends over it.
 
 The hold window is the run without the ramp-up and the final ramp-down: from the first to
@@ -18,6 +19,8 @@ import numpy as np
 import pandas as pd
 
 from AI.context_pack import DEFAULT_DRIFT_PCT, LoadStep, _series_from_labeled, format_iso, to_utc
+from AI.i18n import get_locale, t
+from AI.report_texts import LanguageTable, LocaleTable, text_lang
 
 HOLD_LEVEL_FRACTION = 0.9
 HOLD_MIN_SHARE = 0.5
@@ -36,13 +39,22 @@ TREND_SPECS: tuple[tuple[str, str, str, str, str], ...] = (
     ("hard_resources", "cpu_query", "cpu", "p95", "up"),
     ("hard_resources", "memory_query", "memory", "p95", "up"),
 )
-TREND_TITLES = {
-    "rps": "RPS",
-    "p95": "p95 latency",
-    "error_rate": "доля ошибок",
-    "cpu": "CPU",
-    "memory": "память",
-}
+TREND_KINDS = ("rps", "p95", "error_rate", "cpu", "memory")
+# Metric names of the trends (report.metric.*) in the language of the report being built.
+TREND_TITLES = LocaleTable(TREND_KINDS, lambda kind: t(f"report.metric.{kind}"))
+
+# Notes on how the hold window was chosen, by code (``hold.note_codes``, texts under report.hold_note.*); readers
+# render them in their language and fall back to the stored ``hold.note`` text of reports saved before the codes.
+HOLD_NOTE_CODES = ("no_steady_level", "early_drop", "long_ramp_up")
+HOLD_NOTE_TEXTS = LanguageTable(HOLD_NOTE_CODES, lambda code, lang: t(f"report.hold_note.{code}", locale=lang))
+
+
+def hold_note_text(codes: Sequence[str], lang: str = "ru") -> str:
+    """Text of hold-window note codes in ``lang`` (unknown languages: ru), joined with «; »."""
+    lang = text_lang(lang)
+    return "; ".join(
+        t(f"report.hold_note.{code}", locale=lang) if str(code) in HOLD_NOTE_CODES else str(code) for code in codes or []
+    )
 
 
 def _bin_width(index: pd.DatetimeIndex) -> pd.Timedelta:
@@ -77,6 +89,7 @@ class HoldWindow:
     whole_run: bool = False
     early_drop: Optional[pd.Timestamp] = None
     note: str = ""
+    note_codes: tuple[str, ...] = ()
 
     @property
     def drop_pct(self) -> Optional[float]:
@@ -103,6 +116,7 @@ class HoldWindow:
             "whole_run": self.whole_run,
             "early_drop_iso": format_iso(self.early_drop, shift_hours) if self.early_drop is not None else None,
             "note": self.note,
+            "note_codes": list(self.note_codes),
         }
 
 
@@ -151,10 +165,10 @@ def hold_window_from_series(
     smooth = values.rolling(SMOOTH_POINTS, center=True, min_periods=1).median()
     held = smooth[smooth >= level * HOLD_LEVEL_FRACTION]
     start, end = run_start, run_end
-    whole_run, early_drop, notes = False, None, []
+    whole_run, early_drop, codes = False, None, []
     if held.empty:
         whole_run = True
-        notes.append("RPS не держал устойчивый уровень: окно удержания — весь тест")
+        codes.append("no_steady_level")
     else:
         start, last_held = held.index[0], held.index[-1]
         end = last_held + width
@@ -162,10 +176,10 @@ def hold_window_from_series(
         if run_end - end > allowance:
             early_drop = end
             end = run_end
-            notes.append("RPS упал задолго до конца теста: падение включено в окно удержания")
+            codes.append("early_drop")
         if total > pd.Timedelta(0) and (end - start) < total * HOLD_MIN_SHARE:
             start, end, whole_run = run_start, run_end, True
-            notes.append("разгон занял больше половины теста: окно удержания — весь тест")
+            codes.append("long_ramp_up")
     mean, samples = _mean_between(values, start, end)
     if mean is None:
         return None
@@ -174,7 +188,7 @@ def hold_window_from_series(
         start=start, end=end, level_rps=level, mean_rps=mean,
         min_bucket_rps=lowest, min_bucket_label=lowest_label,
         series=series_name, label=label, samples=samples,
-        whole_run=whole_run, early_drop=early_drop, note="; ".join(notes),
+        whole_run=whole_run, early_drop=early_drop, note=hold_note_text(codes, get_locale()), note_codes=tuple(codes),
     )
 
 
@@ -201,19 +215,19 @@ def hold_check(hold: Optional[Mapping[str, Any]], target_rps: float) -> Dict[str
     lowest_ok = lowest is None or float(lowest) >= lowest_floor
     passed: Optional[bool] = (mean_ok and lowest_ok) if mean is not None else None
     if mean is None:
-        message = "Нет данных RPS для окна удержания"
+        message = t("sla.hold.no_data")
     else:
         window = f"{str(hold.get('start_iso') or '')[11:16]}–{str(hold.get('end_iso') or '')[11:16]}"
-        message = (
-            f"Удержание: средний RPS {float(mean):.1f} за окно {window} ({hold.get('duration_min')} мин) "
-            f"{'≥' if mean_ok else '<'} целевой {target_rps:g} (допуск {HOLD_TOLERANCE_PCT:g} %)"
+        message = t(
+            "sla.hold.mean", mean=f"{float(mean):.1f}", window=window, minutes=str(hold.get("duration_min")),
+            op="≥" if mean_ok else "<", target=f"{target_rps:g}", tolerance=f"{HOLD_TOLERANCE_PCT:g}",
         )
         if lowest is not None:
-            label = hold.get("min_bucket_label") or "интервал"
+            label = hold.get("min_bucket_label") or t("sla.hold.interval_fallback")
             below = (1.0 - float(lowest) / target_rps) * 100.0 if target_rps > 0 else 0.0
-            message += (
-                f"; минимальный интервал «{label}» {float(lowest):.1f} RPS "
-                f"({-below:+.0f} % от целевого, допуск −{HOLD_DROP_TOLERANCE_PCT:g} %)"
+            message += t(
+                "sla.hold.lowest", label=str(label), rps=f"{float(lowest):.1f}", change=f"{-below:+.0f}",
+                tolerance=f"{HOLD_DROP_TOLERANCE_PCT:g}",
             )
     return {
         "passed": passed,
@@ -322,12 +336,17 @@ def build_stability_payload(
 __all__ = [
     "HOLD_DROP_TOLERANCE_PCT",
     "HOLD_LEVEL_FRACTION",
+    "HOLD_NOTE_CODES",
+    "HOLD_NOTE_TEXTS",
     "HOLD_TOLERANCE_PCT",
     "HoldWindow",
+    "TREND_KINDS",
     "TREND_SPECS",
+    "TREND_TITLES",
     "build_stability_payload",
     "compute_trends",
     "hold_check",
+    "hold_note_text",
     "hold_window_from_labeled",
     "hold_window_from_series",
 ]

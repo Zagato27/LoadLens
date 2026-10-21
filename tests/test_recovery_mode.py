@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Recovery mode: the app answers without the storage database and lets a recovery administrator fix it.
 
 psycopg2.connect is replaced by a fake that fails for hosts that are "down"; everything above it is real:

@@ -1,4 +1,5 @@
-"""Celery configuration and the compose worker (docs/perf-plan.md, wave B, agent B2).
+# SPDX-License-Identifier: Apache-2.0
+"""Celery configuration and the compose worker (plans/perf-plan.md, wave B, agent B2).
 
 Offline: nothing here connects to a broker or starts a worker. The checks read the Celery configuration,
 the routing table, the job runner mode derived from the environment, and the compose and env templates.

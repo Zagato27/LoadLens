@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Value objects shared by the auth package."""
 
 from __future__ import annotations
@@ -6,6 +7,8 @@ import enum
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
+
+from AI.i18n import t
 
 
 def utcnow() -> datetime:
@@ -25,7 +28,8 @@ class Role(enum.IntEnum):
 
     @property
     def label(self) -> str:
-        return ROLE_LABELS[self]
+        """Role name in the current locale (``common.role.<key>``)."""
+        return t(ROLE_LABEL_KEYS[self])
 
     @classmethod
     def parse(cls, value: Any) -> "Role":
@@ -35,13 +39,14 @@ class Role(enum.IntEnum):
         for role in cls:
             if role.key == text:
                 return role
-        raise ValueError(f"Неизвестная роль: {value!r}")
+        raise ValueError(t("auth.server.unknown_role", value=repr(value)))
 
 
-ROLE_LABELS = {
-    Role.VIEWER: "Наблюдатель",
-    Role.ENGINEER: "Инженер",
-    Role.ADMIN: "Администратор",
+# Dictionary keys of the role names (the same labels the browser shows through LL.t).
+ROLE_LABEL_KEYS = {
+    Role.VIEWER: "common.role.viewer",
+    Role.ENGINEER: "common.role.engineer",
+    Role.ADMIN: "common.role.admin",
 }
 
 

@@ -1,0 +1,12 @@
+Domain Focus: microservices
+
+Evaluation Criteria Addendum
+- Look for latency growth, error rate, saturation by service, degraded dependencies, uneven load distribution, cascading failures.
+- A good candidate singles out specific services/endpoints and distinguishes the source of the degradation from its consequences.
+- Recommendations must target specific components: service, deployment, pod, instance, endpoint.
+
+Evaluation Steps
+1. Check latency, error rate, throughput and resilience by service.
+2. Check whether the most degraded services and the critical call chains are identified.
+3. Check for specifics: endpoint, service name, pod, time window, threshold.
+4. Check whether the recommendations help to localize and remove the degradation in the service chain.

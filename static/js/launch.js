@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Launch page: the form of a load test run (service, instances, report options) and the list of runs.
 (function () {
   const LL = window.LoadLens;
@@ -11,7 +12,9 @@
   const CHEVRON = '<svg class="instance-chevron" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>';
 
   const state = { tools: {}, toolOrder: [], generators: {}, generatorOrder: [], limits: {}, scripts: {}, ciRefs: {}, seq: 0, runsTimer: null, runsSignature: '', presets: [], picker: null };
-  const CI_KIND_TITLES = { gitlab: 'пайплайн GitLab', jenkins: 'сборка Jenkins' };
+  // What a CI generator launches («GitLab pipeline», «Jenkins build»); '' for an unknown kind.
+  const CI_KIND_KEYS = { gitlab: 'launch.ci_kind.gitlab', jenkins: 'launch.ci_kind.jenkins' };
+  const ciKindTitle = (kind) => (Object.prototype.hasOwnProperty.call(CI_KIND_KEYS, kind) ? LL.t(CI_KIND_KEYS[kind]) : '');
 
   const STATUS_TONE = {
     starting: 'running', running: 'running', stopping: 'warn', draining: 'running', reporting: 'running',
@@ -33,7 +36,12 @@
     const resp = await fetch(url, options);
     let data = {};
     try { data = await resp.json(); } catch (e) { data = {}; }
-    if (!resp.ok) throw new Error(data.message || data.error || `HTTP ${resp.status}`);
+    if (!resp.ok) {
+      // The answer stays on the error: its fields (code, instance) drive the reaction, not the message text.
+      const error = new Error(data.message || data.error || `HTTP ${resp.status}`);
+      error.data = data;
+      throw error;
+    }
     return data;
   }
 
@@ -48,10 +56,11 @@
     const pill = el('span', `pill ${tone}`, run.status_title);
     pill.style.marginLeft = '8px';
     main.append(name, pill);
-    const tools = Array.from(new Set(run.instances.map((i) => i.tool_title || 'вручную'))).join(', ');
+    const tools = Array.from(new Set(run.instances.map((i) => i.tool_title || LL.t('launch.tool.manual')))).join(', ');
     const when = run.started_at ? LL.formatDateTime(run.started_at) : LL.formatDateTime(run.created_at);
-    main.appendChild(el('div', 'meta', `${run.service} · ${run.instances.length} инст. (${tools}) · ${when} · ${run.owner || ''}${run.message ? ' · ' + run.message : ''}`));
-    const link = el('a', 'btn btn-sm', run.active ? 'Открыть' : 'Подробнее');
+    const instances = LL.t('launch.runs.instances', { n: run.instances.length, tools });
+    main.appendChild(el('div', 'meta', `${run.service} · ${instances} · ${when} · ${run.owner || ''}${run.message ? ' · ' + run.message : ''}`));
+    const link = el('a', 'btn btn-sm', LL.t(run.active ? 'launch.runs.open' : 'launch.runs.details'));
     link.href = name.href;
     row.append(main, link);
     return row;
@@ -67,15 +76,15 @@
       if (signature !== state.runsSignature) {
         state.runsSignature = signature;
         host.replaceChildren();
-        if (!runs.length) host.appendChild(el('p', 'dim', 'Прогонов ещё не было.'));
+        if (!runs.length) host.appendChild(el('p', 'dim', LL.t('launch.runs.empty')));
         runs.forEach((run) => host.appendChild(runRow(run)));
       }
       const active = runs.filter((r) => r.active).length;
-      $('runsNote').textContent = active ? `идёт: ${active}` : '';
+      $('runsNote').textContent = active ? LL.t('launch.runs.active', { n: active }) : '';
       clearTimeout(state.runsTimer);
       if (active) state.runsTimer = setTimeout(loadRuns, RUNS_POLL_MS);
     } catch (e) {
-      host.replaceChildren(el('p', 'dim', `Список прогонов не загрузился: ${e.message}`));
+      host.replaceChildren(el('p', 'dim', LL.t('launch.runs.load_error', { error: e.message })));
     }
   }
 
@@ -113,9 +122,9 @@
   function generatorOptions(selected) {
     return state.generatorOrder.map((id) => {
       const g = state.generators[id];
-      const busy = g.busy_runs && g.busy_runs.length ? ` — идёт: ${g.busy_runs.join(', ')}` : '';
+      const busy = g.busy_runs && g.busy_runs.length ? ` — ${LL.t('launch.generator.busy', { runs: g.busy_runs.join(', ') })}` : '';
       const host = g.host ? ` (${g.host})` : '';
-      const unchecked = g.verified === false ? ' · не проверен' : '';
+      const unchecked = g.verified === false ? ` · ${LL.t('launch.generator.unchecked')}` : '';
       return `<option value="${esc(id)}"${id === selected ? ' selected' : ''}>${esc(g.title)}${esc(host)} · ${esc(g.type_title)}${esc(unchecked)}${esc(busy)}</option>`;
     }).join('');
   }
@@ -123,7 +132,7 @@
   function toolOptions(generatorId, selected) {
     const g = state.generators[generatorId];
     const allowed = g ? (g.type === 'manual' ? state.toolOrder : g.tools) : [];
-    const head = g && g.type === 'manual' ? '<option value="">Не указан</option>' : '';
+    const head = g && g.type === 'manual' ? `<option value="">${LL.tHtml('launch.tool.none')}</option>` : '';
     return head + allowed.filter((id) => state.tools[id]).map((id) => `<option value="${esc(id)}"${id === selected ? ' selected' : ''}>${esc(state.tools[id].title)}</option>`).join('');
   }
 
@@ -143,16 +152,16 @@
     const note = card.querySelector('.f-scripts-note');
     const g = state.generators[generator] || {};
     if (!generator || !tool || g.type === 'manual' || g.lists_scripts === false) return;
-    note.textContent = 'Ищем скрипты на генераторе…';
+    note.textContent = LL.t('launch.scripts.loading');
     try {
       const data = await fetchJson(`/load_tests/scripts?generator=${encodeURIComponent(generator)}&tool=${encodeURIComponent(tool)}`);
       state.scripts[`${generator}|${tool}`] = data.scripts || [];
       fillDatalist(card);
       note.textContent = data.message || (data.scripts && data.scripts.length
-        ? `Найдено: ${data.scripts.length} в ${data.scripts_dir}`
-        : `В ${data.scripts_dir || 'каталоге'} ничего не нашлось по маскам ${(state.tools[tool].scripts_glob || []).join(', ')}`);
+        ? LL.t('launch.scripts.found', { n: data.scripts.length, dir: data.scripts_dir })
+        : LL.t(data.scripts_dir ? 'launch.scripts.none_in_dir' : 'launch.scripts.none', { dir: data.scripts_dir, globs: (state.tools[tool].scripts_glob || []).join(', ') }));
     } catch (e) {
-      note.textContent = quiet ? '' : `Список скриптов недоступен: ${e.message}`;
+      note.textContent = quiet ? '' : LL.t('launch.scripts.load_error', { error: e.message });
     }
   }
 
@@ -188,7 +197,7 @@
       area.id = id;
       area.rows = def.type === 'array' ? 1 : 2;
       area.value = String(value === undefined || value === null ? '' : value);
-      if (def.type === 'array') area.placeholder = 'значения через запятую или список JSON';
+      if (def.type === 'array') area.placeholder = LL.t('launch.ci.array_placeholder');
       return area;
     }
     const input = el('input', def.type === 'password' ? '' : 'mono');
@@ -198,7 +207,7 @@
     input.value = String(value === undefined || value === null ? '' : value);
     if (def.type === 'password') {
       input.autocomplete = 'new-password';
-      input.placeholder = 'пусто — секрет из пайплайна';
+      input.placeholder = LL.t('launch.ci.password_placeholder');
     }
     return input;
   }
@@ -226,7 +235,7 @@
         label.htmlFor = id;
         field.append(label, control);
       }
-      const hint = [def.description, def.secret ? 'секрет: не хранится в прогоне и пресетах' : '', def.note].filter(Boolean).join(' · ');
+      const hint = [def.description, def.secret ? LL.t('launch.ci.secret_hint') : '', def.note].filter(Boolean).join(' · ');
       if (hint) field.appendChild(el('div', 'field-hint', hint));
       host.appendChild(field);
     });
@@ -263,7 +272,7 @@
     const refs = state.ciRefs[g.id];
     list.innerHTML = (refs.refs || []).map((ref) => `<option value="${esc(ref)}"></option>`).join('');
     const input = card.querySelector('.f-ci-ref');
-    input.placeholder = refs.default ? `по умолчанию: ${refs.default}` : 'по умолчанию';
+    input.placeholder = refs.default ? LL.t('launch.ci.ref_default', { ref: refs.default }) : LL.t('launch.ci.ref_default_plain');
     // A plain Jenkins job has no branches; a multibranch one lists them.
     if (g.ci.kind === 'jenkins') card.querySelector('.f-ci-ref-box').style.display = (refs.refs || []).length ? '' : 'none';
   }
@@ -283,26 +292,26 @@
     if (!g.ci.reads_params) {
       card.ciState.defs = null;
       renderCiParams(card);
-      note.textContent = 'Без API-токена GitLab LoadLens не видит параметры пайплайна: задайте значения дополнительными переменными.';
+      note.textContent = LL.t('launch.ci.no_token');
       return;
     }
-    note.textContent = 'Читаем параметры пайплайна…';
+    note.textContent = LL.t('launch.ci.loading');
     try {
       const data = await fetchJson(`/load_tests/ci_params?generator=${encodeURIComponent(g.id)}&ref=${encodeURIComponent(ref)}`);
       if (card.ciState.key !== key) return;
       card.ciState.defs = data;
       renderCiParams(card);
       const parts = [];
-      if (data.ref) parts.push(`Ветка ${data.ref}.`);
-      parts.push(data.params && data.params.length ? `Параметров: ${data.params.length}.` : 'Пайплайн не объявляет параметров.');
-      if (data.auto && data.auto.length) parts.push(`LoadLens заполнит сам: ${data.auto.join(', ')}.`);
+      if (data.ref) parts.push(LL.t('launch.ci.branch', { ref: data.ref }));
+      parts.push(data.params && data.params.length ? LL.t('launch.ci.params_count', { n: data.params.length }) : LL.t('launch.ci.no_params'));
+      if (data.auto && data.auto.length) parts.push(LL.t('launch.ci.auto', { names: data.auto.join(', ') }));
       (data.notes || []).forEach((n) => parts.push(n));
       note.textContent = parts.join(' ');
     } catch (e) {
       if (card.ciState.key !== key) return;
       card.ciState.defs = null;
       renderCiParams(card);
-      note.textContent = `Параметры пайплайна не прочитаны: ${e.message}`;
+      note.textContent = LL.t('launch.ci.load_error', { error: e.message });
     }
   }
 
@@ -318,12 +327,13 @@
     card.querySelector('.tool-field').style.display = ci ? 'none' : '';
     card.querySelector('.f-ci-extra-box').style.display = ci && g.ci.extra_vars ? '' : 'none';
     if (ci && g.ci.kind === 'jenkins') card.querySelector('.f-ci-ref-box').style.display = 'none';
-    if (ci) card.querySelector('.f-ci-ref').placeholder = 'по умолчанию';
+    if (ci) card.querySelector('.f-ci-ref').placeholder = LL.t('launch.ci.ref_default_plain');
     if (ci) {
-      card.querySelector('.tool-help').textContent = `Запускается ${CI_KIND_TITLES[g.ci.kind] || 'пайплайн'} как есть: инструмент, скрипт и их настройки задаёт пайплайн, здесь — ветка и его параметры.`
-        + (g.ci.tags_metrics ? '' : ' Метрики пайплайна не помечены тегом прогона: отчёт читает все метрики окна.');
+      const help = [LL.t('launch.ci.help', { kind: ciKindTitle(g.ci.kind) || LL.t('launch.ci_kind.default') })];
+      if (!g.ci.tags_metrics) help.push(LL.t('launch.ci.untagged'));
+      card.querySelector('.tool-help').textContent = help.join(' ');
       const where = card.querySelector('.f-where');
-      const unchecked = g.verified === false ? ' · подключение не проверено в настройках: запуск может не пройти' : '';
+      const unchecked = g.verified === false ? ` · ${LL.t('launch.generator.unverified')}` : '';
       where.textContent = `${g.type_title}${g.host ? ` · ${g.host}` : ''}${unchecked}`;
       where.classList.toggle('warn-text', !!unchecked);
       loadRefs(card);
@@ -338,32 +348,33 @@
     card.querySelectorAll('.ssh-only').forEach((node) => { node.style.display = manual ? 'none' : ''; });
     const help = card.querySelector('.tool-help');
     help.textContent = manual
-      ? 'Ручной генератор: LoadLens ничего не запускает. Запустите инструмент сами и остановите прогон кнопкой, когда тест закончится.'
+      ? LL.t('launch.tool.manual_help')
       : (tool ? tool.help : '');
     const scriptLabel = card.querySelector('.f-script-label');
-    scriptLabel.textContent = tool && tool.script_kind === 'class' ? 'Класс симуляции' : 'Скрипт';
+    scriptLabel.textContent = LL.t(tool && tool.script_kind === 'class' ? 'launch.script.class_label' : 'launch.script.label');
     const lists = !!(g && g.lists_scripts);
     card.querySelector('.f-refresh').style.display = lists ? '' : 'none';
     card.querySelector('.f-script').placeholder = tool && tool.script_kind === 'class'
       ? 'computerdatabase.BasicSimulation'
-      : (g && g.relative_scripts ? 'путь в репозитории задачи CI' : 'путь от каталога скриптов генератора или абсолютный');
+      : LL.t(g && g.relative_scripts ? 'launch.script.placeholder_ci' : 'launch.script.placeholder_path');
     const where = card.querySelector('.f-where');
-    const unchecked = g && g.verified === false ? ' · подключение не проверено в настройках: запуск может не пройти' : '';
-    where.textContent = g && !manual ? `${g.type_title}${g.host ? ` · ${g.host}` : ''}${tool && tool.image && (g.type === 'docker' || g.type === 'kubernetes') ? ` · образ по умолчанию ${tool.image}` : ''}${unchecked}` : '';
+    const unchecked = g && g.verified === false ? ` · ${LL.t('launch.generator.unverified')}` : '';
+    const image = tool && tool.image && g && (g.type === 'docker' || g.type === 'kubernetes') ? ` · ${LL.t('launch.generator.default_image', { image: tool.image })}` : '';
+    where.textContent = g && !manual ? `${g.type_title}${g.host ? ` · ${g.host}` : ''}${image}${unchecked}` : '';
     where.classList.toggle('warn-text', !!unchecked);
     if (!manual && lists && !state.scripts[scriptsKey(card)]) loadScripts(card, true);
     else {
       fillDatalist(card);
       if (!lists && !manual) card.querySelector('.f-scripts-note').textContent = g && g.relative_scripts
-        ? 'Скрипт берётся из репозитория задачи CI.'
-        : 'Список скриптов генератора недоступен: укажите путь.';
+        ? LL.t('launch.scripts.from_ci')
+        : LL.t('launch.scripts.unavailable');
     }
   }
 
-  // Summary line of a collapsed instance: «Инстанс 1 · rest · Gen 1 · k6» (empty parts skipped).
+  // Summary line of a collapsed instance: «Instance 1 · rest · Gen 1 · k6» (empty parts skipped).
   function instanceSummary(index, parts) {
     const p = parts || {};
-    return [`Инстанс ${index + 1}`, p.name, p.generator, p.tool].map((x) => String(x || '').trim()).filter(Boolean).join(' · ');
+    return [LL.t('launch.instance.title', { n: index + 1 }), p.name, p.generator, p.tool].map((x) => String(x || '').trim()).filter(Boolean).join(' · ');
   }
 
   function summaryParts(card) {
@@ -373,12 +384,12 @@
     const tool = state.tools[toolId];
     if (g && g.ci) {
       const ref = card.querySelector('.f-ci-ref').value.trim();
-      return { name: card.querySelector('.f-name').value, generator: g.title, tool: ref ? `ветка ${ref}` : (CI_KIND_TITLES[g.ci.kind] || '') };
+      return { name: card.querySelector('.f-name').value, generator: g.title, tool: ref ? LL.t('launch.instance.branch', { ref }) : ciKindTitle(g.ci.kind) };
     }
     return {
       name: card.querySelector('.f-name').value,
       generator: g ? g.title : generatorId,
-      tool: tool ? tool.title : (g && g.type === 'manual' ? 'вручную' : toolId)
+      tool: tool ? tool.title : (g && g.type === 'manual' ? LL.t('launch.tool.manual') : toolId)
     };
   }
 
@@ -411,7 +422,7 @@
     });
     const max = state.limits.max_instances || 20;
     $('addInstance').disabled = cards.length >= max;
-    $('instancesNote').textContent = cards.length >= max ? `Не больше ${max} инстансов` : '';
+    $('instancesNote').textContent = cards.length >= max ? LL.t('launch.instances.max', { max }) : '';
   }
 
   function addInstance(values) {
@@ -423,47 +434,47 @@
       <details class="instance-details" open>
       <summary class="instance-head">${CHEVRON}<span class="instance-title"></span><span class="instance-meta"></span></summary>
       <div class="instance-grid">
-        <div><label for="${id}-name">Имя</label><input type="text" id="${id}-name" class="f-name" maxlength="60" placeholder="rest, kafka…" /></div>
-        <div><label for="${id}-gen">Генератор</label><select id="${id}-gen" class="f-generator">${generatorOptions(v.generator)}</select></div>
-        <div class="tool-field"><label for="${id}-tool">Инструмент</label><select id="${id}-tool" class="f-tool"></select></div>
-        <div class="ssh-only"><label for="${id}-delay">Задержка старта, с</label><input type="number" id="${id}-delay" class="f-delay" min="0" step="1" value="0" /></div>
+        <div><label for="${id}-name">${LL.tHtml('launch.instance.name')}</label><input type="text" id="${id}-name" class="f-name" maxlength="60" placeholder="rest, kafka…" /></div>
+        <div><label for="${id}-gen">${LL.tHtml('launch.instance.generator')}</label><select id="${id}-gen" class="f-generator">${generatorOptions(v.generator)}</select></div>
+        <div class="tool-field"><label for="${id}-tool">${LL.tHtml('launch.instance.tool')}</label><select id="${id}-tool" class="f-tool"></select></div>
+        <div class="ssh-only"><label for="${id}-delay">${LL.tHtml('launch.instance.delay')}</label><input type="number" id="${id}-delay" class="f-delay" min="0" step="1" value="0" /></div>
         <div class="wide field-hint f-where"></div>
         <div class="wide tool-help"></div>
         <div class="wide ci-only f-ci-ref-box">
-          <label for="${id}-ref">Ветка</label>
+          <label for="${id}-ref">${LL.tHtml('launch.instance.ref')}</label>
           <div class="script-row"><input type="text" id="${id}-ref" class="f-ci-ref mono" list="${id}-refs" autocomplete="off" spellcheck="false" />
-          <button type="button" class="btn btn-sm f-ci-reload">Обновить параметры</button></div>
+          <button type="button" class="btn btn-sm f-ci-reload">${LL.tHtml('launch.instance.reload_params')}</button></div>
           <datalist id="${id}-refs" class="f-ci-refs"></datalist>
         </div>
         <div class="wide ci-only field-hint f-ci-note"></div>
         <div class="wide ci-only ci-params f-ci-params"></div>
         <div class="wide ci-only f-ci-extra-box">
-          <label for="${id}-extra">Дополнительные переменные пайплайна</label>
-          <textarea id="${id}-extra" class="f-ci-extra mono" rows="2" spellcheck="false" placeholder="ИМЯ=значение, по одной в строке"></textarea>
-          <div class="field-hint">Уходят в GitLab переменными пайплайна и видны в нём участникам проекта: не передавайте так секреты.</div>
+          <label for="${id}-extra">${LL.tHtml('launch.instance.extra')}</label>
+          <textarea id="${id}-extra" class="f-ci-extra mono" rows="2" spellcheck="false" placeholder="${LL.tHtml('launch.instance.vars_placeholder')}"></textarea>
+          <div class="field-hint">${LL.tHtml('launch.instance.extra_hint')}</div>
         </div>
         <div class="wide ssh-only tool-only">
-          <label for="${id}-script" class="f-script-label">Скрипт</label>
+          <label for="${id}-script" class="f-script-label">${LL.tHtml('launch.script.label')}</label>
           <div class="script-row"><input type="text" id="${id}-script" class="f-script mono" list="${id}-scripts" autocomplete="off" spellcheck="false" />
-          <button type="button" class="btn btn-sm f-refresh">Обновить список</button></div>
+          <button type="button" class="btn btn-sm f-refresh">${LL.tHtml('launch.instance.refresh_scripts')}</button></div>
           <datalist id="${id}-scripts"></datalist>
           <div class="field-hint f-scripts-note"></div>
         </div>
         <div class="wide ssh-only tool-only">
-          <div class="label-row"><label for="${id}-params">Параметры запуска</label>
-          <button type="button" class="btn btn-sm btn-ghost f-hints" title="Флаги и переменные вывода метрик под источник домена «Нагрузка» сервиса">Вывод метрик</button></div>
+          <div class="label-row"><label for="${id}-params">${LL.tHtml('launch.instance.params')}</label>
+          <button type="button" class="btn btn-sm btn-ghost f-hints" title="${LL.tHtml('launch.instance.hints_title')}">${LL.tHtml('launch.instance.hints')}</button></div>
           <textarea id="${id}-params" class="f-params mono" rows="2" spellcheck="false" placeholder="--vus 50 --duration 10m -e BASE_URL=https://stage.example"></textarea>
-          <div class="field-hint">Как в командной строке: кавычки группируют, переменные и подстановки оболочки не раскрываются.</div>
+          <div class="field-hint">${LL.tHtml('launch.instance.params_hint')}</div>
           <div class="field-hint f-hints-note"></div>
         </div>
         <div class="wide ssh-only tool-only">
-          <label for="${id}-env">Переменные окружения</label>
-          <textarea id="${id}-env" class="f-env mono" rows="2" spellcheck="false" placeholder="ИМЯ=значение, по одной в строке"></textarea>
-          <div class="field-hint">Для токенов и паролей: значения не показываются в интерфейсе и журнале и стираются после завершения инстанса.</div>
+          <label for="${id}-env">${LL.tHtml('launch.instance.env')}</label>
+          <textarea id="${id}-env" class="f-env mono" rows="2" spellcheck="false" placeholder="${LL.tHtml('launch.instance.vars_placeholder')}"></textarea>
+          <div class="field-hint">${LL.tHtml('launch.instance.env_hint')}</div>
         </div>
       </div>
       </details>
-      <button type="button" class="btn btn-sm btn-ghost f-remove instance-remove">Убрать</button>
+      <button type="button" class="btn btn-sm btn-ghost f-remove instance-remove">${LL.tHtml('launch.instance.remove')}</button>
       <div class="instance-preview" hidden></div>`;
     card.querySelector('.f-name').value = v.name || '';
     card.querySelector('.f-script').value = v.script || '';
@@ -491,8 +502,8 @@
     const note = card.querySelector('.f-hints-note');
     const service = $('service').value;
     const tool = card.querySelector('.f-tool').value;
-    if (!service || !tool) { note.textContent = 'Выберите сервис и инструмент.'; return; }
-    note.textContent = 'Смотрим источник домена «Нагрузка»…';
+    if (!service || !tool) { note.textContent = LL.t('launch.hints.need_service_tool'); return; }
+    note.textContent = LL.t('launch.hints.loading');
     try {
       const hint = await fetchJson(`/load_tests/hints?service=${encodeURIComponent(service)}&tool=${encodeURIComponent(tool)}&project_area=${encodeURIComponent(LL.activeProjectArea || '')}`);
       const params = card.querySelector('.f-params');
@@ -501,9 +512,9 @@
       const present = new Set(envBox.value.split('\n').map((line) => line.split('=')[0].trim()).filter(Boolean));
       const added = Object.keys(hint.env || {}).filter((name) => !present.has(name)).map((name) => `${name}=${hint.env[name]}`);
       if (added.length) envBox.value = `${envBox.value.trim()}\n${added.join('\n')}`.trim();
-      note.textContent = (hint.notes || []).join(' ') || (hint.params || added.length ? 'Добавлено.' : 'Добавлять нечего.');
+      note.textContent = (hint.notes || []).join(' ') || LL.t(hint.params || added.length ? 'launch.hints.added' : 'launch.hints.nothing');
     } catch (e) {
-      note.textContent = `Подсказка недоступна: ${e.message}`;
+      note.textContent = LL.t('launch.hints.load_error', { error: e.message });
     }
   }
 
@@ -548,15 +559,15 @@
       applyForm(runToSpec(run));
       const banner = $('repeatBanner');
       const envNames = run.instances.flatMap((inst) => (inst.env_keys || []).concat(inst.ci ? inst.ci.secret || [] : []));
-      banner.querySelector('.banner-title').textContent = `Повтор прогона «${run.run_name}»`;
+      banner.querySelector('.banner-title').textContent = LL.t('launch.repeat.title', { name: run.run_name });
       banner.querySelector('.banner-text').textContent = envNames.length
-        ? `Значения переменных окружения и секретных параметров не сохраняются: введите заново ${Array.from(new Set(envNames)).join(', ')}.`
-        : 'Инстансы и параметры взяты из прошлого прогона; при необходимости измените их и запустите.';
+        ? LL.t('launch.repeat.env_again', { names: Array.from(new Set(envNames)).join(', ') })
+        : LL.t('launch.repeat.text');
       banner.style.display = '';
       await loadPresets();
       return true;
     } catch (e) {
-      setError(`Прогон для повтора не загрузился: ${e.message}`);
+      setError(LL.t('launch.repeat.load_error', { error: e.message }));
       return false;
     }
   }
@@ -566,7 +577,7 @@
     const service = $('service').value;
     if (!service) {
       state.presets = [];
-      select.innerHTML = '<option value="">Сначала выберите сервис</option>';
+      select.innerHTML = `<option value="">${LL.tHtml('launch.preset.need_service')}</option>`;
       return;
     }
     try {
@@ -576,22 +587,22 @@
       state.presets = [];
     }
     select.innerHTML = state.presets.length
-      ? '<option value="">Выберите пресет…</option>' + state.presets.map((p) => `<option value="${esc(p.preset_id)}">${esc(p.name)}${p.owner ? ` · ${esc(p.owner)}` : ''}</option>`).join('')
-      : '<option value="">Пресетов нет</option>';
+      ? `<option value="">${LL.tHtml('launch.preset.choose')}</option>` + state.presets.map((p) => `<option value="${esc(p.preset_id)}">${esc(p.name)}${p.owner ? ` · ${esc(p.owner)}` : ''}</option>`).join('')
+      : `<option value="">${LL.tHtml('launch.preset.none')}</option>`;
   }
 
   function applyPreset() {
     const preset = state.presets.find((p) => p.preset_id === $('presetSelect').value);
     if (!preset) return;
     applyForm({ ...preset.spec, service: preset.service });
-    ui.toast(`Пресет «${preset.name}» подставлен`, { tone: 'ok' });
+    ui.toast(LL.t('launch.preset.applied', { name: preset.name }), { tone: 'ok' });
   }
 
   async function savePreset() {
     const form = readForm();
-    if (!form.service) { setError('Выберите сервис'); return; }
+    if (!form.service) { setError(LL.t('launch.form.need_service')); return; }
     const current = state.presets.find((p) => p.preset_id === $('presetSelect').value);
-    const name = await ui.prompt({ title: 'Сохранить как пресет', label: 'Название', value: current ? current.name : '', confirmText: 'Сохранить' });
+    const name = await ui.prompt({ title: LL.t('launch.preset.save'), label: LL.t('launch.preset.name_label'), value: current ? current.name : '', confirmText: LL.t('launch.preset.save_confirm') });
     if (!name) return;
     try {
       const saved = await fetchJson('/load_tests/presets', {
@@ -600,22 +611,22 @@
       });
       await loadPresets();
       $('presetSelect').value = saved.preset_id;
-      ui.toast(`Пресет «${saved.name}» сохранён; значения переменных окружения в нём не хранятся`, { tone: 'ok' });
+      ui.toast(LL.t('launch.preset.saved', { name: saved.name }), { tone: 'ok' });
     } catch (e) {
-      ui.toast(`Пресет не сохранён: ${e.message}`, { tone: 'error' });
+      ui.toast(LL.t('launch.preset.save_error', { error: e.message }), { tone: 'error' });
     }
   }
 
   async function deletePreset() {
     const preset = state.presets.find((p) => p.preset_id === $('presetSelect').value);
     if (!preset) return;
-    const ok = await ui.confirm({ title: 'Удалить пресет', message: `Пресет «${preset.name}» исчезнет для всех инженеров сервиса.`, confirmText: 'Удалить', danger: true });
+    const ok = await ui.confirm({ title: LL.t('launch.preset.delete_title'), message: LL.t('launch.preset.delete_message', { name: preset.name }), confirmText: LL.t('launch.preset.delete'), danger: true });
     if (!ok) return;
     try {
       await fetchJson(`/load_tests/presets/${encodeURIComponent(preset.preset_id)}`, { method: 'DELETE' });
       await loadPresets();
     } catch (e) {
-      ui.toast(`Пресет не удалён: ${e.message}`, { tone: 'error' });
+      ui.toast(LL.t('launch.preset.delete_error', { error: e.message }), { tone: 'error' });
     }
   }
 
@@ -685,12 +696,12 @@
     const nodes = [];
     if (withTitle) nodes.push(el('div', '', `${cmd.name} · ${cmd.generator_title}`));
     if (cmd.manual) {
-      nodes.push(el('p', 'dim', 'Ручной генератор: LoadLens отметит только время начала и окончания.'));
+      nodes.push(el('p', 'dim', LL.t('launch.preview.manual')));
       return nodes;
     }
     nodes.push(el('pre', '', cmd.command));
-    if (cmd.image) nodes.push(el('div', 'field-hint', `Образ: ${cmd.image}`));
-    if (cmd.cwd) nodes.push(el('div', 'field-hint', `Рабочий каталог: ${cmd.cwd}`));
+    if (cmd.image) nodes.push(el('div', 'field-hint', LL.t('launch.preview.image', { image: cmd.image })));
+    if (cmd.cwd) nodes.push(el('div', 'field-hint', LL.t('launch.preview.cwd', { dir: cmd.cwd })));
     return nodes;
   }
 
@@ -699,12 +710,12 @@
     $('previewCard').style.display = 'none';
   }
 
-  // After an edit the shown commands no longer match the form until «Проверить команды» runs again.
+  // After an edit the shown commands no longer match the form until «Check commands» runs again.
   function markPreviewStale() {
     document.querySelectorAll('.instance-preview:not([hidden]):not(.is-stale)').forEach((node) => {
       node.classList.add('is-stale');
       const label = node.querySelector('.preview-label');
-      if (label) label.textContent = 'Команда до изменений: проверьте заново';
+      if (label) label.textContent = LL.t('launch.preview.stale');
     });
   }
 
@@ -718,12 +729,12 @@
       const cmd = byIndex[i];
       host.hidden = !cmd;
       if (!cmd) return;
-      host.appendChild(el('div', 'preview-label', 'Команда'));
+      host.appendChild(el('div', 'preview-label', LL.t('launch.preview.command')));
       commandNodes(cmd, false).forEach((node) => host.appendChild(node));
     });
     const body = $('previewBody');
     body.replaceChildren();
-    body.appendChild(el('p', 'dim', `Прогон «${data.run_name}», тег ${data.run_tag}. Команды инстансов показаны в их карточках.`));
+    body.appendChild(el('p', 'dim', LL.t('launch.preview.summary', { name: data.run_name, tag: data.run_tag })));
     leftovers.forEach((cmd) => commandNodes(cmd, true).forEach((node) => body.appendChild(node)));
     if (data.warnings && data.warnings.length) {
       const list = el('ul', 'warn-list');
@@ -733,10 +744,16 @@
     $('previewCard').style.display = '';
   }
 
-  // «Инстанс 2: …» from the server: open that card and bring it into view.
-  function revealInstanceError(message) {
-    const match = /^Инстанс (\d+):/.exec(String(message || ''));
-    const card = match ? document.querySelectorAll('.instance-card')[Number(match[1]) - 1] : null;
+  // Number (from 1) of the instance an error answer of the form is about: its "instance" field; null otherwise.
+  function errorInstance(error) {
+    const n = error && error.data ? Number(error.data.instance) : NaN;
+    return Number.isInteger(n) && n > 0 ? n : null;
+  }
+
+  // An error about one instance: open that card and bring it into view.
+  function revealInstanceError(error) {
+    const n = errorInstance(error);
+    const card = n ? document.querySelectorAll('.instance-card')[n - 1] : null;
     if (!card) return;
     card.querySelector('.instance-details').open = true;
     card.scrollIntoView({ block: 'nearest' });
@@ -752,7 +769,7 @@
     } catch (e) {
       setError(e.message);
       clearPreview();
-      revealInstanceError(e.message);
+      revealInstanceError(e);
     } finally {
       btn.disabled = false;
     }
@@ -762,7 +779,7 @@
     event.preventDefault();
     setError('');
     const payload = readForm();
-    if (!payload.service) { setError('Выберите сервис'); return; }
+    if (!payload.service) { setError(LL.t('launch.form.need_service')); return; }
     const btn = $('launchBtn');
     btn.disabled = true;
     try {
@@ -774,7 +791,7 @@
     } catch (e) {
       setError(e.message);
       ui.toast(e.message, { tone: 'error' });
-      revealInstanceError(e.message);
+      revealInstanceError(e);
       btn.disabled = false;
     }
   }
@@ -786,16 +803,16 @@
     try {
       const services = await state.picker.ready;
       if (!services.length) {
-        hint.textContent = 'Нет настроенных сервисов: администратор добавляет их в настройках (раздел «Сервисы»).';
+        hint.textContent = LL.t('launch.service.empty');
         hint.classList.add('warn');
       }
     } catch (e) {
-      hint.textContent = `Сервисы не загрузились: ${e.message}`;
+      hint.textContent = LL.t('launch.service.load_error', { error: e.message });
       hint.classList.add('error');
     }
   }
 
-  LL.launch = { _internals: { instanceSummary, cardsToCollapse, commandsByIndex, blankSecrets, extraText, ciSpecFromView, ciFieldValue } };
+  LL.launch = { _internals: { instanceSummary, cardsToCollapse, commandsByIndex, blankSecrets, extraText, ciSpecFromView, ciFieldValue, errorInstance, ciKindTitle, generatorOptions, toolOptions, state } };
 
   async function init() {
     loadRuns();
@@ -803,7 +820,7 @@
     try {
       options = await fetchJson('/load_tests/options');
     } catch (e) {
-      setError(`Настройки запуска не загрузились: ${e.message}`);
+      setError(LL.t('launch.options_error', { error: e.message }));
       return;
     }
     (options.tools || []).forEach((t) => { state.tools[t.id] = t; state.toolOrder.push(t.id); });
@@ -812,7 +829,7 @@
     const max = state.limits.max_duration_min || 1440;
     $('maxDuration').max = String(max);
     $('maxDuration').placeholder = String(max);
-    $('maxDurationHint').textContent = `Не больше ${max} мин. Генератор остановит инструмент по истечении этого времени, даже если LoadLens недоступен.`;
+    $('maxDurationHint').textContent = LL.t('launch.form.max_duration_limit', { max });
     if (!state.generatorOrder.length) {
       $('noGenerators').style.display = '';
       $('launchBtn').disabled = true;

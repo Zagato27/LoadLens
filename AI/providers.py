@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import contextvars
 import os
 import json
@@ -13,6 +14,9 @@ from urllib.parse import urlparse
 StructuredT = TypeVar("StructuredT")
 
 from settings import CONFIG
+from AI.prompt_store import load_prompt, normalize_lang, resolve_lang
+from AI.prompt_store import text as prompt_text
+from AI.i18n import t
 
 
 logger = logging.getLogger(__name__)
@@ -41,7 +45,7 @@ def _env_key(*names: str) -> str:
     return ""
 _llm_provider_name = (CONFIG.get("llm", {}) or {}).get("provider", "perplexity").lower()
 _llm_provider_cfg = (CONFIG.get("llm", {}) or {}).get(_llm_provider_name, {})
-_llm_semaphore = threading.Semaphore(int(_llm_provider_cfg.get("max_concurrent", 4)))
+_llm_semaphore = threading.Semaphore(int((_llm_provider_cfg or {}).get("max_concurrent") or 4))
 _llm_rate_lock = threading.Lock()
 _llm_last_request_ts = 0.0
 _llm_next_allowed_ts = 0.0
@@ -50,6 +54,8 @@ _gigachat_clients: dict[str, object] = {}
 _usage_lock = threading.Lock()
 _usage_by_domain: Dict[str, Dict[str, Any]] = {}
 _usage_tls = threading.local()
+# (configured language_preference, report language) pairs already warned about in this run.
+_language_warnings: set[tuple[str, str]] = set()
 SUPPORTED_PROVIDERS = ("perplexity", "openai", "anthropic", "gigachat")
 DEFAULT_MAX_ATTEMPTS = 3
 CONTEXT_MARGIN_TOKENS = 4_000
@@ -64,8 +70,13 @@ class LLMOutputTruncated(RuntimeError):
         self.provider = provider
         self.max_tokens = int(max_tokens)
         self.output_tokens = output_tokens
-        detail = f", выдано {output_tokens}" if output_tokens is not None else ""
-        super().__init__(f"{provider}: ответ обрезан на {self.max_tokens} токенах{detail}")
+        # Rendered in the current locale: the pipeline runs inside with_locale(report_language).
+        if output_tokens is not None:
+            text = t("llm.error.output_truncated_with_count", provider=provider,
+                     max_tokens=self.max_tokens, output_tokens=output_tokens)
+        else:
+            text = t("llm.error.output_truncated", provider=provider, max_tokens=self.max_tokens)
+        super().__init__(text)
 
 
 class LLMEmptyAnswer(RuntimeError):
@@ -74,7 +85,7 @@ class LLMEmptyAnswer(RuntimeError):
     def __init__(self, provider: str, max_tokens: int = 0):
         self.provider = provider
         self.max_tokens = int(max_tokens or 0)
-        super().__init__(f"{provider}: модель вернула пустой текст")
+        super().__init__(t("llm.error.empty_answer", provider=provider))
 
 
 class LLMBudgetError(RuntimeError):
@@ -153,9 +164,10 @@ def _empty_usage_bucket() -> Dict[str, Any]:
 
 
 def reset_usage() -> None:
-    """Clears accumulated token usage (call at the start of a report run)."""
+    """Clears accumulated token usage and the per-run warnings (call at the start of a report run)."""
     with _usage_lock:
         _usage_by_domain.clear()
+        _language_warnings.clear()
 
 
 def current_usage_domain() -> str:
@@ -341,18 +353,25 @@ def _safe_float(value, default: float) -> float:
         return float(default)
 
 
+def _safe_int(value, default: int) -> int:
+    """Integer setting; ``None`` (an empty number field of the settings form) or junk gives ``default``."""
+    try:
+        return int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return int(default)
+
+
 def _effective_max_tokens(provider_cfg: dict, default: int, default_cap: int) -> int:
     override = _optional_int((provider_cfg or {}).get("_output_tokens_override"))
     if override is not None and override > 0:
         return override
     gen = (provider_cfg or {}).get("generation") or {}
-    requested = int(gen.get("max_tokens", default))
-    try:
-        cap = int((provider_cfg or {}).get("max_tokens_cap", os.getenv("LOADLENS_LLM_MAX_TOKENS_CAP", str(default_cap))))
-        if cap > 0 and requested > cap:
-            return cap
-    except Exception:
-        pass
+    requested = _safe_int(gen.get("max_tokens"), default)
+    if requested <= 0:
+        requested = default
+    cap = _first_int((provider_cfg or {}).get("max_tokens_cap"), os.getenv("LOADLENS_LLM_MAX_TOKENS_CAP"), default_cap)
+    if cap is not None and cap > 0 and requested > cap:
+        return cap
     return requested
 
 
@@ -455,8 +474,8 @@ def _perplexity_call(messages: list[dict], pcfg: dict) -> str:
         payload = {
             "model": model,
             "messages": messages,
-            "temperature": float(gen.get("temperature", 0.2)),
-            "top_p": float(gen.get("top_p", 0.9)),
+            "temperature": _safe_float(gen.get("temperature"), 0.2),
+            "top_p": _safe_float(gen.get("top_p"), 0.9),
             "max_tokens": req_max_tokens,
         }
         if disable_web:
@@ -480,7 +499,7 @@ def _perplexity_call(messages: list[dict], pcfg: dict) -> str:
         url,
         headers=headers,
         json=payload,
-        timeout=int(pcfg.get("request_timeout_sec", 120)),
+        timeout=_safe_int(pcfg.get("request_timeout_sec"), 120),
         verify=verify,
         proxies=proxies,
     )
@@ -511,11 +530,11 @@ def _openai_call(messages: list[dict], pcfg: dict) -> str:
     payload = {
         "model": pcfg.get("model", "gpt-4o-mini"),
         "messages": messages,
-        "temperature": float(gen.get("temperature", 0.2)),
-        "top_p": float(gen.get("top_p", 0.9)),
+        "temperature": _safe_float(gen.get("temperature"), 0.2),
+        "top_p": _safe_float(gen.get("top_p"), 0.9),
         "max_tokens": req_max_tokens,
     }
-    resp = requests.post(url, headers=headers, json=payload, timeout=int(pcfg.get("request_timeout_sec", 120)), verify=verify, proxies=proxies)
+    resp = requests.post(url, headers=headers, json=payload, timeout=_safe_int(pcfg.get("request_timeout_sec"), 120), verify=verify, proxies=proxies)
     resp.raise_for_status()
     data = resp.json()
     choice = (data.get("choices") or [{}])[0] if isinstance(data, dict) else {}
@@ -748,12 +767,12 @@ def _anthropic_call(messages: list[dict], pcfg: dict, system_text: str) -> str:
         "model": pcfg.get("model", "claude-3-5-sonnet-latest"),
         "system": system_text,
         "max_tokens": req_max_tokens,
-        "temperature": float(gen.get("temperature", 0.2)),
+        "temperature": _safe_float(gen.get("temperature"), 0.2),
         "messages": [
             {"role": "user", "content": user_combined}
         ],
     }
-    resp = requests.post(url, headers=headers, json=payload, timeout=int(pcfg.get("request_timeout_sec", 120)), verify=verify, proxies=proxies)
+    resp = requests.post(url, headers=headers, json=payload, timeout=_safe_int(pcfg.get("request_timeout_sec"), 120), verify=verify, proxies=proxies)
     _raise_for_llm_status(resp)
     data = resp.json()
     blocks = data.get("content") if isinstance(data, dict) else None
@@ -798,9 +817,9 @@ def _get_gigachat_client(pcfg: dict | None = None):
         "base_url": base_url,
         "verify_ssl_certs": verify_ssl_certs,
         **({"ca_bundle_file": tls} if isinstance(tls, str) else {}),
-        "timeout": int(pcfg.get("request_timeout_sec", 120)),
+        "timeout": _safe_int(pcfg.get("request_timeout_sec"), 120),
         "max_tokens": _effective_max_tokens(pcfg, default=1200, default_cap=32768),
-        "temperature": float(gen.get("temperature", 0.2)),
+        "temperature": _safe_float(gen.get("temperature"), 0.2),
     }
     if pcfg.get("api_key") or pcfg.get("credentials"):
         client_kwargs["credentials"] = pcfg.get("api_key") or pcfg.get("credentials")
@@ -862,6 +881,47 @@ def _max_attempts(pcfg: dict, llm_config: Optional[dict]) -> int:
         return DEFAULT_MAX_ATTEMPTS
 
 
+def default_system_prompt(lang: Optional[str] = None, force_json: bool = True) -> str:
+    """Default system prompt in ``lang``: ``_system.txt`` plus ``_system_json.txt`` when JSON is forced."""
+    base = load_prompt("_system.txt", lang).strip()
+    if not force_json:
+        return base
+    return f"{base} {load_prompt('_system_json.txt', lang).strip()}"
+
+
+def _preference_lang(value: Any) -> Optional[str]:
+    """``ru``/``en`` of a Perplexity ``language_preference`` (a code or a language name), else None."""
+    raw = str(value or "").strip().lower()
+    if raw.startswith("rus"):
+        return "ru"
+    if raw.startswith("eng"):
+        return "en"
+    return normalize_lang(raw)
+
+
+def _check_language_preference(pcfg: dict, lang: Optional[str]) -> None:
+    """Warns once per run when ``llm.perplexity.language_preference`` differs from the report language.
+
+    The value is sent only when configured (it is not derived from the run): the prompts set the language.
+    """
+    configured = pcfg.get("language_preference") if isinstance(pcfg, dict) else None
+    if not configured:
+        return
+    run_lang = resolve_lang(lang)
+    preferred = _preference_lang(configured)
+    if preferred == run_lang:
+        return
+    marker = (str(configured), run_lang)
+    with _usage_lock:
+        if marker in _language_warnings:
+            return
+        _language_warnings.add(marker)
+    logger.warning(
+        "llm.perplexity.language_preference=%r differs from the report language %r; the prompts ask for %r",
+        configured, run_lang, run_lang,
+    )
+
+
 def ask_llm_with_text_data(
     user_prompt: str,
     data_context: str,
@@ -869,7 +929,8 @@ def ask_llm_with_text_data(
     api_key: str = None,
     model: str = None,
     base_url: str = None,
-    system_prompt: Optional[str] = None
+    system_prompt: Optional[str] = None,
+    lang: Optional[str] = None,
 ) -> str:
     """Единая точка вызова LLM (Perplexity/OpenAI/Anthropic/GigaChat) с текстовым контекстом.
 
@@ -884,6 +945,8 @@ def ask_llm_with_text_data(
         model (str | None): Имя модели.
         base_url (str | None): Альтернативный эндпойнт.
         system_prompt (str | None): Кастомный системный промпт.
+        lang (str | None): Язык системного промпта по умолчанию (``AI/prompts/<lang>/_system*.txt``);
+            по умолчанию текущая локаль — язык отчёта внутри прогона.
 
     Возвращает:
         str: Сырой ответ модели.
@@ -905,32 +968,10 @@ def ask_llm_with_text_data(
     force_json = bool(gen.get("force_json_in_prompt", True))
     if isinstance(llm_config, dict) and "force_json" in llm_config:
         force_json = bool(llm_config.get("force_json"))
-    system_text = (
-        "Вы инженер по нагрузочному тестированию. Должны проанализировать результаты ступенчатого нагрузочного теста поиска максимальной производительности."
-        "Пользователь предоставит данные и вопрос. "
-        "Используйте контекст этих данных, чтобы ответить на его вопрос. "
-        "Отвечайте на русском языке. Все текстовые поля (verdict, findings.summary, findings.evidence_summary, findings.evidence_items.note, "
-        "recommended_actions, affected_components) формулируйте по-русски; допускаются английские только ключи JSON, "
-        "значения 'severity' и имена метрик/лейблов. " +
-        (
-            "Строго в JSON со схемой: {verdict, confidence, findings[], recommended_actions[]}. "
-            "Каждый элемент findings обязан содержать: id, summary, severity (critical|high|medium|low), component, "
-            "start_time, end_time, peak_time, evidence_summary, evidence_items[]. "
-            "Каждый элемент evidence_items должен быть объектом {metric, observed_value, threshold, note}. "
-            "id должен быть коротким ASCII-идентификатором вроде f1, f2. "
-            "Каждый элемент recommended_actions должен быть объектом: {summary, details, priority (critical|high|medium|low), affected_components[], for_finding_ids[]}. "
-            "Поле details должно содержать развернутое описание действия: что именно менять, зачем, и как понять, что проблема устранена. "
-            "Поле for_finding_ids обязано ссылаться на один или несколько id из findings. "
-            "Если component не указан — извлеките его из evidence_summary по лейблам application|service|job|pod|instance, иначе 'unknown'. "
-            "Если severity не указана — используйте 'low'. "
-            "Поле peak_performance допускается ТОЛЬКО для домена lt_framework "
-            "или итогового overall (если в контексте есть designated_peak_performance). "
-            "Для остальных доменов peak_performance не добавляйте."
-            if force_json else ""
-        )
-    )
     if isinstance(system_prompt, str) and system_prompt.strip():
         system_text = system_prompt.strip()
+    else:
+        system_text = default_system_prompt(lang, force_json)
 
     user_content = user_prompt if not data_context else f"{user_prompt}\n\n{data_context}"
 
@@ -945,6 +986,8 @@ def ask_llm_with_text_data(
         pcfg = {**pcfg, "api_base_url": base_url.strip()}
     if isinstance(api_key, str) and api_key.strip():
         pcfg = {**pcfg, "api_key": api_key.strip()}
+    if provider == "perplexity":
+        _check_language_preference(pcfg, lang)
 
     max_attempts = _max_attempts(pcfg, llm_config)
     attempts = 0
@@ -1008,6 +1051,7 @@ def ask_llm_structured(
     data_context: str,
     schema: Type[StructuredT],
     system_prompt: Optional[str] = None,
+    lang: Optional[str] = None,
 ) -> StructuredT:
     """Asks GigaChat for an answer that already matches ``schema``.
 
@@ -1017,19 +1061,13 @@ def ask_llm_structured(
     gcfg = dict((CONFIG.get("llm") or {}).get("gigachat") or {})
     from langchain_core.messages import HumanMessage, SystemMessage
 
-    system_text = (system_prompt or "").strip() or (
-        "Вы инженер по нагрузочному тестированию. Проанализируйте результаты нагрузочного теста по данным "
-        "пользователя и заполните структуру ответа. Все текстовые поля — на русском языке."
-    )
+    system_text = (system_prompt or "").strip() or prompt_text("system.structured", lang)
     user_content = user_prompt if not data_context else f"{user_prompt}\n\n{data_context}"
 
     def _invoke(cfg: dict) -> StructuredT:
         client = _get_gigachat_client(cfg)
         if not hasattr(client, "with_structured_output"):
-            raise RuntimeError(
-                "GigaChat client does not support with_structured_output: "
-                "обновите langchain-gigachat или отключите llm.gigachat.structured_output"
-            )
+            raise RuntimeError(t("llm.error.gigachat_no_structured_output"))
         output_tokens = _effective_max_tokens(cfg, default=1200, default_cap=32768)
         fitted_user, _reserved = _fit_to_window(
             system_text,

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Location and names of the files collectors download before attaching them to Confluence."""
 
 from __future__ import annotations

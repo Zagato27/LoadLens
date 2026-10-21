@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Run page: status of a load test run, live RPS / errors / p95 / users, instances, stop buttons and logs.
 (function () {
   const LL = window.LoadLens;
@@ -52,20 +53,23 @@
     const h = Math.floor(total / 3600);
     const m = Math.floor((total % 3600) / 60);
     const s = total % 60;
-    return h ? `${h} ч ${m} мин` : (m ? `${m} мин ${s} с` : `${s} с`);
+    if (h) return LL.t('run.duration.hm', { h, m });
+    return m ? LL.t('run.duration.ms', { m, s }) : LL.t('run.duration.s', { s });
   }
 
   // ---- run -------------------------------------------------------------------------------------
 
   function renderRun(run) {
     state.run = run;
-    document.title = `${run.run_name} · Прогон теста`;
+    document.title = LL.t('run.document_title', { name: run.run_name });
     $('runTitle').textContent = run.run_name;
     const crumb = document.getElementById('runCrumb');
     if (crumb) crumb.textContent = run.run_name;
-    const typeLabel = run.test_type ? LL.testTypeLabel(run.test_type) : 'тип не указан';
-    const window = run.started_at ? `${fmtTime(run.started_at)} — ${run.finished_at ? fmtTime(run.finished_at) : 'идёт'} (${duration(run.started_at, run.finished_at)})` : `создан ${fmtTime(run.created_at)}`;
-    $('runMeta').textContent = `${run.service} · ${typeLabel} · тег ${run.run_tag} · ${run.owner || 'без владельца'} · ${window}`;
+    const typeLabel = run.test_type ? LL.testTypeLabel(run.test_type) : LL.t('run.meta.no_type');
+    const window = run.started_at
+      ? `${fmtTime(run.started_at)} — ${run.finished_at ? fmtTime(run.finished_at) : LL.t('run.meta.ongoing')} (${duration(run.started_at, run.finished_at)})`
+      : LL.t('run.meta.created', { time: fmtTime(run.created_at) });
+    $('runMeta').textContent = `${run.service} · ${typeLabel} · ${LL.t('run.meta.tag', { tag: run.run_tag })} · ${run.owner || LL.t('run.meta.no_owner')} · ${window}`;
     $('runMessage').textContent = run.message || '';
     const status = $('runStatus');
     status.className = `pill pill-lg ${STATUS_TONE[run.status] || 'na'}`;
@@ -73,7 +77,7 @@
     const stopAll = $('stopAll');
     stopAll.style.display = run.loading ? '' : 'none';
     stopAll.disabled = run.stop_requested;
-    stopAll.textContent = run.stop_requested ? 'Останавливается…' : 'Остановить прогон';
+    stopAll.textContent = LL.t(run.stop_requested ? 'run.stopping' : 'run.stop_all');
     $('repeatLink').href = `/launch?from=${encodeURIComponent(run.run_id)}`;
     const report = $('reportLink');
     const reportUrl = run.report_url || (run.report && run.report.page_url);
@@ -81,7 +85,7 @@
     const job = $('jobLink');
     if (run.report_job_id && !reportUrl) {
       job.href = `/new?job=${encodeURIComponent(run.report_job_id)}`;
-      job.textContent = run.report ? `Отчёт: ${run.report.progress}%` : 'Задача отчёта';
+      job.textContent = run.report ? LL.t('run.report_progress', { progress: run.report.progress }) : LL.t('run.report_job');
       job.style.display = '';
     } else job.style.display = 'none';
     renderInstances(run);
@@ -98,22 +102,22 @@
     body.replaceChildren();
     run.instances.forEach((inst) => {
       const tr = el('tr');
-      const nameCell = el('td');
+      const nameCell = el('td', 'inst-name');
       nameCell.appendChild(el('strong', '', inst.name));
-      if (inst.script) nameCell.appendChild(el('div', 'dim', inst.script));
+      if (inst.script) nameCell.appendChild(el('div', 'dim mono', inst.script));
       if (inst.command) {
         const details = el('details');
         details.dataset.index = String(inst.index);
         details.open = openCommands.has(String(inst.index));
-        details.appendChild(el('summary', 'dim', inst.ci ? 'Параметры пайплайна' : 'Команда'));
+        details.appendChild(el('summary', 'dim', LL.t(inst.ci ? 'run.instances.ci_params' : 'run.instances.command')));
         details.appendChild(el('pre', '', inst.command));
-        if (inst.env_keys && inst.env_keys.length) details.appendChild(el('div', 'dim', `Переменные: ${inst.env_keys.join(', ')}`));
+        if (inst.env_keys && inst.env_keys.length) details.appendChild(el('div', 'dim', LL.t('run.instances.env', { names: inst.env_keys.join(', ') })));
         nameCell.appendChild(details);
       }
-      const where = el('td', '', `${inst.generator_title} · ${inst.tool_title || 'вручную'}`);
-      if (inst.ci && inst.ci.ref) where.appendChild(el('div', 'dim', `ветка ${inst.ci.ref}`));
+      const where = el('td', '', `${inst.generator_title} · ${inst.tool_title || LL.t('run.instances.manual')}`);
+      if (inst.ci && inst.ci.ref) where.appendChild(el('div', 'dim', LL.t('run.instances.branch', { ref: inst.ci.ref })));
       if (inst.external_url && /^https?:\/\//.test(inst.external_url)) {
-        const link = el('a', '', inst.ci && inst.ci.kind === 'jenkins' ? 'Открыть в Jenkins' : 'Открыть в GitLab');
+        const link = el('a', '', LL.t(inst.ci && inst.ci.kind === 'jenkins' ? 'run.instances.open_jenkins' : 'run.instances.open_gitlab'));
         link.href = inst.external_url;
         link.target = '_blank';
         link.rel = 'noopener noreferrer';
@@ -121,25 +125,25 @@
         line.appendChild(link);
         where.appendChild(line);
       }
-      if (inst.start_delay_sec) where.appendChild(el('div', 'dim', `старт через ${inst.start_delay_sec} с`));
+      if (inst.start_delay_sec) where.appendChild(el('div', 'dim', LL.t('run.instances.delay', { n: inst.start_delay_sec })));
       const statusCell = el('td');
       statusCell.appendChild(el('span', `pill ${INSTANCE_TONE[inst.status] || 'na'}`, inst.status_title));
-      if (inst.exit_code !== null && inst.exit_code !== undefined) statusCell.appendChild(el('div', 'dim', `код выхода ${inst.exit_code}`));
+      if (inst.exit_code !== null && inst.exit_code !== undefined) statusCell.appendChild(el('div', 'dim', LL.t('run.instances.exit_code', { code: inst.exit_code })));
       if (inst.status_text && inst.active) statusCell.appendChild(el('div', 'dim', inst.status_text));
       if (inst.message) statusCell.appendChild(el('div', 'msg', inst.message));
-      const timeCell = el('td', 'nowrap');
+      const timeCell = el('td', 'nowrap m');
       timeCell.appendChild(el('div', '', inst.started_at ? fmtTime(inst.started_at) : '—'));
       if (inst.started_at) timeCell.appendChild(el('div', 'dim', duration(inst.started_at, inst.finished_at)));
       const actions = el('td');
       const box = el('div', 'inst-actions');
       if (inst.has_logs) {
-        const logBtn = el('button', 'btn btn-sm', 'Журнал');
+        const logBtn = el('button', 'btn btn-sm', LL.t('run.instances.log'));
         logBtn.type = 'button';
         logBtn.addEventListener('click', () => openLog(inst.index));
         box.appendChild(logBtn);
       }
       if (inst.active && !inst.stop_requested && run.loading) {
-        const stopBtn = el('button', 'btn btn-sm btn-danger', inst.manual ? 'Завершить' : 'Остановить');
+        const stopBtn = el('button', 'btn btn-sm btn-danger', LL.t(inst.manual ? 'run.instances.finish' : 'run.instances.stop'));
         stopBtn.type = 'button';
         stopBtn.addEventListener('click', () => stop(inst.index, inst.name));
         box.appendChild(stopBtn);
@@ -159,7 +163,7 @@
       if (run.active) state.runTimer = setTimeout(loadRun, RUN_POLL_MS);
       if (!state.liveLoaded || (wasActive && !run.loading)) loadLive(true);
     } catch (e) {
-      $('runMessage').textContent = `Прогон не загрузился: ${e.message}`;
+      $('runMessage').textContent = LL.t('run.load_error', { error: e.message });
       if (!state.liveLoaded) {
         setLiveLoading(false);
         $('liveFresh').textContent = '';
@@ -171,11 +175,9 @@
   async function stop(index, name) {
     const whole = index === null || index === undefined;
     const ok = await ui.confirm({
-      title: whole ? 'Остановить прогон' : `Остановить инстанс «${name}»`,
-      message: whole
-        ? 'Всем инстансам уйдёт сигнал остановки; не завершившиеся за отведённое время будут убиты. Отчёт построится по уже собранным метрикам.'
-        : 'Инстансу уйдёт сигнал остановки. Остальные продолжат работу.',
-      confirmText: 'Остановить',
+      title: whole ? LL.t('run.stop_all') : LL.t('run.stop.instance_title', { name }),
+      message: LL.t(whole ? 'run.stop.all_message' : 'run.stop.instance_message'),
+      confirmText: LL.t('run.stop.confirm'),
       danger: true
     });
     if (!ok) return;
@@ -184,17 +186,29 @@
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(whole ? {} : { index })
       });
       renderRun(run);
-      ui.toast('Остановка запрошена', { tone: 'ok' });
+      ui.toast(LL.t('run.stop.requested'), { tone: 'ok' });
       loadRun();
     } catch (e) {
-      ui.toast(`Не удалось остановить: ${e.message}`, { tone: 'error' });
+      ui.toast(LL.t('run.stop.error', { error: e.message }), { tone: 'error' });
     }
   }
 
   // ---- live metrics ----------------------------------------------------------------------------
 
-  const EVENT_COLORS = { start: '#2f9e44', finish: '#868e96', stop: '#f08c00', limit: '#e03131' };
-  const INSTANCE_COLORS = ['#4dabf7', '#f783ac', '#ffd43b', '#63e6be', '#b197fc', '#ffa94d', '#74c0fc', '#e599f7'];
+  // Colors come from the theme tokens (read at draw time, so a theme switch applies on the next redraw):
+  // event and threshold lines in the status tones, data lines in the series palette (--series-1..8).
+  const EVENT_TONES = { start: 'ok', finish: 'na', stop: 'warn', limit: 'fail' };
+  const TONE_COLOR_KEYS = { ok: 'statusOk', warn: 'statusWarn', fail: 'statusFail', na: 'statusNa' };
+
+  function toneColor(colors, tone) {
+    return colors[TONE_COLOR_KEYS[tone] || 'statusNa'];
+  }
+
+  function seriesColors() {
+    const css = getComputedStyle(document.documentElement);
+    const fallback = ['#268beb', '#c35cb4', '#908e30', '#199eaa', '#894f9a', '#8c5e1a', '#9d86d0', '#2569a8'];
+    return fallback.map((color, i) => css.getPropertyValue(`--series-${i + 1}`).trim() || color);
+  }
 
   function freshLive(windowMin) {
     return { window: windowMin, step: null, mode: '', series: {}, labels: {}, instances: {}, events: [], sla: {}, start: null, end: null, lastMs: null, polls: 0, rpsQuery: null };
@@ -204,9 +218,10 @@
     return points && points.length ? points[points.length - 1][1] : null;
   }
 
+  // Number in the UI locale (LL.intl): «1 234,5» in ru, «1,234.5» in en.
   function fmtNumber(value, digits) {
     if (value === null || value === undefined) return '—';
-    return Number(value).toLocaleString('ru-RU', { maximumFractionDigits: digits });
+    return LL.fmt.number(Number(value), { maximumFractionDigits: digits });
   }
 
   function chartTime(value) {
@@ -222,21 +237,21 @@
     return kept.concat(incoming);
   }
 
-  // «данные на 12:04:31, задержка 9 с»; a minute without new points is a warning.
+  // «data as of 12:04:31, delay 9 s»; a minute without new points is a warning.
   function freshness(lastMs, nowMs, active) {
-    if (!lastMs) return { text: active ? 'данных пока нет' : '', stale: false };
-    if (!active) return { text: `тест завершён, данные до ${chartTime(lastMs)}`, stale: false };
+    if (!lastMs) return { text: active ? LL.t('run.fresh.no_data') : '', stale: false };
+    if (!active) return { text: LL.t('run.fresh.finished', { time: chartTime(lastMs) }), stale: false };
     const delay = Math.max(0, Math.round((nowMs - lastMs) / 1000));
-    return { text: `данные на ${chartTime(lastMs)}, задержка ${delay} с`, stale: delay > STALE_AFTER_SEC };
+    return { text: LL.t('run.fresh.running', { time: chartTime(lastMs), delay }), stale: delay > STALE_AFTER_SEC };
   }
 
   // Threshold lines of the service SLA for each chart.
   function slaLines(sla) {
     const s = sla || {};
     const lines = { rps: [], p95: [] };
-    if (s.target_rps) lines.rps.push({ axis: 'y', value: s.target_rps, label: `цель RPS ${fmtNumber(s.target_rps, 1)}`, color: '#2f9e44' });
-    if (s.max_error_rate_pct) lines.rps.push({ axis: 'y1', value: s.max_error_rate_pct, label: `порог ошибок ${fmtNumber(s.max_error_rate_pct, 2)}%`, color: '#e03131' });
-    if (s.max_p95_ms) lines.p95.push({ axis: 'y', value: s.max_p95_ms, label: `порог p95 ${fmtNumber(s.max_p95_ms, 0)} мс`, color: '#e03131' });
+    if (s.target_rps) lines.rps.push({ axis: 'y', value: s.target_rps, label: LL.t('run.sla.target_rps', { value: fmtNumber(s.target_rps, 1) }), tone: 'ok' });
+    if (s.max_error_rate_pct) lines.rps.push({ axis: 'y1', value: s.max_error_rate_pct, label: LL.t('run.sla.max_errors', { value: fmtNumber(s.max_error_rate_pct, 2) }), tone: 'fail' });
+    if (s.max_p95_ms) lines.p95.push({ axis: 'y', value: s.max_p95_ms, label: LL.t('run.sla.max_p95', { value: fmtNumber(s.max_p95_ms, 0) }), tone: 'fail' });
     return lines;
   }
 
@@ -255,13 +270,15 @@
       const area = chart.chartArea;
       const ctx = chart.ctx;
       if (!area) return;
+      const colors = ui.chartColors();
       ctx.save();
-      ctx.font = '11px sans-serif';
+      // Canvas labels are readings: the mono stack of app.css (canvases cannot read CSS variables).
+      ctx.font = `11px ${ui.fonts.mono}`;
       ctx.lineWidth = 1;
       (opts.events || []).forEach((ev) => {
         const x = chart.scales.x.getPixelForValue(ev.ts);
         if (!(x >= area.left && x <= area.right)) return;
-        ctx.strokeStyle = EVENT_COLORS[ev.kind] || '#868e96';
+        ctx.strokeStyle = toneColor(colors, EVENT_TONES[ev.kind]);
         ctx.setLineDash(ev.kind === 'limit' ? [6, 4] : [3, 3]);
         ctx.beginPath();
         ctx.moveTo(x, area.top);
@@ -281,18 +298,19 @@
         const scale = chart.scales[line.axis || 'y'];
         if (!scale) return;
         const y = scale.getPixelForValue(line.value);
+        const lineColor = line.color || toneColor(colors, line.tone);
         if (y < area.top) {
           // Far above the data: a note on top, in the middle (event labels sit at the edges).
-          ctx.fillStyle = line.color;
+          ctx.fillStyle = lineColor;
           ctx.textAlign = 'center';
-          ctx.fillText(`${line.label} (выше графика)`, (area.left + area.right) / 2, area.top + 12 + above * 14);
+          ctx.fillText(LL.t('run.chart.above', { label: line.label }), (area.left + area.right) / 2, area.top + 12 + above * 14);
           ctx.textAlign = 'left';
           above += 1;
           return;
         }
         if (y > area.bottom) return;
-        ctx.strokeStyle = line.color;
-        ctx.fillStyle = line.color;
+        ctx.strokeStyle = lineColor;
+        ctx.fillStyle = lineColor;
         ctx.setLineDash([8, 4]);
         ctx.beginPath();
         ctx.moveTo(area.left, y);
@@ -313,7 +331,7 @@
       animation: false,
       interaction: { mode: 'nearest', intersect: false, axis: 'x' },
       plugins: {
-        legend: { labels: { color: colors.text, boxWidth: 12 } },
+        legend: { labels: { color: colors.text, boxWidth: 14, boxHeight: 2 } },
         tooltip: { callbacks: { title: (items) => (items.length ? chartTime(items[0].parsed.x) : '') } },
         llMarkers: markers
       },
@@ -352,43 +370,46 @@
     $('liveFresh').classList.toggle('stale', fresh.stale);
     const notes = [];
     if (message) notes.push(message);
-    if (live.step) notes.push(`шаг ${live.step} с${live.mode === 'filtered' ? ', только метрики с тегом прогона' : ''}`);
+    if (live.step) notes.push(LL.t(live.mode === 'filtered' ? 'run.live.step_filtered' : 'run.live.step', { step: live.step }));
     $('liveNote').textContent = notes.join(' · ');
     const query = $('liveQuery');
     const empty = !(live.series['lt.rps_total'] || []).length;
     query.hidden = !(empty && live.rpsQuery && live.rpsQuery.query);
     if (!query.hidden) {
-      query.querySelector('summary').textContent = `Запрос RPS: ${live.rpsQuery.label}`;
+      query.querySelector('summary').textContent = LL.t('run.live.rps_query_named', { label: live.rpsQuery.label });
       $('liveQueryText').textContent = live.rpsQuery.query;
     }
     if (!window.Chart) return;
     const colors = ui.chartColors();
     const toXY = (points) => (points || []).map((p) => ({ x: p[0], y: p[1] }));
+    // Mono HH:MM:SS labels are wide: fewer ticks on phones so they do not run into each other.
+    const ticksLimit = (document.documentElement.clientWidth || 1024) < 720 ? 4 : 8;
     const x = {
       type: 'linear', min: live.start ? live.start * 1000 : undefined, max: live.end ? live.end * 1000 : undefined,
-      ticks: { color: colors.text, callback: (value) => chartTime(value), maxTicksLimit: 8 }, grid: { color: colors.grid }
+      ticks: { color: colors.text, callback: (value) => chartTime(value), maxTicksLimit: ticksLimit, maxRotation: 0 }, grid: { color: colors.grid }
     };
     const axis = (title, extra) => ({ beginAtZero: true, title: { display: !!title, text: title, color: colors.text }, ticks: { color: colors.text }, grid: { color: colors.grid }, ...(extra || {}) });
     const lines = slaLines(live.sla);
     const dataMax = (...sets) => Math.max(0, ...sets.flat().map((p) => (p && Number.isFinite(p[1]) ? p[1] : 0)));
     const withLine = (base, list, axisKey, maxValue) => axisRange(base, list.filter((l) => (l.axis || 'y') === axisKey), maxValue);
     const instances = Object.keys(live.instances).map((tag) => live.instances[tag]);
-    const rpsSets = [{ label: instances.length > 1 ? 'RPS, всего' : 'RPS', data: toXY(live.series['lt.rps_total']), borderColor: colors.accent, backgroundColor: colors.accentSoft, yAxisID: 'y', pointRadius: 0, borderWidth: 2, spanGaps: true }];
+    const series = seriesColors();
+    const rpsSets = [{ label: instances.length > 1 ? LL.t('run.chart.rps_total') : 'RPS', data: toXY(live.series['lt.rps_total']), borderColor: series[0], backgroundColor: series[0], yAxisID: 'y', pointRadius: 0, borderWidth: 2, spanGaps: true }];
     if (instances.length > 1) {
-      instances.forEach((inst, i) => rpsSets.push({ label: `RPS ${inst.name}`, data: toXY(inst.points), borderColor: INSTANCE_COLORS[i % INSTANCE_COLORS.length], backgroundColor: INSTANCE_COLORS[i % INSTANCE_COLORS.length], yAxisID: 'y', pointRadius: 0, borderWidth: 1.2, spanGaps: true }));
+      instances.forEach((inst, i) => rpsSets.push({ label: `RPS ${inst.name}`, data: toXY(inst.points), borderColor: series[(i + 1) % series.length], backgroundColor: series[(i + 1) % series.length], yAxisID: 'y', pointRadius: 0, borderWidth: 1.2, spanGaps: true }));
     }
-    rpsSets.push({ label: 'Ошибки, %', data: toXY(live.series['lt.error_rate_pct']), borderColor: '#e5484d', backgroundColor: '#e5484d', yAxisID: 'y1', pointRadius: 0, borderWidth: 1.5, spanGaps: true });
+    rpsSets.push({ label: LL.t('run.chart.errors'), data: toXY(live.series['lt.error_rate_pct']), borderColor: colors.statusFail, backgroundColor: colors.statusFail, yAxisID: 'y1', pointRadius: 0, borderWidth: 1.5, spanGaps: true });
     const rpsMax = dataMax(live.series['lt.rps_total'] || [], ...instances.map((inst) => inst.points || []));
     drawChart('rps', 'chartRps', rpsSets, {
       x,
       y: withLine(axis('RPS', { position: 'left' }), lines.rps, 'y', rpsMax),
-      y1: withLine(axis('Ошибки, %', { position: 'right', suggestedMax: 5, grid: { drawOnChartArea: false } }), lines.rps, 'y1', Math.max(5, dataMax(live.series['lt.error_rate_pct'] || [])))
+      y1: withLine(axis(LL.t('run.chart.errors'), { position: 'right', suggestedMax: 5, grid: { drawOnChartArea: false } }), lines.rps, 'y1', Math.max(5, dataMax(live.series['lt.error_rate_pct'] || [])))
     }, { events: live.events, lines: lines.rps, labels: true });
     drawChart('p95', 'chartP95', [
-      { label: 'p95, мс', data: toXY(live.series['lt.p95_total']), borderColor: '#f59f00', backgroundColor: '#f59f00', pointRadius: 0, borderWidth: 1.5, spanGaps: true }
+      { label: LL.t('run.chart.p95'), data: toXY(live.series['lt.p95_total']), borderColor: series[0], backgroundColor: series[0], pointRadius: 0, borderWidth: 1.5, spanGaps: true }
     ], { x, y: withLine(axis(''), lines.p95, 'y', dataMax(live.series['lt.p95_total'] || [])) }, { events: live.events, lines: lines.p95, labels: false });
     drawChart('vus', 'chartVus', [
-      { label: 'Пользователи', data: toXY(live.series['lt.vus']), borderColor: '#20c997', backgroundColor: '#20c997', pointRadius: 0, borderWidth: 1.5, stepped: true, spanGaps: true }
+      { label: LL.t('run.chart.users'), data: toXY(live.series['lt.vus']), borderColor: series[0], backgroundColor: series[0], pointRadius: 0, borderWidth: 1.5, stepped: true, spanGaps: true }
     ], { x, y: axis('') }, { events: live.events, lines: [], labels: false });
   }
 
@@ -428,7 +449,7 @@
     grid.classList.toggle('is-loading', on);
     grid.setAttribute('aria-busy', String(on));
     if (on) {
-      $('liveFresh').textContent = 'загружаем метрики…';
+      $('liveFresh').textContent = LL.t('run.live.loading');
       $('liveFresh').classList.remove('stale');
     }
   }
@@ -459,13 +480,13 @@
       }
       applyLive(data, incremental);
       state.liveLoaded = true;
-      renderLive(data.ok ? data.message : (data.message || 'Метрики не загрузились'));
+      renderLive(data.ok ? data.message : (data.message || LL.t('run.live.failed')));
       setLiveLoading(false);
     } catch (e) {
       if (live !== state.live) return;
       setLiveLoading(false);
       $('liveFresh').textContent = '';
-      $('liveNote').textContent = `Метрики не загрузились: ${e.message}`;
+      $('liveNote').textContent = LL.t('run.live.load_error', { error: e.message });
     }
     if (state.run && state.run.loading) state.liveTimer = setTimeout(() => loadLive(false), LIVE_POLL_MS);
   }
@@ -489,10 +510,10 @@
     try {
       const data = await fetchJson(`/load_tests/runs/${encodeURIComponent(runId)}/logs?index=${state.logIndex}`);
       const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
-      pre.textContent = data.text || '(журнал пуст)';
+      pre.textContent = data.text || LL.t('run.log.empty');
       if (atBottom) pre.scrollTop = pre.scrollHeight;
     } catch (e) {
-      pre.textContent = `Журнал недоступен: ${e.message}`;
+      pre.textContent = LL.t('run.log.load_error', { error: e.message });
     }
     const inst = state.run && state.run.instances.find((i) => i.index === state.logIndex);
     if ($('logFollow').checked && inst && inst.active) state.logTimer = setTimeout(loadLog, LOG_POLL_MS);
@@ -501,9 +522,9 @@
   function openLog(index) {
     const inst = state.run.instances.find((i) => i.index === index);
     state.logIndex = index;
-    $('logTitle').textContent = `Журнал: ${inst ? inst.name : index}`;
+    $('logTitle').textContent = LL.t('run.log.title_named', { name: inst ? inst.name : index });
     $('logCard').style.display = '';
-    $('logText').textContent = 'Загрузка…';
+    $('logText').textContent = LL.t('run.log.loading');
     loadLog();
     $('logCard').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
@@ -518,7 +539,7 @@
     loadRun();
   }
 
-  LL.launchRun = { _internals: { mergePoints, freshness, slaLines, axisRange } };
+  LL.launchRun = { _internals: { mergePoints, freshness, slaLines, axisRange, duration, fmtNumber } };
 
   if ($('runRoot')) document.addEventListener('DOMContentLoaded', init);
 })();

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Catalog of metric connections and per-domain bindings.
 
 A source stores only how to connect (address, auth, TLS). A binding says which
@@ -11,6 +12,8 @@ import copy
 import re
 from dataclasses import dataclass
 from typing import Mapping
+
+from AI.i18n import t
 
 SOURCE_TYPES: tuple[str, ...] = ("prometheus", "grafana_proxy", "influxdb")
 # lt_generators: resources of the load generator hosts (optional domain of the load test report).
@@ -77,7 +80,7 @@ class ResolvedSource:
 def validate_data_sources(payload: dict) -> None:
     """Raises ``DataSourceConfigError`` when the catalog shape is wrong."""
     if not isinstance(payload, dict):
-        raise DataSourceConfigError("Каталог источников должен быть объектом")
+        raise DataSourceConfigError(t("server.data_sources.catalog_object"))
     for source_id, entry in payload.items():
         _validate_source(str(source_id), entry)
 
@@ -91,9 +94,11 @@ def validate_domain_sources(payload: dict, catalog: dict) -> None:
 
 def binding_errors(catalog: dict, global_bindings: dict, area_bindings: Mapping[str, dict]) -> list[str]:
     """Bindings that the new catalog would break, including sources still in use."""
-    errors = binding_messages(global_bindings, catalog, require_default=False, missing_kind="used", place="глобальные привязки")
+    errors = binding_messages(
+        global_bindings, catalog, require_default=False, missing_kind="used", place=t("server.data_sources.place.global")
+    )
     for area in sorted(area_bindings):
-        place = f"область {area}"
+        place = t("server.data_sources.place.area", area=area)
         errors.extend(binding_messages(area_bindings[area], catalog, require_default=False, missing_kind="used", place=place))
     return errors
 
@@ -108,11 +113,11 @@ def binding_messages(
 ) -> list[str]:
     """Human-readable binding problems. Empty bindings are allowed when default is optional."""
     if not isinstance(payload, dict):
-        return [_scoped(place, "привязки должны быть объектом")]
+        return [_scoped(place, t("server.data_sources.bindings_object"))]
     if not payload and not require_default:
         return []
     if DEFAULT_BINDING not in payload:
-        return [_scoped(place, "не задан источник по умолчанию")]
+        return [_scoped(place, t("server.data_sources.no_default_lower"))]
     catalog_map = catalog if isinstance(catalog, dict) else {}
     errors: list[str] = []
     for key, raw in payload.items():
@@ -123,27 +128,29 @@ def binding_messages(
 def resolve_domain_source(cfg: dict, domain: str) -> ResolvedSource:
     """Binding of ``domain``, or the default binding when the domain has none."""
     if domain not in BINDING_KEYS:
-        raise DataSourceConfigError(f"Неизвестный домен «{domain}»")
+        raise DataSourceConfigError(t("server.data_sources.unknown_domain", domain=domain))
     catalog = cfg.get("data_sources")
     if not isinstance(catalog, dict):
-        raise DataSourceConfigError("Каталог источников data_sources не задан")
+        raise DataSourceConfigError(t("server.data_sources.catalog_missing"))
     bindings = cfg.get("domain_sources")
     if not isinstance(bindings, dict) or DEFAULT_BINDING not in bindings:
-        raise DataSourceConfigError("Не задан источник по умолчанию")
+        raise DataSourceConfigError(t("server.data_sources.no_default"))
     raw = bindings.get(domain)
     if not isinstance(raw, dict):
         raw = bindings.get(DEFAULT_BINDING)
     if not isinstance(raw, dict):
-        raise DataSourceConfigError(f"домен {domain}: не задан источник")
+        raise DataSourceConfigError(t("server.data_sources.domain_no_source", domain=domain))
     binding = _parse_binding(domain, raw)
     entry = catalog.get(binding.source_id)
     if not isinstance(entry, dict):
-        raise DataSourceConfigError(f"домен {domain}: источник «{binding.source_id}» не найден")
+        raise DataSourceConfigError(t("server.data_sources.domain_source_missing", domain=domain, source=binding.source_id))
     source_type = str(entry.get("type") or "")
     if source_type not in SOURCE_TYPES:
-        raise DataSourceConfigError(f"домен {domain}: источник «{binding.source_id}» имеет неизвестный тип «{source_type}»")
+        raise DataSourceConfigError(
+            t("server.data_sources.domain_source_type", domain=domain, source=binding.source_id, type=source_type)
+        )
     if source_type == "grafana_proxy" and not binding.datasource_uid and not binding.datasource_name:
-        raise DataSourceConfigError(f"домен {domain}: у источника «{binding.source_id}» не задан UID или имя датасорса")
+        raise DataSourceConfigError(t("server.data_sources.domain_no_datasource", domain=domain, source=binding.source_id))
     return ResolvedSource(domain, binding.source_id, source_type, _resolved_config(entry, source_type, binding))
 
 
@@ -167,8 +174,14 @@ def domain_query_language(resolved: ResolvedSource, qcfg: dict) -> str | None:
     extra = [lang for lang in present if lang not in allowed]
     if extra or allowed[0] not in present:
         raise DataSourceConfigError(
-            f"домен {resolved.domain}: источник «{resolved.source_id}» ({resolved.source_type}) "
-            f"принимает {allowed[0]}, в запросах есть {', '.join(present)}"
+            t(
+                "server.data_sources.language_mismatch",
+                domain=resolved.domain,
+                source=resolved.source_id,
+                type=resolved.source_type,
+                accepted=allowed[0],
+                present=", ".join(present),
+            )
         )
     return allowed[0]
 
@@ -184,22 +197,19 @@ def source_accepts_language(source_type: str, language: str) -> bool:
 
 def _validate_source(source_id: str, entry: object) -> None:
     if not SOURCE_ID_RE.fullmatch(source_id):
-        raise DataSourceConfigError(
-            f"Идентификатор источника «{source_id}» недопустим: латиница в нижнем регистре, "
-            "цифры, дефис и подчёркивание, до 40 символов"
-        )
+        raise DataSourceConfigError(t("server.data_sources.bad_id", source=source_id))
     if not isinstance(entry, dict):
-        raise DataSourceConfigError(f"Источник «{source_id}» должен быть объектом")
+        raise DataSourceConfigError(t("server.data_sources.source_object", source=source_id))
     _validate_title(source_id, entry.get("title"))
     source_type = entry.get("type")
     if source_type not in SOURCE_TYPES:
         raise DataSourceConfigError(
-            f"Источник «{source_id}»: неизвестный тип «{source_type}». Допустимо: {', '.join(SOURCE_TYPES)}"
+            t("server.data_sources.source_type", source=source_id, type=source_type, allowed=", ".join(SOURCE_TYPES))
         )
     block_key = _SOURCE_BLOCK[str(source_type)]
     for key in entry:
         if key not in {"title", "type", block_key}:
-            raise DataSourceConfigError(f"Источник «{source_id}»: лишний ключ «{key}»")
+            raise DataSourceConfigError(t("server.data_sources.extra_key", source=source_id, key=key))
     block = entry.get(block_key)
     if source_type == "prometheus":
         _require_url(source_id, block, "prometheus", "url", "prometheus.url")
@@ -215,11 +225,11 @@ def _validate_source(source_id: str, entry: object) -> None:
 
 def _validate_title(source_id: str, title: object) -> None:
     if not isinstance(title, str) or not title.strip():
-        raise DataSourceConfigError(f"Источник «{source_id}»: укажите название")
+        raise DataSourceConfigError(t("server.data_sources.title_required", source=source_id))
     if len(title.strip()) > TITLE_MAX_LEN:
-        raise DataSourceConfigError(f"Источник «{source_id}»: название длиннее {TITLE_MAX_LEN} символов")
+        raise DataSourceConfigError(t("server.data_sources.title_too_long", source=source_id, max=TITLE_MAX_LEN))
     if any(ord(ch) < 32 for ch in title):
-        raise DataSourceConfigError(f"Источник «{source_id}»: в названии есть управляющие символы")
+        raise DataSourceConfigError(t("server.data_sources.title_control_chars", source=source_id))
 
 
 def _validate_grafana(source_id: str, block: object) -> None:
@@ -227,42 +237,42 @@ def _validate_grafana(source_id: str, block: object) -> None:
     assert isinstance(block, dict)
     _reject_unknown(source_id, block, {"base_url", "verify_ssl", "auth"})
     if "verify_ssl" in block and not isinstance(block.get("verify_ssl"), bool):
-        raise DataSourceConfigError(f"Источник «{source_id}»: grafana.verify_ssl должен быть true или false")
+        raise DataSourceConfigError(t("server.data_sources.verify_ssl", source=source_id))
     auth = block.get("auth")
     if not isinstance(auth, dict):
-        raise DataSourceConfigError(f"Источник «{source_id}»: укажите способ авторизации Grafana")
+        raise DataSourceConfigError(t("server.data_sources.grafana_auth_required", source=source_id))
     _reject_unknown(source_id, auth, {"method", "username", "password", "token"})
     method = auth.get("method")
     if method not in AUTH_METHODS:
-        raise DataSourceConfigError(f"Источник «{source_id}»: grafana.auth.method — допустимо basic, bearer")
+        raise DataSourceConfigError(t("server.data_sources.grafana_auth_method", source=source_id))
     for key in ("username", "password", "token"):
         _optional_text(source_id, auth, key)
 
 
 def _require_url(source_id: str, block: object, block_name: str, field: str, label: str) -> None:
     if not isinstance(block, dict):
-        raise DataSourceConfigError(f"Источник «{source_id}»: блок {block_name} должен быть объектом")
+        raise DataSourceConfigError(t("server.data_sources.block_object", source=source_id, block=block_name))
     url = block.get(field)
     if not isinstance(url, str) or not url.strip():
-        raise DataSourceConfigError(f"Источник «{source_id}»: укажите {label}")
+        raise DataSourceConfigError(t("server.data_sources.field_required", source=source_id, field=label))
 
 
 def _reject_unknown(source_id: str, block: dict, allowed: set[str]) -> None:
     for key in block:
         if key not in allowed:
-            raise DataSourceConfigError(f"Источник «{source_id}»: лишний ключ «{key}»")
+            raise DataSourceConfigError(t("server.data_sources.extra_key", source=source_id, key=key))
 
 
 def _optional_text(source_id: str, block: dict, field: str) -> None:
     if field in block and not isinstance(block.get(field), str):
-        raise DataSourceConfigError(f"Источник «{source_id}»: поле «{field}» должно быть строкой")
+        raise DataSourceConfigError(t("server.data_sources.field_string", source=source_id, field=field))
 
 
 def _one_binding(key: str, raw: object, catalog: dict, place: str, missing_kind: str) -> list[str]:
     if key not in BINDING_KEYS:
-        return [_scoped(place, f"неизвестная привязка «{key}»")]
+        return [_scoped(place, t("server.data_sources.unknown_binding", key=key))]
     if not isinstance(raw, dict):
-        return [_scoped(place, f"привязка «{key}» должна быть объектом")]
+        return [_scoped(place, t("server.data_sources.binding_object", key=key))]
     texts, text_error = _binding_texts(key, raw, place)
     if text_error:
         return [text_error]
@@ -272,13 +282,13 @@ def _one_binding(key: str, raw: object, catalog: dict, place: str, missing_kind:
         return [_missing_source(source_id, key, place, missing_kind)]
     source_type = str(entry.get("type") or "")
     if source_type not in SOURCE_TYPES:
-        return [_scoped(place, f"домен {key}: источник «{source_id}» имеет неизвестный тип «{source_type}»")]
+        return [_scoped(place, t("server.data_sources.domain_source_type", domain=key, source=source_id, type=source_type))]
     allowed = _fields_for(source_type)
     for field, value in texts.items():
         if field not in allowed and value:
-            return [_scoped(place, f"привязка «{key}»: поле «{field}» не используется для типа {source_type}")]
+            return [_scoped(place, t("server.data_sources.binding_field_unused", key=key, field=field, type=source_type))]
     if source_type == "grafana_proxy" and not texts["datasource_uid"] and not texts["datasource_name"]:
-        return [_scoped(place, f"привязка «{key}»: для Grafana укажите UID или имя датасорса")]
+        return [_scoped(place, t("server.data_sources.binding_datasource", key=key))]
     return []
 
 
@@ -290,11 +300,11 @@ def _binding_texts(key: str, raw: dict, place: str) -> tuple[dict[str, str], str
             texts[field] = ""
             continue
         if not isinstance(value, str):
-            return {}, _scoped(place, f"привязка «{key}»: поле «{field}» должно быть строкой")
+            return {}, _scoped(place, t("server.data_sources.binding_field_string", key=key, field=field))
         texts[field] = value.strip()
     for field in raw:
         if field not in _BINDING_TEXT_FIELDS:
-            return {}, _scoped(place, f"привязка «{key}»: лишний ключ «{field}»")
+            return {}, _scoped(place, t("server.data_sources.binding_extra_key", key=key, field=field))
     return texts, ""
 
 
@@ -308,15 +318,15 @@ def _fields_for(source_type: str) -> frozenset[str]:
 
 def _missing_source(source_id: str, domain: str, place: str, missing_kind: str) -> str:
     if missing_kind == "used" and source_id:
-        where = place or "привязки"
-        return f"источник {source_id} используется: {where}, домен {domain}"
+        where = place or t("server.data_sources.place.bindings")
+        return t("server.data_sources.source_in_use", source=source_id, where=where, domain=domain)
     if source_id:
-        return _scoped(place, f"домен {domain}: источник «{source_id}» не найден")
-    return _scoped(place, f"привязка «{domain}»: не выбран источник")
+        return _scoped(place, t("server.data_sources.domain_source_missing", domain=domain, source=source_id))
+    return _scoped(place, t("server.data_sources.binding_no_source", key=domain))
 
 
 def _scoped(place: str, message: str) -> str:
-    if not place or place == "привязки":
+    if not place or place == t("server.data_sources.place.bindings"):
         return message[0].upper() + message[1:] if message else message
     return f"{place}: {message}"
 
@@ -328,7 +338,7 @@ def _parse_binding(domain: str, raw: dict) -> DomainBinding:
 
     source_id = text("source")
     if not source_id:
-        raise DataSourceConfigError(f"домен {domain}: не выбран источник")
+        raise DataSourceConfigError(t("server.data_sources.domain_not_selected", domain=domain))
     return DomainBinding(domain, source_id, text("datasource_uid"), text("datasource_name"), text("database"), text("bucket"))
 
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """PostgreSQL implementation of the auth repository.
 
 Tables are created lazily with ``IF NOT EXISTS`` (the same approach as the other stores in this

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Basic metrics of a running test: RPS, errors, p95 and virtual users from the load tool queries.
 
 The queries are the rows of the ``lt_framework`` domain that carry these roles (installed query packs),
@@ -14,6 +15,9 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Optional
 
+from AI.i18n import get_locale
+
+from .messages import msg, ru_text, t
 from .store import INSTANCE_STATUS_TITLES, RUN_CANCELLED, RUN_DONE, RUN_FAILED, RunRecord
 from .tools import ToolTemplate
 
@@ -32,7 +36,10 @@ SLA_LINES = ("target_rps", "max_error_rate_pct", "max_p95_ms")
 NO_DATA_AFTER_SEC = 45
 MAX_POINTS = 600
 NICE_STEPS = (5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600)
-UNFILTERED_NOTE = "Метрики инструмента без тега прогона: показаны все метрики за окно прогона"
+# Texts of a snapshot are rendered in the language of the request (the caches below are per language).
+UNFILTERED_KEY = "lt.live.unfiltered"
+# The ru text of the note, for callers that compare with it.
+UNFILTERED_NOTE = ru_text(UNFILTERED_KEY)
 
 # Test window hint of the new report form (GET /lt_windows).
 WINDOWS_DEFAULT_HOURS = 6.0
@@ -43,7 +50,7 @@ WINDOWS_KEEP = 3
 WINDOWS_RUNS_KEEP = 5
 WINDOWS_CACHE_SEC = 60.0
 WINDOWS_CACHE_MAX = 128
-_windows_cache: dict[tuple[str, str, float], tuple[float, dict[str, Any]]] = {}
+_windows_cache: dict[tuple[str, str, float, str], tuple[float, dict[str, Any]]] = {}
 _windows_lock = threading.Lock()
 
 
@@ -214,18 +221,19 @@ def run_events(run: RunRecord) -> list[dict[str, Any]]:
     stop_all = _ms(run.stop_all_at)
     for inst in run.instances:
         if inst.started_at:
-            events.append({"ts": _ms(inst.started_at), "kind": "start", "label": f"{inst.name}: старт"})
+            events.append({"ts": _ms(inst.started_at), "kind": "start", "label": t("lt.live.event.start", name=inst.name)})
         if inst.stop_sent_at and stop_all is None:
-            events.append({"ts": _ms(inst.stop_sent_at), "kind": "stop", "label": f"{inst.name}: остановка"})
+            events.append({"ts": _ms(inst.stop_sent_at), "kind": "stop", "label": t("lt.live.event.stop", name=inst.name)})
         if inst.finished_at:
-            title = INSTANCE_STATUS_TITLES.get(inst.status, "завершён")
-            events.append({"ts": _ms(inst.finished_at), "kind": "finish", "label": f"{inst.name}: {title[:1].lower()}{title[1:]}"})
+            title = INSTANCE_STATUS_TITLES.get(inst.status) or t("lt.live.event.finished")
+            status = f"{title[:1].lower()}{title[1:]}"
+            events.append({"ts": _ms(inst.finished_at), "kind": "finish", "label": t("lt.live.event.finish", name=inst.name, status=status)})
     if stop_all is not None:
-        events.append({"ts": stop_all, "kind": "stop", "label": "остановка прогона"})
+        events.append({"ts": stop_all, "kind": "stop", "label": t("lt.live.event.run_stop")})
     begin = run.started_at or min((i.started_at for i in run.instances if i.started_at), default=None)
     max_seconds = int(run.options.get("max_seconds") or 0)
     if isinstance(begin, datetime) and max_seconds:
-        events.append({"ts": int((begin.timestamp() + max_seconds) * 1000), "kind": "limit", "label": "лимит длительности"})
+        events.append({"ts": int((begin.timestamp() + max_seconds) * 1000), "kind": "limit", "label": t("lt.live.event.limit")})
     return sorted(events, key=lambda event: event["ts"])
 
 
@@ -288,7 +296,7 @@ def live_snapshot(run: RunRecord, tools: dict[str, ToolTemplate], now: Optional[
     try:
         cfg = _scope_config(run)
     except Exception as exc:
-        return {**base, "message": f"Настройки сервиса не читаются: {exc}"}
+        return {**base, "message": t("lt.live.settings_unreadable", error=exc)}
     base["sla"] = sla_lines(cfg)
     packs = run_filter_packs(run, tools, cfg)
     filtered = bool(packs) and mode != "plain"
@@ -296,7 +304,7 @@ def live_snapshot(run: RunRecord, tools: dict[str, ToolTemplate], now: Optional[
     roles = wanted + ((INSTANCE_ROLE,) if with_instances else ())
     lang, rows = _block_rows(_filtered(cfg, run, packs) if filtered else (cfg.get("queries") or {}), roles)
     if not any(role in rows for role in wanted):
-        return {**base, "message": "В домене «Нагрузка» сервиса нет запросов RPS, ошибок, p95 и пользователей: установите пакет запросов инструмента"}
+        return {**base, "message": t("lt.live.no_queries")}
 
     def read(rows_: dict, lang_: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
         """Reads every live row at once: each is one HTTP query to the source, and the page waits for all."""
@@ -338,7 +346,7 @@ def live_snapshot(run: RunRecord, tools: dict[str, ToolTemplate], now: Optional[
         if plain_points:
             series, instances, errors = read(plain_rows, plain_lang)
             used_rows = plain_rows
-            out.update(series=series, instances=instances, filtered=False, mode="plain", message=UNFILTERED_NOTE)
+            out.update(series=series, instances=instances, filtered=False, mode="plain", message=t(UNFILTERED_KEY))
         else:
             # Nothing either way: show the query as the service has it, the one to compare with Grafana.
             both_empty = True
@@ -351,15 +359,12 @@ def live_snapshot(run: RunRecord, tools: dict[str, ToolTemplate], now: Optional[
     started = any(inst.started_at for inst in run.instances)
     if rps_row and not since and not last and not errors and started and current - run_start > NO_DATA_AFTER_SEC:
         if both_empty:
-            tag = f" ни с тегом прогона {run.run_tag}, ни без него"
+            key = "lt.live.no_points_both"
         elif out["mode"] == "filtered":
-            tag = f" с тегом прогона {run.run_tag}"
+            key = "lt.live.no_points_tagged"
         else:
-            tag = ""
-        out["message"] = (
-            f"Запрос «{rps_row[0]}» не вернул точек за {_clock(fetch_start)}–{_clock(end)}{tag}: проверьте источник "
-            "домена «Нагрузка» (датасорс, база или bucket) и переменные пакета, например testid; текст запроса — ниже"
-        )
+            key = "lt.live.no_points"
+        out["message"] = t(key, query=rps_row[0], start=_clock(fetch_start), end=_clock(end), tag=run.run_tag)
     if errors and not out["series"]:
         out["ok"] = False
         out["message"] = "; ".join(errors)[:600]
@@ -371,18 +376,19 @@ def live_snapshot(run: RunRecord, tools: dict[str, ToolTemplate], now: Optional[
 BRIEF_ROLES = ("lt.rps_total", "lt.error_rate_pct")
 BRIEF_WINDOW_MIN = 15
 BRIEF_CACHE_SEC = 10.0
-_brief_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_brief_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 _brief_lock = threading.Lock()
 
 
 def live_brief(run: RunRecord, tools: dict[str, ToolTemplate], now: Optional[float] = None) -> dict[str, Any]:
-    """RPS and errors of the last 15 minutes for the dashboard, cached for a few seconds per run.
+    """RPS and errors of the last 15 minutes for the dashboard, cached for a few seconds per run and language.
 
     Several open dashboards ask every 15 s; one read of the metrics storage serves them all.
     """
     current = time.monotonic()
+    cache_key = (run.run_id, get_locale())
     with _brief_lock:
-        hit = _brief_cache.get(run.run_id)
+        hit = _brief_cache.get(cache_key)
         if hit is not None and current - hit[0] < BRIEF_CACHE_SEC:
             return hit[1]
     snapshot = live_snapshot(run, tools, now, window_min=BRIEF_WINDOW_MIN, roles=BRIEF_ROLES, with_instances=False)
@@ -402,7 +408,7 @@ def live_brief(run: RunRecord, tools: dict[str, ToolTemplate], now: Optional[flo
     with _brief_lock:
         if len(_brief_cache) >= 256:
             _brief_cache.clear()
-        _brief_cache[run.run_id] = (current, brief)
+        _brief_cache[cache_key] = (current, brief)
     return brief
 
 
@@ -412,7 +418,7 @@ def clear_brief_cache() -> None:
 
 
 def report_filter(run: RunRecord, tools: dict[str, ToolTemplate], start: float, end: float) -> tuple[list[str], str]:
-    """Packs to filter in the report and a note for the run; unfiltered when the tag found no data."""
+    """Packs to filter in the report and a note for the run (a dictionary message); unfiltered when the tag found no data."""
     try:
         cfg: Optional[dict] = _scope_config(run)
     except Exception:
@@ -429,7 +435,7 @@ def report_filter(run: RunRecord, tools: dict[str, ToolTemplate], start: float, 
         _, plain_rows = _block_rows(cfg.get("queries") or {}, ("lt.rps_total",))
         plain = plain_rows.get("lt.rps_total")
         if plain is not None and _fetch(cfg, lang, plain, start, end, step, True):
-            return [], UNFILTERED_NOTE.replace("показаны", "отчёт читает")
+            return [], msg("lt.live.unfiltered_report")
     except Exception:
         return packs, ""
     return packs, ""
@@ -569,12 +575,12 @@ def load_windows(area: str, service: str, hours: Any = WINDOWS_DEFAULT_HOURS, no
     try:
         cfg = _service_config(area, service)
     except Exception as exc:
-        out.update(ok=False, message="Настройки сервиса не читаются", detail=str(exc)[:300])
+        out.update(ok=False, message=t("lt.live.settings_unreadable_short"), detail=str(exc)[:300])
         return out
     lang, rows = _block_rows(cfg.get("queries") or {}, ("lt.rps_total",))
     row = rows.get("lt.rps_total")
     if row is None:
-        out.update(ok=False, message="В домене «Нагрузка» сервиса нет запроса общего RPS: установите пакет запросов инструмента")
+        out.update(ok=False, message=t("lt.live.no_rps_query"))
         return out
     step = _window_step(start, end, cfg)
     out["step_sec"] = step
@@ -582,7 +588,7 @@ def load_windows(area: str, service: str, hours: Any = WINDOWS_DEFAULT_HOURS, no
     try:
         points = _fetch(cfg, lang, row, start, end, step, True)
     except Exception as exc:
-        out.update(ok=False, message="Источник метрик недоступен", detail=str(exc)[:300])
+        out.update(ok=False, message=t("lt.live.source_unavailable"), detail=str(exc)[:300])
         return out
     segments = activity_segments(points, step)
     windows = []
@@ -599,8 +605,8 @@ def load_windows(area: str, service: str, hours: Any = WINDOWS_DEFAULT_HOURS, no
 
 
 def cached_load_windows(area: str, service: str, hours: Any = WINDOWS_DEFAULT_HOURS) -> dict[str, Any]:
-    """:func:`load_windows` cached for a minute per (area, service, hours): forms ask on every service pick."""
-    key = (area or "", service, clamp_hours(hours))
+    """:func:`load_windows` cached for a minute per (area, service, hours, language): forms ask on every service pick."""
+    key = (area or "", service, clamp_hours(hours), get_locale())
     current = time.monotonic()
     with _windows_lock:
         hit = _windows_cache.get(key)

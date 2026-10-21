@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Lightweight key validation for configuration sections.
 
 There is no formal schema: the pristine ``settings.py`` defaults, together with
@@ -14,7 +15,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
-from loadlens_app.appearance import AppearanceError, parse_accent
+from AI.i18n import t
+from loadlens_app.appearance import AppearanceError, parse_accent, parse_language, parse_language_switch
 
 SETTINGS_PATH = Path(__file__).resolve().parent.parent / "settings.py"
 EXAMPLE_PATH = Path(__file__).resolve().parent.parent / "settings.example.py"
@@ -122,50 +124,58 @@ def validate_sla(payload: dict) -> None:
     """Choice fields of ``sla`` must hold one of the allowed values."""
     for key, allowed in SLA_CHOICES.items():
         if key in payload and payload[key] not in allowed:
-            raise SlaConfigError(f"sla.{key}: допустимо {', '.join(allowed)}, получено «{payload[key]}»")
+            raise SlaConfigError(t("server.config.sla_choice", key=key, allowed=", ".join(allowed), value=payload[key]))
 
 
 def validate_appearance(payload: dict) -> None:
-    """``appearance.accent`` must be a ``#rrggbb`` color."""
+    """Checks only the keys sent: ``accent`` is a ``#rrggbb`` color, ``language`` a supported report language
+    (``ru``/``en``), ``language_switch`` a boolean. POST /config merges the payload into the stored section,
+    so the accent and the language can be saved one without the other.
+    """
     if not isinstance(payload, dict):
         raise AppearanceError(payload)
-    parse_accent(payload.get("accent"))
+    if "accent" in payload:
+        parse_accent(payload.get("accent"))
+    if "language" in payload:
+        parse_language(payload.get("language"))
+    if "language_switch" in payload:
+        parse_language_switch(payload.get("language_switch"))
 
 
 def validate_queries(payload: dict) -> None:
     """Each non-empty query list must match ``labels``, with unique non-empty names."""
     if not isinstance(payload, dict):
-        raise QueryConfigError("queries должен быть объектом")
+        raise QueryConfigError(t("server.config.queries_object"))
     query_keys = ("promql_queries", "flux_queries", "influxql_queries")
     for domain, block in payload.items():
         if not isinstance(block, dict):
-            raise QueryConfigError(f"{domain}: ожидается объект")
+            raise QueryConfigError(t("server.config.domain_object", domain=domain))
         labels = block.get("labels") or []
         if not isinstance(labels, list):
-            raise QueryConfigError(f"{domain}: labels должен быть списком")
+            raise QueryConfigError(t("server.config.labels_list", domain=domain))
         seen: set[str] = set()
         for index, label in enumerate(labels, start=1):
             text = str(label or "").strip()
             if not text:
-                raise QueryConfigError(f"{domain}: пустое название в строке {index}")
+                raise QueryConfigError(t("server.config.empty_label", domain=domain, row=index))
             if text in seen:
-                raise QueryConfigError(f"{domain}: название «{text}» повторяется")
+                raise QueryConfigError(t("server.config.duplicate_label", domain=domain, label=text))
             seen.add(text)
         for key in query_keys:
             queries = block.get(key) or []
             if not isinstance(queries, list):
-                raise QueryConfigError(f"{domain}: {key} должен быть списком")
+                raise QueryConfigError(t("server.config.queries_list", domain=domain, key=key))
             if queries and len(queries) != len(labels):
                 raise QueryConfigError(
-                    f"{domain}: {key} ({len(queries)}) и labels ({len(labels)}) разной длины, строка 1"
+                    t("server.config.length_mismatch", domain=domain, key=key, queries=len(queries), labels=len(labels))
                 )
         prom_keys = block.get("label_keys_list") or []
         if (block.get("promql_queries") or []) and len(prom_keys) != len(labels):
-            raise QueryConfigError(f"{domain}: label_keys_list и labels разной длины")
+            raise QueryConfigError(t("server.config.label_keys_mismatch", domain=domain))
         uses_tags = bool(block.get("flux_queries") or block.get("influxql_queries"))
         tag_keys = block.get("label_tag_keys_list") or []
         if uses_tags and len(tag_keys) != len(labels):
-            raise QueryConfigError(f"{domain}: label_tag_keys_list и labels разной длины")
+            raise QueryConfigError(t("server.config.tag_keys_mismatch", domain=domain))
         _validate_pack_keys(domain, block)
 
 
@@ -176,27 +186,27 @@ def _validate_pack_keys(domain: str, block: dict) -> None:
     """
     title = block.get("title")
     if title is not None and (not isinstance(title, str) or len(title) > 60):
-        raise QueryConfigError(f"{domain}: title — строка не длиннее 60 символов")
+        raise QueryConfigError(t("server.config.title_format", domain=domain))
     roles = block.get("roles")
     if roles is not None:
         if not isinstance(roles, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in roles.items()):
-            raise QueryConfigError(f"{domain}: roles должен быть объектом «название запроса → роль»")
+            raise QueryConfigError(t("server.config.roles_object", domain=domain))
     derived = block.get("derived")
     if derived is not None:
         if not isinstance(derived, dict) or not all(
             isinstance(meta, dict) and meta.get("kind") == "sum" and isinstance(meta.get("of"), list)
             for meta in derived.values()
         ):
-            raise QueryConfigError(f"{domain}: derived должен быть объектом «название → {{kind: sum, of: [названия]}}»")
+            raise QueryConfigError(t("server.config.derived_object", domain=domain))
     packs = block.get("packs")
     if packs is not None:
         if not isinstance(packs, list):
-            raise QueryConfigError(f"{domain}: packs должен быть списком")
+            raise QueryConfigError(t("server.config.packs_list", domain=domain))
         for entry in packs:
             if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
-                raise QueryConfigError(f"{domain}: каждый элемент packs должен содержать id")
+                raise QueryConfigError(t("server.config.pack_id", domain=domain))
             if "variables" in entry and not isinstance(entry["variables"], dict):
-                raise QueryConfigError(f"{domain}: packs[{entry['id']}].variables должен быть объектом")
+                raise QueryConfigError(t("server.config.pack_variables", domain=domain, pack=entry["id"]))
 
 
 def warnings_for(section: str, payload: dict) -> list[str]:
@@ -204,8 +214,10 @@ def warnings_for(section: str, payload: dict) -> list[str]:
     messages: list[str] = []
     for path in unknown_keys(section, payload):
         hint = known_keys_hint(section, path)
-        suffix = f" Известные ключи: {', '.join(hint)}." if hint else ""
-        messages.append(f"Неизвестный ключ «{path}» — возможно, опечатка; он будет сохранён, но не используется.{suffix}")
+        if hint:
+            messages.append(t("server.config.unknown_key_hint", path=path, keys=", ".join(hint)))
+        else:
+            messages.append(t("server.config.unknown_key", path=path))
     return messages
 
 

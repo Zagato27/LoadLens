@@ -1,0 +1,115 @@
+# The five-minute demo, end to end: builds the image, starts docker/docker-compose.demo.yml with
+# docker/demo.env, waits for /healthz, signs in with the demo administrator and checks that the dashboard
+# answers and that the demo run is in the archive. A demo that broke is worse than no demo.
+name: Demo
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docker/**"
+      - "settings.demo.py"
+      - "tools/stubs/**"
+      - "loadlens_app/demo_data.py"
+      - ".github/workflows/demo.yml"
+  schedule:
+    - cron: "17 6 * * 1"  # Mondays, 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  demo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      COMPOSE: docker compose -f docker/docker-compose.demo.yml --env-file docker/demo.env --profile demo
+      BASE: http://127.0.0.1:5000
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start the demo stack
+        run: docker compose -f docker/docker-compose.demo.yml --env-file docker/demo.env --profile demo up -d --build
+
+      - name: Wait for /healthz (up to 3 minutes)
+        run: |
+          for i in $(seq 1 90); do
+            if curl -fsS "$BASE/healthz" >/dev/null 2>&1; then echo "healthy after $((i * 2)) s"; exit 0; fi
+            sleep 2
+          done
+          echo "::error::/healthz did not answer within 3 minutes"
+          $COMPOSE ps
+          $COMPOSE logs --no-color --tail=200 app
+          exit 1
+
+      - name: Sign in with the demo administrator
+        run: |
+          set -a; . docker/demo.env; set +a
+          # The login page creates the first administrator from LOADLENS_ADMIN_USER/PASSWORD on its first visit;
+          # the form is submitted like a browser does, with the CSRF token of the page.
+          csrf=$(curl -fsS -c cookies.txt "$BASE/login" | sed -n 's/.*name="csrf_token" value="\([^"]*\)".*/\1/p' | head -n 1)
+          test -n "$csrf" || { echo "::error::no CSRF token on the login page"; exit 1; }
+          code=$(curl -sS -b cookies.txt -c cookies.txt -o login.out -w '%{http_code}' \
+            --data-urlencode "username=$DEMO_ADMIN_USER" --data-urlencode "password=$DEMO_ADMIN_PASSWORD" \
+            --data-urlencode "csrf_token=$csrf" "$BASE/login")
+          case "$code" in 200|302|303) ;; *) echo "::error::login answered $code"; head -c 600 login.out; exit 1;; esac
+          code=$(curl -sS -b cookies.txt -o home.html -w '%{http_code}' "$BASE/")
+          test "$code" = "200" || { echo "::error::GET / answered $code"; exit 1; }
+          grep -q 'id="demoBanner"' home.html || { echo "::error::the dashboard has no demo banner markup"; exit 1; }
+          echo "GET / -> 200"
+
+      - name: The demo run is in the archive (up to 5 minutes)
+        run: |
+          for i in $(seq 1 150); do
+            if curl -fsS -b cookies.txt "$BASE/runs" | grep -q '"demo-checkout-step"'; then
+              echo "demo run listed after $((i * 2)) s"
+              curl -fsS -b cookies.txt "$BASE/demo/status"; echo
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::the demo run did not appear in /runs within 5 minutes"
+          curl -sS -b cookies.txt "$BASE/runs" | head -c 2000; echo
+          $COMPOSE logs --no-color --tail=200 app
+          exit 1
+
+      - name: The stub report is built through the job pipeline (up to 5 minutes)
+        run: |
+          for i in $(seq 1 150); do
+            curl -fsS -b cookies.txt -o runs.json "$BASE/runs?limit=20"
+            curl -fsS -b cookies.txt -o jobs.json "$BASE/jobs?status=running,error&limit=5"
+            state=$(python3 - <<'EOF'
+          import json
+          runs = json.load(open("runs.json"))
+          runs = runs.get("items") if isinstance(runs, dict) else runs
+          jobs = json.load(open("jobs.json")).get("jobs", [])
+          if any(job.get("status") == "error" for job in jobs):
+              print("error:" + json.dumps(jobs)[:400])
+          elif jobs:
+              print("running")
+          else:
+              built = next((r for r in runs or [] if r.get("run_name") == "demo-checkout-step-2"), None)
+              print("done:" + str((built or {}).get("verdict")) if built and built.get("verdict") in ("pass", "risk", "fail") else "waiting")
+          EOF
+          )
+            case "$state" in
+              done:*) echo "stub report built after $((i * 2)) s, verdict ${state#done:}"; exit 0;;
+              error:*) echo "::error::the stub report job failed: ${state#error:}"; $COMPOSE logs --no-color --tail=200 app; exit 1;;
+            esac
+            sleep 2
+          done
+          echo "::error::the stub report was not built within 5 minutes"
+          cat jobs.json; echo
+          $COMPOSE logs --no-color --tail=200 app
+          exit 1
+
+      - name: Logs on failure
+        if: failure()
+        run: |
+          $COMPOSE ps
+          $COMPOSE logs --no-color --tail=300
+
+      - name: Stop the demo stack
+        if: always()
+        run: docker compose -f docker/docker-compose.demo.yml --env-file docker/demo.env --profile demo down -v

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """CI generators: the team's own GitLab pipeline or Jenkins job, one run per instance.
 
 The pipeline holds the tool, the scripts and their settings; LoadLens starts it with the branch and the
@@ -17,6 +18,7 @@ from typing import Any, Callable, Mapping, Optional
 from urllib.parse import quote, urlsplit
 
 from ..generators import Generator
+from ..messages import msg, t, text_of
 from ..tools import ToolTemplate, public_url
 from .base import LOG_TAIL_BYTES, CheckReport, GeneratorError, LaunchPlan, LaunchResult, Probe
 from .http import ApiClient, ApiError
@@ -127,7 +129,7 @@ class CiExecutor:
         try:
             return kind, run_id, int(index), rest
         except ValueError as exc:
-            raise GeneratorError(f"Непонятная ссылка на задачу CI: {ref}") from exc
+            raise GeneratorError("lt.ci_exec.bad_ref", ref=ref) from exc
 
     @property
     def _project(self) -> str:
@@ -170,15 +172,12 @@ class CiExecutor:
             if not _variables_refused(exc):
                 raise
             if plan.ci_variables:
-                raise GeneratorError(
-                    "Проект GitLab запрещает переменные пайплайна: задайте значения входными параметрами (spec:inputs) "
-                    "или разрешите переменные в настройках CI/CD проекта"
-                ) from exc
+                raise GeneratorError("lt.ci_exec.variables_refused") from exc
             pipeline = self._create_pipeline(plan, ref, {})
-            message = "проект запрещает переменные пайплайна: LOADLENS_* не переданы"
+            message = msg("lt.ci_exec.auto_not_passed")
         pipeline_id = pipeline.get("id")
         if not pipeline_id:
-            raise GeneratorError(f"GitLab не вернул номер пайплайна: {str(pipeline)[:200]}")
+            raise GeneratorError("lt.ci_exec.no_pipeline_id", answer=str(pipeline)[:200])
         url = str(pipeline.get("web_url") or "")
         return LaunchResult(ref=f"gitlab:{plan.run_id}:{plan.instance_index}:{pipeline_id}",
                             url=public_url(url) if url else "", message=message)
@@ -197,7 +196,7 @@ class CiExecutor:
             response = self.api.request("POST", f"{job}/build", ok=(200, 201))
         location = response.headers.get("Location", "")
         if not location:
-            raise GeneratorError("Jenkins не вернул ссылку на очередь сборки")
+            raise GeneratorError("lt.ci_exec.no_queue_location")
         return LaunchResult(ref=f"jenkins:{plan.run_id}:{plan.instance_index}:queue:{self._path(location)}")
 
     # ---- status ----
@@ -234,8 +233,7 @@ class CiExecutor:
         if not self.cfg.api_token:
             # Without the API only the events of the pipeline say anything: the window counts from the launch.
             return Probe(state="running", started_at=event_started,
-                         message="" if event_started else "Без API-токена LoadLens не видит статус пайплайна: окно закроется "
-                                                          "событием пайплайна, кнопкой «Остановить» или по лимиту длительности")
+                         message="" if event_started else msg("lt.ci_exec.no_token_status"))
         pipeline = self.api.json("GET", f"{self._project}/pipelines/{pipeline_id}")
         status = str(pipeline.get("status") or "")
         url = public_url(str(pipeline.get("web_url") or ""))
@@ -245,13 +243,13 @@ class CiExecutor:
             return Probe(state="exited", started_at=started_at, finished_at=finished_at, exit_code=0, url=url)
         if status == "failed":
             return Probe(state="exited", started_at=started_at, finished_at=finished_at, exit_code=1,
-                         message="Пайплайн GitLab упал", url=url)
+                         message=msg("lt.ci_exec.gitlab_failed"), url=url)
         if status in ("canceled", "skipped"):
             return Probe(state="exited", started_at=started_at, finished_at=finished_at, exit_code=None,
-                         message=f"Пайплайн GitLab: {status}", url=url)
+                         message=msg("lt.ci_exec.gitlab_status", status=status), url=url)
         if status in GITLAB_RUNNING:
             return Probe(state="running", started_at=started_at, url=url)
-        label = f"Пайплайн GitLab: {status}" if status else "Пайплайн GitLab создаётся"
+        label = msg("lt.ci_exec.gitlab_status", status=status) if status else msg("lt.ci_exec.gitlab_creating")
         return Probe(state="starting", message=label, url=url)
 
     def _probe_jenkins(self, run_id: str, index: int, rest: str, event_started: Optional[float]) -> Probe:
@@ -264,7 +262,7 @@ class CiExecutor:
                 # The queue item expires minutes after the build starts: keep the build path instead.
                 new_ref = f"jenkins:{run_id}:{index}:{build_path}"
         if build is None:
-            return Probe(state="starting", message="Сборка Jenkins в очереди", ref=new_ref)
+            return Probe(state="starting", message=msg("lt.ci_exec.jenkins_queued"), ref=new_ref)
         timestamp = build.get("timestamp")
         started_at = event_started or (float(timestamp) / 1000 if isinstance(timestamp, (int, float)) and timestamp else None)
         if not build.get("building", True):
@@ -274,7 +272,7 @@ class CiExecutor:
             finished_at = (float(timestamp) + float(duration)) / 1000 if isinstance(timestamp, (int, float)) and timestamp \
                 and isinstance(duration, (int, float)) and duration else None
             return Probe(state="exited", started_at=started_at, finished_at=finished_at, exit_code=code,
-                         message=f"Сборка Jenkins: {result}", ref=new_ref, url=url)
+                         message=msg("lt.ci_exec.jenkins_result", result=result), ref=new_ref, url=url)
         return Probe(state="running", started_at=started_at, ref=new_ref, url=url)
 
     # ---- stop and logs ----
@@ -283,7 +281,7 @@ class CiExecutor:
         kind, run_id, index, rest = self.parse_ref(ref)
         if kind == "gitlab":
             if not self.cfg.api_token:
-                raise GeneratorError("Остановка недоступна: у генератора GitLab не задан API-токен")
+                raise GeneratorError("lt.ci_exec.stop_unavailable")
             try:
                 self.api.request("POST", f"{self._project}/pipelines/{rest}/cancel", ok=(200, 201))
             except ApiError as exc:
@@ -323,7 +321,7 @@ class CiExecutor:
         return None
 
     def control(self, ref: str, argv: tuple[str, ...], cwd: str = "") -> tuple[int, str]:
-        return 1, "Команды управления инструментом в CI не поддерживаются"
+        return 1, t("lt.ci_exec.no_control")
 
     def list_scripts(self, scripts_dir: str, tool: ToolTemplate) -> Optional[list[str]]:
         return None
@@ -334,12 +332,12 @@ _LOCAL_HOST_RE = re.compile(r"^https?://(127\.\d+\.\d+\.\d+|localhost|\[::1\]|0\
 
 def _loadlens_url_problems(cfg) -> list[str]:
     if cfg.loadlens_url and _LOCAL_HOST_RE.match(cfg.loadlens_url):
-        return [f"адрес LoadLens {cfg.loadlens_url} — локальный: события пайплайна с раннера CI до него не дойдут"]
+        return [t("lt.ci_exec.local_loadlens_url", url=cfg.loadlens_url)]
     return []
 
 
 def check_ci_generator(generator: Generator, tools: Mapping[str, ToolTemplate]) -> CheckReport:
-    """Reaches the CI and the project or job and reads the parameters of the pipeline."""
+    """Reaches the CI and the project or job and reads the parameters of the pipeline (texts in the request language)."""
     from ..ci_params import CiParamError, read_params
 
     assert generator.ci is not None
@@ -352,23 +350,22 @@ def check_ci_generator(generator: Generator, tools: Mapping[str, ToolTemplate]) 
             if not cfg.api_token:
                 # Without a token GitLab still answers (401): that is enough to know the address is right.
                 executor.api.request("GET", "/api/v4/version", ok=(200, 401, 403))
-                problems.insert(0, "API-токен не задан: LoadLens запустит пайплайн триггером, но не увидит его параметры, "
-                                   "статус и журнал и не сможет его отменить")
-                return CheckReport(ok=True, message="; ".join(["GitLab отвечает", *problems]), details=details,
+                problems.insert(0, t("lt.ci_exec.no_api_token_check"))
+                return CheckReport(ok=True, message="; ".join([t("lt.ci_exec.gitlab_answers"), *problems]), details=details,
                                    connected=True, problems=problems)
             project = executor.api.json("GET", executor._project)
-            head = f"проект {project.get('path_with_namespace', cfg.project)}"
+            head = t("lt.ci_exec.project", project=project.get("path_with_namespace", cfg.project))
         else:
             job = executor.api.json("GET", f"{_jenkins_job_path(cfg.job)}/api/json", params={"tree": "_class,fullName"})
-            head = f"задача {job.get('fullName') or cfg.job}"
+            head = t("lt.ci_exec.job", job=job.get("fullName") or cfg.job)
     except GeneratorError as exc:
         return CheckReport(ok=False, message=str(exc))
     try:
         params = read_params(generator, api=executor.api)
     except (GeneratorError, CiParamError) as exc:
-        problems.append(f"параметры пайплайна не читаются: {exc}")
+        problems.append(t("lt.ci_exec.params_unreadable", error=exc))
         return CheckReport(ok=False, message="; ".join([head, *problems]), details=details, connected=True, problems=problems)
-    problems.extend(params.notes)
+    problems.extend(text_of(note) for note in params.notes)
     if params.version:
         details["system"] = f"GitLab {params.version}"
     details.update({
@@ -378,8 +375,11 @@ def check_ci_generator(generator: Generator, tools: Mapping[str, ToolTemplate]) 
         "inputs_api": params.inputs_api,
         "ref": params.ref,
     })
-    names = ", ".join(param.name for param in params.params[:12]) or "нет"
-    message = f"{details['system']}, {head}{f', ветка {params.ref}' if params.ref else ''}; параметры: {names}"
+    names = ", ".join(param.name for param in params.params[:12]) or t("lt.ci_exec.none")
+    if params.ref:
+        message = t("lt.ci_exec.check_ok_ref", system=details["system"], head=head, ref=params.ref, names=names)
+    else:
+        message = t("lt.ci_exec.check_ok", system=details["system"], head=head, names=names)
     return CheckReport(ok=True, message="; ".join([message, *problems]), details=details, connected=True, problems=problems)
 
 

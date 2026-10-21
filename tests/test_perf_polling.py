@@ -1,4 +1,5 @@
-"""Polling and static files (docs/perf-plan.md, agent 6): TTL cache of the polled answers, idle watcher, static URLs.
+# SPDX-License-Identifier: Apache-2.0
+"""Polling and static files (plans/perf-plan.md, agent 6): TTL cache of the polled answers, idle watcher, static URLs.
 
 Offline: the database is a fake that counts statements, the load test store and the job table live in memory.
 The response cache is off by default in tests (tests/conftest.py); the route tests here switch it on.
@@ -369,7 +370,8 @@ def test_active_runs_are_cached_per_user(app_env):
     assert _active(app_env, "bob", admin="0")["runs"][0]["can_stop"] is False  # not alice's answer from the cache
     assert _active(app_env, "carol", admin="1")["runs"][0]["can_stop"] is True
 
-    app_env.store._runs[run_id].message = "changed behind the cache"
+    # A stored message is its text plus the ref readers render (load_tests/messages.py): change both.
+    app_env.store._runs[run_id].message, app_env.store._runs[run_id].message_ref = "changed behind the cache", None
     assert _active(app_env, "alice", admin="0")["runs"][0]["message"] != "changed behind the cache"  # a hit within 3 s
     app_env.clock.now += 3.1
     assert _active(app_env, "alice", admin="0")["runs"][0]["message"] == "changed behind the cache"
@@ -606,8 +608,10 @@ def test_pages_link_static_files_by_version(app_env):
     links = re.findall(r'(?:src|href)="(/static/[^"]+)"', html)
     assert links and all("?v=" in link for link in links)
     assert static_assets.static_url("js/ui.js") in links
-    order = [html.index(static_assets.static_url(name)) for name in ("vendor/chart.umd.js", "js/ui.js", "js/charts.js", "js/dashboard.js")]
-    assert order == sorted(order)  # deferred scripts run in document order: Chart.js first
+    order = [html.index(static_assets.static_url(name)) for name in ("js/ui.js", "js/charts.js", "js/dashboard.js")]
+    assert order == sorted(order)  # deferred scripts run in document order
+    # The dashboard draws SVG only: Chart.js is not loaded there.
+    assert "chart.umd.js" not in html
 
 
 def test_templates_use_versioned_static_links_and_defer_chart_js():
@@ -616,5 +620,6 @@ def test_templates_use_versioned_static_links_and_defer_chart_js():
         text = path.read_text(encoding="utf-8")
         assert not re.search(r'(?:src|href)="/static/', text), f"{path.name}: link /static/ through url_for('static', ...)"
         chart_tags += [(path.name, tag) for tag in re.findall(r"<script[^>]*chart\.umd\.js[^>]*>", text)]
-    assert len(chart_tags) == 5
+    assert len(chart_tags) == 4
+    assert "dashboard.html" not in {name for name, _ in chart_tags}
     assert all(re.search(r"\sdefer[\s>]", tag) for _, tag in chart_tags), chart_tags

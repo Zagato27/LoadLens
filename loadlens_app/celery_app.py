@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Celery application shared by the web process and the worker.
 
 The web process only publishes tasks. The modules listed in ``TASK_MODULES`` are imported by a worker at

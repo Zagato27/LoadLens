@@ -1,124 +1,117 @@
 {% extends "base.html" %}
 {% set active_nav = 'dashboard' %}
-{% block title %}Дэшборд{% endblock %}
-{% block head %}
-<script defer src="{{ url_for('static', filename='vendor/chart.umd.js') }}"></script>
-{% endblock %}
+{% set i18n_ns = ['charts', 'dashboard'] %}
+{% block title %}{{ t('dashboard.title') }}{% endblock %}
+{# The dashboard draws SVG only (verdict columns, load profile, sparklines): no Chart.js; ui.js and charts.js run without it. #}
 {% block content %}
 <div class="dash-page">
-  <div class="page-header">
-    <h2>Дэшборд</h2>
-    <div class="page-actions">
-      <a class="btn btn-primary" href="/new" data-min-role="engineer"><svg class="icon" aria-hidden="true"><use href="#i-file-plus"/></svg>Новый отчёт</a>
+  {# Title with the status line (runs of 7 and 30 days, running tests, report jobs, last report) and the verdicts of 8 weeks. #}
+  <div class="dash-head">
+    <div class="dash-head-main">
+      <div class="page-header">
+        <h2>{{ t('dashboard.title') }}</h2>
+        <div class="page-actions">
+          <a class="btn btn-sm" href="/new" data-min-role="engineer">{{ t('dashboard.new_report') }}</a>
+        </div>
+      </div>
+      <div class="dash-stats dash-tiles{% if role_rank >= 2 %} dash-tiles-5{% endif %}" role="group" id="dashTiles" aria-label="{{ t('dashboard.kpi.aria') }}">
+        <span class="dash-stat" id="kpiRuns"><b id="kpiRunsValue">—</b><span id="kpiRunsNote"></span></span>
+        <span class="dash-stat" id="kpiRisky"><b id="kpiRiskyValue">—</b><span id="kpiRiskyNote"></span></span>
+        {% if role_rank >= 2 %}
+        <span class="dash-stat" id="activeTile"><b id="kpiActiveValue">—</b><span id="kpiActiveNote"></span></span>
+        {% endif %}
+        <span class="dash-stat" id="kpiJobs"><b id="kpiJobsValue">—</b><span id="kpiJobsNote"></span></span>
+        <span class="dash-stat" id="kpiUpdated"><b id="kpiUpdatedValue">—</b><span id="kpiUpdatedNote"></span></span>
+      </div>
+    </div>
+    <div class="dash-weeks" id="weeksBlock">
+      <div class="dash-weeks-cap"><span class="lbl">{{ t('dashboard.weeks.title') }}</span><span class="dim mono" id="weeksTotal"></span></div>
+      <div class="dash-weeks-chart" id="weeksChart" role="img" aria-label="{{ t('dashboard.weeks.chart_aria') }}"></div>
+      <div class="dim dash-weeks-empty" id="weeksEmpty" hidden>{{ t('dashboard.weeks.empty') }}</div>
     </div>
   </div>
 
+  <section id="setupBanner" class="banner" data-min-role="admin" hidden>
+    <div>
+      <div class="banner-title">{{ t('dashboard.setup.title') }}</div>
+      <div class="muted">{{ t('dashboard.setup.text') }}</div>
+    </div>
+    <div class="banner-actions">
+      <a class="btn btn-primary" href="/settings?wizard=1">{{ t('dashboard.setup.open_wizard') }}</a>
+      <button type="button" class="btn" id="bannerDemoBtn">{{ t('dashboard.demo.load') }}</button>
+    </div>
+  </section>
+
+  {# The demo stack: dashboard.js shows it when GET /demo/status says the demo seed is on and the run is stored. #}
+  <section id="demoBanner" class="banner" hidden>
+    <div>
+      <div class="banner-title">{{ t('dashboard.demo_banner.title') }}</div>
+      <div class="muted">{{ t('dashboard.demo_banner.text') }}</div>
+    </div>
+    <div class="banner-actions">
+      <a class="btn btn-sm" href="/reports">{{ t('dashboard.demo_banner.open_archive') }}</a>
+      <button type="button" class="btn btn-sm" id="demoBannerDismiss">{{ t('dashboard.demo_banner.dismiss') }}</button>
+    </div>
+  </section>
+
+  <section id="emptyState" class="empty-state dash-empty" hidden>
+    <h3>{{ t('dashboard.empty.title') }}</h3>
+    <p>{{ t('dashboard.empty.lead') }}</p>
+    <div class="steps">
+      <div class="step"><span class="step-num">1</span><div class="step-title">{{ t('dashboard.empty.step1_title') }}</div><div class="step-desc">{{ t('dashboard.empty.step1_text') }}</div><a class="btn btn-sm" href="/settings#connections" data-min-role="admin">{{ t('dashboard.empty.open_settings') }}</a></div>
+      <div class="step"><span class="step-num">2</span><div class="step-title">{{ t('dashboard.empty.step2_title') }}</div><div class="step-desc">{{ t('dashboard.empty.step2_text') }}</div><button type="button" class="btn btn-sm" id="emptyDemoBtn" data-min-role="admin">{{ t('dashboard.demo.load') }}</button></div>
+      <div class="step"><span class="step-num">3</span><div class="step-title">{{ t('dashboard.empty.step3_title') }}</div><div class="step-desc">{{ t('dashboard.empty.step3_text') }}</div><a class="btn btn-sm btn-primary" href="/new" data-min-role="engineer">{{ t('dashboard.new_report') }}</a></div>
+    </div>
+  </section>
+
   {# Load tests going on now; dashboard.js fills it for engineers and admins and hides it when nothing runs. #}
-  <section class="card dash-active" id="activeRuns" aria-labelledby="activeTitle" hidden>
-    <div class="dash-card-head"><h3 id="activeTitle">Идут сейчас</h3><a class="btn btn-sm" href="/launch#runsPanel">Все прогоны</a></div>
+  <section class="dash-active" id="activeRuns" aria-labelledby="activeTitle" hidden>
+    <div class="dash-sec-head"><h3 id="activeTitle">{{ t('dashboard.active.title') }}</h3><a class="link" href="/launch#runsPanel">{{ t('dashboard.active.all_runs') }}</a></div>
     <div id="activeList" class="dash-active-list"></div>
     <div class="dim dash-jobs-more" id="activeMore" hidden></div>
   </section>
 
-  <section id="setupBanner" class="banner" data-min-role="admin" hidden>
-    <div>
-      <div class="banner-title">Похоже, LoadLens ещё не настроен</div>
-      <div class="muted">Пройдите мастер: подключение к базе, источникам метрик и LLM-провайдеру проверяется прямо в форме. Это займёт несколько минут.</div>
+  <section class="dash-jobs" id="jobsCard" hidden>
+    <div class="dash-sec-head"><h3>{{ t('dashboard.jobs.title') }}</h3><a class="link" href="/new" data-min-role="engineer">{{ t('dashboard.jobs.to_new_report') }}</a></div>
+    <div id="jobsList"></div>
+  </section>
+
+  {# The last run: a rule in the verdict color, figures against the SLA thresholds and, on the right, its load profile. #}
+  <section class="dash-run tone-na" id="lastCard" aria-labelledby="lastTitle">
+    <div class="dash-run-main">
+      <div class="lbl">{{ t('dashboard.hero.eyebrow') }}</div>
+      <div class="dash-run-head">
+        <h3 class="dash-run-title" id="lastTitle">—</h3>
+        <div class="dash-run-badges" id="lastBadges"></div>
+      </div>
+      <div class="dash-run-meta"><span id="lastMeta"></span><span id="lastPeriod"></span></div>
+      <div class="figs dash-run-figs" id="lastKpis"></div>
+      <div class="dash-run-actions">
+        <a class="btn btn-primary" id="lastReportLink" href="/reports" hidden>{{ t('dashboard.hero.open_report') }}</a>
+        <a class="btn" id="lastCompareLink" href="/compare" hidden>{{ t('dashboard.hero.compare_previous') }}</a>
+        <span class="dim" id="lastPrevNote"></span>
+      </div>
     </div>
-    <div class="banner-actions">
-      <a class="btn btn-primary" href="/settings?wizard=1">Открыть мастер</a>
-      <button type="button" class="btn" id="bannerDemoBtn">Загрузить демо-данные</button>
+    <div class="dash-run-profile" id="lastProfileBox" hidden>
+      <div class="dash-run-profile-cap"><span class="lbl">{{ t('dashboard.profile.title') }}</span><span class="mono" id="lastProfileSla"></span></div>
+      <div id="lastProfile"></div>
     </div>
   </section>
 
-  <section id="emptyState" class="card empty-state" hidden>
-    <h3>Отчётов пока нет</h3>
-    <p>Три шага, чтобы увидеть первый результат:</p>
-    <div class="steps">
-      <div class="step"><span class="step-num">1</span><div class="step-title">Проверить подключения</div><div class="step-desc">База данных, Prometheus/Grafana, метрики нагрузочного инструмента и LLM-провайдер — каждое соединение можно проверить кнопкой.</div><a class="btn btn-sm" href="/settings#connections" data-min-role="admin">Открыть настройки</a></div>
-      <div class="step"><span class="step-num">2</span><div class="step-title">Посмотреть демо-отчёт</div><div class="step-desc">Синтетический прогон с метриками, SLA-чеклистом и анализом — без внешних систем.</div><button type="button" class="btn btn-sm" id="emptyDemoBtn" data-min-role="admin">Загрузить демо-данные</button></div>
-      <div class="step"><span class="step-num">3</span><div class="step-title">Создать первый отчёт</div><div class="step-desc">Укажите окно теста, сервис и тип нагрузки; прогресс виден по фазам.</div><a class="btn btn-sm btn-primary" href="/new" data-min-role="engineer">Новый отчёт</a></div>
-    </div>
-  </section>
-
-  <section class="dash-tiles{% if role_rank >= 2 %} dash-tiles-5{% endif %}" id="dashTiles" aria-label="Сводка">
-    <div class="dash-tile">
-      <div class="dash-tile-label">Запусков за 7 дней</div>
-      <div class="dash-tile-value" id="kpiRunsValue">—</div>
-      <div class="dash-tile-note" id="kpiRunsNote">&nbsp;</div>
-    </div>
-    <div class="dash-tile">
-      <div class="dash-tile-label">Доля с рисками за 30 дней</div>
-      <div class="dash-tile-value" id="kpiRiskyValue">—</div>
-      <div class="dash-meter" aria-hidden="true"><span id="kpiRiskyMeter"></span></div>
-      <div class="dash-tile-note" id="kpiRiskyNote">&nbsp;</div>
-    </div>
-    {% if role_rank >= 2 %}
-    <div class="dash-tile" id="activeTile">
-      <div class="dash-tile-label">Идут тесты</div>
-      <div class="dash-tile-value" id="kpiActiveValue">—</div>
-      <div class="dash-tile-note" id="kpiActiveNote">&nbsp;</div>
-    </div>
-    {% endif %}
-    <div class="dash-tile">
-      <div class="dash-tile-label">Задачи в работе</div>
-      <div class="dash-tile-value" id="kpiJobsValue">—</div>
-      <div class="dash-tile-note" id="kpiJobsNote">&nbsp;</div>
-    </div>
-    <div class="dash-tile">
-      <div class="dash-tile-label">Последнее обновление</div>
-      <div class="dash-tile-value" id="kpiUpdatedValue">—</div>
-      <div class="dash-tile-note" id="kpiUpdatedNote">&nbsp;</div>
-    </div>
-  </section>
-
-  <div class="dash-main">
-    <section class="card dash-hero" id="lastCard" aria-labelledby="lastTitle">
-      <div class="dash-hero-head">
-        <div class="dash-hero-name">
-          <div class="dash-eyebrow">Последний запуск</div>
-          <h3 class="dash-hero-title" id="lastTitle">—</h3>
-          <div class="dim" id="lastMeta"></div>
-        </div>
-        <div class="dash-hero-badges" id="lastBadges"></div>
-      </div>
-      <div class="dash-hero-kpis" id="lastKpis"></div>
-      <div class="dash-hero-actions">
-        <a class="btn btn-primary" id="lastReportLink" href="/reports" hidden>Открыть отчёт</a>
-        <a class="btn" id="lastCompareLink" href="/compare" hidden>Сравнить с предыдущим</a>
-      </div>
-    </section>
-    <section class="card dash-weeks" aria-labelledby="weeksTitle">
-      <div class="dash-card-head"><h3 id="weeksTitle">Вердикты по неделям</h3><span class="dim" id="weeksTotal"></span></div>
-      <div class="dash-chart-wrap">
-        <canvas id="weeksChart" role="img" aria-label="Вердикты запусков по неделям"></canvas>
-        <div class="dash-chart-empty" id="weeksEmpty" hidden>Завершённых отчётов за 8 недель нет</div>
-      </div>
-    </section>
-    <section class="card dash-jobs" id="jobsCard" hidden>
-      <div class="dash-card-head"><h3>Задачи в работе</h3><a class="btn btn-sm" href="/new" data-min-role="engineer">К созданию отчёта</a></div>
-      <div id="jobsList"></div>
-    </section>
+  <div class="dash-sec-head"><h3>{{ t('dashboard.services.title') }}</h3><span class="dim">{{ t('dashboard.services.subtitle') }}</span></div>
+  <div class="table-wrap">
+    <table class="grid data-table dash-services" id="servicesTable">
+      <thead><tr><th>{{ t('dashboard.services.col_service') }}</th><th>{{ t('dashboard.services.col_last_run') }}</th><th>{{ t('dashboard.services.col_verdict') }}</th><th class="n">Max RPS</th><th>{{ t('dashboard.services.col_trend') }}</th><th><span class="visually-hidden">{{ t('dashboard.services.col_actions') }}</span></th></tr></thead>
+      <tbody id="servicesBody"></tbody>
+    </table>
   </div>
 
-  <div class="section-head"><h3>По сервисам</h3><span class="dim">последний вердикт и Max RPS пяти последних запусков, от старых к новым</span></div>
-  <div class="card">
-    <div class="table-wrap">
-      <table class="data-table" id="servicesTable">
-        <thead><tr><th>Сервис</th><th>Последний запуск</th><th>Вердикт</th><th class="num">Max RPS</th><th>Тренд</th><th><span class="visually-hidden">Действия</span></th></tr></thead>
-        <tbody id="servicesBody"></tbody>
-      </table>
-    </div>
-  </div>
-
-  <div class="section-head"><h3>Недавние запуски</h3><a href="/reports">Весь архив →</a></div>
-  <div class="card">
-    <div class="table-wrap">
-      <table class="data-table" id="recentTable">
-        <thead><tr><th>Запуск</th><th>Сервис</th><th>Тип теста</th><th>Вердикт</th><th>Отчёт создан</th></tr></thead>
-        <tbody id="recentBody"></tbody>
-      </table>
-    </div>
+  <div class="dash-sec-head"><h3>{{ t('dashboard.recent.title') }}</h3><a class="link" href="/reports">{{ t('dashboard.recent.all_archive') }}</a></div>
+  <div class="table-wrap">
+    <table class="grid data-table dense dash-recent" id="recentTable">
+      <thead><tr><th>{{ t('dashboard.recent.col_run') }}</th><th>{{ t('dashboard.recent.col_service') }}</th><th>{{ t('dashboard.recent.col_test_type') }}</th><th>{{ t('dashboard.recent.col_verdict') }}</th><th class="n">{{ t('dashboard.recent.col_created') }}</th></tr></thead>
+      <tbody id="recentBody"></tbody>
+    </table>
   </div>
 </div>
 {% endblock %}

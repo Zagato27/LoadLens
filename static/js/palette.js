@@ -1,5 +1,6 @@
-// Command palette: Ctrl+K / Cmd+K or the «Поиск» button in the sidebar foot (#paletteOpen).
-// Sources: pages from the sidebar navigation (Jinja already filtered it by role), reports from
+// SPDX-License-Identifier: Apache-2.0
+// Command palette: Ctrl+K / Cmd+K or the «Search» button of the top bar (#paletteOpen).
+// Sources: pages from the top bar navigation (Jinja already filtered it by role), reports from
 // GET /runs, project areas (LL.projectAreas) and actions. The «/» key focuses the page's own search
 // field (marked with data-slash-focus, e.g. the archive) unless focus is already in a text field.
 (function () {
@@ -10,15 +11,16 @@
   const DEBOUNCE_MS = 250;
   const NON_TEXT_INPUTS = ['checkbox', 'radio', 'button', 'submit', 'reset', 'range', 'color', 'file', 'image'];
 
-  // Extra words a page is found by (the label is always searched).
+  // Extra words a page is found by (the label is always searched): Russian and English, so a page is found by
+  // its name in either language whatever the UI language is. Not shown, so not translated.
   const PAGE_KEYWORDS = {
-    '/': 'главная обзор dashboard дашборд',
-    '/launch': 'запустить нагрузку генератор launch',
-    '/reports': 'отчёты список история reports',
-    '/compare': 'сравнить baseline compare',
-    '/forecasting': 'прогноз мощности usl forecast',
-    '/settings': 'конфигурация источники сервисы settings',
-    '/account': 'профиль пароль токены api account',
+    '/': 'главная обзор дэшборд дашборд dashboard home overview',
+    '/launch': 'запуск теста запустить нагрузку генератор launch run test',
+    '/reports': 'архив отчёты список история archive reports history',
+    '/compare': 'сравнение сравнить baseline compare',
+    '/forecasting': 'прогнозирование прогноз мощности usl forecasting capacity',
+    '/settings': 'настройки конфигурация источники сервисы settings configuration',
+    '/account': 'профиль пароль токены api account profile password tokens',
   };
 
   // ---- pure helpers (LL.palette._internals) ------------------------------------------------
@@ -52,7 +54,7 @@
       .map((entry) => entry.item);
   }
 
-  // links: [{href, label, icon}] read from the sidebar. /new becomes the «Новый отчёт» action instead.
+  // links: [{href, label, icon}] read from the top bar. /new becomes the «Новый отчёт» action instead.
   function pageItems(links) {
     const seen = new Set();
     const out = [];
@@ -66,35 +68,57 @@
     return out;
   }
 
-  // canCreate: the sidebar offers /new (engineers and admins); theme: the current one.
+  // Theme of the page for the actions: the resolved theme and the stored mode of LL.ui.theme ('system' without a
+  // stored choice). Without ui.js the mode is unknown ('') and the page counts as dark.
+  function themeState() {
+    const theme = LL.ui && LL.ui.theme ? LL.ui.theme : null;
+    return {
+      theme: theme && typeof theme.current === 'function' ? theme.current() : 'dark',
+      themeMode: theme && typeof theme.mode === 'function' ? theme.mode() : '',
+    };
+  }
+
+  // canCreate: the top bar offers /new (engineers and admins); theme: the current one; themeMode: the stored mode
+  // (themeState); languageSwitch: the top bar menu offers the interface language (off with
+  // appearance.language_switch=false); locale: the current language.
   function actionItems(options) {
     const opts = options || {};
     const out = [];
     if (opts.canCreate) {
-      out.push({ kind: 'action', key: 'action:new', label: 'Новый отчёт', href: '/new', icon: 'file-plus', keywords: 'создать анализ new report' });
+      out.push({ kind: 'action', key: 'action:new', label: LL.t('palette.action.new_report'), href: '/new', icon: 'file-plus', keywords: 'создать анализ new report' });
     }
     const light = opts.theme === 'light';
     out.push({
       kind: 'action', key: 'action:theme', action: 'theme',
-      label: light ? 'Включить тёмную тему' : 'Включить светлую тему',
+      label: light ? LL.t('palette.action.theme_dark') : LL.t('palette.action.theme_light'),
       icon: light ? 'moon' : 'sun',
       keywords: 'сменить тему оформление тёмная светлая theme dark light',
     });
+    // «Theme as in the system» is offered whenever the mode is not system already: after an explicit light or dark
+    // choice (made here, in the view menu or in another tab) and when the mode is unknown.
     if (opts.themeMode !== 'system') {
       out.push({
         kind: 'action', key: 'action:theme-system', action: 'theme-system',
-        label: 'Тема как в системе', icon: 'sliders',
+        label: LL.t('palette.action.theme_system'), icon: 'sliders',
         keywords: 'тема системная авто оформление theme system auto',
+      });
+    }
+    if (opts.languageSwitch) {
+      // The label is in the language it switches to («Switch to English» in ru, «Переключить на русский» in en).
+      out.push({
+        kind: 'action', key: 'action:lang', action: 'lang', lang: opts.locale === 'en' ? 'ru' : 'en',
+        label: LL.t('palette.action.switch_language'), icon: 'globe',
+        keywords: 'язык интерфейса русский английский language interface english russian',
       });
     }
     return out;
   }
 
-  // areas: LL.projectAreas (strings or {id, title}); «Все области» first, the active one marked.
+  // areas: LL.projectAreas (strings or {id, title}); «All areas» first, the active one marked.
   // Empty when there is nothing to switch to.
   function areaItems(areas, active) {
     const current = String(active || '');
-    const list = [{ id: '', title: 'Все области' }];
+    const list = [{ id: '', title: LL.t('ui.project_area.all') }];
     (Array.isArray(areas) ? areas : []).forEach((a) => {
       const id = a && typeof a === 'object' ? String(a.id || '') : String(a || '');
       if (!id || list.some((x) => x.id === id)) return;
@@ -104,14 +128,14 @@
     if (list.length < 2) return [];
     return list.map((x) => ({
       kind: 'area', key: `area:${x.id}`, area: x.id, label: x.title, icon: 'columns',
-      current: x.id === current, meta: x.id === current ? 'текущая' : '', keywords: `область проект ${x.id}`,
+      current: x.id === current, meta: x.id === current ? LL.t('palette.area.current') : '', keywords: `область проект area project ${x.id}`,
     }));
   }
 
   function runItems(runs, now) {
     return (Array.isArray(runs) ? runs : []).filter((r) => r && r.run_name).map((r) => {
       const when = r.end_time || r.start_time || r.report_created_at;
-      const meta = [r.service, when ? LL.relativeTime(when, now) : '', r.verdict].filter(Boolean).join(' · ');
+      const meta = [r.service, when ? LL.relativeTime(when, now) : '', r.verdict ? LL.verdictLabel(r.verdict) : ''].filter(Boolean).join(' · ');
       return { kind: 'run', key: `run:${r.run_name}`, label: r.run_name, meta, href: LL.reportUrl(r), verdict: r.verdict || '' };
     });
   }
@@ -123,14 +147,14 @@
     const searching = !!normalize(query);
     const groups = [];
     const add = (id, title, items, note) => { if (items.length || note) groups.push({ id, title, items, note: note || '' }); };
-    add('pages', 'Страницы', filterItems(src.pages, query));
-    add('actions', 'Действия', filterItems(src.actions, query));
+    add('pages', LL.t('palette.group.pages'), filterItems(src.pages, query));
+    add('actions', LL.t('palette.group.actions'), filterItems(src.actions, query));
     let runsNote = '';
-    if (runs.status === 'loading') runsNote = searching ? 'Ищем отчёты…' : 'Загружаем отчёты…';
-    else if (runs.status === 'error') runsNote = 'Не удалось загрузить отчёты';
-    else if (runs.status === 'ready' && searching && !(runs.items || []).length) runsNote = 'Отчётов не найдено';
-    add('runs', searching ? 'Отчёты' : 'Недавние отчёты', runs.status === 'ready' ? (runs.items || []) : [], runsNote);
-    add('areas', 'Проектные области', filterItems(src.areas, query));
+    if (runs.status === 'loading') runsNote = searching ? LL.t('palette.runs.searching') : LL.t('palette.runs.loading');
+    else if (runs.status === 'error') runsNote = LL.t('palette.runs.error');
+    else if (runs.status === 'ready' && searching && !(runs.items || []).length) runsNote = LL.t('palette.runs.none');
+    add('runs', searching ? LL.t('palette.group.runs') : LL.t('palette.group.recent_runs'), runs.status === 'ready' ? (runs.items || []) : [], runsNote);
+    add('areas', LL.t('palette.group.areas'), filterItems(src.areas, query));
     return groups;
   }
 
@@ -162,7 +186,7 @@
   }
 
   palette._internals = {
-    normalize, matchRank, filterItems, pageItems, actionItems, areaItems, runItems, buildGroups, moveIndex,
+    normalize, matchRank, filterItems, pageItems, themeState, actionItems, areaItems, runItems, buildGroups, moveIndex,
     isOpenShortcut, isTextTarget, isSlashShortcut, RUNS_LIMIT, RECENT_RUNS_LIMIT, DEBOUNCE_MS,
   };
 
@@ -193,13 +217,13 @@
       const label = a.querySelector('.nav-label');
       links.push({ href: a.getAttribute('href'), label: (label || a).textContent.trim(), icon: ref.replace(/^#i-/, '') });
     });
-    document.querySelectorAll('.sidebar-foot a.menu-link[href]').forEach((a) => {
+    document.querySelectorAll('#appSidebar .user-menu a.menu-link[href]').forEach((a) => {
       links.push({ href: a.getAttribute('href'), label: a.textContent.trim(), icon: '' });
     });
     return links;
   }
 
-  // While a password change is enforced the sidebar has no links and data calls are refused.
+  // While a password change is enforced the top bar has no links and data calls are refused.
   function dataAllowed() {
     return !!document.querySelector('#appNav a.nav-btn[href]');
   }
@@ -208,11 +232,11 @@
     const links = navLinks();
     return {
       pages: pageItems(links),
-      actions: actionItems({
+      actions: actionItems(Object.assign(themeState(), {
         canCreate: links.some((l) => l.href === '/new'),
-        theme: LL.ui && LL.ui.theme ? LL.ui.theme.current() : 'dark',
-        themeMode: LL.ui && LL.ui.theme && LL.ui.theme.mode ? LL.ui.theme.mode() : '',
-      }),
+        languageSwitch: !!(LL.ui && LL.ui.locale && document.querySelector('#viewMenu [data-view-pref="lang"]')),
+        locale: LL.ui && LL.ui.locale ? LL.ui.locale.current() : LL.locale,
+      })),
       areas: dataAllowed() ? areaItems(LL.projectAreas, LL.activeProjectArea) : [],
       runs: runsState,
     };
@@ -240,12 +264,12 @@
       if (group.note) html += `<div class="palette-note" aria-hidden="true">${esc(group.note)}</div>`;
       html += '</div>';
     });
-    if (!groups.length) html = '<div class="palette-empty">Ничего не найдено</div>';
+    if (!groups.length) html = `<div class="palette-empty">${esc(LL.t('palette.empty'))}</div>`;
     listEl.innerHTML = html;
     let idx = flat.findIndex((item) => item.key === activeKey);
     if (idx < 0) idx = flat.length ? 0 : -1;
     highlight(idx);
-    if (!switching) statusEl.textContent = flat.length ? `Найдено: ${flat.length}` : 'Ничего не найдено';
+    if (!switching) statusEl.textContent = flat.length ? LL.t('palette.found', { n: flat.length }) : LL.t('palette.empty');
   }
 
   function highlight(idx) {
@@ -305,7 +329,7 @@
     if (item.current) { close(); return; }
     switching = true;
     input.disabled = true;
-    statusEl.textContent = `Переключаем область «${item.label}»…`;
+    statusEl.textContent = LL.t('palette.switching_area', { name: item.label });
     listEl.setAttribute('aria-busy', 'true');
     try {
       await fetch('/project_area', {
@@ -331,6 +355,11 @@
       close();
       return;
     }
+    if (item.action === 'lang') {
+      close();
+      if (LL.ui && LL.ui.locale) LL.ui.locale.set(item.lang);
+      return;
+    }
     if (!item.href) return;
     if (newTab) { window.open(item.href, '_blank', 'noopener'); return; }
     close(false);
@@ -353,17 +382,17 @@
   function build() {
     dialog = document.createElement('dialog');
     dialog.className = 'll-dialog palette-dialog';
-    dialog.setAttribute('aria-label', 'Командная палитра');
+    dialog.setAttribute('aria-label', LL.t('palette.dialog_label'));
     dialog.innerHTML = [
       '<div class="palette-search">',
       '<svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>',
       '<input type="text" class="palette-input" role="combobox" aria-expanded="true" aria-controls="paletteList" aria-autocomplete="list"',
-      ' aria-label="Поиск страниц, отчётов, областей и действий" placeholder="Страница, отчёт или действие…" autocomplete="off" spellcheck="false" />',
+      ` aria-label="${esc(LL.t('palette.search_label'))}" placeholder="${esc(LL.t('palette.search_placeholder'))}" autocomplete="off" spellcheck="false" />`,
       '<kbd class="palette-kbd" aria-hidden="true">Esc</kbd>',
       '</div>',
-      '<div class="palette-list" id="paletteList" role="listbox" aria-label="Результаты"></div>',
-      '<div class="palette-foot" aria-hidden="true"><span><kbd class="palette-kbd">↑</kbd><kbd class="palette-kbd">↓</kbd> выбор</span>',
-      '<span><kbd class="palette-kbd">Enter</kbd> открыть</span><span><kbd class="palette-kbd">Ctrl</kbd>+<kbd class="palette-kbd">Enter</kbd> в новой вкладке</span></div>',
+      `<div class="palette-list" id="paletteList" role="listbox" aria-label="${esc(LL.t('palette.results'))}"></div>`,
+      `<div class="palette-foot" aria-hidden="true"><span><kbd class="palette-kbd">↑</kbd><kbd class="palette-kbd">↓</kbd> ${esc(LL.t('palette.foot.select'))}</span>`,
+      `<span><kbd class="palette-kbd">Enter</kbd> ${esc(LL.t('palette.foot.open'))}</span><span><kbd class="palette-kbd">Ctrl</kbd>+<kbd class="palette-kbd">Enter</kbd> ${esc(LL.t('palette.foot.new_tab'))}</span></div>`,
       '<div class="visually-hidden" role="status" aria-live="polite"></div>',
     ].join('');
     document.body.appendChild(dialog);
@@ -448,7 +477,7 @@
     const trigger = document.getElementById('paletteOpen');
     if (!trigger) return;
     trigger.setAttribute('aria-haspopup', 'dialog');
-    trigger.title = 'Поиск по страницам, отчётам и действиям';
+    trigger.title = LL.t('palette.trigger_title');
     trigger.addEventListener('click', open);
     const platform = String((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '');
     if (/mac|iphone|ipad/i.test(platform)) {

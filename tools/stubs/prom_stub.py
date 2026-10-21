@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Prometheus stub for a LoadLens sandbox: synthetic series for any PromQL query on 127.0.0.1:5092.
 
 How to run (own console, or in the background; Ctrl+C stops it):
@@ -6,7 +7,7 @@ How to run (own console, or in the background; Ctrl+C stops it):
     C:/Python312/python.exe tools/stubs/prom_stub.py --series 8 --steps 4 --delay-ms 20 --seed 7
 
 Point the sandbox at it in its settings_runtime.json (``tools/bench_endpoints.py --setup-stubs`` writes
-this and the rest of the stub configuration, see docs/perf-baseline.md, "Этап 3"):
+this and the rest of the stub configuration, see plans/perf-baseline.md, "Этап 3"):
 
     "data_sources": {"prometheus": {"title": "Prometheus", "type": "prometheus",
                                     "prometheus": {"url": "http://127.0.0.1:5092"}}},
@@ -31,7 +32,8 @@ profile of ``--steps`` equal steps across the requested window (``--steps 0``: f
 that look like percentages (``100 *``, ``(%)``, ``ratio``) stay within 0..100. Everything is a pure function
 of (``--seed``, query, series number, window, step): the same request always gets the same answer.
 
-Only 127.0.0.1/localhost addresses are served. Standard library only. ``--log FILE`` appends one JSON line
+Listens on 127.0.0.1/localhost; ``--host 0.0.0.0`` is for a container of the demo stack
+(docker/docker-compose.demo.yml). Standard library only. ``--log FILE`` appends one JSON line
 per request (off by default: a report makes about a hundred queries).
 """
 
@@ -56,6 +58,8 @@ DEFAULT_SERIES = 6
 DEFAULT_STEPS = 4
 DEFAULT_MAX_POINTS = 11000
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+# Inside a container (docker/docker-compose.demo.yml) the stub must answer the other containers.
+CONTAINER_HOSTS = frozenset({"0.0.0.0", "::"})
 VERSION = "2.53.0-loadlens-stub"
 # Labels every series carries, whatever the query: the keys of the label_keys_list of the bundled query packs.
 BASE_LABELS = (
@@ -346,7 +350,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prometheus stub for the LoadLens sandbox (see the module docstring).")
-    parser.add_argument("--host", default="127.0.0.1", help="address to listen on (local only)")
+    parser.add_argument("--host", default="127.0.0.1", help="address to listen on: 127.0.0.1/localhost, or 0.0.0.0 inside a container")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--series", type=int, default=DEFAULT_SERIES, help="series per query")
     parser.add_argument("--steps", type=int, default=DEFAULT_STEPS, help="load steps across the window (0 or 1: flat)")
@@ -355,8 +359,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--max-points", type=int, default=DEFAULT_MAX_POINTS, help="points per series above which a range query gets 400")
     parser.add_argument("--log", help="append one JSON line per query to this file")
     args = parser.parse_args(argv)
-    if args.host not in LOCAL_HOSTS:
-        parser.error("the stub listens on 127.0.0.1/localhost only")
+    if args.host not in LOCAL_HOSTS and args.host not in CONTAINER_HOSTS:
+        parser.error("the stub listens on 127.0.0.1/localhost, or on 0.0.0.0 inside a container")
     if args.series < 0 or args.max_points < 1:
         parser.error("--series must not be negative, --max-points must be positive")
     return args

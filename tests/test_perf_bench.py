@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Bench tooling: the Server-Timing header, the seed builders of tools/seed_bench_data.py, the statistics and
 the --during-job / --setup-stubs parts of tools/bench_endpoints.py, and the stubs of tools/stubs. Offline: no
 database; the only network is servers the tests start on 127.0.0.1 (stubs on port 0), with proxies off."""
@@ -133,17 +134,23 @@ def test_metric_rows_are_deterministic_and_cover_lt_and_jvm():
 
 
 def test_report_rows_follow_the_dashboard_rules():
+    from AI.verdicts import LEGACY, to_code
+
     assert seed.DASHBOARD_VERDICTS == dashboard.DASHBOARD_VERDICTS
     plan = seed.plan_runs(200, 10, 30, seed=3, now=NOW)
     seen_styles = set()
+    stored = Counter()
     for run in plan:
         rows = [dict(zip(seed.REPORT_COLUMNS, row)) for row in seed.report_rows(run, seed=3)]
         finals = [r for r in rows if r["domain"] == "final"]
         assert len(finals) == len(run.analyses)
         assert sorted(r["domain"] for r in rows) == sorted(["final", *seed.OTHER_DOMAINS] * len(run.analyses))
         for row in rows:
-            assert row["verdict"] in dashboard.DASHBOARD_VERDICTS and row["project_area"] == "bench"
-            assert row["sla_verdict"] in (None, *dashboard.DASHBOARD_VERDICTS)
+            # Codes mixed with the old labels, as a database written before the codes holds them.
+            assert to_code(row["verdict"]) in dashboard.DASHBOARD_VERDICTS and row["project_area"] == "bench"
+            assert row["verdict"] in (*dashboard.DASHBOARD_VERDICTS, *LEGACY)
+            assert row["sla_verdict"] in (None, *dashboard.DASHBOARD_VERDICTS, *LEGACY)
+            stored["label" if row["verdict"] in LEGACY else "code"] += 1
         for final in finals:
             parsed = final["parsed"].adapted
             section, field = seed.RPS_FIELD_BY_TEST_TYPE[run.test_type]
@@ -156,6 +163,7 @@ def test_report_rows_follow_the_dashboard_rules():
                 assert parsed_number == pytest.approx(run.max_rps)
             assert json.loads(final["text"]) == parsed
     assert seen_styles == {"number", "string", "tilde"}
+    assert 0.2 < stored["label"] / (stored["label"] + stored["code"]) < 0.4  # about 30 % old labels
 
 
 def test_report_rows_are_deterministic():
@@ -576,7 +584,7 @@ def test_llm_stub_over_http_answers_the_provider_code(local_without_proxy):
     with _serving(llm_stub, "--delay", "0", "--fail-every", "3") as url:
         llm_config = {"provider": "openai", "max_attempts": 1, "openai": {"api_base_url": f"{url}/v1", "api_key": "stub", "model": "stub-model", "verify": False}}
         text = ask_llm_with_text_data("Проанализируйте домен", json.dumps({"domain": "jvm", "sections": []}), llm_config=llm_config)
-        assert parse_llm_analysis_strict(text).verdict == "Успешно"
+        assert parse_llm_analysis_strict(text).verdict == "pass"  # the stub answers with the label, the analysis keeps the code
         ask_llm_with_text_data("prompt", json.dumps({"domain": "kafka"}), llm_config=llm_config)
         with pytest.raises(Exception):
             ask_llm_with_text_data("prompt", json.dumps({"domain": "kafka"}), llm_config=llm_config)  # third call: 500
@@ -739,10 +747,15 @@ def test_during_job_table_renders_and_parses_back():
 
 
 def test_the_thread_baseline_of_the_docs_is_a_compare_source():
-    """docs/perf-baseline.md, "Этап 3": the first during-job table is the thread-mode baseline B6 compares with."""
-    tables = bench.parse_during_tables((ROOT_DIR / "docs" / "perf-baseline.md").read_text(encoding="utf-8"))
+    """plans/perf-baseline.md, "Этап 3": the first during-job table is the thread-mode baseline B6 compares with.
+
+    plans/ holds the maintainer's notes and is not in the repository, so the check runs only where it exists."""
+    baseline = ROOT_DIR / "plans" / "perf-baseline.md"
+    if not baseline.is_file():
+        pytest.skip("plans/perf-baseline.md is maintainer-local (plans/ is ignored by git)")
+    tables = bench.parse_during_tables(baseline.read_text(encoding="utf-8"))
     assert len(tables) >= 3
-    first = bench.load_during_baseline(str(ROOT_DIR / "docs" / "perf-baseline.md"), 1)
+    first = bench.load_during_baseline(str(baseline), 1)
     assert [row["path"] for row in first] == [*bench.DURING_JOB_ENDPOINTS, bench.JOB_STATUS_ROW]
     assert all(row["job_p95"] and row["job_count"] > 0 for row in first)
 
@@ -911,7 +924,7 @@ class _FakeApp(BaseHTTPRequestHandler):
             return self._reply(200, b"<html></html>", "text/html")
         if self.path.startswith("/llm_reports?"):
             state["llm_reports"] = self.path
-            return self._reply(200, [{"domain": "final", "verdict": "Успешно"}, {"domain": "jvm", "verdict": "Успешно"}])
+            return self._reply(200, [{"domain": "final", "verdict": "pass"}, {"domain": "jvm", "verdict": "pass"}])
         state["gets"].append(self.path)
         return self._reply(200, {"ok": True})
 
@@ -962,7 +975,7 @@ def test_during_job_runs_the_report_and_prints_both_tables(outcome, tmp_path, ca
     tables = bench.parse_during_tables(printed)
     assert len(tables) == 1 and tables[0][-1]["path"] == bench.JOB_STATUS_ROW and tables[0][-1]["job_count"] >= 4
     if outcome == "done":
-        assert code == 0 and job["report"]["ok"] and job["report"]["final_verdict"] == "Успешно" and job["report"]["domains"] == 2
+        assert code == 0 and job["report"]["ok"] and job["report"]["final_verdict"] == "pass" and job["report"]["domains"] == 2
         assert state["deleted"] == ("/runs/" + quote(body["run_name"], safe=""), "tok-1")
         assert "удалён (`DELETE /runs` → 200)" in printed and "По фазам задачи" in printed
     else:
@@ -976,7 +989,7 @@ def test_job_summary_lists_duration_phases_stubs_and_report():
         "phases": [["сбор метрик и подготовка", 16.3], ["анализ ИИ по доменам", 24.2], ["итоговый анализ и сохранение", None]],
         "llm_stub": {"calls": 28, "by_kind": {"analysis": 21, "judge": 7}, "delay_sec": 2.0, "max_in_flight": 2},
         "prometheus_stub": {"requests": {"query_range": 69}, "points": 99774},
-        "report": {"run_name": "bench-job-1", "page_url": "/reports/r1", "page_status": 200, "llm_status": 200, "domains": 7, "final_verdict": "Успешно", "deleted": 200},
+        "report": {"run_name": "bench-job-1", "page_url": "/reports/r1", "page_status": 200, "llm_status": 200, "domains": 7, "final_verdict": "pass", "deleted": 200},
         "rows": [{"path": "/x", "job_count": 3}, {"path": "/y", "job_count": 50}],
         "requests": 1000, "no_answer": 10,
     }

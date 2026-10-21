@@ -1,0 +1,5 @@
+No numeric SLA is set for this service. Do not invent norms (using "generally accepted", "recommended" or
+"world practice" thresholds is FORBIDDEN). Assess the relative change of metrics across
+steps (step_table.change_vs_first_pct, per_step), the anomalies (anomalies) and the difference from baseline.
+Assign severity by the size and persistence of a change: growth faster than the load or growth under an unchanged
+load is a risk; no change while the load grows is normal.

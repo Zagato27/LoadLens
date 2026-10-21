@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Pure helpers of static/js/dashboard.js (LL.dashboard._internals), run under Node."""
 
 import json
@@ -19,12 +20,13 @@ def call(expression):
     return run_js(FILES, expression)
 
 
+# Verdicts are codes as /dashboard_data sends them; the page shows the Russian labels.
 HISTORY = [
-    {"run_name": "r5", "run_id": "id5", "created_at": "2026-10-15T10:00:00Z", "verdict": "Есть риски", "max_rps": 240, "test_type": "step"},
-    {"run_name": "r4", "run_id": "", "created_at": "2026-10-14T10:00:00Z", "verdict": "Успешно", "max_rps": 120, "test_type": "soak"},
-    {"run_name": "r3", "run_id": "id3", "created_at": "2026-10-13T10:00:00Z", "verdict": "Успешно", "max_rps": 200, "test_type": "step"},
-    {"run_name": "r2", "run_id": "id2", "created_at": "2026-10-12T10:00:00Z", "verdict": "Провал", "max_rps": None, "test_type": ""},
-    {"run_name": "r1", "run_id": "id1", "created_at": "2026-10-11T10:00:00Z", "verdict": "Недостаточно данных", "max_rps": 180, "test_type": "step"},
+    {"run_name": "r5", "run_id": "id5", "created_at": "2026-10-15T10:00:00Z", "verdict": "risk", "max_rps": 240, "test_type": "step"},
+    {"run_name": "r4", "run_id": "", "created_at": "2026-10-14T10:00:00Z", "verdict": "pass", "max_rps": 120, "test_type": "soak"},
+    {"run_name": "r3", "run_id": "id3", "created_at": "2026-10-13T10:00:00Z", "verdict": "pass", "max_rps": 200, "test_type": "step"},
+    {"run_name": "r2", "run_id": "id2", "created_at": "2026-10-12T10:00:00Z", "verdict": "fail", "max_rps": None, "test_type": ""},
+    {"run_name": "r1", "run_id": "id1", "created_at": "2026-10-11T10:00:00Z", "verdict": "no_data", "max_rps": 180, "test_type": "step"},
 ]
 
 
@@ -87,14 +89,15 @@ def test_sla_badge(sla, expected):
 
 def test_weeks_model():
     weeks = [
-        {"week_start": "2026-10-05", "counts": {"Успешно": 2, "Провал": 1}},
-        {"week_start": "2026-10-12", "counts": {"Есть риски": 1, "Недостаточно данных": "3"}},
+        {"week_start": "2026-10-05", "counts": {"pass": 2, "fail": 1}},
+        {"week_start": "2026-10-12", "counts": {"risk": 1, "no_data": "3"}},
         {"week_start": "2026-12-28", "counts": {}},
     ]
     model = call(f"{I}.weeksModel({js(weeks)})")
     assert model["labels"] == ["05.10", "12.10", "28.12"]
     assert model["ranges"] == ["05.10–11.10", "12.10–18.10", "28.12–03.01"]
-    assert [s["verdict"] for s in model["series"]] == ["Успешно", "Есть риски", "Провал", "Недостаточно данных"]
+    assert [s["verdict"] for s in model["series"]] == ["pass", "risk", "fail", "no_data"]
+    assert [s["label"] for s in model["series"]] == ["Успешно", "Есть риски", "Провал", "Недостаточно данных"]
     assert [s["tone"] for s in model["series"]] == ["ok", "warn", "fail", "na"]
     assert [s["values"] for s in model["series"]] == [[2, 0, 0], [0, 1, 0], [1, 0, 0], [0, 3, 0]]
     assert model["totals"] == [3, 4, 0] and model["total"] == 7
@@ -106,20 +109,6 @@ def test_weeks_model_of_nothing():
     model = call(f"{I}.weeksModel(undefined)")
     assert model == {"labels": [], "ranges": [], "series": model["series"], "totals": [], "total": 0}
     assert all(s["values"] == [] for s in model["series"])
-
-
-@pytest.mark.parametrize(
-    ("values", "visible", "expected"),
-    [
-        ([2, 1, 0, 0], None, 1),
-        ([2, 1, 0, 3], None, 3),
-        ([2, 1, 0, 3], [True, True, True, False], 1),
-        ([0, 0, 0, 0], None, -1),
-        ([], None, -1),
-    ],
-)
-def test_top_segment_index(values, visible, expected):
-    assert call(f"{I}.topSegmentIndex({js(values)}, {js(visible)})") == expected
 
 
 def test_spark_points_geometry():
@@ -144,24 +133,26 @@ def test_spark_points_flat_and_single():
 
 def test_sparkline_markup():
     svg = call(f"{I}.sparkline({js(HISTORY)})")
-    assert svg.startswith('<svg class="dash-spark"') and 'role="img"' in svg
+    assert svg.startswith('<svg class="dash-spark" viewBox="0 0 110 26"') and 'role="img"' in svg
     # The line joins step runs only and breaks at the step run without RPS: r1 alone (no line), then r3-r5;
-    # the soak run r4 between them is a faded point off the line.
+    # the soak run r4 between them is a faded square off the line.
     lines = re.findall(r'<polyline class="dash-spark-line" points="([^"]+)"', svg)
-    assert lines == ["66,14.3 125,7"]
-    dots = re.findall(r'<circle class="(dash-spark-dot [^"]+)"[^>]*r="(\d+)"', svg)
+    assert lines == ["55,10 106,4"]
+    # Verdict squares centered on the points; the newest one is larger.
+    dots = re.findall(r'<rect class="(dash-spark-dot [^"]+)" x="([^"]+)" y="([^"]+)" width="(\d+)"', svg)
     assert [d[0] for d in dots] == [
         "dash-spark-dot na", "dash-spark-dot fail empty", "dash-spark-dot ok", "dash-spark-dot ok other", "dash-spark-dot warn",
     ]
-    assert [d[1] for d in dots] == ["4", "4", "4", "4", "5"]
-    assert svg.count('class="dash-spark-hit"') == 5
+    assert [d[3] for d in dots] == ["5", "5", "5", "5", "7"]
+    assert (dots[2][1], dots[2][2]) == ("52.5", "7.5") and (dots[4][1], dots[4][2]) == ("102.5", "0.5")
+    assert svg.count('class="dash-spark-hit"') == 5 and "<circle" not in svg
     assert "<title>r5 · 2026-10-15 10:00 · 240.0 RPS · Ступенчатый (max perf) · Есть риски</title>" in svg
     assert "RPS нет" in svg
     assert 'aria-label="Max RPS запусков от старых к новым: 180.0, нет данных, 200.0, 120.0, 240.0"' in svg
 
 
 def test_sparkline_escapes_names_and_handles_empty():
-    history = [{"run_name": '<img src=x onerror="1">', "verdict": "Успешно", "max_rps": 1}]
+    history = [{"run_name": '<img src=x onerror="1">', "verdict": "pass", "max_rps": 1}]
     svg = call(f"{I}.sparkline({js(history)})")
     assert "<img" not in svg and "&lt;img" in svg
     assert call(f"{I}.sparkline([])") == '<span class="dim">—</span>'
@@ -215,10 +206,10 @@ def test_jobs_tile():
 
 
 def test_service_history_falls_back_to_verdicts():
-    svc = {"service": "a", "last_run": "r2", "run_id": "id2", "verdict": "Провал", "max_rps": 10, "test_type": "step", "recent_verdicts": ["Провал", "Успешно"]}
+    svc = {"service": "a", "last_run": "r2", "run_id": "id2", "verdict": "fail", "max_rps": 10, "test_type": "step", "recent_verdicts": ["fail", "pass"]}
     history = call(f"{I}.serviceHistory({js(svc)})")
     assert history[0]["run_name"] == "r2" and history[0]["max_rps"] == 10
-    assert history[1] == {"verdict": "Успешно", "max_rps": None}
+    assert history[1] == {"verdict": "pass", "max_rps": None}
     assert call(f"{I}.serviceHistory({js(dict(svc, history=HISTORY))}).length") == 5
 
 
@@ -292,7 +283,10 @@ def test_menu_badge_counts_running_tests():
 
 
 def test_manual_verdict_pill_is_marked():
-    manual = {"verdict": "Есть риски", "reason": "деградация <стенда>", "author": "ivanov", "changed_at": "2026-10-17T12:00:00Z"}
-    html = call(f"LL.dashboard._internals.verdictPill('Есть риски', '', {js(manual)})")
-    assert 'class="pill warn"' in html and "verdict-manual-mark" in html and "&lt;стенда&gt;" in html
-    assert "verdict-manual-mark" not in call("LL.dashboard._internals.verdictPill('Провал')")
+    manual = {"verdict": "risk", "reason": "деградация <стенда>", "author": "ivanov", "changed_at": "2026-10-17T12:00:00Z"}
+    html = call(f"LL.dashboard._internals.verdictPill('risk', '', {js(manual)})")
+    assert 'class="pill warn"' in html and ">Есть риски</span>" in html and "verdict-manual-mark" in html and "&lt;стенда&gt;" in html
+    assert "verdict-manual-mark" not in call("LL.dashboard._internals.verdictPill('fail')")
+    # A missing verdict and an old label (an open tab of an older page) still render.
+    assert 'class="pill na"' in call("LL.dashboard._internals.verdictPill(null)") and ">Недостаточно данных<" in call("LL.dashboard._internals.verdictPill('')")
+    assert 'class="pill fail"' in call("LL.dashboard._internals.verdictPill('Провал')")

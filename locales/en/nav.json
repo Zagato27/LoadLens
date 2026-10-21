@@ -1,0 +1,23 @@
+{
+  "nav.account": "Profile and API tokens",
+  "nav.area_prefix": "area",
+  "nav.brand_home": "LoadLens — go to the dashboard",
+  "nav.item.archive": "Archive",
+  "nav.item.compare": "Compare tests",
+  "nav.item.dashboard": "Dashboard",
+  "nav.item.forecasting": "Forecasting",
+  "nav.item.launch": "Run a test",
+  "nav.item.new": "New report",
+  "nav.item.settings": "Settings",
+  "nav.lang.label": "Language",
+  "nav.logout": "Sign out",
+  "nav.main": "Main navigation",
+  "nav.project_area": "Project area",
+  "nav.search": "Search",
+  "nav.skip_link": "Skip to content",
+  "nav.theme.label": "Theme",
+  "nav.theme.title": "Interface theme",
+  "nav.user_menu": "User menu",
+  "nav.view.label": "View",
+  "nav.view.title": "Interface theme and language"
+}

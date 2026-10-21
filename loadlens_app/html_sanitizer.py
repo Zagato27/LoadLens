@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Allow-list sanitizer for the engineer's notes, which arrive as HTML from a contenteditable editor.
 
 Only formatting tags survive, attributes are dropped except a link's ``href`` with a safe scheme, and

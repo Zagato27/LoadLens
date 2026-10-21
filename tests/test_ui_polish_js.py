@@ -1,4 +1,7 @@
-"""Stage 5 of docs/ui-plan.md in ui.js: theme modes with "system", empty states, card labels.
+# SPDX-License-Identifier: Apache-2.0
+"""Stage 5 of plans/ui-plan.md in ui.js: theme modes with "system", empty states, card labels; stage 5 of
+plans/instrument-ui-plan.md in charts.js and palette.js: the legend list without a separator, the highlighted step of
+the load profile, the «system theme» command of the palette.
 
 Runs under Node through tests/js_harness.py (skipped when node is absent). A setup file replaces
 ``window.matchMedia`` before ui.js loads, so the OS color scheme can be switched from a test.
@@ -7,10 +10,11 @@ Runs under Node through tests/js_harness.py (skipped when node is absent). A set
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from tests.js_harness import run_js, theme_css_vars
+from tests.js_harness import REPO_ROOT, run_js, theme_css_vars
 
 UI = ["static/js/ui.js"]
 
@@ -69,9 +73,9 @@ def test_system_mode_follows_os_switch_and_restyles_charts(os_scheme):
         __os.setLight(false);
         ({ before, afterLight, after: LL.ui.theme.current(), seen, mode: LL.ui.theme.mode() })
     """, local_storage={"loadlens.theme": "system"}, dom_ready=True)
-    assert result["before"] == ["dark", css["dark"]["--chart-text"]]
+    assert result["before"] == ["dark", css["dark"]["--dim"]]
     # ui.js registers restyleCharts on DOMContentLoaded, so Chart.js defaults follow the OS switch.
-    assert result["afterLight"] == ["light", css["light"]["--chart-text"], "light"]
+    assert result["afterLight"] == ["light", css["light"]["--dim"], "light"]
     assert result["after"] == "dark"
     # A repeated OS event with the same scheme does not notify again.
     assert result["seen"] == ["light", "dark"]
@@ -115,11 +119,20 @@ def test_toggle_from_system_switches_to_explicit_opposite(os_scheme):
     assert result == ["dark", "dark", "dark"]
 
 
-def test_unknown_mode_falls_back_to_dark_and_no_choice_keeps_page_theme():
-    assert run_js(UI, "LL.ui.theme.set('purple'); [LL.ui.theme.mode(), LL.ui.theme.current()]", theme="light") == ["dark", "dark"]
-    # Without a stored choice the mode is the theme the page was rendered with.
-    assert run_js(UI, "[LL.ui.theme.mode(), LL.ui.theme.current()]", theme="light") == ["light", "light"]
-    assert run_js(UI, "LL.ui.theme.mode()", local_storage={"loadlens.theme": "bogus"}) == "dark"
+def test_unknown_mode_and_no_choice_follow_the_os(os_scheme):
+    # "system" is the default (plans/instrument-ui-plan.md): an unknown or missing choice follows the OS.
+    assert run_js(UI, "LL.ui.theme.set('purple'); [LL.ui.theme.mode(), LL.ui.theme.current()]") == ["system", "dark"]
+    assert run_js(UI, "LL.ui.theme.set('purple'); [LL.ui.theme.mode(), LL.ui.theme.current()]", theme="light") == ["system", "light"]
+    assert run_js(os_scheme(True), "LL.ui.theme.set('purple'); [LL.ui.theme.mode(), LL.ui.theme.current(), __harness.storage.get('loadlens.theme')]") == ["system", "light", "system"]
+    # Without a stored choice the page rendered dark switches to the OS theme, and back.
+    result = run_js(os_scheme(True), """
+        const before = [LL.ui.theme.mode(), LL.ui.theme.current(), document.documentElement.getAttribute('data-theme')];
+        __os.setLight(false);
+        ({ before, after: LL.ui.theme.current(), stored: __harness.storage.get('loadlens.theme') || null })
+    """)
+    assert result == {"before": ["system", "light", "light"], "after": "dark", "stored": None}
+    assert run_js(os_scheme(False), "[LL.ui.theme.mode(), LL.ui.theme.current()]", theme="light") == ["system", "dark"]
+    assert run_js(UI, "LL.ui.theme.mode()", local_storage={"loadlens.theme": "bogus"}) == "system"
 
 
 def test_theme_chosen_in_another_tab_applies(os_scheme):
@@ -135,9 +148,10 @@ def test_theme_chosen_in_another_tab_applies(os_scheme):
     """, local_storage={"loadlens.theme": "dark"})
     assert result["viaSystem"] == ["system", "light"]
     assert result["sameTheme"] == ["light", "light"]
-    assert result["cleared"] == ["dark", "dark"]
+    # A cleared choice is "system" again: the OS (light here) decides.
+    assert result["cleared"] == ["system", "light"]
     # Listeners hear only real changes of the resolved theme.
-    assert result["seen"] == ["light", "dark"]
+    assert result["seen"] == ["light"]
 
 
 def test_theme_works_without_match_media():
@@ -281,3 +295,183 @@ def test_label_table_ignores_tables_without_header():
 def test_dom_ready_without_mutation_observer_or_menu():
     # The harness has no MutationObserver and no #viewMenu: wiring must be a no-op, not an error.
     assert run_js(UI, "LL.ui.theme.set('light'); LL.ui.theme.current()", dom_ready=True) == "light"
+
+
+# ---- LL.charts.legendChips: the legend list of the report -----------------------------------------------------------
+
+CHARTS = ["static/js/common.js", "static/js/ui.js", "static/js/charts.js"]
+
+_LEGEND = r"""(() => {
+  const chart = {
+    canvas: { width: 400, height: 200 }, ctx: {}, width: 400, currentDevicePixelRatio: 1,
+    data: { labels: [1, 2], datasets: [{ label: 'api', data: [10, 30], borderColor: '#111111' }, { label: 'db', data: [5, 7] }] },
+    isDatasetVisible: () => true, setDatasetVisibility() {}, update() {},
+  };
+  const values = (host) => {
+    const list = host.children[0];
+    return list.children.filter((el) => el.className === 'legend-chip').map((chip) => chip.children[2].textContent);
+  };
+  const live = (host, api) => {
+    // The harness DOM has no selectors: give the list and the chips the lookups showIndex uses.
+    const list = host.children[0];
+    const chips = list.children.filter((el) => el.className === 'legend-chip');
+    list.querySelectorAll = () => chips;
+    chips.forEach((chip) => { chip.querySelector = () => chip.children[2]; });
+    api.showIndex(1);
+    const shown = values(host);
+    api.showIndex(-1);
+    return [shown, values(host)];
+  };
+  const plainHost = document.createElement('div');
+  const plain = LL.charts.legendChips(chart, plainHost, { separator: '' });
+  const dotHost = document.createElement('div');
+  const dotted = LL.charts.legendChips(Object.assign({}, chart), dotHost);
+  return { plain: values(plainHost), plainLive: live(plainHost, plain), dotted: values(dotHost), dottedLive: live(dotHost, dotted) };
+})()"""
+
+
+def test_legend_chips_render_the_value_without_a_separator():
+    out = run_js(CHARTS, _LEGEND, locale="en")
+    # The report legend is a list: dash, name, value (no "· " between the name and the value).
+    assert out["plain"] == ["20", "6"]
+    assert out["plainLive"] == [["30", "7"], ["20", "6"]]
+    # Other callers keep the chip text with its separator.
+    assert out["dotted"] == ["· 20", "· 6"]
+    assert out["dottedLive"] == [["· 30", "· 7"], ["· 20", "· 6"]]
+
+
+def test_report_and_compare_use_the_legend_list():
+    reports = (REPO_ROOT / "static" / "js" / "reports.js").read_text(encoding="utf-8")
+    assert "maxVisible: MAX_VISIBLE_SERIES, separator: '' }" in reports
+    compare = (REPO_ROOT / "static" / "js" / "compare.js").read_text(encoding="utf-8")
+    assert "filename: `compare-${queryLabel}`, separator: '' }" in compare
+
+
+# ---- LL.charts.stepProfile: the highlighted step ---------------------------------------------------------------------
+
+_MSK = timezone(timedelta(hours=3))
+_P0 = datetime(2026, 10, 15, 19, 10, tzinfo=_MSK)
+
+
+def _steps(levels, minutes=10):
+    out = []
+    for i, rps in enumerate(levels):
+        start = _P0 + timedelta(minutes=minutes * i)
+        out.append({"index": i + 1, "rps": rps, "selected": i == len(levels) - 1,
+                    "start_iso": start.isoformat(), "end_iso": (start + timedelta(minutes=minutes)).isoformat()})
+    return out
+
+
+def test_step_profile_model_highlights_a_step_by_its_index():
+    steps = _steps([50, 100, 150, 200])
+    model = run_js(CHARTS, f"""[2, '3', 9, null, {{ t: 1 }}].map((h) => LL.charts.stepProfileModel({{ steps: {json.dumps(steps)}, width: 400, compact: true, highlight: h }}).highlight)""")
+    second, third, unknown, none, range_ = model
+    assert second == {"index": 2, "x": 100, "w": 100, "y": second["y"], "path": f"M100 {second['y']}H200"}
+    assert third["index"] == 3 and third["x"] == 200 and third["w"] == 100
+    assert unknown is None and none is None and range_ is None
+    assert run_js(CHARTS, f"LL.charts.stepProfileModel({{ steps: {json.dumps(steps)}, width: 400 }}).highlight") is None
+
+
+def test_step_profile_handle_highlight_redraws_and_survives_updates():
+    steps = _steps([50, 100, 150, 200])
+    result = run_js(CHARTS, f"""
+        const host = document.createElement('div');
+        const handle = LL.charts.stepProfile(host, {{ steps: {json.dumps(steps)}, width: 400, compact: true }});
+        const before = host.innerHTML;
+        const same = handle.highlight(2) === handle;
+        const lit = host.innerHTML;
+        const model = handle.model.highlight;
+        handle.update({{ target: 180 }});
+        const kept = handle.model.highlight && handle.model.highlight.index;
+        handle.highlight(null);
+        const cleared = host.innerHTML;
+        handle.highlight(42);
+        ({{ before, same, lit, model, kept, cleared, unknown: handle.model.highlight, emptyOk: LL.charts.stepProfile(document.createElement('div'), {{ steps: [] }}).highlight(1).model }})
+    """, locale="en")
+    assert 'class="pf-hl"' not in result["before"] and 'class="pf-hl-path"' not in result["before"]
+    assert result["same"] is True
+    lit = result["lit"]
+    assert '<rect class="pf-hl" x="100" y="8" width="100"' in lit and f'<path class="pf-hl-path" d="{result["model"]["path"]}"/>' in lit
+    # The shade is drawn under the staircase, the level of the step over it.
+    assert lit.index('class="pf-hl"') < lit.index('class="pf-path"') < lit.index('class="pf-hl-path"')
+    assert 'class="pf-level is-highlighted"' in lit
+    assert result["kept"] == 2
+    assert "pf-hl" not in result["cleared"] and "is-highlighted" not in result["cleared"]
+    assert result["unknown"] is None and result["emptyOk"] is None
+
+
+def test_report_step_cells_carry_the_step_index_and_highlight_the_profile():
+    source = (REPO_ROOT / "static" / "js" / "reports.js").read_text(encoding="utf-8")
+    assert 'data-step-index="${escapeHtml(String(step.index))}"' in source
+    assert "profile.highlight(stepIndex)" in source and "highlightProfile(null)" in source
+    # The step highlight on the charts is neutral; the accent marks the SLA zone only.
+    assert "tone: 'muted' }" in source and "dataset.stepTo), tone: 'accent'" not in source
+
+
+# ---- palette: «Тема как в системе» ---------------------------------------------------------------------------------
+
+PALETTE = ["static/js/common.js", "static/js/ui.js", "static/js/palette.js"]
+
+
+@pytest.mark.parametrize("stored, offered", [(None, False), ("system", False), ("light", True), ("dark", True), ("purple", False)])
+def test_palette_offers_the_system_theme_unless_the_mode_is_system(os_scheme, stored, offered):
+    storage = {} if stored is None else {"loadlens.theme": stored}
+    files = [*os_scheme(False), "static/js/common.js", "static/js/palette.js"]
+    result = run_js(files, """
+        const P = LL.palette._internals;
+        const keys = () => P.actionItems(P.themeState()).map((a) => a.key);
+        const first = { state: P.themeState(), keys: keys() };
+        LL.ui.theme.set('light');
+        const light = keys();
+        LL.ui.theme.set('system');
+        ({ first, light, system: keys() })
+    """, local_storage=storage)
+    assert ("action:theme-system" in result["first"]["keys"]) is offered
+    expected_mode = stored if stored in ("system", "light", "dark") else "system"
+    assert result["first"]["state"]["themeMode"] == expected_mode
+    # An explicit choice made on the page offers the way back; choosing «system» removes the command.
+    assert "action:theme-system" in result["light"] and "action:theme-system" not in result["system"]
+
+
+def test_palette_without_ui_js_offers_the_system_theme():
+    state = run_js(["static/js/common.js", "static/js/palette.js"], "LL.palette._internals.themeState()")
+    assert state == {"theme": "dark", "themeMode": ""}
+    keys = run_js(["static/js/common.js", "static/js/palette.js"], "LL.palette._internals.actionItems(LL.palette._internals.themeState()).map((a) => a.key)")
+    assert keys == ["action:theme", "action:theme-system"]
+
+
+# ---- forecast report: labels of the load scale stay inside it --------------------------------------------------------
+
+_FIT = """
+const mk = (cls, rect, span) => {
+  const set = new Set(cls.split(' '));
+  return {
+    classList: { add: (...c) => c.forEach((x) => set.add(x)), remove: (...c) => c.forEach((x) => set.delete(x)), contains: (c) => set.has(c) },
+    getBoundingClientRect: () => rect, querySelector: () => span || null, cls: () => Array.from(set).sort().join(' '),
+  };
+};
+const marks = [
+  mk('forecast-scale-mark', { left: 300, right: 420 }),
+  mk('forecast-scale-mark', { left: -20, right: 60 }),
+  mk('forecast-scale-mark', { left: 100, right: 200 }),
+  mk('forecast-scale-mark is-end', { left: 300, right: 420 }),
+  mk('forecast-scale-target', { left: 0, right: 0 }, { getBoundingClientRect: () => ({ left: 330, right: 410 }) }),
+  mk('forecast-scale-mark fit-end', { left: 100, right: 200 }),
+];
+const scale = { getBoundingClientRect: () => ({ left: 0, right: 362, width: 362 }), querySelectorAll: () => marks };
+LL.forecastReport._internals.fitScaleLabels({ querySelector: () => scale });
+LL.forecastReport._internals.fitScaleLabels(null);
+marks.map((m) => m.cls())
+"""
+
+
+def test_forecast_scale_labels_are_anchored_to_the_edge_they_would_cross():
+    files = ["static/js/common.js", "static/js/ui.js", "static/js/forecast_report.js"]
+    assert run_js(files, _FIT) == [
+        "fit-end forecast-scale-mark",  # would cross the right edge of a 362px scale
+        "fit-start forecast-scale-mark",  # would cross the left edge
+        "forecast-scale-mark",  # fits centered
+        "forecast-scale-mark is-end",  # already anchored by the page
+        "fit-end forecast-scale-target",  # the target label turns to the left of its line
+        "forecast-scale-mark",  # a stale anchor goes once the label fits (a wider window)
+    ]

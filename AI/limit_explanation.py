@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """LLM explanation of the forecast load limit, grounded in the domain findings of the report.
 
 Related findings are picked without the model: they overlap the window where the limit
@@ -16,6 +17,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from AI.context_pack import to_utc
 from AI.db_store import StoredFinding
+from AI.i18n import LocalizedError
 from AI.scoring import VERIFICATION_UNVERIFIED, FindingItem, _extract_json_like, _extract_numeric_claims
 from AI.verification import verify_finding
 
@@ -29,8 +31,8 @@ DIGIT_GROUP_RE = re.compile(r"(?<=\d)[ \u00a0\u202f](?=\d{3}(?!\d))")
 RAW_EXCERPT_CHARS = 200
 
 
-class ExplanationParseError(ValueError):
-    """The model answer is not the expected JSON."""
+class ExplanationParseError(LocalizedError, ValueError):
+    """The model answer is not the expected JSON; the text renders in the locale where it is shown."""
 
 
 @dataclass(frozen=True)
@@ -148,12 +150,12 @@ def finding_payload(finding: StoredFinding) -> dict[str, str]:
 def parse_explanation(raw: str) -> LimitExplanation:
     data = _extract_json_like(raw or "")
     if data is None:
-        raise ExplanationParseError(f"Ответ модели не содержит JSON: «{(raw or '')[:RAW_EXCERPT_CHARS]}»")
+        raise ExplanationParseError("capacity.explain.no_json", excerpt=(raw or "")[:RAW_EXCERPT_CHARS])
     try:
         return LimitExplanation.model_validate(data)
     except ValidationError as exc:
         fields = ", ".join(".".join(str(part) for part in error["loc"]) for error in exc.errors())
-        raise ExplanationParseError(f"Ответ модели не совпал со схемой разбора, поля: {fields}") from exc
+        raise ExplanationParseError("capacity.explain.bad_schema", fields=fields) from exc
 
 
 def _grouped(text: str) -> str:

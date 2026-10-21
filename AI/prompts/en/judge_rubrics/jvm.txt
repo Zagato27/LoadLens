@@ -1,0 +1,12 @@
+Domain Focus: JVM
+
+Evaluation Criteria Addendum
+- Look for heap/metaspace pressure, GC pause, GC frequency, thread saturation, CPU pressure of JVM processes.
+- Note signs of a memory leak, stop-the-world pauses, degradation after the load grows.
+- A good candidate links JVM symptoms to a specific service, pod/job or time window.
+
+Evaluation Steps
+1. Check JVM memory: heap, non-heap, metaspace, old/new generation.
+2. Check GC: pauses, frequency, anomalous growth, impact on latency/throughput.
+3. Check threads, CPU and locks if they are present in the context.
+4. Check whether specific actions for the JVM or the service are proposed rather than generic phrases.

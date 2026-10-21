@@ -1,0 +1,9 @@
+{
+  "picker.empty": "Нет настроенных сервисов",
+  "picker.label": "Сервис",
+  "picker.load_failed": "Сервисы не загрузились",
+  "picker.loading": "Загрузка списка сервисов…",
+  "picker.not_found": "Сервис не найден",
+  "picker.placeholder": "Начните вводить название сервиса",
+  "picker.recent": "недавно"
+}

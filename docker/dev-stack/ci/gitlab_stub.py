@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """GitLab API stub for the CI generator of the Run test page. Dev stack only.
 
 Runs on the host (127.0.0.1:5095) and answers the GitLab API calls LoadLens makes: version, project, branches,

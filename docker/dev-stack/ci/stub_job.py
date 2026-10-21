@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The "pipeline" of the GitLab and Jenkins stubs: one k6 container of the dev stack with the run's values.
 
 Like a real load test pipeline it prepares for a while, runs k6 with the values it was given, may report

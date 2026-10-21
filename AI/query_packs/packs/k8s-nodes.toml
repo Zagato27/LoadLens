@@ -2,6 +2,7 @@ schema_version = 1
 id = "k8s-nodes"
 version = 1
 title = "Kubernetes: ноды (kube-state-metrics)"
+title_en = "Kubernetes: nodes (kube-state-metrics)"
 category = "infrastructure"
 stack = ["kubernetes"]
 domain = "hard_resources"
@@ -11,14 +12,24 @@ description = """
 (насколько плотно расписаны поды) и число подов. Фактическую загрузку CPU и памяти нод даёт пакет \
 node_exporter — ставьте их вместе.
 """
+description_en = """
+Node state from kube-state-metrics 2.x: readiness, CPU and memory requests against allocatable (how densely \
+pods are scheduled) and the number of pods. The actual CPU and memory load of the nodes comes from the \
+node_exporter pack; install them together.
+"""
 requires_metrics = ["kube_node_status_condition", "kube_node_status_allocatable", "kube_pod_container_resource_requests"]
 prompt_addendum = """
 Метрики нод Kubernetes: Ready=0 — нода недоступна для подов, requests % от allocatable около 100 — новым \
 подам (в том числе от HPA) не хватит места и они останутся в Pending.
 """
+prompt_addendum_en = """
+Kubernetes node metrics: Ready=0 means the node is not available for pods; requests near 100 % of allocatable \
+mean new pods (including those from HPA) will not fit and stay Pending.
+"""
 
 [variables.ksm_matchers]
 title = "Матчеры kube-state-metrics"
+title_en = "kube-state-metrics matchers"
 default = 'job=~".*kube-state-metrics.*"'
 
 [[queries]]
@@ -28,6 +39,7 @@ unit = "count"
 query = 'max by (node) (kube_node_status_condition{condition="Ready", status="true", {{ksm_matchers}} })'
 keys = ["node"]
 description = "1 — нода готова, 0 — нет."
+description_en = "1 means the node is ready, 0 means it is not."
 
 [[queries]]
 label = "K8s nodes: CPU requests (% of allocatable) by node"
@@ -37,6 +49,7 @@ required = true
 query = '100 * sum by (node) (kube_pod_container_resource_requests{resource="cpu", node!="", {{ksm_matchers}} }) / sum by (node) (kube_node_status_allocatable{resource="cpu", {{ksm_matchers}} })'
 keys = ["node"]
 description = "Сумма CPU requests подов ноды от allocatable, %."
+description_en = "Sum of the CPU requests of the node's pods relative to allocatable, %."
 
 [[queries]]
 label = "K8s nodes: Memory requests (% of allocatable) by node"
@@ -45,6 +58,7 @@ unit = "percent"
 query = '100 * sum by (node) (kube_pod_container_resource_requests{resource="memory", node!="", {{ksm_matchers}} }) / sum by (node) (kube_node_status_allocatable{resource="memory", {{ksm_matchers}} })'
 keys = ["node"]
 description = "Сумма memory requests подов ноды от allocatable, %."
+description_en = "Sum of the memory requests of the node's pods relative to allocatable, %."
 
 [[queries]]
 label = "K8s nodes: Pods by node"
@@ -53,3 +67,4 @@ unit = "count"
 query = 'count by (node) (kube_pod_info{node!="", {{ksm_matchers}} })'
 keys = ["node"]
 description = "Поды на ноде."
+description_en = "Pods on the node."
