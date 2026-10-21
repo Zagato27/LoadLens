@@ -2,14 +2,16 @@
 
 A production installation of LoadLens is four containers from `docker/docker-compose.yml`: `app` (gunicorn with
 the web UI and the API), `timescaledb`, `redis` and `celery_worker`, which builds the reports and the Confluence
-publications. The image is built from the repository; tagged releases also publish it as
-`ghcr.io/<owner>/loadlens:<version>` (see [development.md](development.md#changelog-and-releases)). The
+publications. The image is built from the repository; tagged releases also publish it for linux/amd64 and
+linux/arm64 as `ghcr.io/<owner>/loadlens:<tag>` (for example `v1.0.0`) and `:latest` (see
+[development.md](development.md#changelog-and-releases)). The
 five-minute demo is a separate stack and is described in [getting-started.md](getting-started.md#try-the-demo-first);
 the Russian original of this page is [docker/DOCKER_SETUP.md](../docker/DOCKER_SETUP.md).
 
 - [Files to prepare](#files-to-prepare)
 - [Environment file](#environment-file)
 - [Start and first login](#start-and-first-login)
+- [HTTPS with Caddy](#https-with-caddy)
 - [The database](#the-database)
 - [Redis and the Celery worker](#redis-and-the-celery-worker)
 - [Health checks and migrations at start](#health-checks-and-migrations-at-start)
@@ -77,8 +79,39 @@ with `docker compose exec app python -m loadlens_app.auth set-password <login>`.
 
 The image runs gunicorn (`GUNICORN_CMD_ARGS` in the Dockerfile: one process with 8 threads, timeout 120 s, access
 log with the request time in milliseconds) as the unprivileged user `app` (UID 1000). Put it behind an HTTPS reverse
-proxy for production and set `LOADLENS_COOKIE_SECURE=1` and `LOADLENS_TRUSTED_PROXIES=1`. Pages are served with a
-Content-Security-Policy that allows scripts and images from the same origin only.
+proxy for production (below). Pages are served with a Content-Security-Policy that allows scripts and images from
+the same origin only.
+
+## HTTPS with Caddy
+
+`docker/docker-compose.https.yml` adds [Caddy](https://caddyserver.com/) in front of the application. Caddy takes
+ports 80 and 443 and obtains a certificate, and the app port is then published on `127.0.0.1` only. The override
+also sets `LOADLENS_COOKIE_SECURE=1` and `LOADLENS_TRUSTED_PROXIES=1`, so cookies get the `Secure` flag and login
+throttling sees the client addresses from `X-Forwarded-For`. It needs Docker Compose 2.24.4 or newer.
+
+```bash
+# docker/.env
+LOADLENS_HOSTNAME=loadlens.example.com
+# Optional: plain `docker compose` commands (updates, logs) then include the override; use ; on Windows
+COMPOSE_FILE=docker-compose.yml:docker-compose.https.yml
+```
+
+```bash
+cd docker
+docker compose -f docker-compose.yml -f docker-compose.https.yml up -d --build
+```
+
+- **Public hostname:** the DNS name must point at the host and ports 80 and 443 must be reachable from the
+  internet. Caddy then gets a Let's Encrypt certificate on the first request and renews it by itself. Certificates
+  live in the `caddy_data` volume; keep it, otherwise every restart asks for new ones and hits the rate limits.
+- **Internal hostname:** uncomment `tls internal` in `docker/Caddyfile`. Caddy then signs the certificate with its
+  own CA, and the clients must trust its root
+  (`docker compose exec caddy cat /data/caddy/pki/authorities/local/root.crt`). To use a certificate of your
+  company CA instead, replace that line with `tls /certs/loadlens.crt /certs/loadlens.key` and mount the files
+  into the `caddy` service at `/certs`.
+- **Another proxy** (nginx, Traefik, a load balancer): skip the override. Set `LOADLENS_COOKIE_SECURE=1` and
+  `LOADLENS_TRUSTED_PROXIES` to the number of proxies in front of the app, forward `X-Forwarded-For`, `-Proto`
+  and `-Host`, and do not publish port 5000 beyond the proxy.
 
 ## The database
 

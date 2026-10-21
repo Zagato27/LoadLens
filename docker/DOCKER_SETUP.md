@@ -136,6 +136,26 @@ docker compose exec app python -m loadlens_app.auth create-user admin --role adm
 
 При каждом старте `app` в фоне проверяет миграции данных по таблице `app_migrations` и выполняет недостающие (`LOADLENS_RUN_MIGRATIONS=0` выключает): идентификаторы старых отчётов, таблица прогонов `run_index`, колонка `max_rps`, индекс `idx_metrics_run_name`. Так база, которую писала старая версия приложения, догоняет новую сразу после обновления. Выполненные одноразовые миграции не повторяются; если база в момент старта недоступна, попытки повторяются. Состояние: `docker compose exec app python -m loadlens_app.migrations --status`. На базе с уже сохранёнными прогонами архив пуст, пока первая миграция не заполнит `run_index` (около 2 с на 2 млн строк `metrics`); ход виден в `docker logs ltar_app`.
 
+### HTTPS через Caddy
+
+`docker/docker-compose.https.yml` ставит перед приложением [Caddy](https://caddyserver.com/): он занимает порты 80 и 443 и сам получает сертификат, а порт приложения публикуется только на `127.0.0.1`. Override также задаёт `LOADLENS_COOKIE_SECURE=1` и `LOADLENS_TRUSTED_PROXIES=1`. Нужен Docker Compose 2.24.4 или новее.
+
+```bash
+# docker/.env
+LOADLENS_HOSTNAME=loadlens.example.com
+# По желанию: тогда обычные команды docker compose (обновление, логи) тоже берут override; на Windows разделитель ;
+COMPOSE_FILE=docker-compose.yml:docker-compose.https.yml
+```
+
+```bash
+cd docker
+docker compose -f docker-compose.yml -f docker-compose.https.yml up -d --build
+```
+
+- **Публичное имя:** DNS указывает на хост, порты 80 и 443 доступны из интернета. Caddy получит сертификат Let's Encrypt при первом запросе и будет продлевать его сам. Сертификаты лежат в томе `caddy_data`, не удаляйте его.
+- **Внутреннее имя:** раскомментируйте `tls internal` в `docker/Caddyfile`. Caddy выпустит сертификат своим CA, корневой сертификат (`docker compose exec caddy cat /data/caddy/pki/authorities/local/root.crt`) нужно добавить в доверенные на клиентах. Для сертификата корпоративного CA замените строку на `tls /certs/loadlens.crt /certs/loadlens.key` и смонтируйте файлы в сервис `caddy` в `/certs`.
+- **Другой прокси** (nginx, Traefik, балансировщик): override не нужен. Задайте `LOADLENS_COOKIE_SECURE=1` и `LOADLENS_TRUSTED_PROXIES` по числу прокси, передавайте `X-Forwarded-For`, `-Proto` и `-Host` и не публикуйте порт 5000 дальше прокси.
+
 ### 3) Что делает TimescaleDB при старте
 
 - Разворачивается образ `timescale/timescaledb:latest-pg16`.

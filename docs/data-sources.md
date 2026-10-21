@@ -4,7 +4,7 @@ LoadLens reads the metrics of a test from the stores you already have: Prometheu
 InfluxDB 1.x (InfluxQL) and 2.x (Flux), directly or through a Grafana data source proxy. A *source* is a connection;
 a *domain* is a group of series the report analyses together; a *binding* says which source a domain reads; a
 *query pack* fills the queries of a domain for a typical exporter, runtime or load tool. The generated reference of
-every pack is [query-packs.md](query-packs.md) (Russian, built from the TOML files in `AI/query_packs/packs/`).
+every pack is [query-packs.en.md](query-packs.en.md) (built from the TOML files in `AI/query_packs/packs/`).
 
 - [Sources](#sources)
 - [Domains and bindings](#domains-and-bindings)
@@ -130,7 +130,8 @@ Rules of application:
   with live exporters; the other packs are checked syntactically and for the series and unit contract.
 
 The command line reads the same catalogue: `python -m AI.query_packs list`, `render <pack_id> --var name=value`,
-`bundle <bundle_id>`, `docs <file>` (regenerates [query-packs.md](query-packs.md)) and `example` (rewrites the
+`bundle <bundle_id>`, `docs [--lang en] <file>` (regenerates [query-packs.en.md](query-packs.en.md) and its Russian
+twin [query-packs.md](query-packs.md)) and `example` (rewrites the
 queries and SLA references of `settings.example.py` from the default bundle). The REST endpoints are listed in
 [api.md](api.md#settings-administrator).
 

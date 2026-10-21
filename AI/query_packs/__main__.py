@@ -4,7 +4,8 @@
     python -m AI.query_packs list
     python -m AI.query_packs render jvm-micrometer --var service_label=app
     python -m AI.query_packs bundle spring-k8s-k6-influxdb       # queries + SLA references as JSON
-    python -m AI.query_packs docs docs/query-packs.md             # markdown catalog
+    python -m AI.query_packs docs docs/query-packs.md             # markdown catalog (Russian)
+    python -m AI.query_packs docs --lang en docs/query-packs.en.md
     python -m AI.query_packs example                               # rewrites queries/SLA of settings.example.py
 """
 
@@ -17,35 +18,103 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from AI.i18n import with_locale
+from AI.i18n import normalize_lang, with_locale
 
 from .blocks import merge_pack
 from .catalog import Catalog, load_catalog
-from .models import CATEGORY_TITLES, LANGUAGE_TITLES
+from .models import CATEGORY_TITLES, LANGUAGE_TITLES, localized
 from .render import render_pack
 from .roles import ROLES, UNIT_TITLES
 
 EXAMPLE_BUNDLE = "spring-k8s-k6-influxdb"
 EXAMPLE_PATH = Path(__file__).resolve().parents[2] / "settings.example.py"
-DOMAIN_TITLES = {
-    "lt_framework": "Нагрузочный инструмент",
-    "jvm": "JVM и рантайм",
-    "microservices": "Микросервисы",
-    "database": "Базы данных",
-    "kafka": "Kafka",
-    "hard_resources": "Ресурсы узлов",
-    "lt_generators": "Ресурсы генераторов нагрузки",
-}
-SLA_FIELD_TITLES = {
-    "max_performance_query": "запрос производительности",
-    "error_rate_query": "доля ошибок",
-    "p95_query": "p95",
-    "p99_query": "p99",
-    "cpu_query": "CPU узлов",
-    "memory_query": "память узлов",
-    "mean_latency_query": "среднее время (прогноз)",
-    "vus_query": "VU (прогноз)",
-    "service_cpu_query": "CPU сервисов (план ресурсов)",
+DOCS_FILES = {"ru": "docs/query-packs.md", "en": "docs/query-packs.en.md"}
+# Texts of the generated catalog; category, role and unit titles come from the locale dictionaries.
+DOCS_TEXT: dict[str, dict[str, Any]] = {
+    "ru": {
+        "title": "Пакеты запросов",
+        "other_language": "[English version](query-packs.en.md)",
+        "intro": [
+            "Пакет — готовые запросы одного домена для типового источника метрик. Применение добавляет запросы",
+            "в раздел «Запросы» выбранной области и заполняет ссылки SLA. Задержки нагрузочных инструментов",
+            "приводятся к миллисекундам, CPU узлов — к процентам, CPU экземпляра сервиса — к доле 0..1.",
+            "",
+            "Отметка «проверен на стенде» значит, что каждый обязательный запрос пакета вернул данные на",
+            "`docker/dev-stack` с живыми экспортерами. Остальные пакеты проверены синтаксически и на контракте",
+            "рядов и единиц; перед использованием прогоните их кнопкой «Проверить».",
+        ],
+        "bundles": "Наборы",
+        "bundle_columns": "| Набор | Пакеты |",
+        "domain": "домен «{domain}»",
+        "verified": " · проверен на стенде `docker/dev-stack`",
+        "variable_columns": "| Переменная | По умолчанию | Описание |",
+        "empty": "пусто",
+        "choices": "Варианты: {choices}",
+        "query_columns": "| Запрос | Роль | Единица | SLA |",
+        "required": " (обязательный)",
+        "domains": {
+            "lt_framework": "Нагрузочный инструмент",
+            "jvm": "JVM и рантайм",
+            "microservices": "Микросервисы",
+            "database": "Базы данных",
+            "kafka": "Kafka",
+            "hard_resources": "Ресурсы узлов",
+            "lt_generators": "Ресурсы генераторов нагрузки",
+        },
+        "sla_fields": {
+            "max_performance_query": "запрос производительности",
+            "error_rate_query": "доля ошибок",
+            "p95_query": "p95",
+            "p99_query": "p99",
+            "cpu_query": "CPU узлов",
+            "memory_query": "память узлов",
+            "mean_latency_query": "среднее время (прогноз)",
+            "vus_query": "VU (прогноз)",
+            "service_cpu_query": "CPU сервисов (план ресурсов)",
+        },
+    },
+    "en": {
+        "title": "Query packs",
+        "other_language": "[Русская версия](query-packs.md)",
+        "intro": [
+            "A pack is a set of ready queries of one domain for a typical metric source. Applying it adds the queries",
+            "to the \"Queries\" section of the chosen area and fills the SLA references. Latencies of load tools are",
+            "converted to milliseconds, node CPU to percent, the CPU of a service instance to a fraction 0..1.",
+            "",
+            "\"Verified on `docker/dev-stack`\" means that every required query of the pack returned data on",
+            "`docker/dev-stack` with live exporters. The other packs are checked for syntax and for the contract of",
+            "series and units; run them with the \"Check\" button before use.",
+        ],
+        "bundles": "Bundles",
+        "bundle_columns": "| Bundle | Packs |",
+        "domain": "domain \"{domain}\"",
+        "verified": " · verified on `docker/dev-stack`",
+        "variable_columns": "| Variable | Default | Description |",
+        "empty": "empty",
+        "choices": "Choices: {choices}",
+        "query_columns": "| Query | Role | Unit | SLA |",
+        "required": " (required)",
+        "domains": {
+            "lt_framework": "Load testing tool",
+            "jvm": "JVM and runtime",
+            "microservices": "Microservices",
+            "database": "Databases",
+            "kafka": "Kafka",
+            "hard_resources": "Node resources",
+            "lt_generators": "Load generator resources",
+        },
+        "sla_fields": {
+            "max_performance_query": "performance query",
+            "error_rate_query": "error rate",
+            "p95_query": "p95",
+            "p99_query": "p99",
+            "cpu_query": "node CPU",
+            "memory_query": "node memory",
+            "mean_latency_query": "mean latency (forecast)",
+            "vus_query": "VUs (forecast)",
+            "service_cpu_query": "service CPU (resource plan)",
+        },
+    },
 }
 
 
@@ -112,34 +181,34 @@ def write_example(path: Path = EXAMPLE_PATH) -> None:
     path.write_text(text, encoding="utf-8", newline="\n")
 
 
-def docs_markdown(catalog: Catalog | None = None) -> str:
-    # docs/query-packs.md is Russian; role, unit and category titles otherwise follow the current locale.
-    with with_locale("ru"):
-        return _docs_markdown(catalog)
+def docs_markdown(catalog: Catalog | None = None, lang: str = "ru") -> str:
+    """Markdown catalog in ``lang``; role, unit and category titles otherwise follow the current locale."""
+    code = normalize_lang(lang)
+    if code not in DOCS_TEXT:
+        raise ValueError(f"no catalog texts for language {lang!r}")
+    with with_locale(code):
+        return _docs_markdown(catalog or load_catalog(), code)
 
 
-def _docs_markdown(catalog: Catalog | None = None) -> str:
-    catalog = catalog or load_catalog()
+def _docs_markdown(catalog: Catalog, lang: str) -> str:
+    text = DOCS_TEXT[lang]
+    flag = "" if lang == "ru" else f" --lang {lang}"
     out = [
-        "# Пакеты запросов",
+        f"# {text['title']}",
         "",
-        "<!-- Generated by `python -m AI.query_packs docs docs/query-packs.md`; edit the TOML files in AI/query_packs/packs. -->",
+        f"<!-- Generated by `python -m AI.query_packs docs{flag} {DOCS_FILES[lang]}`; edit the TOML files in AI/query_packs/packs. -->",
         "",
-        "Пакет — готовые запросы одного домена для типового источника метрик. Применение добавляет запросы",
-        "в раздел «Запросы» выбранной области и заполняет ссылки SLA. Задержки нагрузочных инструментов",
-        "приводятся к миллисекундам, CPU узлов — к процентам, CPU экземпляра сервиса — к доле 0..1.",
+        text["other_language"],
         "",
-        "Отметка «проверен на стенде» значит, что каждый обязательный запрос пакета вернул данные на",
-        "`docker/dev-stack` с живыми экспортерами. Остальные пакеты проверены синтаксически и на контракте",
-        "рядов и единиц; перед использованием прогоните их кнопкой «Проверить».",
+        *text["intro"],
         "",
-        "## Наборы",
+        f"## {text['bundles']}",
         "",
-        "| Набор | Пакеты |",
+        text["bundle_columns"],
         "|---|---|",
     ]
     for bundle in catalog.bundles.values():
-        out.append(f"| {bundle.title} | {', '.join(f'`{pack_id}`' for pack_id in bundle.packs)} |")
+        out.append(f"| {localized(bundle, 'title', lang)} | {', '.join(f'`{pack_id}`' for pack_id in bundle.packs)} |")
     for category, title in CATEGORY_TITLES.items():
         packs = [pack for pack in catalog.packs.values() if pack.category == category]
         if not packs:
@@ -147,30 +216,35 @@ def _docs_markdown(catalog: Catalog | None = None) -> str:
         out += ["", f"## {title}"]
         for pack in packs:
             rendered = render_pack(pack)
+            domain = text["domain"].format(domain=text["domains"].get(pack.domain, pack.domain))
             out += [
                 "",
-                f"### {pack.title}",
+                f"### {localized(pack, 'title', lang)}",
                 "",
-                f"`{pack.id}` v{pack.version} · домен «{DOMAIN_TITLES.get(pack.domain, pack.domain)}» · {LANGUAGE_TITLES[pack.language]}"
-                + (" · проверен на стенде `docker/dev-stack`" if pack.verified else ""),
+                f"`{pack.id}` v{pack.version} · {domain} · {LANGUAGE_TITLES[pack.language]}"
+                + (text["verified"] if pack.verified else ""),
                 "",
-                " ".join(pack.description.split()),
+                " ".join(localized(pack, "description", lang).split()),
             ]
             if pack.variables:
-                out += ["", "| Переменная | По умолчанию | Описание |", "|---|---|---|"]
+                out += ["", text["variable_columns"], "|---|---|---|"]
                 for name, var in pack.variables.items():
-                    default = f"`{var.default}`" if var.default else "пусто"
-                    parts = [text.strip().rstrip(".") for text in (var.title, var.help) if text.strip()]
+                    default = f"`{var.default}`" if var.default else text["empty"]
+                    parts = [
+                        value.strip().rstrip(".")
+                        for value in (localized(var, "title", lang), localized(var, "help", lang))
+                        if value.strip()
+                    ]
                     if var.choices:
-                        parts.append(f"Варианты: {', '.join(var.choices)}")
+                        parts.append(text["choices"].format(choices=", ".join(var.choices)))
                     hint = ". ".join(parts)
                     out.append(f"| `{name}` | {default} | {_cell(hint)} |")
-            out += ["", "| Запрос | Роль | Единица | SLA |", "|---|---|---|---|"]
+            out += ["", text["query_columns"], "|---|---|---|---|"]
             refs = {label: field for field, label in rendered.sla_refs.items()}
             for query in rendered.queries:
                 role = ROLES.get(query.role or "")
-                role_text = f"{role.title}{' (обязательный)' if query.required else ''}" if role else ""
-                sla = SLA_FIELD_TITLES.get(refs.get(query.label, ""), "")
+                role_text = f"{role.title}{text['required'] if query.required else ''}" if role else ""
+                sla = text["sla_fields"].get(refs.get(query.label, ""), "")
                 out.append(f"| {_cell(query.label)} | {_cell(role_text)} | {UNIT_TITLES.get(query.unit, query.unit)} | {sla} |")
     return "\n".join(out) + "\n"
 
@@ -190,6 +264,7 @@ def main(argv: list[str] | None = None) -> int:
     bundle_cmd.add_argument("bundle_id")
     docs_cmd = sub.add_parser("docs", help="markdown catalog")
     docs_cmd.add_argument("output", nargs="?", help="file to write (default: stdout)")
+    docs_cmd.add_argument("--lang", choices=sorted(DOCS_TEXT), default="ru", help="language of the catalog (default: ru)")
     sub.add_parser("example", help="rewrite queries and SLA references of settings.example.py")
     args = parser.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
@@ -207,7 +282,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "bundle":
         print(json.dumps(bundle_config(args.bundle_id, catalog), ensure_ascii=False, indent=2))
     elif args.command == "docs":
-        text = docs_markdown(catalog)
+        text = docs_markdown(catalog, args.lang)
         if args.output:
             Path(args.output).write_text(text, encoding="utf-8", newline="\n")
         else:

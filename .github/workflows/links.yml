@@ -1,0 +1,30 @@
+# Dead internet links in the markdown files. tests/test_readme.py checks the relative links on every run; this
+# job checks the external ones on documentation changes and weekly, because sites move without any change here.
+name: Links
+
+on:
+  push:
+    branches: [main]
+    paths: ["**/*.md", ".github/lychee.toml", ".github/workflows/links.yml"]
+  pull_request:
+    paths: ["**/*.md", ".github/lychee.toml", ".github/workflows/links.yml"]
+  schedule:
+    - cron: "41 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lychee:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the links of the markdown files
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --config .github/lychee.toml --no-progress "./**/*.md"
+          fail: true
+        env:
+          # Authenticated requests to github.com links are not rate limited as hard as anonymous ones.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -114,7 +114,7 @@ A domain is a group of series the report analyses together: load tool, JVM and r
 Kafka, node resources, load generators and application logs. Every domain reads one source with one query language;
 packs fill the queries, the series labels, the roles (which series is "total RPS", "p95", "node CPU") and the SLA
 references in one step. [data-sources.md](data-sources.md) explains the catalogue, the bindings, the packs and which
-pack matches which load tool; [query-packs.md](query-packs.md) lists every pack with its variables.
+pack matches which load tool; [query-packs.en.md](query-packs.en.md) lists every pack with its variables.
 
 Two conventions matter for the SLA and the forecast: node CPU arrives in percent with a `node` series key, the CPU of
 one service instance as a fraction 0..1 with an `instance` key, and load tool latencies in milliseconds. The packs

@@ -53,7 +53,7 @@ echo '{}' > settings_runtime.json && echo '{}' > metrics_config_runtime.json
 cd docker && docker compose up -d --build           # app, TimescaleDB, Redis, Celery worker
 ```
 
-Open http://localhost:5000, sign in with the administrator from `docker/.env` and run the wizard at `/settings?wizard=1`: storage, data sources, domain bindings, query packs for your stack, LLM and SLA, each connection checked before you save. Tagged releases publish the image `ghcr.io/<owner>/loadlens:<tag>` (and `:latest`). Details: [docs/getting-started.md](docs/getting-started.md), [docs/deployment.md](docs/deployment.md).
+Open http://localhost:5000, sign in with the administrator from `docker/.env` and run the wizard at `/settings?wizard=1`: storage, data sources, domain bindings, query packs for your stack, LLM and SLA, each connection checked before you save. Tagged releases publish the image `ghcr.io/<owner>/loadlens:<tag>` (and `:latest`) for linux/amd64 and linux/arm64; [docs/deployment.md](docs/deployment.md#https-with-caddy) puts it behind HTTPS with Caddy. Details: [docs/getting-started.md](docs/getting-started.md), [docs/deployment.md](docs/deployment.md).
 
 ## What it works with
 
@@ -112,12 +112,11 @@ CI: `tests.yml` runs the suite on every push and pull request, `dependency-audit
 
 ## Roadmap
 
-Design notes for finished and planned work live in `docs/*-plan.md` (Russian). Next on the list:
+Finished work is listed in [CHANGELOG.md](CHANGELOG.md). Next on the list:
 
-- More query packs: JMeter with the Prometheus listener, Kafka Burrow, and live-stack verification of the packs that are only checked syntactically today (Windows, MySQL, MongoDB, Istio, NGINX ingress, Yandex.Tank).
+- More query packs: JMeter with the Prometheus listener, Kafka Burrow, and live-stack verification of the 21 packs that are only checked syntactically today (among them Windows, MySQL, MongoDB, Istio, NGINX ingress, JMX exporter, OpenTelemetry, kube-state-metrics and the InfluxQL packs of JMeter, Gatling and Yandex.Tank).
 - Local models through OpenAI-compatible servers as a documented, tested path, and more providers.
 - Import of Grafana dashboards as the starting point of a domain's queries.
-- A link checker for README and docs in CI, and an English build of the query pack catalogue.
 - A quality pass of the English prompts and reports on real providers.
 
 Suggestions and use cases are welcome in Discussions; the pinned roadmap issue tracks what is in progress.

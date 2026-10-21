@@ -15,7 +15,7 @@ directory as they were written; they are listed at the end of this page.
 | [api.md](api.md) | The REST API: tokens, roles, every endpoint by area, `/about` and `/healthz` |
 | [deployment.md](deployment.md) | Docker Compose in production: environment file, database and roles, Redis and the Celery worker, health checks, migrations, secrets, updates, external database |
 | [development.md](development.md) | Tests, the UI sandbox, localization rules and the Cyrillic ratchet, prompts, query packs, SPDX headers, CHANGELOG and releases, CI |
-| [query-packs.md](query-packs.md) | Generated reference of every query pack: variables, queries, roles, units (Russian; regenerate with `python -m AI.query_packs docs docs/query-packs.md`) |
+| [query-packs.en.md](query-packs.en.md) | Generated reference of every query pack: variables, queries, roles, units (regenerate with `python -m AI.query_packs docs --lang en docs/query-packs.en.md`; the Russian twin is [query-packs.md](query-packs.md)) |
 
 Related files in the repository root: [README.md](../README.md) (overview and quick start),
 [README.ru.md](../README.ru.md) (the Russian README with more screenshots), [CHANGELOG.md](../CHANGELOG.md),

@@ -379,6 +379,16 @@ def test_docs_catalog_is_up_to_date():
     assert (ROOT_DIR / "docs/query-packs.md").read_text(encoding="utf-8") == docs_markdown()
 
 
+def test_english_docs_catalog_is_up_to_date_and_english():
+    """`python -m AI.query_packs docs --lang en docs/query-packs.en.md` regenerates it; only the link back is Russian."""
+    text = (ROOT_DIR / "docs/query-packs.en.md").read_text(encoding="utf-8")
+    assert text == docs_markdown(lang="en")
+    cyrillic = [line for line in text.splitlines() if re.search("[А-Яа-яЁё]", line)]
+    assert cyrillic == ["[Русская версия](query-packs.md)"]
+    with pytest.raises(ValueError):
+        docs_markdown(lang="de")
+
+
 # ---- analysis pipeline and project readiness --------------------------------------------------------
 
 def test_aux_resources_follow_roles_and_fall_back_to_jvm_names():

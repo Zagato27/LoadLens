@@ -113,7 +113,9 @@ def test_english_docs_have_no_cyrillic(name: str) -> None:
 def test_english_docs_are_utf8_lf_without_bom(name: str) -> None:
     data = (DOCS_DIR / name).read_bytes()
     assert not data.startswith(b"\xef\xbb\xbf"), f"docs/{name} starts with a BOM"
-    assert b"\r" not in data, f"docs/{name} has CR characters"
+    # LF in the repository; a Windows checkout with core.autocrlf turns every line into CRLF, never only some.
+    assert data.count(b"\r\n") in (0, data.count(b"\n")), f"docs/{name} mixes CRLF and LF"
+    assert b"\r" not in data.replace(b"\r\n", b""), f"docs/{name} has stray CR characters"
     data.decode("utf-8")
 
 

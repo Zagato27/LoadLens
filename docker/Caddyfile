@@ -1,0 +1,11 @@
+# Caddy in front of LoadLens (docker/docker-compose.https.yml). LOADLENS_HOSTNAME comes from docker/.env.
+# A public name gets a Let's Encrypt certificate automatically. For a name that only resolves inside your
+# network, uncomment "tls internal": Caddy then issues the certificate from its own CA, whose root
+# (docker compose exec caddy cat /data/caddy/pki/authorities/local/root.crt) the clients must trust;
+# or replace it with "tls /certs/loadlens.crt /certs/loadlens.key" and mount your certificate at /certs.
+{$LOADLENS_HOSTNAME} {
+	# tls internal
+	encode zstd gzip
+	# Caddy sends X-Forwarded-For, -Proto and -Host; LOADLENS_TRUSTED_PROXIES=1 makes the app honour them.
+	reverse_proxy app:5000
+}

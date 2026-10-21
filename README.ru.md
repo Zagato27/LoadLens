@@ -467,6 +467,7 @@ CI (`.github/workflows/tests.yml`) на каждый push и pull request про
 После изменения пакета запросов перегенерируйте каталог и пример конфига — тесты сверяют их с пакетами, а PromQL пакетов проверяют встроенным синтаксическим анализатором (`tests/promql_lint.py`):
 ```bash
 python -m AI.query_packs docs docs/query-packs.md
+python -m AI.query_packs docs --lang en docs/query-packs.en.md
 python -m AI.query_packs example        # запросы и ссылки SLA settings.example.py из набора по умолчанию
 python -m AI.query_packs render jvm-micrometer --var service_label=app
 ```

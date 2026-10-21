@@ -116,6 +116,7 @@ compare both with the packs and lint the PromQL with `tests/promql_lint.py`:
 
 ```bash
 python -m AI.query_packs docs docs/query-packs.md
+python -m AI.query_packs docs --lang en docs/query-packs.en.md
 python -m AI.query_packs example
 python -m AI.query_packs render jvm-micrometer --var service_label=app
 ```
@@ -158,7 +159,7 @@ python tools/release.py --notes 1.1.0           # the changelog section of a ver
 `--version` moves the Unreleased entries into `## [1.1.0] - <date>`, updates the reference links, regenerates the
 dependency table and runs the header check; it never runs git. The owner then reviews the diff, commits, tags
 `v1.1.0` and pushes the tag. `.github/workflows/release.yml` runs the suite, verifies that the tag names the same
-version (`--check --tag`), builds `ghcr.io/<owner>/loadlens:<tag>` and `:latest` (a tag with a suffix such as
+version (`--check --tag`), builds `ghcr.io/<owner>/loadlens:<tag>` and `:latest` for linux/amd64 and linux/arm64 (a tag with a suffix such as
 `v1.1.0-rc1` is a pre-release and does not move `latest`) and creates the GitHub Release with the notes. Repository
 renames, tag pushes and image publishing are owner actions.
 
@@ -169,7 +170,8 @@ renames, tag pushes and image publishing are owner actions.
 | `tests.yml` | Every push and pull request | pytest on Ubuntu with Python 3.12 and Node 22, `LOADLENS_REQUIRE_NODE=1`, example configuration |
 | `dependency-audit.yml` | Changes of `requirements*.txt` or the notices, weekly | `pip-audit`; `pip-licenses` with the copyleft deny list; every requirement named in `THIRD_PARTY_NOTICES.md` |
 | `demo.yml` | Changes of the demo files, weekly, by hand | Starts the demo stack, waits for `/healthz`, signs in, checks the demo run in the archive and the stub report built by the job pipeline |
-| `release.yml` | Tags `v*` | Tests, image on GHCR, GitHub Release from the changelog |
+| `links.yml` | Changes of `*.md`, weekly, by hand | lychee over every markdown file with `.github/lychee.toml`: external links only (local and example hosts are skipped; `tests/test_readme.py` checks the relative ones) |
+| `release.yml` | Tags `v*` | Tests, image on GHCR for linux/amd64 and linux/arm64 (arm64 under QEMU; both are started once before the push), GitHub Release from the changelog |
 
 ## Debugging switches
 

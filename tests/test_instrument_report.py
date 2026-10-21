@@ -252,6 +252,22 @@ def test_sla_scope_and_clock_offset():
     assert run_js(REPORT_JS, f"[3, -5, 5.5, 0, NaN].map((h) => {I}.utcOffsetText(h))") == ["UTC+3", "UTC-5", "UTC+5:30", "UTC+0", "UTC"]
 
 
+def test_chart_axis_and_tooltip_follow_the_report_clock_not_the_browser():
+    # The browser is in New York (UTC-4 in October), the steps of the report carry +03:00: the axis tick and the
+    # tooltip title read 15:44 like the step row and the markers, not 08:44.
+    label = "2026-10-20T12:44:00Z"
+    out = run_js(REPORT_JS, f"""(() => {{
+      {I}.reportState.stepTable = {js(DEMO["sla_details"]["load_step_table"])};
+      const steps = [{I}.clockLabel({js(label)}), {I}.dateTimeAt(Date.parse({js(label)}), 3)];
+      {I}.reportState.stepTable = {{ steps: [{{ start_iso: '2026-10-20T12:44:00-05:00' }}] }};
+      const minus5 = {I}.clockLabel({js(label)});
+      {I}.reportState.stepTable = null;
+      return steps.concat([minus5, {I}.clockLabel({js(label)}), {I}.clockLabel('not a time')]);
+    }})()""", tz="America/New_York")
+    # Without a step table the report clock is UTC+3, as for the marker labels.
+    assert out == ["15:44", "2026-10-20 15:44 UTC+3", "07:44", "15:44", "not a time"]
+
+
 # ---- analysis tabs -------------------------------------------------------------------------------------------------
 
 def test_findings_and_recommendations_in_two_columns_without_boxes():

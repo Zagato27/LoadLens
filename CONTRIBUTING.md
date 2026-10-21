@@ -35,8 +35,9 @@ python -m pytest -q tests/test_i18n.py      # one file while you work
   outside `127.0.0.1`. Do not add tests that need network access or a running service.
 - The user-storage tests can additionally run against a real PostgreSQL with `LOADLENS_TEST_PG_DSN`.
 - Every behaviour change comes with a test; a fix for a bug starts with a test that fails before the fix.
-- `tests/promql_lint.py` checks the PromQL of the query packs; `python -m AI.query_packs docs docs/query-packs.md`
-  and `python -m AI.query_packs example` regenerate the generated files that the tests compare with the packs.
+- `tests/promql_lint.py` checks the PromQL of the query packs; `python -m AI.query_packs docs docs/query-packs.md`,
+  `python -m AI.query_packs docs --lang en docs/query-packs.en.md` and `python -m AI.query_packs example` regenerate the generated
+  files that the tests compare with the packs.
 
 ## Localization (i18n)
 

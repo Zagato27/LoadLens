@@ -1,0 +1,38 @@
+# HTTPS in front of LoadLens with Caddy, on top of the production stack:
+#
+#   cd docker
+#   docker compose -f docker-compose.yml -f docker-compose.https.yml up -d --build
+#
+# docker/.env needs LOADLENS_HOSTNAME (the name users open, e.g. loadlens.example.com). A public name gets a
+# Let's Encrypt certificate automatically when ports 80 and 443 are reachable from the internet; for an internal
+# name see docker/Caddyfile. The application then trusts one proxy (X-Forwarded-*), marks cookies Secure and is
+# published on 127.0.0.1 only, so the proxy is the one way in. Needs Docker Compose 2.24.4 or newer (!override).
+services:
+  app:
+    ports: !override
+      - "127.0.0.1:${APP_PORT:-5000}:5000"
+    environment:
+      LOADLENS_COOKIE_SECURE: "1"
+      LOADLENS_TRUSTED_PROXIES: "1"
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: ltar_caddy
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      LOADLENS_HOSTNAME: ${LOADLENS_HOSTNAME:?Set LOADLENS_HOSTNAME in docker/.env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and the ACME account; losing them means new certificates and Let's Encrypt rate limits.
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

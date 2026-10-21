@@ -1,0 +1,20 @@
+# Link check of the markdown files (.github/workflows/links.yml); options: https://lychee.cli.rs/usage/config/
+# tests/test_readme.py checks the relative links offline, this file covers the internet ones.
+
+# Addresses of a local install in the examples (localhost:5000, 127.0.0.1:19090, a private network).
+exclude_loopback = true
+exclude_private = true
+exclude_link_local = true
+
+exclude = [
+  # Example hosts in the docs: gitlab.example.ru, k8s.example.ru:6443, jenkins.example.ru.
+  '^https?://([a-z0-9-]+\.)*example\.(ru|com|org|net)([:/]|$)',
+  # Pages that exist only for a signed-in user (new advisory, new discussion) answer 404 to anonymous clients.
+  '^https://github\.com/Zagato27/LoadLens/(security/advisories/new|discussions/new|issues/new)',
+]
+
+# Some sites answer automated clients with 403 or rate limits; that is not a dead link.
+accept = ["200..=299", "403", "429"]
+max_retries = 3
+retry_wait_time = 5
+timeout = 30

@@ -1816,6 +1816,18 @@
     const shifted = new Date(ms + offsetHours * 3600000);
     return String(shifted.getUTCHours()).padStart(2, '0') + ':' + String(shifted.getUTCMinutes()).padStart(2, '0');
   }
+  // «2026-10-21 14:05 UTC+3»: LL.formatDateTime in the clock of the report instead of the browser's.
+  function dateTimeAt(ms, offsetHours) {
+    const shifted = new Date(ms + offsetHours * 3600000);
+    const pad = (n) => String(n).padStart(2, '0');
+    const day = `${shifted.getUTCFullYear()}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())}`;
+    return `${day} ${clockAt(ms, offsetHours)} ${utcOffsetText(offsetHours)}`;
+  }
+  // Offset of the report clock: the step row, the markers and the chart axes all read it.
+  function reportClockOffset() {
+    const table = reportState.stepTable;
+    return reportOffsetHours(table && Array.isArray(table.steps) ? table.steps.filter(isPlainObject) : []);
+  }
   function slaWindowOf(finalRow) {
     const sla = parseJsonish(finalRow && finalRow.sla_details) || {};
     if (sla.stable_window && typeof sla.stable_window === 'object') return sla.stable_window;
@@ -2864,11 +2876,12 @@
     }));
     return { labels: labels, datasets: datasets };
   }
-  function clockLabel(label) {
+  // Time axis tick in the clock of the report, so that the ticks agree with the marker labels and the step row
+  // whatever the browser's time zone is.
+  function clockLabel(label, offsetHours) {
     const ms = utcMoment(label);
     if (ms === null) return String(label || '');
-    const d = new Date(ms);
-    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    return clockAt(ms, offsetHours === undefined ? reportClockOffset() : offsetHours);
   }
   async function reportsDrawOne(run, domain, ql, canvas, legendHost, group) {
     const u = new URL('/run_series', location.origin);
@@ -2895,11 +2908,12 @@
     }
     const built = buildChartData(data.points);
     const colors = LL.ui.chartColors();
+    const offset = reportClockOffset();
     const tooltip = LL.charts && typeof LL.charts.htmlTooltip === 'function' ? LL.charts.htmlTooltip({ max: TOOLTIP_ROWS }) : {};
     tooltip.callbacks = Object.assign({}, tooltip.callbacks, {
       title(items) {
         const ms = items && items.length ? utcMoment(items[0].label) : null;
-        return ms === null ? '' : LL.formatDateTime(ms);
+        return ms === null ? '' : dateTimeAt(ms, offset);
       }
     });
     const plugins = LL.charts ? [LL.charts.markers, LL.charts.thresholds, LL.charts.crosshair] : [];
@@ -2925,7 +2939,7 @@
               color: colors.text,
               maxRotation: 0,
               autoSkipPadding: 16,
-              callback(value) { return clockLabel(this.getLabelForValue(value)); }
+              callback(value) { return clockLabel(this.getLabelForValue(value), offset); }
             },
             // Instrument look: horizontal grid only, the time axis is a hairline (step starts are marker ticks).
             grid: { color: colors.grid, display: false }
@@ -3272,6 +3286,8 @@
     renderHeroKpis: renderHeroKpis,
     slaScopeText: slaScopeText,
     utcOffsetText: utcOffsetText,
+    clockLabel: clockLabel,
+    dateTimeAt: dateTimeAt,
     timelineHtml: timelineHtml,
     linkSlaToSteps: linkSlaToSteps,
     renderLoadStepTableHtml: renderLoadStepTableHtml,
