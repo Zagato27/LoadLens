@@ -55,7 +55,8 @@ data_collectors/temporary_files
 k6-load-testing-results*.json
 opensearch_error_report.md
 opensearch_logs_config.json
-loadlens_sber
+loadlens-fork*
+loadlens_fork*
 **/*.log
 
 # Not needed at run time
@@ -63,5 +64,6 @@ docker
 docs
 tests
 requirements-dev.txt
-G-Eval.pdf
-body.json
+
+# Maintainer-only design plans
+plans/

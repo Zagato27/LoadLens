@@ -1,6 +1,18 @@
 # Используем официальный образ Python
 FROM python:3.12-slim
 
+# Version and build id (date and short commit hash) of this image. .github/workflows/release.yml passes them
+# as build args; GET /about and Settings → About show them. LICENSE, NOTICE and THIRD_PARTY_NOTICES.md ride
+# along with the source copy below.
+ARG LOADLENS_VERSION=""
+ARG LOADLENS_BUILD=""
+ENV LOADLENS_BUILD=$LOADLENS_BUILD
+LABEL org.opencontainers.image.title="LoadLens" \
+      org.opencontainers.image.description="Load test reports with SLA verdicts, verified AI analysis, forecasting and Confluence export" \
+      org.opencontainers.image.source="https://github.com/Zagato27/LoadTestingAutoReports" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="$LOADLENS_VERSION"
+
 # Принудительно ведём логирование в stdout/stderr и не пишем .pyc
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

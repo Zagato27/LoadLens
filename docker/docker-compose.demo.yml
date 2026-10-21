@@ -1,0 +1,145 @@
+# LoadLens demo: a filled dashboard and a report in the browser from one command, without API keys,
+# Grafana, Prometheus or any other external system.
+#
+#   docker compose -f docker/docker-compose.demo.yml --env-file docker/demo.env --profile demo up --build
+#   open http://localhost:5000 and sign in with admin / loadlens-demo (docker/demo.env)
+#   docker compose -f docker/docker-compose.demo.yml --env-file docker/demo.env --profile demo down -v
+#
+# The stack is separate from docker/docker-compose.yml: its own project name, container names and
+# volumes, so it can run next to a production install without touching it. --env-file is part of the
+# command on purpose: without it docker compose would read docker/.env of that install. Every variable
+# below has a default equal to the value in docker/demo.env, so a stray variable from the environment is
+# the only way to change them.
+#
+# Services:
+#   timescaledb  the storage database, port not published
+#   llm-stub     OpenAI-compatible model stub (tools/stubs/llm_stub.py): English analysis texts
+#   prom-stub    Prometheus stub (tools/stubs/prom_stub.py): synthetic series for every query
+#   app          LoadLens from the same image as production, with settings.demo.py as its settings.py;
+#                LOADLENS_DEMO_SEED=1 writes the demo run and builds one report through the job pipeline
+#                and the two stubs on start (idempotent). Reports run in a thread of this container, so
+#                the demo needs neither Redis nor the Celery worker.
+
+name: loadlens-demo
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: loadlens_demo_db
+    profiles: ["demo"]
+    environment:
+      POSTGRES_USER: ${DEMO_DB_USER:-loadlens}
+      POSTGRES_PASSWORD: ${DEMO_DB_PASSWORD:-loadlens-demo-password}
+      POSTGRES_DB: ${DEMO_DB_NAME:-loadlens_demo}
+      # The application connects as POSTGRES_USER: no separate role in the demo (docker/initdb/03_app_role.sh).
+      APP_DB_USER: ""
+      APP_DB_PASSWORD: ""
+    volumes:
+      - tsdb_data:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  llm-stub:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: loadlens-demo:latest
+    container_name: loadlens_demo_llm
+    profiles: ["demo"]
+    command: python tools/stubs/llm_stub.py --host 0.0.0.0 --port 5090 --lang en --delay ${DEMO_LLM_DELAY_SEC:-1}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:5090/v1/models"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    restart: unless-stopped
+
+  prom-stub:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: loadlens-demo:latest
+    container_name: loadlens_demo_prom
+    profiles: ["demo"]
+    # Five load steps across any requested window: the step detector of the report has something to find.
+    command: python tools/stubs/prom_stub.py --host 0.0.0.0 --port 5092 --steps 5
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:5092/-/healthy"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    restart: unless-stopped
+
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: loadlens-demo:latest
+    container_name: loadlens_demo_app
+    profiles: ["demo"]
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      llm-stub:
+        condition: service_healthy
+      prom-stub:
+        condition: service_healthy
+    ports:
+      # Loopback only: the demo is for the browser on this machine.
+      - "127.0.0.1:${APP_PORT:-5000}:5000"
+    environment:
+      # Writes the demo run and builds the stub report on start; no effect on the production compose file.
+      LOADLENS_DEMO_SEED: "1"
+      # Reports run in a thread of this container: no broker, no worker.
+      LOADLENS_JOB_RUNNER: thread
+      CELERY_TASK_ALWAYS_EAGER: "1"
+      LOADLENS_RUN_MIGRATIONS: "1"
+      LOADLENS_LOAD_TEST_WATCHER: "0"
+      # Sign-in with the demo administrator (docker/demo.env).
+      LOADLENS_AUTH_ENABLED: "1"
+      LOADLENS_SECRET_KEY: ${DEMO_SECRET_KEY:-demo-only-secret-key-not-for-production}
+      LOADLENS_ADMIN_USER: ${DEMO_ADMIN_USER:-admin}
+      LOADLENS_ADMIN_PASSWORD: ${DEMO_ADMIN_PASSWORD:-loadlens-demo}
+      # Read by settings.demo.py (mounted as settings.py below).
+      DEMO_DB_HOST: timescaledb
+      DEMO_DB_NAME: ${DEMO_DB_NAME:-loadlens_demo}
+      DEMO_DB_USER: ${DEMO_DB_USER:-loadlens}
+      DEMO_DB_PASSWORD: ${DEMO_DB_PASSWORD:-loadlens-demo-password}
+      DEMO_LLM_URL: http://llm-stub:5090/v1
+      DEMO_PROM_URL: http://prom-stub:5092
+    volumes:
+      # The demo settings take the place of settings.py; the metrics config is the example as it is.
+      # settings_runtime.json and metrics_config_runtime.json are written inside the container (the demo
+      # seed registers its project area there on every start), so nothing on the host is touched.
+      - type: bind
+        source: ../settings.demo.py
+        target: /app/settings.py
+        read_only: true
+      - type: bind
+        source: ../metrics_config.example.py
+        target: /app/metrics_config.py
+        read_only: true
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2g
+          pids: 512
+    restart: unless-stopped
+
+volumes:
+  tsdb_data:
+    driver: local
