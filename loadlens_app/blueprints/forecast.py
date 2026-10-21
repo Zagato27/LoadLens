@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """HTTP API of the capacity forecast pages."""
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from typing import Any, Callable, Mapping, Optional
 import psycopg2
 from flask import Blueprint, abort, jsonify, render_template, request
 
+from AI.i18n import t as translate
 from AI.limit_explanation import ExplanationParseError
 from loadlens_app.auth import current_auth
 from loadlens_app.core import _active_project_area, _resolve_services_filter, public_base_url
@@ -24,7 +26,7 @@ from loadlens_app.forecast import (
 from loadlens_app.forecast_confluence import load_forecast_publication, publish_forecast  # noqa: F401
 from loadlens_app.forecast_explanation import ExplanationError, ExplanationView, explanation_view, generate_explanation
 from loadlens_app import job_runner, tasks
-from loadlens_app.jobs import JOB_KIND_FORECAST_CONFLUENCE, job_store
+from loadlens_app.jobs import JOB_KIND_FORECAST_CONFLUENCE, failure_message, job_message, job_store
 from loadlens_app.limits import LimitError, check_job_slot
 
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -63,16 +65,16 @@ def _number(source: Mapping[str, Any], name: str, message: str) -> Optional[floa
 
 def _forecast_inputs(source: Mapping[str, Any]) -> ForecastInputs:
     """Target, headroom and CPU ceiling of the calculator, from query args or a JSON body."""
-    target_message = "target_rps должен быть положительным числом не больше 10000000"
+    target_message = translate("api.forecast.bad_target")
     target = _number(source, "target_rps", target_message)
     if target is not None and not 0 < target <= MAX_TARGET_RPS:
         raise InputError(target_message)
-    headroom_message = "headroom_pct — от 0 до 90"
+    headroom_message = translate("api.forecast.bad_headroom")
     headroom = _number(source, "headroom_pct", headroom_message)
     headroom = DEFAULT_HEADROOM_PCT if headroom is None else headroom
     if not 0 <= headroom <= MAX_HEADROOM_PCT:
         raise InputError(headroom_message)
-    ceiling_message = "cpu_ceiling_pct — от 10 до 100"
+    ceiling_message = translate("api.forecast.bad_ceiling")
     ceiling = _number(source, "cpu_ceiling_pct", ceiling_message)
     low, high = CPU_CEILING_RANGE_PCT
     if ceiling is not None and not low <= ceiling <= high:
@@ -88,7 +90,7 @@ def _owner() -> str:
 def _bad_id(run_id: str):
     if RUN_ID_PATTERN.fullmatch(run_id or ""):
         return None
-    return jsonify({"error": "Некорректный идентификатор отчёта", "code": "bad_request"}), 400
+    return jsonify({"error": translate("api.forecast.bad_id"), "code": "bad_request"}), 400
 
 
 @forecast_bp.route("/forecasting")
@@ -181,7 +183,7 @@ def post_forecast_explanation(run_id: str):
     if rejected is not None:
         return rejected
     if not request.is_json:
-        return jsonify({"error": "Нужен запрос с Content-Type: application/json", "code": "bad_request"}), 415
+        return jsonify({"error": translate("api.common.json_required"), "code": "bad_request"}), 415
     owner = _owner()
     return _explanation_response(lambda: generate_explanation(run_id, budget_owner=owner))
 
@@ -202,10 +204,9 @@ def get_forecast_confluence(run_id: str):
     return jsonify(asdict(publication))
 
 
-def _failure_message(job_id: str) -> str:
-    current = job_store.get(job_id)
-    stage = (current.message or "").strip() if current else ""
-    return f"Ошибка на этапе «{stage}»" if stage else "Ошибка публикации прогноза"
+def _failure_message(job_id: str):
+    """Failure message (a ``Msg`` in the job's locale) naming the stage of the publication that failed."""
+    return failure_message(job_store.get(job_id), "job.forecast_failed")
 
 
 def _publish_in_background(job_id: str, run_id: str, inputs: ForecastInputs, source_url: str) -> None:
@@ -231,10 +232,10 @@ def post_forecast_confluence(run_id: str):
     if rejected is not None:
         return rejected
     if not request.is_json:
-        return jsonify({"error": "Нужен запрос с Content-Type: application/json", "code": "bad_request"}), 415
+        return jsonify({"error": translate("api.common.json_required"), "code": "bad_request"}), 415
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
-        return jsonify({"error": "Тело запроса должно быть JSON-объектом", "code": "bad_request"}), 400
+        return jsonify({"error": translate("api.common.json_body_object"), "code": "bad_request"}), 400
     try:
         inputs = _forecast_inputs(data)
     except InputError as exc:
@@ -246,7 +247,9 @@ def post_forecast_confluence(run_id: str):
     except LimitError as exc:
         return jsonify({"error": str(exc), "code": exc.code}), exc.status_code
     # The runner the job is registered for (Celery worker or a thread here) decides where it is published.
-    job = job_runner.create_job(JOB_KIND_FORECAST_CONFLUENCE, run_name=run_name, message="Публикация прогноза в Confluence…", owner=owner)
+    job = job_runner.create_job(
+        JOB_KIND_FORECAST_CONFLUENCE, run_name=run_name, message=job_message("job.publishing_forecast"), owner=owner,
+    )
     job_store.update(job.job_id, report_url=f"/forecasting/{run_id}")
     _publish_in_background(job.job_id, run_id, inputs, f"{public_base_url()}/forecasting/{run_id}")
-    return jsonify({"status": "accepted", "job_id": job.job_id, "message": "Публикация прогноза в Confluence началась."}), 200
+    return jsonify({"status": "accepted", "job_id": job.job_id, "message": translate("api.forecast.publish_started")}), 200

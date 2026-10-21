@@ -1,11 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
 """Contracts of the shared front-end helpers (static/js/common.js, ui.js, charts.js), run under Node."""
 
 import json
 import re
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from tests.js_harness import JsHarnessError, run_js, theme_css_vars
+from tests.js_harness import REPO_ROOT, JsHarnessError, run_js, theme_css_vars
 
 COMMON = ["static/js/common.js"]
 UI = ["static/js/common.js", "static/js/ui.js"]
@@ -414,13 +416,190 @@ def test_tooltip_defaults_follow_theme_tokens():
         LL.ui.restyleCharts();
         ({ dark, light: { bg: t.backgroundColor, title: t.titleColor } })
     """)
+    # Tooltips float: the popover surface and the strong hairline (plans/instrument-ui-plan.md 2.3).
     assert result["dark"] == {
-        "bg": css["dark"]["--bg-elev"], "border": css["dark"]["--border"], "title": css["dark"]["--text"],
-        "body": css["dark"]["--text"], "radius": 8, "point": True, "padding": 10,
+        "bg": css["dark"]["--bg-pop"], "border": css["dark"]["--line-2"], "title": css["dark"]["--text"],
+        "body": css["dark"]["--text"], "radius": 3, "point": True, "padding": 10,
     }
-    assert result["light"] == {"bg": css["light"]["--bg-elev"], "title": css["light"]["--text"]}
+    assert result["light"] == {"bg": css["light"]["--bg-pop"], "title": css["light"]["--text"]}
+
+
+def test_chart_defaults_use_the_mono_font():
+    result = run_js(CHARTS, "[Chart.defaults.font.family, Chart.defaults.font.size, LL.ui.fonts.mono, LL.ui.fonts.sans]")
+    assert result[0] == result[2] and result[0].startswith("'JetBrains Mono'") and result[1] == 11
+    assert result[3].startswith("'Golos Text'")
 
 
 def test_harness_reports_js_errors():
     with pytest.raises(JsHarnessError, match="boom"):
         run_js(COMMON, "throw new Error('boom')")
+
+
+# ---- LL.charts.stepProfileModel / stepProfile (load profile, plans/instrument-ui-plan.md 2.3) ---------------
+
+MSK = timezone(timedelta(hours=3))
+P0 = datetime(2026, 10, 15, 19, 10, tzinfo=MSK)
+
+
+def ms(moment):
+    return int(moment.timestamp() * 1000)
+
+
+def profile_steps(levels, minutes=10, selected=None, after_drop=()):
+    """load_step_table.steps as the report stores them: ISO strings with the +03:00 offset of the report."""
+    out = []
+    for i, rps in enumerate(levels):
+        start = P0 + timedelta(minutes=minutes * i)
+        out.append({
+            "index": i + 1, "label": f"{rps} RPS", "rps": rps, "selected": i == selected, "after_drop": i in after_drop,
+            "start_iso": start.isoformat(), "end_iso": (start + timedelta(minutes=minutes)).isoformat(),
+            "plateau_start_iso": (start + timedelta(minutes=1)).isoformat(),
+            "plateau_end_iso": (start + timedelta(minutes=minutes - 1)).isoformat(),
+        })
+    return out
+
+
+def profile_model(opts, **kwargs):
+    return run_js(CHARTS, f"LL.charts.stepProfileModel({json.dumps(opts)})", locale="en", **kwargs)
+
+
+@pytest.mark.parametrize("opts", [
+    None, {}, {"steps": []}, {"steps": "nope"},
+    {"steps": [{"index": 1, "rps": 50}]},
+    {"steps": [{"start_iso": "soon", "end_iso": "later", "rps": 50}]},
+    {"steps": [{"start_iso": P0.isoformat(), "end_iso": P0.isoformat(), "rps": 50}]},
+    {"steps": [{"start_iso": P0.isoformat(), "end_iso": (P0 + timedelta(minutes=5)).isoformat(), "rps": None}]},
+])
+def test_step_profile_model_is_null_without_a_drawable_step(opts):
+    assert profile_model(opts) is None
+
+
+def test_step_profile_empties_and_hides_its_host_without_steps():
+    result = run_js(CHARTS, """
+        const host = document.createElement('div');
+        host.innerHTML = 'old';
+        const handle = LL.charts.stepProfile(host, { steps: [] });
+        ({ hidden: host.hidden, html: host.innerHTML, model: handle.model, cls: host.className })
+    """)
+    assert result == {"hidden": True, "html": "", "model": None, "cls": "ll-profile"}
+    assert run_js(CHARTS, "LL.charts.stepProfile(null, {})") is None
+
+
+def test_step_profile_model_of_one_step():
+    m = profile_model({"steps": profile_steps([120]), "width": 600, "height": 150})
+    assert (m["x0"], m["x1"], m["width"], m["height"], m["compact"]) == (ms(P0), ms(P0 + timedelta(minutes=10)), 600, 150, False)
+    # 120 RPS with headroom is 134.4: the scale ends at the round 150; the plot runs from y=10 to y=116.
+    assert m["yMax"] == 150 and m["plot"] == {"top": 10, "bottom": 116} and m["maxRps"] == 120
+    assert m["path"] == "M0 31.2H600"
+    step = m["steps"][0]
+    assert (step["x"], step["w"], step["y"], step["rps"], step["index"], step["level"]) == (0, 600, 31.2, 120, 1, None)
+    assert m["bands"] == [] and m["lines"] == [] and m["target"] is None and m["sla"] is None
+    assert [(g["value"], g["text"]) for g in m["grid"]] == [(50, "50"), (100, "100")]
+    # Both ends plus round clock times of the report's offset (+03:00), clear of the end labels.
+    assert [(t["x"], t["text"], t["anchor"]) for t in m["ticks"]] == [
+        (0, "19:10", "start"), (120, "19:12", "middle"), (240, "19:14", "middle"), (360, "19:16", "middle"),
+        (480, "19:18", "middle"), (600, "19:20", "end"),
+    ]
+    assert m["offsetHours"] == 3 and m["aria"] == "Load profile: 1 step, peak 120 RPS"
+
+
+def test_step_profile_staircase_runs_to_the_next_step_and_marks_the_after_drop_level():
+    steps = profile_steps([50, 100, 185.4], after_drop=(2,))
+    steps[1]["end_iso"] = (P0 + timedelta(minutes=15)).isoformat()  # a pause before the third step
+    m = profile_model({"steps": list(reversed(steps)), "width": 600, "compact": True, "target": 200})
+    # Sorted by start; 200 RPS target with headroom (224) ends the scale at 250. Compact plot: y 8..128.
+    assert m["yMax"] == 250 and m["plot"] == {"top": 8, "bottom": 128}
+    assert m["path"] == "M0 104H200V80H400V39H600"
+    assert [s["level"]["text"] for s in m["steps"]] == ["50", "100", "~185"]
+    assert all(s["level"]["anchor"] == "middle" for s in m["steps"])
+    assert m["target"] == {"y": 32, "value": 200, "text": "200 · target", "x": 4, "anchor": "start"}
+    assert m["grid"] == []
+    ru = json.loads((REPO_ROOT / "locales" / "ru" / "charts.json").read_text(encoding="utf-8"))["charts.profile.target"]
+    assert run_js(CHARTS, f"LL.charts.stepProfileModel({json.dumps({'steps': steps, 'target': 200})}).target.text") == ru.replace("{value}", "200")
+
+
+def test_step_profile_sla_zone_from_the_window_the_marker_or_the_selected_step():
+    steps = profile_steps([50, 100, 150, 200, 250], selected=4)
+    window = {"start": (P0 + timedelta(minutes=41)).isoformat(), "end": (P0 + timedelta(minutes=49)).isoformat(), "level": 250}
+    full = profile_model({"steps": steps, "window": window, "width": 1000})
+    assert full["bands"] == [{"x": 820, "w": 160, "label": "SLA · step 5", "labelX": 824, "labelY": 170, "tone": "accent", "role": "sla"}]
+    assert full["sla"] == {"index": 5, "rps": 250, "start": ms(P0 + timedelta(minutes=41)), "end": ms(P0 + timedelta(minutes=49)),
+                           "startText": "19:51", "endText": "19:59"}
+    compact = profile_model({"steps": steps, "window": window, "width": 1000, "compact": True})
+    assert compact["bands"][0]["label"] == "SLA" and compact["bands"][0]["labelY"] == 122
+    # The selected step's plateau when there is no window: the same zone.
+    assert profile_model({"steps": steps, "width": 1000})["bands"] == full["bands"]
+    # A window reaching outside the run is clipped; one entirely outside draws nothing.
+    early = {"start_iso": (P0 - timedelta(minutes=30)).isoformat(), "end_iso": (P0 + timedelta(minutes=5)).isoformat()}
+    unselected = profile_steps([50, 100, 150, 200, 250])
+    clipped = profile_model({"steps": unselected, "window": early, "width": 1000})
+    assert [(b["x"], b["w"], b["label"]) for b in clipped["bands"]] == [(0, 100, "SLA · step 1")]
+    assert clipped["sla"]["startText"] == "19:10" and clipped["sla"]["index"] == 1
+    outside = {"start": (P0 + timedelta(hours=2)).isoformat(), "end": (P0 + timedelta(hours=3)).isoformat()}
+    nothing = profile_model({"steps": unselected, "window": outside, "width": 1000})
+    assert nothing["bands"] == [] and nothing["sla"] is None
+    # Without a window and a selected step, the SLA band of the report markers (its own label in the full size).
+    band = {"kind": "band", "role": "sla", "tone": "accent", "label": "SLA: step 4",
+            "t": ms(P0 + timedelta(minutes=31)), "to": (P0 + timedelta(minutes=39)).isoformat()}
+    marked = profile_model({"steps": unselected, "markers": [band], "width": 1000})
+    assert [(b["x"], b["w"], b["label"]) for b in marked["bands"]] == [(620, 160, "SLA: step 4")]
+
+
+def test_step_profile_lines_and_bands_of_the_markers():
+    steps = profile_steps([50, 100, 150, 200, 250])
+    markers = [
+        {"kind": "line", "t": ms(P0 + timedelta(minutes=45)), "to": None, "label": "degradation 19:55", "tone": "fail", "role": "degradation"},
+        {"kind": "line", "t": (P0 + timedelta(minutes=47)).isoformat(), "label": "RPS drop 19:57", "tone": "odd", "role": "rps_drop"},
+        {"kind": "line", "t": ms(P0 + timedelta(minutes=10)), "label": "early", "tone": "warn", "role": "x"},
+        {"kind": "line", "t": ms(P0 - timedelta(minutes=5)), "label": "before the run", "tone": "fail", "role": "rps_drop"},
+        {"kind": "line", "t": ms(P0 + timedelta(minutes=51)), "label": "after the run", "tone": "fail", "role": "rps_drop"},
+        {"kind": "line", "t": "not a time", "label": "broken", "tone": "fail", "role": "rps_drop"},
+        {"kind": "tick", "t": ms(P0 + timedelta(minutes=20)), "label": "", "tone": "muted", "role": "step"},
+        {"kind": "band", "t": ms(P0 + timedelta(minutes=45)), "to": ms(P0 + timedelta(minutes=70)), "label": "hold", "tone": "warn", "role": "hold"},
+        {"kind": "band", "t": ms(P0 + timedelta(hours=2)), "to": ms(P0 + timedelta(hours=3)), "label": "spike", "tone": "warn", "role": "spike"},
+    ]
+    m = profile_model({"steps": steps, "markers": markers, "width": 1000})
+    lines = [(l["x"], l["label"], l["labelX"], l["labelY"], l["anchor"], l["tone"], l["role"]) for l in m["lines"]]
+    assert lines == [
+        (200, "early", 205, 20, "start", "warn", "x"),
+        # Labels near the right edge turn left; a label that would overlap the previous one goes a row down.
+        (900, "degradation 19:55", 895, 20, "end", "fail", "degradation"),
+        (940, "RPS drop 19:57", 935, 33, "end", "fail", "rps_drop"),
+    ]
+    # Ticks are not drawn (the staircase shows the step starts); a band reaching past the end is clipped.
+    assert [(b["x"], b["w"], b["label"], b["tone"], b["role"]) for b in m["bands"]] == [(900, 100, "hold", "warn", "hold")]
+
+
+def test_step_profile_clock_follows_the_offset_of_the_steps():
+    naive = [{"index": 1, "rps": 10, "start_iso": "2026-10-15T16:10:00", "end_iso": "2026-10-15T16:40:00"}]
+    # A naive ISO time is UTC (as in the report markers); without an offset the clock is +03:00.
+    assert profile_model({"steps": naive, "width": 400})["ticks"][0]["text"] == "19:10"
+    assert profile_model({"steps": naive, "width": 400, "offsetHours": 0})["ticks"][0]["text"] == "16:10"
+    utc = [{"index": 1, "rps": 10, "start_iso": "2026-10-15T16:10:00-02:00", "end_iso": "2026-10-15T16:40:00-02:00"}]
+    first = profile_model({"steps": utc, "width": 400})
+    assert first["offsetHours"] == -2 and first["ticks"][0]["text"] == "16:10" and first["ticks"][-1]["text"] == "16:40"
+
+
+def test_step_profile_renders_an_escaped_svg_and_redraws():
+    steps = profile_steps([50, 100, 185.4], selected=1)
+    marker = {"kind": "line", "t": ms(P0 + timedelta(minutes=20)), "label": "<b>&", "tone": "fail", "role": "degradation"}
+    result = run_js(CHARTS, f"""
+        const host = document.createElement('div');
+        const handle = LL.charts.stepProfile(host, {{ steps: {json.dumps(steps)}, markers: [{json.dumps(marker)}], compact: true }});
+        const first = {{ html: host.innerHTML, hidden: host.hidden, cls: host.className, width: handle.model.width, sla: handle.model.sla.index }};
+        handle.update({{ steps: [] }});
+        const emptied = {{ html: host.innerHTML, hidden: host.hidden }};
+        handle.update({{ steps: {json.dumps(steps)} }});
+        ({{ first, emptied, again: host.hidden, same: host.$llProfile === handle }})
+    """, locale="en")
+    html = result["first"]["html"]
+    assert html.startswith('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 150" width="100%" height="150"')
+    assert 'role="img" aria-label="Load profile: 3 steps, peak 185 RPS"' in html
+    for part in ('class="pf-band tone-accent"', 'class="pf-path" d="M0 ', 'class="pf-axis"', 'class="pf-mark tone-fail"',
+                 'class="pf-level is-selected"', '>&lt;b&gt;&amp;</text>', '>SLA</text>', '>19:10</text>', '>19:40</text>'):
+        assert part in html, part
+    assert "<b>" not in html
+    assert result["first"]["hidden"] is False and result["first"]["cls"] == "ll-profile"
+    assert result["first"]["width"] == 560 and result["first"]["sla"] == 2
+    assert result["emptied"] == {"html": "", "hidden": True}
+    assert result["again"] is False and result["same"] is True

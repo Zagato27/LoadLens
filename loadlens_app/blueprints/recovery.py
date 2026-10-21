@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Recovery page: fix the storage connection while the database is down.
 
 Reachable by a recovery session (see ``loadlens_app.auth.recovery``) and by administrators. The form
@@ -15,6 +16,7 @@ from typing import Any, Optional
 from flask import Blueprint, g, jsonify, redirect, render_template, request, session
 
 from AI import storage_state
+from AI.i18n import t as translate
 from loadlens_app import core
 from loadlens_app.auth import recovery
 from loadlens_app.auth.web import current_auth, get_service
@@ -92,37 +94,37 @@ def _normalized(values: dict) -> tuple[dict, str]:
     out: dict = {}
     host = _text(values.get("host"))
     if not host:
-        return {}, "Укажите адрес сервера базы"
+        return {}, translate("api.recovery.host_required")
     if len(host) > 253 or any(ch not in _HOST_CHARS for ch in host):
-        return {}, "Адрес сервера: только имя хоста или IP-адрес, без схемы, пути и пробелов"
+        return {}, translate("api.recovery.host_format")
     out["host"] = host
     raw_port = values.get("port")
     port = _as_int(raw_port if raw_port not in (None, "") else 5432)
     if port is None or not 1 <= port <= 65535:
-        return {}, "Порт должен быть числом от 1 до 65535"
+        return {}, translate("api.recovery.port")
     out["port"] = port
-    for key, label in (("dbname", "имя базы данных"), ("user", "пользователя базы")):
+    for key, label_key in (("dbname", "api.recovery.field.dbname"), ("user", "api.recovery.field.user")):
         text = _text(values.get(key))
         if not text or len(text) > _NAME_LIMIT or any(ch.isspace() for ch in text):
-            return {}, f"Укажите {label}: до {_NAME_LIMIT} символов, без пробелов"
+            return {}, translate("api.recovery.name_format", label=translate(label_key), limit=_NAME_LIMIT)
         out[key] = text
     password = values.get("password")
     if password is not None and not isinstance(password, str):
-        return {}, "Пароль должен быть строкой"
+        return {}, translate("api.recovery.password_string")
     out["password"] = password or ""
     sslmode = (_text(values.get("sslmode")) or "prefer").lower()
     if sslmode not in SSL_MODES:
-        return {}, f"Режим SSL: одно из значений {', '.join(SSL_MODES)}"
+        return {}, translate("api.recovery.sslmode", allowed=", ".join(SSL_MODES))
     out["sslmode"] = sslmode
     schema = _text(values.get("schema")) or "public"
     if not _identifier(schema):
-        return {}, "Схема: латинские буквы, цифры и подчёркивание, не с цифры"
+        return {}, translate("api.recovery.schema")
     out["schema"] = schema
     timeout = values.get("connect_timeout_sec")
     if timeout not in (None, ""):
         seconds = _as_int(timeout)
         if seconds is None or not 2 <= seconds <= 60:
-            return {}, "Таймаут подключения: целое число секунд от 2 до 60"
+            return {}, translate("api.recovery.timeout")
         out["connect_timeout_sec"] = seconds
     return out, ""
 
@@ -130,7 +132,7 @@ def _normalized(values: dict) -> tuple[dict, str]:
 def _candidate(body: object) -> tuple[Optional[dict], str]:
     """The stored section with the form fields applied and a masked password restored."""
     if not isinstance(body, dict):
-        return None, "Ожидается JSON-объект с полями подключения"
+        return None, translate("api.recovery.body")
     current = _stored()
     merged = {key: current.get(key) for key in FORM_FIELDS if key in current}
     merged.update({key: body[key] for key in FORM_FIELDS if key in body})

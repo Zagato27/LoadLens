@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Endpoints: login/logout, account (password, API tokens), user administration, audit log."""
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ import psycopg2
 from flask import Blueprint, current_app, jsonify, make_response, redirect, render_template, request, session
 
 from AI import storage_state
+from AI.i18n import t as translate
 
 from . import recovery
 from .models import Role
@@ -16,8 +18,6 @@ from .service import AuthError, LoginStatus
 from .web import current_actor, current_auth, csrf_token, establish_session, get_service, json_error, safe_next
 
 auth_bp = Blueprint("auth", __name__)
-
-_INVALID_LOGIN = "Неверный логин или пароль, либо учётная запись временно заблокирована"
 
 
 def _body() -> dict[str, Any]:
@@ -32,14 +32,14 @@ def _auth_error(exc: AuthError):
 
 @auth_bp.errorhandler(psycopg2.Error)
 def _database_error(exc: psycopg2.Error):
-    return json_error("База данных пользователей недоступна", 503, "auth_unavailable")
+    return json_error(translate("auth.server.users_db_unavailable"), 503, "auth_unavailable")
 
 
 def _require_user():
     """The signed-in user, or an error response when authentication is switched off."""
     user = current_auth().user
     if user is None:
-        return None, json_error("Недоступно: авторизация отключена", 400, "auth_disabled")
+        return None, json_error(translate("auth.server.auth_disabled"), 400, "auth_disabled")
     return user, None
 
 
@@ -99,17 +99,17 @@ def _recovery_login_submit(service, username: str, password: str, as_json: bool)
 
     if not recovery.configured(service.settings):
         recovery.log("login refused: no recovery administrator configured", ip=ip, user=username)
-        return reply("Хранилище недоступно, а аварийный администратор не настроен", 503, "recovery_not_configured")
+        return reply(translate("auth.server.recovery_not_configured"), 503, "recovery_not_configured")
     limiter = current_app.extensions[recovery.EXTENSION_KEY]
     wait = limiter.retry_after(ip, username)
     if wait > 0:
         recovery.log("login throttled", ip=ip, user=username)
         seconds = max(1, math.ceil(wait))
-        return reply(f"Слишком много попыток входа. Повторите через {math.ceil(seconds / 60)} мин.", 429, "throttled", seconds)
+        return reply(translate("auth.server.throttled", minutes=math.ceil(seconds / 60)), 429, "throttled", seconds)
     if not recovery.verify(service.settings, username, password):
         limiter.failure(ip, username)
         recovery.log("login failed", ip=ip, user=username)
-        return reply("Неверный логин или пароль аварийного администратора", 401, "invalid_credentials")
+        return reply(translate("auth.server.recovery_invalid_login"), 401, "invalid_credentials")
     limiter.success(ip, username)
     recovery.establish(session)
     recovery.log("login", ip=ip, user=username)
@@ -159,12 +159,12 @@ def login_submit():
 
     if outcome.status is LoginStatus.THROTTLED:
         wait = max(1, math.ceil(outcome.retry_after))
-        message = f"Слишком много попыток входа. Повторите через {math.ceil(wait / 60)} мин."
+        message = translate("auth.server.throttled", minutes=math.ceil(wait / 60))
         status, code = 429, "throttled"
     elif outcome.status is LoginStatus.UNAVAILABLE:
-        message, status, code, wait = "Сервис авторизации временно недоступен", 503, "auth_unavailable", 0
+        message, status, code, wait = translate("auth.server.unavailable"), 503, "auth_unavailable", 0
     else:
-        message, status, code, wait = _INVALID_LOGIN, 401, "invalid_credentials", 0
+        message, status, code, wait = translate("auth.server.invalid_login"), 401, "invalid_credentials", 0
 
     if as_json:
         response = json_error(message, status, code)

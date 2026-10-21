@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Pure helpers of the command palette (static/js/palette.js) and the archive (static/js/archive.js), run under Node."""
 
 import json
@@ -87,7 +88,7 @@ def test_area_items_mark_the_active_area_and_hide_when_nothing_to_switch():
 
 def test_run_items_link_by_id_and_describe_the_run():
     runs = [
-        {"run_name": "nightly-1", "run_id": "abc", "service": "checkout", "end_time": "2026-10-15T09:55:00Z", "verdict": "Провал"},
+        {"run_name": "nightly-1", "run_id": "abc", "service": "checkout", "end_time": "2026-10-15T09:55:00Z", "verdict": "fail"},
         {"run_name": "old run", "service": "", "verdict": ""},
         {"service": "no-name"},
     ]
@@ -177,8 +178,10 @@ def test_archive_parse_query_defaults():
 
 
 def test_archive_parse_query_reads_and_validates_every_field():
+    # A shared link with the old label (?verdict=Провал) selects its code.
     state = archive("A.parseQuery('?q=%20night%20&service=checkout&verdict=%D0%9F%D1%80%D0%BE%D0%B2%D0%B0%D0%BB&test_type=Soak&sort=max_rps&page=3')")
-    assert state == {"page": 3, "sort": "max_rps", "dir": "desc", "q": "night", "service": "checkout", "verdict": "Провал", "testType": "soak"}
+    assert state == {"page": 3, "sort": "max_rps", "dir": "desc", "q": "night", "service": "checkout", "verdict": "fail", "testType": "soak"}
+    assert archive("A.parseQuery('?verdict=no_data').verdict") == "no_data"
     bad = archive("A.parseQuery('?verdict=maybe&sort=drop&dir=up&page=0')")
     assert (bad["verdict"], bad["sort"], bad["dir"], bad["page"]) == ("", "end_time", "desc", 1)
     assert archive("A.parseQuery('?sort=run_name').dir") == "asc"
@@ -190,7 +193,7 @@ def test_archive_parse_query_reads_and_validates_every_field():
 
 def test_archive_build_query_omits_defaults_and_round_trips():
     assert archive("A.buildQuery(A.defaultState())") == ""
-    state = {"page": 2, "sort": "run_name", "dir": "desc", "q": "50% x", "service": "НСИ", "verdict": "Успешно", "testType": "spike"}
+    state = {"page": 2, "sort": "run_name", "dir": "desc", "q": "50% x", "service": "НСИ", "verdict": "pass", "testType": "spike"}
     query = archive(f"A.buildQuery({js(state)})")
     assert query.startswith("?q=50%25+x&service=")
     assert "sort=run_name" in query and "dir=desc" in query and "page=2" in query
@@ -202,11 +205,12 @@ def test_archive_build_query_omits_defaults_and_round_trips():
 
 def test_archive_runs_url():
     url = archive("A.buildRunsUrl({ ...A.defaultState(), page: 3, q: 'a b', testType: 'soak' })")
-    assert url == "/runs?q=a+b&test_type=soak&offset=40&limit=20&sort=end_time&dir=desc"
+    # include=sla: the SLA n/m and p95 columns of the archive (stage 3 of plans/instrument-ui-plan.md).
+    assert url == "/runs?q=a+b&test_type=soak&offset=40&limit=20&sort=end_time&dir=desc&include=sla"
 
 
 def test_archive_chips_and_removing_a_filter():
-    state = {"page": 4, "sort": "end_time", "dir": "desc", "q": "night", "service": "svc", "verdict": "Провал", "testType": "soak"}
+    state = {"page": 4, "sort": "end_time", "dir": "desc", "q": "night", "service": "svc", "verdict": "fail", "testType": "soak"}
     chips = archive(f"A.activeChips({js(state)}, {{ service: (id) => 'Сервис ' + id, testType: (k) => LL.testTypeLabel(k) }})")
     assert chips == [
         {"key": "q", "label": "Поиск", "value": "«night»"},
@@ -265,8 +269,10 @@ def test_archive_format_rps(value, expected):
 
 
 def test_archive_time_cell_and_duration():
+    # A short absolute date in mono; the full date and the relative one go to the tooltip.
     cell = archive(f"A.timeCell('2026-10-15T09:00:00Z', {NOW})")
-    assert cell == {"text": "1 ч назад", "title": "2026-10-15 09:00"}
+    assert cell == {"text": "15.10 09:00", "title": "2026-10-15 09:00 · 1 ч назад"}
+    assert archive(f"A.timeCell('2026-10-15T09:00:00Z', {NOW}, {{ timeToday: true }}).text") == "09:00"
     assert archive(f"A.timeCell(null, {NOW})") == {"text": "—", "title": ""}
     assert archive(f"A.timeCell('garbage', {NOW})") == {"text": "—", "title": ""}
     run = {"start_time": "2026-10-15T08:00:00Z", "end_time": "2026-10-15T09:05:00Z"}

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The ``max_rps`` column of ``llm_reports``: one parsing rule for Python and SQL, the write in
 ``save_llm_results``, the backfill migration, the read expressions of the dashboard and ``/runs`` and the
 DDL (column plus partial indexes of the final rows). Offline: fake connections and cursors only."""

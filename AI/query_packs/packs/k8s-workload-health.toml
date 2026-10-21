@@ -2,6 +2,7 @@ schema_version = 1
 id = "k8s-workload-health"
 version = 1
 title = "Kubernetes: здоровье нагрузки (рестарты, троттлинг, реплики, OOM)"
+title_en = "Kubernetes: workload health (restarts, throttling, replicas, OOM)"
 category = "infrastructure"
 stack = ["kubernetes"]
 domain = "hard_resources"
@@ -11,6 +12,11 @@ description = """
 CPU по CFS-квоте, память относительно лимита, OOMKilled, доступные и желаемые реплики deployment и \
 реплики HPA. Источники — cAdvisor (kubelet) и kube-state-metrics 2.x. Ограничьте namespace стенда.
 """
+description_en = """
+Signals that explain degradation under load in Kubernetes: container restarts, CPU throttling by the CFS \
+quota, memory against the limit, OOMKilled, available and desired deployment replicas and HPA replicas. \
+Sources: cAdvisor (kubelet) and kube-state-metrics 2.x. Limit it to the namespace of the test environment.
+"""
 requires_metrics = ["kube_pod_container_status_restarts_total", "container_cpu_cfs_throttled_periods_total", "kube_deployment_status_replicas_available"]
 prompt_addendum = """
 Метрики Kubernetes: троттлинг CPU выше 10–20 % означает упор в CPU-лимит контейнера (растут задержки при \
@@ -18,18 +24,27 @@ prompt_addendum = """
 желаемых — поды не готовы (readiness) или не помещаются на ноды, рост реплик HPA во время ступени меняет \
 пропускную способность сервиса.
 """
+prompt_addendum_en = """
+Kubernetes metrics: CPU throttling above 10–20 % means the container hits its CPU limit (latency grows while \
+node CPU stays moderate); memory near 100 % of the limit leads to OOMKilled and a restart; fewer available \
+replicas than desired means pods are not ready (readiness) or do not fit on the nodes; HPA replicas growing \
+during a step change the throughput of the service.
+"""
 
 [variables.namespace]
 title = "Namespace (регулярное выражение)"
+title_en = "Namespace (regular expression)"
 default = ".+"
 pattern = '^[^"\n\r{}]*$'
 
 [variables.ksm_matchers]
 title = "Матчеры kube-state-metrics"
+title_en = "kube-state-metrics matchers"
 default = 'job=~".*kube-state-metrics.*"'
 
 [variables.window]
 title = "Окно rate()"
+title_en = "rate() window"
 default = "2m"
 pattern = '^[1-9][0-9]*[smh]$'
 
@@ -41,6 +56,7 @@ required = true
 query = 'sum by (namespace, pod) (increase(kube_pod_container_status_restarts_total{namespace=~"{{namespace}}", {{ksm_matchers}} }[5m])) > 0'
 keys = ["namespace", "pod"]
 description = "Перезапуски контейнеров за 5 минут (показываются только ненулевые)."
+description_en = "Container restarts over 5 minutes (only non-zero values are shown)."
 
 [[queries]]
 label = "K8s workloads: CPU throttling (%) by namespace & pod (top 20)"
@@ -49,6 +65,7 @@ unit = "percent"
 query = 'topk(20, 100 * sum by (namespace, pod) (rate(container_cpu_cfs_throttled_periods_total{namespace=~"{{namespace}}", container!="", container!="POD"}[{{window}}])) / sum by (namespace, pod) (rate(container_cpu_cfs_periods_total{namespace=~"{{namespace}}", container!="", container!="POD"}[{{window}}])))'
 keys = ["namespace", "pod"]
 description = "Доля CFS-периодов с троттлингом, %."
+description_en = "Share of CFS periods with throttling, %."
 
 [[queries]]
 label = "K8s workloads: memory working set (% of limit) by namespace & pod (top 20)"
@@ -57,6 +74,7 @@ unit = "percent"
 query = 'topk(20, 100 * sum by (namespace, pod) (container_memory_working_set_bytes{namespace=~"{{namespace}}", container!="", container!="POD"}) / sum by (namespace, pod) (kube_pod_container_resource_limits{resource="memory", namespace=~"{{namespace}}", {{ksm_matchers}} }))'
 keys = ["namespace", "pod"]
 description = "Working set памяти пода от суммы лимитов контейнеров, %."
+description_en = "Pod memory working set relative to the sum of the container limits, %."
 
 [[queries]]
 label = "K8s workloads: OOMKilled containers by namespace & pod"
@@ -65,6 +83,7 @@ unit = "count"
 query = 'sum by (namespace, pod) (kube_pod_container_status_last_terminated_reason{reason="OOMKilled", namespace=~"{{namespace}}", {{ksm_matchers}} }) > 0'
 keys = ["namespace", "pod"]
 description = "Контейнеры, последний раз завершённые OOM killer."
+description_en = "Containers last terminated by the OOM killer."
 
 [[queries]]
 label = "K8s workloads: available replicas by namespace & deployment"
@@ -73,6 +92,7 @@ unit = "count"
 query = 'sum by (namespace, deployment) (kube_deployment_status_replicas_available{namespace=~"{{namespace}}", {{ksm_matchers}} })'
 keys = ["namespace", "deployment"]
 description = "Готовые реплики deployment."
+description_en = "Ready deployment replicas."
 
 [[queries]]
 label = "K8s workloads: desired replicas by namespace & deployment"
@@ -81,6 +101,7 @@ unit = "count"
 query = 'sum by (namespace, deployment) (kube_deployment_spec_replicas{namespace=~"{{namespace}}", {{ksm_matchers}} })'
 keys = ["namespace", "deployment"]
 description = "Желаемые реплики deployment."
+description_en = "Desired deployment replicas."
 
 [[queries]]
 label = "K8s workloads: HPA current replicas by namespace & hpa"
@@ -89,3 +110,4 @@ unit = "count"
 query = 'sum by (namespace, horizontalpodautoscaler) (kube_horizontalpodautoscaler_status_current_replicas{namespace=~"{{namespace}}", {{ksm_matchers}} })'
 keys = ["namespace", "horizontalpodautoscaler"]
 description = "Текущие реплики по HPA."
+description_en = "Current HPA replicas."

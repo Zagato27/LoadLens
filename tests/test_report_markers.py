@@ -1,5 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
 """Chart markers, SLA thresholds and series colors: AI/report_markers.py and its JS mirror in
-static/js/reports.js must agree, and the Confluence PNG must draw the same items (ui-plan 1.1, 1.2, 1.7)."""
+static/js/reports.js must agree in every language (labels are dictionary texts: the UI locale on the page, the
+locale of the caller in Python), and the Confluence PNG must draw the same items (ui-plan 1.1, 1.2, 1.7)."""
 
 import io
 import json
@@ -12,6 +14,7 @@ import pytest
 
 from AI import report_markers as rm
 from AI import sla_evaluator
+from AI.i18n import with_locale
 from AI.context_pack import format_iso
 from loadlens_app import confluence_export, demo_data
 from tests.js_harness import run_js, theme_css_vars
@@ -24,12 +27,12 @@ def js(value):
     return json.dumps(value, ensure_ascii=False)
 
 
-def js_markers(row, table=None):
-    return run_js(REPORT_JS, f"LL.report._internals.reportMarkers({js(row)}, {js(table)})")
+def js_markers(row, table=None, locale="ru"):
+    return run_js(REPORT_JS, f"LL.report._internals.reportMarkers({js(row)}, {js(table)})", locale=locale)
 
 
-def js_thresholds(row, table=None):
-    return run_js(REPORT_JS, f"LL.report._internals.slaThresholds({js(row)}, {js(table)})")
+def js_thresholds(row, table=None, locale="ru"):
+    return run_js(REPORT_JS, f"LL.report._internals.slaThresholds({js(row)}, {js(table)})", locale=locale)
 
 
 # ---- rows ------------------------------------------------------------------------------------
@@ -157,19 +160,56 @@ ROWS = {
 
 # ---- the JS/Python contract --------------------------------------------------------------------
 
+@pytest.mark.parametrize("lang", ["ru", "en"])
 @pytest.mark.parametrize("name", sorted(ROWS))
-def test_js_and_python_build_the_same_markers_and_thresholds(name):
+def test_js_and_python_build_the_same_markers_and_thresholds(name, lang):
     row = ROWS[name]()
-    assert js_markers(row) == rm.markers_for(row)
-    assert js_thresholds(row) == rm.thresholds_for(row)
+    with with_locale(lang):
+        assert js_markers(row, locale=lang) == rm.markers_for(row)
+        assert js_thresholds(row, locale=lang) == rm.thresholds_for(row)
 
 
-def test_js_and_python_agree_with_a_resolved_step_table():
+@pytest.mark.parametrize("lang", ["ru", "en"])
+def test_js_and_python_agree_with_a_resolved_step_table(lang):
     row = stress_row()
     table = row["sla_details"].pop("load_step_table")
-    assert rm.markers_for(row) != rm.markers_for(row, table)
-    assert js_markers(row, table) == rm.markers_for(row, table)
-    assert js_thresholds(row, table) == rm.thresholds_for(row, table)
+    with with_locale(lang):
+        assert rm.markers_for(row) != rm.markers_for(row, table)
+        assert js_markers(row, table, locale=lang) == rm.markers_for(row, table)
+        assert js_thresholds(row, table, locale=lang) == rm.thresholds_for(row, table)
+
+
+def test_marker_and_threshold_labels_follow_the_locale():
+    with with_locale("en"):
+        markers = {m["role"]: m["label"] for m in rm.markers_for(stress_row())}
+        thresholds = {t["name"]: t["label"] for t in rm.thresholds_for(stress_row())}
+        hold = rm.markers_for(soak_row())[0]["label"]
+        spikes = [m["label"] for m in rm.markers_for(spike_row())]
+    assert markers == {"sla": "SLA: step 4", "step": "", "degradation": "degradation 18:06", "rps_drop": "RPS drop 18:12"}
+    assert thresholds == {"target_rps": "target ≥ 180 RPS", "p95_latency": "p95 ≤ 300 ms", "error_rate": "errors ≤ 1.5 %"}
+    assert hold == "hold window"
+    # Spike labels stored with the report stay as stored; a spike without one is named by its index.
+    assert spikes == ["всплеск 1", "spike 2"]
+    window_only = spike_row()
+    window_only["parsed"]["spike_analysis"]["spikes"] = []
+    window_only["sla_details"]["stable_window"].pop("title")
+    with with_locale("en"):
+        assert [m["label"] for m in rm.markers_for(window_only)] == ["spike"]
+        assert rm.markers_for(legacy_row())[0]["label"] == "SLA: step 3"
+
+
+def test_query_and_series_are_parsed_from_ru_and_en_check_texts():
+    window = {}
+    for message in ("p95 280.50 мс ≤ порог 300 мс (на ступени, запрос «Latency», серия «POST /x»)",
+                    "p95 280.50 ms ≤ threshold 300 ms (on the step, query «Latency», series «POST /x»)",
+                    "RPS 200.0; label='Latency'; series='POST /x'"):
+        check = {"name": "p95_latency", "threshold": 300, "message": message}
+        assert rm.check_source(check, window, {}) == ("Latency", "POST /x")
+        assert run_js(REPORT_JS, f"LL.report._internals.slaThresholds({js({'sla_details': {'checks': [check]}})}, null)", locale="en") == [
+            {"name": "p95_latency", "query_label": "Latency", "series": "POST /x", "value": 300, "label": "p95 ≤ 300 ms", "tone": "fail"}]
+    # Explicit fields win over the text.
+    explicit = {"name": "p95_latency", "query_label": "Real", "series": "s", "message": "query «Old», series «x»"}
+    assert rm.check_source(explicit, window, {}) == ("Real", "s")
 
 
 def test_demo_row_markers_and_thresholds():

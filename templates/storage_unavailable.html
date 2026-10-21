@@ -1,26 +1,27 @@
 <!DOCTYPE html>
-<html lang="ru" data-theme="dark">
+<html lang="{{ locale }}" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   {# Re-check by itself: the storage breaker lets one request through after the pause. #}
   <meta http-equiv="refresh" content="{{ [retry_seconds, 15] | max }}" />
-  <title>Хранилище недоступно — LoadLens</title>
+  <title>{{ t('recovery.outage.title') }} — LoadLens</title>
   <script nonce="{{ csp_nonce }}">
-    // Apply the saved theme before first paint to avoid a flash (same logic as base.html).
-    // ui.js is not loaded here, so "system" keeps following the OS setting from this script.
+    // Apply the theme before first paint to avoid a flash (same logic as base.html): a stored "light" or "dark"
+    // wins, anything else follows the OS setting. ui.js is not loaded here, so this script keeps following it.
     (function () {
+      var root = document.documentElement;
+      var saved = null;
+      try { saved = localStorage.getItem('loadlens.theme'); } catch (e) {}
+      if (saved === 'light' || saved === 'dark') {
+        root.setAttribute('data-theme', saved);
+        return;
+      }
       try {
-        var root = document.documentElement;
-        var saved = localStorage.getItem('loadlens.theme');
-        if (saved === 'system') {
-          var query = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null;
-          var follow = function () { root.setAttribute('data-theme', query && query.matches ? 'light' : 'dark'); };
-          follow();
-          if (query && query.addEventListener) query.addEventListener('change', follow);
-        } else if (saved === 'light' || saved === 'dark') {
-          root.setAttribute('data-theme', saved);
-        }
+        var query = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null;
+        var follow = function () { root.setAttribute('data-theme', query && query.matches ? 'light' : 'dark'); };
+        follow();
+        if (query && query.addEventListener) query.addEventListener('change', follow);
       } catch (e) {}
     })();
   </script>
@@ -35,25 +36,28 @@
         <img class="logo" src="/assets/logo.png?c={{ appearance.key }}" alt="" />
         <span class="brand">LoadLens</span>
       </div>
-      <h1 class="outage-title">Хранилище недоступно</h1>
+      <h1 class="outage-title">{{ t('recovery.outage.title') }}</h1>
       <div class="auth-alert" role="alert">
         <strong>{{ storage.title }}.</strong> {{ storage.hint }}
       </div>
       {% if show_details and (storage.address or storage.message) %}
       <dl class="outage-details">
-        {% if storage.address %}<dt>Адрес</dt><dd><code>{{ storage.address }}</code></dd>{% endif %}
-        {% if storage.message %}<dt>Ответ</dt><dd><code>{{ storage.message }}</code></dd>{% endif %}
+        {% if storage.address %}<dt>{{ t('recovery.details.address') }}</dt><dd><code>{{ storage.address }}</code></dd>{% endif %}
+        {% if storage.message %}<dt>{{ t('recovery.details.response') }}</dt><dd><code>{{ storage.message }}</code></dd>{% endif %}
       </dl>
       {% endif %}
-      <p class="outage-text">Отчёты, архив и вход пользователей хранятся в этой базе, поэтому они временно не работают. Страница проверит подключение снова через {{ [retry_seconds, 15] | max }}&nbsp;с.</p>
+      {#- The number and the unit stay together on one line: a non-breaking space. #}
+      {%- set retry_delay %}{{ [retry_seconds, 15] | max }}&nbsp;{{ t('recovery.outage.seconds_unit') }}{% endset %}
+      <p class="outage-text">{{ t('recovery.outage.text', delay=retry_delay) }}</p>
       {% if not auth_enabled %}
-      <a class="btn btn-primary btn-lg" href="/recovery">Исправить подключение</a>
+      <a class="btn btn-primary btn-lg" href="/recovery">{{ t('recovery.outage.fix_connection') }}</a>
       {% elif recovery_configured %}
-      <a class="btn btn-primary btn-lg" href="/login">Войти как аварийный администратор</a>
-      <p class="auth-note">Аварийный вход открывает только настройку подключения к хранилищу.</p>
+      <a class="btn btn-primary btn-lg" href="/login">{{ t('recovery.outage.recovery_login') }}</a>
+      <p class="auth-note">{{ t('recovery.outage.recovery_login_note') }}</p>
       {% else %}
       {% include "_recovery_setup.html" %}
       {% endif %}
+      {% include "_lang_switch.html" %}
     </div>
   </main>
 </body>

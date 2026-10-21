@@ -1,42 +1,49 @@
 {% extends "base.html" %}
 {% set active_nav = 'launch' %}
-{% block title %}Запуск теста{% endblock %}
-{% block container_class %}container-narrow{% endblock %}
+{% set i18n_ns = ['launch', 'picker'] %}
+{% block title %}{{ t('launch.title') }}{% endblock %}
+{% block container_class %}form-page{% endblock %}
 {% block head %}
 <style>
-  .form-hint { color: var(--text-muted); font-size: 14px; line-height: 1.5; margin: 0 0 16px; }
-  .runs-panel { border: 1px solid var(--border); border-radius: 12px; background: var(--bg-elev); padding: 12px 16px; margin-bottom: 18px; }
-  .runs-panel .runs-title { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-weight: 600; }
-  .run-row { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; padding: 8px 0; border-top: 1px solid var(--border-soft); font-size: 13px; }
-  .run-row:first-of-type { border-top: none; }
-  .run-row .name { font-weight: 600; }
-  .run-row .meta { color: var(--text-dim); font-size: 12px; margin-top: 2px; }
-  .instances { display: grid; gap: 12px; }
-  .instance-card { position: relative; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev2); }
-  .instance-head { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 54px; padding: 12px 96px 12px 12px; font-weight: 600; cursor: pointer; list-style: none; border-radius: 10px; }
+  /* Form sections and hints: stage 4 section of app.css. */
+  /* Runs going on now and recent ones: hairline rows, run names in mono. */
+  .runs-panel { margin: 0 0 22px; }
+  .runs-panel .runs-title { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--line-2); font-size: 15px; font-weight: 600; }
+  .runs-panel .runs-title small { font-weight: 400; }
+  .runs-panel #runsList > p { margin: 10px 0 0; }
+  .run-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .run-row:last-child { border-bottom: 0; }
+  .run-row .name { font-family: var(--mono); font-weight: 500; overflow-wrap: anywhere; }
+  .run-row .meta { margin-top: 2px; color: var(--dim); font-size: 12px; overflow-wrap: anywhere; }
+  /* Instances: blocks with a rule on the left; <details> folds the fields, the command preview stays under them. */
+  .instances { display: grid; gap: 14px; }
+  .instance-card { position: relative; padding-left: 14px; border-left: 2px solid var(--line-2); }
+  .instance-card:has(> .instance-details[open]) { border-left-color: var(--muted); }
+  .instance-head { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 32px; padding: 0 96px 0 0; font-weight: 500; cursor: pointer; list-style: none; }
   .instance-head::-webkit-details-marker { display: none; }
-  .instance-head:hover .instance-title { color: var(--accent); }
-  .instance-chevron { flex: 0 0 auto; width: 16px; height: 16px; color: var(--text-dim); transform: rotate(-90deg); transition: transform 0.15s; }
+  .instance-head:hover .instance-title { text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 3px; }
+  .instance-chevron { flex: 0 0 auto; width: 14px; height: 14px; color: var(--dim); transform: rotate(-90deg); transition: transform 0.15s; }
   .instance-details[open] > .instance-head .instance-chevron { transform: none; }
   .instance-title { flex: 0 0 auto; }
-  .instance-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; color: var(--text-muted); }
-  .instance-details > .instance-grid { padding: 0 12px 12px; }
-  .instance-remove { position: absolute; top: 12px; right: 12px; }
-  .instance-preview { border-top: 1px solid var(--border-soft); padding: 10px 12px 12px; font-size: 13px; }
-  .instance-preview .preview-label { display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 12px; }
-  .instance-preview pre { white-space: pre-wrap; word-break: break-all; background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12px; margin: 6px 0 4px; }
+  .instance-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: 400 12px var(--mono); }
+  .instance-details > .instance-grid { padding: 8px 0 4px; }
+  .instance-remove { position: absolute; top: 3px; right: 0; }
+  .instance-preview { margin-top: 8px; padding: 8px 0 2px; border-top: 1px solid var(--line); font-size: 13px; }
+  .instance-preview .preview-label { display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 12px; }
+  .instance-preview pre, .preview-card pre { margin: 6px 0 6px; padding: 0; border: 0; background: none; color: var(--text); font: 12px/1.55 var(--mono); white-space: pre-wrap; word-break: break-all; }
   .instance-preview.is-stale pre { opacity: 0.55; }
-  .instance-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+  .instance-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
   .instance-grid .wide { grid-column: 1 / -1; }
   .script-row { display: flex; gap: 8px; }
-  .script-row input { flex: 1; }
-  textarea.mono, input.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
-  .tool-help { font-size: 12px; color: var(--text-muted); line-height: 1.45; margin-top: 4px; }
-  .preview-card { border: 1px solid var(--border); border-radius: 12px; background: var(--bg-elev); padding: 12px 16px; margin-top: 16px; }
-  .preview-card pre { white-space: pre-wrap; word-break: break-all; background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12px; margin: 4px 0 10px; }
-  .preview-card .warn-list { margin: 8px 0 0; padding-left: 18px; color: var(--warn-fg); font-size: 13px; }
-  .checkbox-line { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+  .script-row input { flex: 1; min-width: 0; }
+  textarea.mono, input.mono { font-family: var(--mono); font-size: 12px; }
+  .tool-help { margin-top: 4px; color: var(--dim); font-size: 12px; line-height: 1.45; }
+  /* Command check: a hairline section, commands in borderless mono. */
+  .preview-card { margin-top: 26px; padding: 18px 0 0; border-top: 1px solid var(--line); }
+  .preview-card .report-block-title { margin-bottom: 8px; font-size: 15px; }
+  .checkbox-line { display: flex; align-items: center; gap: 8px; margin: 6px 0; color: var(--text); font-size: 13px; font-weight: 400; }
   .checkbox-line input { width: auto; }
+  .preview-card .warn-list { margin: 8px 0 0; padding-left: 18px; color: var(--warn); font-size: 13px; }
   .preset-bar { display: flex; gap: 8px; flex-wrap: wrap; }
   .preset-bar select { flex: 1; min-width: 220px; }
   .label-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
@@ -48,12 +55,12 @@
 </style>
 {% endblock %}
 {% block content %}
-  <h2>Запуск теста</h2>
-  <p class="form-hint">Выберите сервис и добавьте инстансы: на каком генераторе, каким инструментом и с какими параметрами запускать скрипт. Инстансы одного прогона стартуют вместе, отчёт строится по окну всего прогона, когда последний из них завершится.</p>
+  <h1>{{ t('launch.title') }}</h1>
+  <p class="form-intro">{{ t('launch.intro') }}</p>
 
   <section id="runsPanel" class="runs-panel" aria-live="polite">
-    <div class="runs-title"><span>Идущие и недавние прогоны</span><small class="dim" id="runsNote"></small></div>
-    <div id="runsList"><p class="dim">Загрузка…</p></div>
+    <div class="runs-title"><span>{{ t('launch.runs.title') }}</span><small class="dim" id="runsNote"></small></div>
+    <div id="runsList"><p class="dim">{{ t('launch.runs.loading') }}</p></div>
   </section>
 
   <div id="repeatBanner" class="banner" style="display:none" role="status">
@@ -62,80 +69,80 @@
 
   <div id="noGenerators" class="banner" style="display:none" role="status">
     <div>
-      <div class="banner-title">Генераторы нагрузки не настроены</div>
-      Администратор добавляет их в настройках, раздел «Подключения» → «Генераторы нагрузки».
+      <div class="banner-title">{{ t('launch.no_generators.title') }}</div>
+      {{ t('launch.no_generators.text') }}
     </div>
   </div>
 
   <form id="launchForm" novalidate>
     <fieldset class="form-section">
-      <legend>Сервис и прогон</legend>
+      <legend>{{ t('launch.form.service_legend') }}</legend>
       <div class="form-grid two">
         <div>
-          <label for="serviceInput">Сервис</label>
+          <label for="serviceInput">{{ t('launch.form.service') }}</label>
           <div id="serviceCombo" class="service-combo"></div>
           <input type="hidden" id="service" />
-          <div class="field-hint" id="serviceHint">Метрики и SLA прогона берутся из настроек этого сервиса.</div>
+          <div class="field-hint" id="serviceHint">{{ t('launch.form.service_hint') }}</div>
         </div>
         <div>
-          <label for="testType">Тип теста</label>
+          <label for="testType">{{ t('launch.form.test_type') }}</label>
           <select id="testType">
-            <option value="">Не указан</option>
-            <option value="step">Ступенчатый (max perf)</option>
-            <option value="soak">Долговременный (soak)</option>
-            <option value="spike">Всплески (spike)</option>
-            <option value="stress">Стресс</option>
+            <option value="">{{ t('launch.form.test_type_none') }}</option>
+            <option value="step">{{ t('common.test_type.step') }}</option>
+            <option value="soak">{{ t('common.test_type.soak') }}</option>
+            <option value="spike">{{ t('common.test_type.spike') }}</option>
+            <option value="stress">{{ t('common.test_type.stress') }}</option>
           </select>
-          <div class="field-hint">Определяет программный анализ в отчёте.</div>
+          <div class="field-hint">{{ t('launch.form.test_type_hint') }}</div>
         </div>
         <div>
-          <label for="runName">Название прогона <span class="optional">(необязательно)</span></label>
-          <input type="text" id="runName" maxlength="180" placeholder="Напр.: release-2.5-step; иначе run-ГГГГММДД-ЧЧММСС" />
-          <div class="field-hint">Из названия получается тег прогона, которым инструмент помечает метрики.</div>
+          <label for="runName">{{ t('launch.form.run_name') }} <span class="optional">{{ t('launch.form.optional') }}</span></label>
+          <input type="text" id="runName" maxlength="180" placeholder="{{ t('launch.form.run_name_placeholder') }}" />
+          <div class="field-hint">{{ t('launch.form.run_name_hint') }}</div>
         </div>
         <div>
-          <label for="maxDuration">Предельная длительность, мин</label>
+          <label for="maxDuration">{{ t('launch.form.max_duration') }}</label>
           <input type="number" id="maxDuration" min="1" step="1" />
-          <div class="field-hint" id="maxDurationHint">Генератор остановит инструмент по истечении этого времени, даже если LoadLens недоступен.</div>
+          <div class="field-hint" id="maxDurationHint">{{ t('launch.form.max_duration_hint') }}</div>
         </div>
       </div>
     </fieldset>
 
     <fieldset class="form-section">
-      <legend>Пресет</legend>
+      <legend>{{ t('launch.preset.legend') }}</legend>
       <div class="preset-bar">
-        <select id="presetSelect" aria-label="Пресет формы запуска"><option value="">Сначала выберите сервис</option></select>
-        <button type="button" class="btn" id="presetSave">Сохранить как пресет</button>
-        <button type="button" class="btn btn-ghost" id="presetDelete">Удалить</button>
+        <select id="presetSelect" aria-label="{{ t('launch.preset.select_label') }}"><option value="">{{ t('launch.preset.need_service') }}</option></select>
+        <button type="button" class="btn" id="presetSave">{{ t('launch.preset.save') }}</button>
+        <button type="button" class="btn btn-ghost" id="presetDelete">{{ t('launch.preset.delete') }}</button>
       </div>
-      <div class="field-hint">Пресет хранит инстансы и параметры формы для сервиса и общий для всех инженеров. Значения переменных окружения в нём не сохраняются.</div>
+      <div class="field-hint">{{ t('launch.preset.hint') }}</div>
     </fieldset>
 
     <fieldset class="form-section">
-      <legend>Инстансы</legend>
+      <legend>{{ t('launch.instances.legend') }}</legend>
       <div class="instances" id="instances"></div>
       <div class="form-actions" style="margin-top:10px">
-        <button type="button" class="btn" id="addInstance">Добавить инстанс</button>
+        <button type="button" class="btn" id="addInstance">{{ t('launch.instances.add') }}</button>
         <span class="dim" id="instancesNote"></span>
       </div>
     </fieldset>
 
     <fieldset class="form-section">
-      <legend>Отчёт</legend>
-      <label class="checkbox-line"><input type="checkbox" id="autoReport" checked /> Построить отчёт, когда прогон завершится</label>
-      <label class="checkbox-line"><input type="checkbox" id="useLlm" checked /> С анализом ИИ</label>
-      <div class="field-hint">Перед отчётом LoadLens ждёт, пока метрики дойдут до хранилища: два шага выборки, от 30 секунд до 5 минут.</div>
+      <legend>{{ t('launch.report.legend') }}</legend>
+      <label class="checkbox-line"><input type="checkbox" id="autoReport" checked /> {{ t('launch.report.auto') }}</label>
+      <label class="checkbox-line"><input type="checkbox" id="useLlm" checked /> {{ t('launch.report.llm') }}</label>
+      <div class="field-hint">{{ t('launch.report.hint') }}</div>
     </fieldset>
 
     <div class="form-actions">
-      <button type="button" class="btn" id="previewBtn">Проверить команды</button>
-      <button type="submit" class="btn btn-primary btn-lg" id="launchBtn">Запустить</button>
+      <button type="button" class="btn" id="previewBtn">{{ t('launch.form.preview') }}</button>
+      <button type="submit" class="btn btn-primary" id="launchBtn">{{ t('launch.form.submit') }}</button>
       <span id="formError" class="form-error" role="alert"></span>
     </div>
   </form>
 
   <section id="previewCard" class="preview-card" style="display:none" aria-live="polite">
-    <div class="report-block-title">Что будет запущено</div>
+    <div class="report-block-title">{{ t('launch.preview.title') }}</div>
     <div id="previewBody"></div>
   </section>
 {% endblock %}

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Jenkins API stub for the CI generator of the Run test page. Dev stack only.
 
 Runs on the host (127.0.0.1:5096) with basic auth bot / JT and two jobs:

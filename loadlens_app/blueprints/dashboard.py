@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Dashboard and report-related routes."""
 
 from __future__ import annotations
@@ -31,7 +32,9 @@ from AI.db_store import (
     save_manual_verdict,
     upsert_llm_feedback,
 )
+from AI.i18n import t as translate
 from AI.scoring import parse_llm_analysis_strict
+from AI.verdicts import CODES as VERDICT_CODES, FAIL, RISK, code_sql, exact_code, normalize_report, optional_code, rank_sql, to_code
 from settings import CONFIG
 # update_report and publish_report run in loadlens_app.tasks, which looks them up here (tests replace them here).
 from update_page import _effective_config_for_scope, default_run_name, update_report  # noqa: F401
@@ -57,7 +60,7 @@ from loadlens_app.core import (
     run_name_problem,
 )
 from loadlens_app.auth import Role, current_auth
-from loadlens_app.demo_data import DemoAlreadyExistsError, seed_demo_run
+from loadlens_app.demo_data import DemoAlreadyExistsError, demo_status, seed_demo_run
 from loadlens_app.errors import internal_error
 from loadlens_app.html_sanitizer import sanitize_html
 from loadlens_app.limits import LimitError, check_job_slot, check_report_window, consume_llm
@@ -66,7 +69,10 @@ from loadlens_app.jobs import (
     JOB_KIND_REPORT,
     JOB_STATUSES,
     JobStoreError,
+    failure_message,
+    job_message,
     job_store,
+    message_text,
 )
 from loadlens_app import response_cache
 
@@ -81,22 +87,24 @@ ENGINEER_NOTE_MAX_CHARS = 200_000
 DASHBOARD_RECENT_RUNS = 5
 DASHBOARD_VERDICTS_PER_SERVICE = 5
 DASHBOARD_VERDICT_WEEKS = 8
-DASHBOARD_VERDICTS = ("Успешно", "Есть риски", "Провал", "Недостаточно данных")
-DASHBOARD_RISKY_VERDICTS = ("Есть риски", "Провал")
+# Verdict codes (AI.verdicts): the keys of verdict_counts and of the weekly counts.
+DASHBOARD_VERDICTS = VERDICT_CODES
+DASHBOARD_RISKY_VERDICTS = (RISK, FAIL)
 PROJECT_AREA_COOKIE_MAX_AGE = 60 * 60 * 24 * 365
 
 
-def _job_failure_message(job_id: str) -> str:
-    """Human-readable failure message naming the phase that was running."""
-    current = job_store.get(job_id)
-    stage = (current.message or "").strip() if current else ""
-    return f"Ошибка на этапе «{stage}»" if stage else "Ошибка выполнения задачи"
+def _job_failure_message(job_id: str):
+    """Failure message (a ``Msg`` in the job's locale) naming the phase that was running."""
+    return failure_message(job_store.get(job_id), "job.failed")
 
 
 def _job_view(job) -> dict:
     """Job state for the client. The raw error (upstream bodies, exception text) is shown to admins only;
-    everyone else sees the failed phase in ``message``."""
+    everyone else sees the failed phase in ``message``, rendered in the reader's language from its ref."""
+    from loadlens_app.i18n import current_locale
+
     data = job.to_dict()
+    data["message"] = message_text(job, current_locale())
     if data.get("error") and current_auth().role < Role.ADMIN:
         data["error"] = None
     return data
@@ -231,7 +239,7 @@ def report_ref(run_id: str):
     """Name and service for the report page addressed by ``run_id`` (or, for old runs, by name)."""
     ref = _lookup_report_ref(run_id=run_id) or _lookup_report_ref(run_name=run_id)
     if ref is None:
-        return jsonify({"error": "Отчёт не найден"}), 404
+        return jsonify({"error": translate("api.dashboard.report_not_found")}), 404
     return jsonify(ref)
 
 
@@ -297,12 +305,15 @@ def get_services():
 
 
 def _manual_verdict_view(cols) -> dict | None:
-    """``{verdict, reason, author, changed_at}`` of joined manual-verdict columns, None without a manual verdict."""
+    """``{verdict, reason, author, changed_at}`` of joined manual-verdict columns, None without a manual verdict.
+
+    ``verdict`` is a code; rows written before the codes hold a label and are mapped.
+    """
     verdict, reason, author, changed_at = (list(cols) + [None] * 4)[:4]
     if not verdict:
         return None
     return {
-        "verdict": verdict,
+        "verdict": to_code(verdict),
         "reason": str(reason or ""),
         "author": str(author or ""),
         "changed_at": changed_at.isoformat() if hasattr(changed_at, "isoformat") else (str(changed_at) if changed_at else None),
@@ -319,6 +330,7 @@ def _group_service_rows(rows: list) -> list[dict]:
     grouped: dict[str, dict] = {}
     for row in rows:
         service, run_name, verdict, created_at, max_rps, test_type = row[:6]
+        verdict = to_code(verdict)
         run_id = str(row[6] or "").strip() if len(row) > 6 else ""
         created = created_at.isoformat() if created_at else None
         rps = _dashboard_number(max_rps)
@@ -401,20 +413,20 @@ def _dashboard_date(value):
 def _dashboard_activity(rows: list, weeks: list) -> tuple[list[dict], dict]:
     """Verdict counts per week and the run counters from (week_start, verdict, runs, runs_7d, runs_30d) rows.
 
-    Every week of ``weeks`` is present, empty ones with zero counts; an unknown verdict counts as
-    «Недостаточно данных». ``risky_share_30d`` is the share of «Есть риски» and «Провал» among the runs of
-    the last 30 days, None without runs.
+    Counts are keyed by verdict codes; every week of ``weeks`` is present, empty ones with zero counts; an old
+    label counts under its code and an unknown verdict as ``no_data``. ``risky_share_30d`` is the share of
+    ``risk`` and ``fail`` among the runs of the last 30 days, None without runs.
     """
     buckets = {week: {v: 0 for v in DASHBOARD_VERDICTS} for week in weeks}
     runs_7d = runs_30d = risky_30d = 0
     for week_start, verdict, runs, last_7d, last_30d in rows:
-        label = verdict if verdict in DASHBOARD_VERDICTS else "Недостаточно данных"
+        code = to_code(verdict)
         counts = buckets.get(_dashboard_date(week_start))
         if counts is not None:
-            counts[label] += int(runs or 0)
+            counts[code] += int(runs or 0)
         runs_7d += int(last_7d or 0)
         runs_30d += int(last_30d or 0)
-        if label in DASHBOARD_RISKY_VERDICTS:
+        if code in DASHBOARD_RISKY_VERDICTS:
             risky_30d += int(last_30d or 0)
     verdict_weeks = [
         {"week_start": week.isoformat(), "counts": counts, "total": sum(counts.values())}
@@ -484,14 +496,126 @@ def _dashboard_previous_run(conn, schema: str, table: str, last: dict, created_a
         "run_name": previous.run_name,
         "run_id": str(row[0] or "").strip() if row else "",
         "max_rps": _dashboard_number(row[1]) if row and len(row) > 1 else None,
-        "verdict": previous.verdict,
+        "verdict": to_code(previous.verdict),
         "created_at": previous.created_at.isoformat() if previous.created_at else None,
     }
+
+
+# Effective verdict of a final row as a code: the SLA verdict, else the stored one (old labels mapped).
+_FINAL_VERDICT_SQL = code_sql("COALESCE(sla_verdict, verdict)")
 
 
 def _dashboard_cache_key() -> tuple:
     """The dashboard depends on the services of the active area only (not on the user)."""
     return (tuple(_resolve_services_filter(_active_project_area())),)
+
+
+# Step fields the dashboard load profile draws (LL.charts.stepProfile); the rest of a step row stays in the report.
+_DASHBOARD_PROFILE_STEP_FIELDS = (
+    "index", "label", "start_iso", "end_iso", "plateau_start_iso", "plateau_end_iso", "rps", "selected", "after_drop", "dip",
+)
+
+
+def _dashboard_profile_parsed_sql(column: str) -> str:
+    """The keys of a final row's ``parsed`` the chart markers read (AI/report_markers), as one small JSON object.
+
+    The whole analysis stays in the database: the marker mode (spike, hold, step), the stress RPS drop and the
+    load-step table and SLA window of older rows (before ``sla_details`` held them).
+    """
+    keys = ("spike_analysis", "stability_under_load", "test_profile", "saturation", "load_step_table")
+    pairs = ", ".join(f"'{key}', {column}->'{key}'" for key in keys)
+    return (
+        f"jsonb_build_object({pairs}, "
+        f"'deterministic_sla', jsonb_build_object('stable_window', {column}->'deterministic_sla'->'stable_window'))"
+    )
+
+
+def _dashboard_json(value):
+    """A JSON column value (a dict or list from the driver, or text); None for broken text."""
+    import json
+
+    if isinstance(value, (str, bytes)):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return None
+    return value
+
+
+def _dashboard_checks(sla_details, fallback_checks) -> list[dict]:
+    """``[{name, title, threshold, actual, passed}]`` of the SLA checks of a final row (the source of the summary).
+
+    The dashboard draws its figures from them: max RPS against the ``target_rps`` threshold, p95 and the error
+    rate against theirs, and one square per check; ``title`` is the check name in the UI language.
+    """
+    from AI.i18n import has_key
+
+    details = _dashboard_json(sla_details)
+    checks = details.get("checks") if isinstance(details, dict) else None
+    if not (isinstance(checks, list) and checks):
+        checks = _dashboard_json(fallback_checks)
+    out = []
+    for check in checks if isinstance(checks, list) else []:
+        if not isinstance(check, dict) or not str(check.get("name") or "").strip():
+            continue
+        passed = check.get("passed")
+        name = str(check.get("name")).strip()
+        out.append({
+            "name": name,
+            "title": translate(f"sla.check_title.{name}") if has_key(f"sla.check_title.{name}") else name,
+            "threshold": _dashboard_number(check.get("threshold")),
+            "actual": _dashboard_number(check.get("actual")),
+            "passed": passed if isinstance(passed, bool) else None,
+        })
+    return out
+
+
+def _dashboard_profile(sla_details, parsed, fallback_checks) -> dict | None:
+    """``{steps, window, markers, target}`` of the last run's load profile; None without a load-step table.
+
+    The steps are ``load_step_table.steps`` saved with the final row, the window its ``stable_window`` and the
+    markers those of the report charts (AI/report_markers.markers_for: degradation, RPS drop, hold and spike
+    windows) without the step ticks and the SLA band, which the window already draws; their labels follow the
+    UI language of the request. ``target`` is the threshold of the ``target_rps`` check.
+    """
+    from AI import report_markers
+
+    details = _dashboard_json(sla_details)
+    parsed_doc = _dashboard_json(parsed)
+    row = {
+        "sla_details": details if isinstance(details, dict) else {},
+        "parsed": dict(parsed_doc) if isinstance(parsed_doc, dict) else {},
+    }
+    fallback = _dashboard_json(fallback_checks)
+    if isinstance(fallback, list) and fallback:
+        deterministic = row["parsed"].get("deterministic_sla")
+        row["parsed"]["deterministic_sla"] = dict(deterministic if isinstance(deterministic, dict) else {}, checks=fallback)
+    table = report_markers.embedded_step_table(row) or {}
+    steps = [
+        {key: step[key] for key in _DASHBOARD_PROFILE_STEP_FIELDS if key in step}
+        for step in table.get("steps") or []
+        if isinstance(step, dict)
+    ]
+    if not steps:
+        return None
+    window = report_markers.sla_window(row)
+    start = report_markers.moment_ms(window.get("start") or window.get("start_iso"))
+    end = report_markers.moment_ms(window.get("end") or window.get("end_iso"))
+    window_out = {"start": window.get("start") or window.get("start_iso"), "end": window.get("end") or window.get("end_iso")} if (
+        start is not None and end is not None and end > start
+    ) else None
+    markers = []
+    for marker in report_markers.markers_for(row):
+        if marker.get("kind") == "tick" or (marker.get("kind") == "band" and marker.get("role") == "sla"):
+            continue
+        if window_out and marker.get("kind") == "band" and (marker.get("t"), marker.get("to")) == (start, end):
+            continue  # a hold window equal to the SLA window: drawn once
+        markers.append(marker)
+    target = next(
+        (_dashboard_number(c.get("threshold")) for c in report_markers.sla_checks(row) if str(c.get("name") or "") == "target_rps"),
+        None,
+    )
+    return {"steps": steps, "window": window_out, "markers": markers, "target": target if target and target > 0 else None}
 
 
 @dashboard_bp.route("/dashboard_data", methods=["GET"])
@@ -502,6 +626,7 @@ def dashboard_data():
     A run with several final rows (a re-analysis) counts once, by its newest row. ``kpi`` holds the run
     counters of the last 7 and 30 days, the share of risky runs and the max RPS of the last run next to the
     previous run of the same service and test type; ``verdict_weeks`` counts verdicts per UTC week.
+    ``last_run.checks`` lists its SLA checks and ``last_run.profile`` its load profile (None without steps).
     """
     try:
         cfg = _storage_cfg()
@@ -519,8 +644,14 @@ def dashboard_data():
         services_filter = _resolve_services_filter(_active_project_area())
         svc_where, svc_params = _services_clause(services_filter)
         periods = _dashboard_periods(_dashboard_now())
-        # The manual verdict of a run replaces its automatic one everywhere on the dashboard.
+        # The manual verdict of a run replaces its automatic one everywhere on the dashboard. Verdicts are
+        # codes: old labels in any of the three columns map in SQL, so mixed rows group together.
         manual_cte = manual_verdicts_cte(schema, manual_verdicts_ready(conn, schema))
+        final_verdict_sql = _FINAL_VERDICT_SQL
+        last_effective_sql = code_sql("COALESCE(mv.verdict, l.effective_verdict)")
+        ranked_effective_sql = code_sql("COALESCE(mv.verdict, r.effective_verdict)")
+        latest_effective_sql = code_sql("COALESCE(mv.verdict, l.verdict)")
+        profile_parsed_sql = _dashboard_profile_parsed_sql("l.parsed_doc")
         last_run = None
         last_created_at = None
         verdict_counts = {v: 0 for v in DASHBOARD_VERDICTS}
@@ -534,19 +665,20 @@ def dashboard_data():
                 f"""
                 WITH last AS (
                   SELECT run_name, service, start_ms, end_ms,
-                         COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS effective_verdict,
+                         {final_verdict_sql} AS effective_verdict,
                          verdict AS llm_verdict, sla_verdict, created_at, COALESCE(run_id, '') AS run_id,
                          COALESCE(test_type, '') AS test_type, {DASHBOARD_MAX_RPS_SQL} AS max_rps,
-                         sla_details, parsed->'deterministic_sla'->'checks' AS sla_checks
+                         sla_details, parsed->'deterministic_sla'->'checks' AS sla_checks, parsed AS parsed_doc
                   FROM {schema}.{table}
                   WHERE domain = 'final'{svc_where}
                   ORDER BY created_at DESC
                   LIMIT 1
                 ), {manual_cte}
                 SELECT l.run_name, l.service, l.start_ms, l.end_ms,
-                       COALESCE(mv.verdict, l.effective_verdict), l.llm_verdict, l.sla_verdict, l.created_at,
+                       {last_effective_sql}, l.llm_verdict, l.sla_verdict, l.created_at,
                        l.run_id, l.test_type, l.max_rps, l.sla_details, l.sla_checks,
-                       mv.verdict, mv.reason, mv.author, mv.changed_at, l.effective_verdict
+                       mv.verdict, mv.reason, mv.author, mv.changed_at, l.effective_verdict,
+                       {profile_parsed_sql}
                 FROM last l LEFT JOIN manual_verdicts mv ON mv.run_name = l.run_name
                 """,
                 tuple(svc_params),
@@ -559,37 +691,43 @@ def dashboard_data():
                     "service": r[1],
                     "start_ms": int(r[2]) if r[2] is not None else None,
                     "end_ms": int(r[3]) if r[3] is not None else None,
-                    "verdict": r[4],
-                    "llm_verdict": r[5],
-                    "sla_verdict": r[6],
+                    "verdict": to_code(r[4]),
+                    "llm_verdict": optional_code(r[5]),
+                    "sla_verdict": optional_code(r[6]),
                     "created_at": r[7].isoformat() if r[7] else None,
                     "run_id": str(r[8] or "").strip() if len(r) > 8 else "",
                     "test_type": str(r[9] or "") if len(r) > 9 else "",
                     "max_rps": _dashboard_number(r[10]) if len(r) > 10 else None,
                     "sla": _dashboard_sla_summary(r[11] if len(r) > 11 else None, r[12] if len(r) > 12 else None),
                     "manual_verdict": _manual_verdict_view(r[13:17]) if len(r) > 16 else None,
-                    "auto_verdict": r[17] if len(r) > 17 else r[4],
+                    "auto_verdict": to_code(r[17] if len(r) > 17 else r[4]),
+                    "checks": _dashboard_checks(r[11] if len(r) > 11 else None, r[12] if len(r) > 12 else None),
                 }
+                try:
+                    last_run["profile"] = _dashboard_profile(
+                        r[11] if len(r) > 11 else None, r[18] if len(r) > 18 else None, r[12] if len(r) > 12 else None,
+                    )
+                except Exception as exc:
+                    # The profile is optional: a malformed step table hides it, the rest of the dashboard stays.
+                    logger.warning("dashboard: load profile of %s skipped: %s", last_run["run_name"], exc)
+                    last_run["profile"] = None
             cur.execute(
                 f"""
                 WITH ranked AS (
                   SELECT run_name,
-                         COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS effective_verdict,
+                         {final_verdict_sql} AS effective_verdict,
                          ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC) AS rn
                   FROM {schema}.{table}
                   WHERE domain = 'final'{svc_where}
                 ), {manual_cte}
-                SELECT COALESCE(mv.verdict, r.effective_verdict) AS v, COUNT(*) AS cnt
+                SELECT {ranked_effective_sql} AS v, COUNT(*) AS cnt
                 FROM ranked r LEFT JOIN manual_verdicts mv ON mv.run_name = r.run_name
                 WHERE r.rn = 1 GROUP BY 1
                 """,
                 tuple(svc_params),
             )
             for v, cnt in cur.fetchall():
-                if v in verdict_counts:
-                    verdict_counts[v] = int(cnt)
-                else:
-                    verdict_counts["Недостаточно данных"] += int(cnt)
+                verdict_counts[to_code(v)] += int(cnt)
             # One row per run (run_index), so a plain count; the metrics hypertable is not touched.
             cur.execute(
                 f"SELECT COUNT(*) FROM {schema}.{RUN_INDEX_TABLE} WHERE run_name <> ''{svc_where}",
@@ -601,7 +739,7 @@ def dashboard_data():
                 f"""
                 WITH latest AS (
                   SELECT service, run_name, COALESCE(run_id, '') AS run_id,
-                         COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS verdict,
+                         {final_verdict_sql} AS verdict,
                          created_at,
                          {DASHBOARD_MAX_RPS_SQL} AS max_rps,
                          test_type,
@@ -609,7 +747,7 @@ def dashboard_data():
                   FROM {schema}.{table}
                   WHERE domain = 'final' AND service IS NOT NULL AND service <> ''{svc_where}
                 ), {manual_cte}, effective AS (
-                  SELECT l.service, l.run_name, l.run_id, COALESCE(mv.verdict, l.verdict) AS verdict, l.created_at,
+                  SELECT l.service, l.run_name, l.run_id, {latest_effective_sql} AS verdict, l.created_at,
                          l.max_rps, l.test_type
                   FROM latest l LEFT JOIN manual_verdicts mv ON mv.run_name = l.run_name
                   WHERE l.run_rn = 1
@@ -629,13 +767,13 @@ def dashboard_data():
                 f"""
                 WITH latest AS (
                   SELECT run_name, service,
-                         COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS verdict,
+                         {final_verdict_sql} AS verdict,
                          created_at, test_type, start_ms, end_ms, COALESCE(run_id, '') AS run_id,
                          ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC) AS rn
                   FROM {schema}.{table}
                   WHERE domain = 'final'{svc_where}
                 ), {manual_cte}
-                SELECT l.run_name, l.service, COALESCE(mv.verdict, l.verdict), l.created_at, l.test_type,
+                SELECT l.run_name, l.service, {latest_effective_sql}, l.created_at, l.test_type,
                        l.start_ms, l.end_ms, l.run_id, mv.verdict AS recent_manual, mv.reason, mv.author, mv.changed_at
                 FROM latest l LEFT JOIN manual_verdicts mv ON mv.run_name = l.run_name
                 WHERE l.rn = 1
@@ -650,7 +788,7 @@ def dashboard_data():
                 recent_runs.append({
                     "run_name": run_name,
                     "service": service,
-                    "verdict": verdict,
+                    "verdict": to_code(verdict),
                     "created_at": created_at.isoformat() if created_at else None,
                     "test_type": test_type or "",
                     "start_ms": int(start_ms) if start_ms is not None else None,
@@ -662,13 +800,13 @@ def dashboard_data():
                 f"""
                 WITH latest AS (
                   SELECT run_name, created_at,
-                         COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS verdict,
+                         {final_verdict_sql} AS verdict,
                          ROW_NUMBER() OVER (PARTITION BY run_name ORDER BY created_at DESC) AS rn
                   FROM {schema}.{table}
                   WHERE domain = 'final' AND created_at >= %s{svc_where}
                 ), {manual_cte}
                 SELECT (date_trunc('week', l.created_at AT TIME ZONE 'UTC'))::date AS week_start,
-                       COALESCE(mv.verdict, l.verdict) AS verdict,
+                       {latest_effective_sql} AS verdict,
                        COUNT(*) AS runs,
                        COUNT(*) FILTER (WHERE l.created_at >= %s) AS runs_7d,
                        COUNT(*) FILTER (WHERE l.created_at >= %s) AS runs_30d
@@ -719,9 +857,10 @@ def demo_seed():
     try:
         result = seed_demo_run()
     except DemoAlreadyExistsError as e:
-        return jsonify({"status": "exists", "message": str(e), "run_name": e.run_name, "report_url": e.report_url}), 409
+        message = translate("api.dashboard.demo_exists", run_name=e.run_name)
+        return jsonify({"status": "exists", "message": message, "run_name": e.run_name, "report_url": e.report_url}), 409
     except Exception as e:
-        return internal_error(e, "Не удалось создать демо-прогон")
+        return internal_error(e, "api.error.demo_failed")
     response_cache.invalidate(response_cache.DASHBOARD)
     resp = jsonify({"status": "ok", **result})
     if result.get("area"):
@@ -730,12 +869,26 @@ def demo_seed():
     return resp, 200
 
 
+@dashboard_bp.route("/demo/status", methods=["GET"])
+def demo_status_view():
+    """Whether this instance runs with the demo seed (LOADLENS_DEMO_SEED=1) and the demo run is stored.
+
+    The dashboard shows its "demo data" banner only when both hold; a production install answers
+    ``{"enabled": false}`` without touching the database.
+    """
+    return jsonify(demo_status()), 200
+
+
 @dashboard_bp.route("/llm_reports", methods=["GET"])
 def llm_reports():
-    """Возвращает сохранённые LLM-ответы и метаданные по конкретному запуску."""
+    """Возвращает сохранённые LLM-ответы и метаданные по конкретному запуску.
+
+    Verdict fields (``verdict``, ``llm_verdict``, ``sla_verdict``, ``auto_verdict``, ``parsed.verdict``,
+    ``parsed.deterministic_sla.verdict``, ``manual_verdict.verdict``) are codes; old labels are mapped on read.
+    """
     run_name = request.args.get("run_name")
     if not run_name:
-        return jsonify({"error": "run_name обязателен"}), 400
+        return jsonify({"error": translate("api.required.run_name")}), 400
     try:
         cfg = _storage_cfg()
         schema = cfg.get("schema", "public")
@@ -788,11 +941,11 @@ def llm_reports():
                     "start_ms": int(r[2]) if r[2] is not None else None,
                     "end_ms": int(r[3]) if r[3] is not None else None,
                     "domain": r[4],
-                    "verdict": r[9] or r[5],
-                    "llm_verdict": r[5],
-                    "sla_verdict": r[9],
+                    "verdict": optional_code(r[9] or r[5]),
+                    "llm_verdict": optional_code(r[5]),
+                    "sla_verdict": optional_code(r[9]),
                     "text": r[6],
-                    "parsed": parsed_value,
+                    "parsed": normalize_report(parsed_value),
                     "scores": r[8],
                     "sla_details": r[10],
                     "system_context": r[11],
@@ -818,7 +971,7 @@ def llm_context():
     run_name = request.args.get("run_name")
     domain = (request.args.get("domain") or "").strip()
     if not run_name:
-        return jsonify({"error": "run_name обязателен"}), 400
+        return jsonify({"error": translate("api.required.run_name")}), 400
     try:
         cfg = (CONFIG.get("storage", {}) or {}).get("timescale", {})
         schema = cfg.get("schema", "public")
@@ -866,7 +1019,7 @@ def llm_context():
 def llm_feedback_get():
     run_name = request.args.get("run_name")
     if not run_name:
-        return jsonify({"error": "run_name обязателен"}), 400
+        return jsonify({"error": translate("api.required.run_name")}), 400
     try:
         cfg = (CONFIG.get("storage", {}) or {}).get("timescale", {})
         conn = _ts_conn()
@@ -904,7 +1057,8 @@ RUNS_SORT_COLUMNS = {
     "service": "service",
     "start_time": "start_time",
     "end_time": "end_time",
-    "verdict": "verdict",
+    # By severity (AI.verdicts.RANK: pass, risk, fail, no_data), not by the text of a label.
+    "verdict": "verdict_rank",
     "test_type": "test_type",
     "report_created_at": "report_created_at",
     "max_rps": "max_rps",
@@ -980,9 +1134,9 @@ def _runs_item(row) -> dict:
         "start_time": cols[1].isoformat() if cols[1] else None,
         "end_time": cols[2].isoformat() if cols[2] else None,
         "service": cols[3],
-        "verdict": cols[4],
-        "llm_verdict": cols[5],
-        "sla_verdict": cols[6],
+        "verdict": to_code(cols[4]),
+        "llm_verdict": optional_code(cols[5]),
+        "sla_verdict": optional_code(cols[6]),
         "report_created_at": cols[7].isoformat() if cols[7] else None,
         "test_type": test_type,
         "test_type_key": normalize_test_type(test_type),
@@ -994,15 +1148,77 @@ def _runs_item(row) -> dict:
     }
 
 
+# ``include`` value of ``/runs`` that adds the SLA summary of every page row (the archive's SLA and p95 columns).
+RUNS_INCLUDE_SLA = "sla"
+
+
+def _runs_include(raw: str) -> set[str]:
+    """Known names of the comma-separated ``include`` request param; unknown names are ignored."""
+    return {part.strip().lower() for part in str(raw or "").split(",")} & {RUNS_INCLUDE_SLA}
+
+
+def _runs_sla_checks_sql(schema: str, llm_table: str) -> str:
+    """Scalar subquery with the SLA checks of the final row that ``joined`` picked for a run.
+
+    The row is found by run name and creation time (the ``(run_name, created_at)`` index), and only its checks
+    leave the database: ``sla_details.checks``, else ``parsed.deterministic_sla.checks`` of rows saved before
+    ``sla_details``. Only the outer select of the page uses it, so with ORDER BY ... LIMIT the planner runs it
+    for the rows of the page (the jsonb columns never ride through the sorts of all runs).
+    """
+    return (
+        "(SELECT COALESCE(NULLIF(r.sla_details->'checks', '[]'::jsonb), r.parsed->'deterministic_sla'->'checks')"
+        f" FROM {schema}.{llm_table} r"
+        " WHERE r.domain = 'final' AND r.run_name = joined.run_name AND r.created_at = joined.report_created_at"
+        " LIMIT 1)"
+    )
+
+
+def _runs_sla_view(checks) -> dict | None:
+    """``{passed, total, p95_ms, p95_passed}`` of a run's SLA checks, None without an evaluated check.
+
+    ``total`` counts the checks with a result (``passed`` true or false), as the report and the dashboard do.
+    ``p95_ms`` is the measured value of the first ``p95_latency`` check with a number and ``p95_passed`` its
+    result; both None without such a check.
+    """
+    import json
+
+    if isinstance(checks, (str, bytes)):
+        try:
+            checks = json.loads(checks)
+        except ValueError:
+            return None
+    items = [c for c in checks if isinstance(c, dict)] if isinstance(checks, list) else []
+    passed = sum(1 for c in items if c.get("passed") is True)
+    failed = sum(1 for c in items if c.get("passed") is False)
+    if not passed + failed:
+        return None
+    p95_ms = None
+    p95_passed = None
+    for check in items:
+        actual = check.get("actual")
+        if check.get("name") != "p95_latency" or isinstance(actual, bool):
+            continue
+        p95_ms = _runs_float(actual)
+        if p95_ms is not None:
+            p95_passed = check.get("passed") if isinstance(check.get("passed"), bool) else None
+            break
+    return {"passed": passed, "total": passed + failed, "p95_ms": p95_ms, "p95_passed": p95_passed}
+
+
 @dashboard_bp.route("/runs", methods=["GET"])
 def list_runs():
-    """Постраничный список запусков активной области.
+    """One page of the runs of the active area.
 
-    Query params: ``q`` (подстрока run_name/service), ``service``, ``verdict`` (точные совпадения),
-    ``test_type`` (step/soak/spike/stress или любой их синоним), ``offset``, ``limit``, ``sort``
-    (включая ``max_rps``), ``dir``. Тело ответа — массив; общее число подходящих запусков
-    в заголовке ``X-Total-Count``. ``test_type`` в ответе — сохранённое значение,
-    ``test_type_key`` — нормализованный тип; ``max_rps`` и ``project_area`` берутся из итогового отчёта.
+    Query params: ``q`` (substring of run_name/service), ``service``, ``verdict`` (exact matches; a code
+    pass/risk/fail/no_data or an old Russian label), ``test_type`` (step/soak/spike/stress or any synonym),
+    ``offset``, ``limit``, ``sort`` (including ``max_rps``; ``verdict`` sorts by severity: pass, risk, fail,
+    no_data), ``dir``, ``include`` (``sla``: see below). The body is an array; the number of matching runs is
+    in the ``X-Total-Count`` header. Verdicts are codes. ``test_type`` is the stored value, ``test_type_key``
+    the normalized type; ``max_rps`` and ``project_area`` come from the final report.
+
+    With ``include=sla`` every item also carries ``sla``: ``{passed, total, p95_ms, p95_passed}`` of the SLA
+    checks of the final report (``_runs_sla_view``), null without evaluated checks. The same single statement
+    reads it for the rows of the page only.
     """
     try:
         cfg = _storage_cfg()
@@ -1013,11 +1229,12 @@ def list_runs():
         service_filter = (request.args.get("service") or "").strip()
         verdict_filter = (request.args.get("verdict") or "").strip()
         test_type_filter = (request.args.get("test_type") or "").strip()
+        include_sla = RUNS_INCLUDE_SLA in _runs_include(request.args.get("include", ""))
         try:
             offset = min(RUNS_MAX_OFFSET, max(0, int(request.args.get("offset", "0") or 0)))
             limit = min(RUNS_MAX_LIMIT, max(1, int(request.args.get("limit", "20") or 20)))
         except ValueError:
-            return jsonify({"error": "offset и limit должны быть целыми числами"}), 400
+            return jsonify({"error": translate("api.dashboard.bad_offset_limit")}), 400
         sort_key = (request.args.get("sort", "end_time") or "end_time").lower()
         if sort_key not in RUNS_SORT_COLUMNS:
             sort_key = "end_time"
@@ -1043,8 +1260,9 @@ def list_runs():
             filter_clauses.append("service = %s")
             filter_params.append(service_filter)
         if verdict_filter:
+            # ``verdict`` of ``joined`` is a code; an old label in the URL selects its code, other text nothing.
             filter_clauses.append("verdict = %s")
-            filter_params.append(verdict_filter)
+            filter_params.append(exact_code(verdict_filter) or verdict_filter)
         if test_type_filter:
             # ``test_type`` of ``joined`` is the normalized type, so any stored synonym matches.
             filter_clauses.append("test_type = %s")
@@ -1052,6 +1270,10 @@ def list_runs():
         where_filters = (" WHERE " + " AND ".join(filter_clauses)) if filter_clauses else ""
         test_type_sql = _runs_test_type_sql("f.test_type", "f.run_name IS NULL")
         max_rps_sql = _runs_max_rps_sql("parsed")
+        # Manual verdict of a run with a report, else its SLA or stored verdict; codes, old labels mapped.
+        joined_verdict = "COALESCE(CASE WHEN f.run_name IS NOT NULL THEN mv.verdict END, f.verdict)"
+        verdict_sql = code_sql(joined_verdict)
+        verdict_rank_sql = rank_sql(joined_verdict)
 
         # ``base`` reads run_index (one row per run with metrics) instead of aggregating the metrics hypertable.
         # ``final`` keeps the newest final row of each run; DISTINCT ON (not a ROW_NUMBER filter) lets the
@@ -1063,7 +1285,7 @@ def list_runs():
               WHERE run_name <> ''{svc_where}{where_q}
             ), final AS (
               SELECT DISTINCT ON (run_name) run_name,
-                     COALESCE(sla_verdict, verdict, 'Недостаточно данных') AS verdict,
+                     COALESCE(sla_verdict, verdict) AS verdict,
                      verdict AS llm_verdict,
                      sla_verdict,
                      created_at,
@@ -1076,7 +1298,8 @@ def list_runs():
               ORDER BY run_name, created_at DESC
             ), {{manual_cte}}, joined AS (
               SELECT b.run_name, b.start_time, b.end_time, b.service,
-                     COALESCE(CASE WHEN f.run_name IS NOT NULL THEN mv.verdict END, f.verdict, 'Недостаточно данных') AS verdict,
+                     {verdict_sql} AS verdict,
+                     {verdict_rank_sql} AS verdict_rank,
                      CASE WHEN f.run_name IS NOT NULL THEN mv.verdict END AS manual_verdict,
                      mv.reason AS manual_reason, mv.author AS manual_author, mv.changed_at AS manual_changed_at,
                      f.llm_verdict, f.sla_verdict,
@@ -1102,6 +1325,8 @@ def list_runs():
         except Exception:
             pass
         runs_cte = runs_cte.replace("{manual_cte}", manual_verdicts_cte(schema, manual_verdicts_ready(conn, schema)))
+        # Column 17 of a page row with include=sla; the default statement stays as it was.
+        sla_select = f", {_runs_sla_checks_sql(schema, llm_table)} AS sla_checks" if include_sla else ""
         with conn, conn.cursor() as cur:
             # One statement: the page plus the number of matching runs (the window runs before OFFSET/LIMIT).
             cur.execute(
@@ -1110,7 +1335,7 @@ def list_runs():
                 SELECT run_name, start_time, end_time, service,
                        verdict, llm_verdict, sla_verdict, report_created_at, test_type_raw, run_id,
                        project_area, max_rps, COUNT(*) OVER () AS total,
-                       manual_verdict, manual_reason, manual_author, manual_changed_at
+                       manual_verdict, manual_reason, manual_author, manual_changed_at{sla_select}
                 FROM joined
                 {where_filters}
                 ORDER BY {sort_sql} {dir_sql}{nulls_sql}{tiebreak_sql}
@@ -1133,6 +1358,9 @@ def list_runs():
                 total = 0
         conn.close()
         out = [_runs_item(r) for r in rows]
+        if include_sla:
+            for item, row in zip(out, rows):
+                item["sla"] = _runs_sla_view(row[17] if len(row) > 17 else None)
         response = make_response(jsonify(out))
         response.headers["X-Total-Count"] = str(total)
         return response
@@ -1188,7 +1416,7 @@ def create_report():
     run_name = _text_field(data, "run_name")
 
     if not all([start_str, end_str, service]):
-        return jsonify({"status": "error", "message": "Укажите время начала, окончания и сервис"}), 400
+        return jsonify({"status": "error", "message": translate("api.dashboard.create.missing_fields")}), 400
 
     try:
         start = convert_to_timestamp(start_str)
@@ -1196,10 +1424,10 @@ def create_report():
     except ValueError:
         return jsonify({
             "status": "error",
-            "message": "Некорректный формат времени: ожидается ISO 8601, например 2025-01-15T10:00 или 2025-01-15T10:00:00+03:00",
+            "message": translate("api.dashboard.create.bad_time"),
         }), 400
     if end <= start:
-        return jsonify({"status": "error", "message": "Время окончания должно быть позже времени начала"}), 400
+        return jsonify({"status": "error", "message": translate("api.dashboard.create.end_before_start")}), 400
     run_name_error = run_name_problem(run_name) if run_name else None
     if run_name_error:
         return jsonify({"status": "error", "message": run_name_error}), 400
@@ -1215,7 +1443,8 @@ def create_report():
         except Exception:
             taken = False
         if taken:
-            return jsonify({"status": "error", "message": f"Запуск '{run_name}' уже существует для сервиса '{service}'. Выберите другое имя."}), 400
+            message = translate("api.dashboard.create.run_name_taken", run_name=run_name, service=service)
+            return jsonify({"status": "error", "code": "run_name_taken", "message": message}), 400
 
     try:
         job = start_report_job(
@@ -1235,7 +1464,7 @@ def create_report():
         "service": service,
         "project_area": project_area,
         "run_name": job.run_name,
-        "message": "Задача принята. Формирование отчёта началось.",
+        "message": translate("api.dashboard.create.accepted"),
     }), 200
 
 
@@ -1252,13 +1481,13 @@ def resolve_report_target(service: str, project_area: str = "") -> str:
     """
     service_area = _find_area_for_service(service)
     if not service_area:
-        raise ReportRequestError(f"Сервис '{service}' не найден в настройках")
+        raise ReportRequestError(translate("api.dashboard.service_not_configured", service=service))
     if project_area and project_area != service_area:
-        raise ReportRequestError(f"Сервис '{service}' принадлежит другой области")
+        raise ReportRequestError(translate("api.dashboard.service_other_area", service=service))
     _bootstrap_service_configs(service_area, service)
     _metrics_area, service_metrics_cfg = _metrics_service_entry(service)
     if not service_metrics_cfg:
-        raise ReportRequestError(f"Конфигурация для сервиса '{service}' не найдена")
+        raise ReportRequestError(translate("api.dashboard.service_config_missing", service=service))
     return service_area
 
 
@@ -1276,6 +1505,7 @@ def start_report_job(
     owner: str,
     run_tag: str | None = None,
     run_filter_packs: list[str] | None = None,
+    report_language: str | None = None,
 ):
     """Checks the limits, creates a report job and starts it; raises :class:`LimitError`.
 
@@ -1284,7 +1514,13 @@ def start_report_job(
 
     Shared by POST /create_report and the load test watcher, which passes ``run_tag`` and the packs its
     tools tagged, so the load tool queries read only the metrics of its run.
+
+    The report language is fixed here (``appearance.language`` of this process, unless ``report_language`` is
+    given): a Celery worker keeps the settings it started with.
     """
+    from loadlens_app.i18n import normalize_lang, report_language as current_report_language
+
+    report_lang = normalize_lang(report_language) or current_report_language()
     check_report_window(start, end, _report_step(project_area, service))
     check_job_slot(*job_store.running_counts(owner))
     if use_llm:
@@ -1292,7 +1528,9 @@ def start_report_job(
 
     # Name the run up front so the job is identifiable in the archive while it runs.
     run_name = run_name or default_run_name()
-    job = job_runner.create_job(JOB_KIND_REPORT, run_name=run_name, service=service, message="Инициализация…", owner=owner)
+    job = job_runner.create_job(
+        JOB_KIND_REPORT, run_name=run_name, service=service, message=job_message("job.initializing", locale=report_lang), owner=owner,
+    )
     job_runner.submit(
         tasks.report_task, job,
         start=start,
@@ -1306,6 +1544,7 @@ def start_report_job(
         test_type=test_type,
         run_tag=run_tag,
         run_filter_packs=list(run_filter_packs) if run_filter_packs is not None else None,
+        report_language=report_lang,
     )
     return job
 
@@ -1340,11 +1579,12 @@ def list_jobs():
     statuses = [s.strip() for s in raw_statuses if s.strip()]
     unknown = [s for s in statuses if s not in JOB_STATUSES]
     if unknown:
-        return jsonify({"error": f"Недопустимый статус: {', '.join(unknown)}. Допустимо: {', '.join(JOB_STATUSES)}"}), 400
+        message = translate("api.dashboard.jobs.bad_status", unknown=", ".join(unknown), allowed=", ".join(JOB_STATUSES))
+        return jsonify({"error": message}), 400
     try:
         limit = int(request.args.get("limit", "20") or 20)
     except ValueError:
-        return jsonify({"error": "limit должен быть целым числом"}), 400
+        return jsonify({"error": translate("api.dashboard.jobs.bad_limit")}), 400
     limit = max(1, min(limit, JOBS_LIST_MAX_LIMIT))
     jobs = job_store.list(statuses=statuses, limit=limit)
     return jsonify({"jobs": [_job_view(j) for j in jobs]}), 200
@@ -1360,17 +1600,17 @@ def dismiss_jobs():
     body = request.get_json(silent=True)
     job_ids = body.get("job_ids") if isinstance(body, dict) else None
     if not isinstance(job_ids, list) or not job_ids:
-        return jsonify({"error": "Укажите job_ids — непустой список идентификаторов задач"}), 400
+        return jsonify({"error": translate("api.dashboard.jobs.ids_required")}), 400
     if len(job_ids) > JOBS_DISMISS_MAX_IDS:
-        return jsonify({"error": f"Не больше {JOBS_DISMISS_MAX_IDS} задач за один запрос"}), 400
+        return jsonify({"error": translate("api.dashboard.jobs.too_many_ids", max=JOBS_DISMISS_MAX_IDS)}), 400
     if any(not isinstance(job_id, str) or not job_id.strip() or len(job_id) > JOB_ID_MAX_LENGTH for job_id in job_ids):
-        return jsonify({"error": "job_ids должен содержать строковые идентификаторы задач"}), 400
+        return jsonify({"error": translate("api.dashboard.jobs.ids_strings")}), 400
     try:
         dismissed, skipped = job_store.dismiss(job_id.strip() for job_id in job_ids)
     except JobStoreError as exc:
         return jsonify({"error": str(exc), "code": "jobs_dismiss_unavailable"}), 503
     except Exception as exc:
-        return internal_error(exc, "Не удалось очистить список задач")
+        return internal_error(exc, "api.error.jobs_dismiss_failed")
     g.audit_extra = {"dismissed": len(dismissed), "skipped_running": len(skipped), "job_ids": dismissed[:20]}
     return jsonify({"dismissed": dismissed, "skipped_running": skipped}), 200
 
@@ -1379,11 +1619,11 @@ def dismiss_jobs():
 def delete_run(run_name: str):
     """Удаляет все артефакты конкретного запуска."""
     if not run_name:
-        return jsonify({"error": "run_name обязателен"}), 400
+        return jsonify({"error": translate("api.required.run_name")}), 400
     try:
         _delete_run_data(run_name)
         response_cache.invalidate(response_cache.DASHBOARD)
-        return jsonify({"status": "ok", "message": "Отчёт удалён"})
+        return jsonify({"status": "ok", "message": translate("api.dashboard.run_deleted")})
     except Exception as e:  # pragma: no cover
         return internal_error(e)
 
@@ -1395,9 +1635,9 @@ def rename_run(run_name: str):
     new_name = (data.get("new_run_name") or data.get("run_name") or data.get("name") or "").strip()
     service = (data.get("service") or "").strip() if isinstance(data.get("service"), str) else ""
     if not run_name:
-        return jsonify({"error": "run_name обязателен"}), 400
+        return jsonify({"error": translate("api.required.run_name")}), 400
     if not new_name:
-        return jsonify({"error": "Новое имя отчёта обязательно"}), 400
+        return jsonify({"error": translate("api.dashboard.new_name_required")}), 400
     try:
         result = _rename_run_data(run_name, new_name)
     except LookupError as e:
@@ -1457,7 +1697,10 @@ def _verdict_change(run_name: str, verdict: str | None, reason: str):
 
 @dashboard_bp.route("/runs/<run_name>/verdict", methods=["GET"])
 def get_run_verdict(run_name: str):
-    """Вердикт прогона: автоматический, действующий и история ручных изменений (новые первыми)."""
+    """Вердикт прогона: автоматический, действующий и история ручных изменений (новые первыми).
+
+    All verdicts, ``choices`` included, are codes (pass/risk/fail/no_data).
+    """
     try:
         cfg = _storage_cfg()
         conn = _ts_conn()
@@ -1473,7 +1716,7 @@ def get_run_verdict(run_name: str):
     except Exception as e:  # pragma: no cover
         return internal_error(e)
     if state is None:
-        return jsonify({"error": f"Итоговый отчёт '{run_name}' не найден"}), 404
+        return jsonify({"error": translate("server.report.final_not_found", run_name=run_name)}), 404
     state["choices"] = list(MANUAL_VERDICTS)
     state["reason_max"] = MANUAL_VERDICT_REASON_MAX
     return jsonify(state), 200
@@ -1481,14 +1724,17 @@ def get_run_verdict(run_name: str):
 
 @dashboard_bp.route("/runs/<run_name>/verdict", methods=["PUT"])
 def set_run_verdict(run_name: str):
-    """Ставит вердикт прогона вручную: ``{"verdict": "Провал", "reason": "..."}``; причина обязательна."""
+    """Ставит вердикт прогона вручную: ``{"verdict": "fail", "reason": "..."}``; причина обязательна.
+
+    ``verdict`` is a code (pass/risk/fail/no_data) or a legacy Russian label; the stored value is the code.
+    """
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
-        return jsonify({"error": "Ожидается JSON-объект"}), 400
+        return jsonify({"error": translate("api.common.json_object_expected")}), 400
     verdict = data.get("verdict")
     reason = data.get("reason")
     if not isinstance(verdict, str) or not isinstance(reason, str):
-        return jsonify({"error": "verdict и reason — строки"}), 400
+        return jsonify({"error": translate("api.dashboard.verdict_reason_strings")}), 400
     return _verdict_change(run_name, verdict.strip(), reason)
 
 
@@ -1499,7 +1745,7 @@ def reset_run_verdict(run_name: str):
     reason = data.get("reason") if isinstance(data, dict) else None
     reason = "" if reason is None else reason
     if not isinstance(reason, str):
-        return jsonify({"error": "reason — строка"}), 400
+        return jsonify({"error": translate("api.dashboard.reason_string")}), 400
     return _verdict_change(run_name, None, reason)
 
 
@@ -1536,7 +1782,7 @@ def get_engineer_summary():
     """Возвращает последнюю сохранённую заметку инженера по запуску."""
     run_name = request.args.get("run_name")
     if not run_name:
-        return jsonify({"error": "run_name обязателен"}), 400
+        return jsonify({"error": translate("api.required.run_name")}), 400
     try:
         cfg = _storage_cfg()
         schema = cfg.get("schema", "public")
@@ -1573,11 +1819,11 @@ def post_engineer_summary():
     run_name = (data.get("run_name") or "").strip()
     content_html = data.get("content_html") if isinstance(data.get("content_html"), str) else data.get("content")
     if not run_name:
-        return jsonify({"error": "run_name обязателен"}), 400
+        return jsonify({"error": translate("api.required.run_name")}), 400
     if not isinstance(content_html, str):
         content_html = ""
     if len(content_html) > ENGINEER_NOTE_MAX_CHARS:
-        return jsonify({"error": f"Заметка длиннее {ENGINEER_NOTE_MAX_CHARS} символов"}), 400
+        return jsonify({"error": translate("api.dashboard.note_too_long", max=ENGINEER_NOTE_MAX_CHARS)}), 400
     # Stored as formatting-only HTML: viewers and the Confluence export get no scripts or forms.
     content_html = sanitize_html(content_html)
     try:
@@ -1622,7 +1868,7 @@ def get_confluence_publication():
     """Возвращает страницу Confluence, куда уже опубликован веб-отчёт (если публиковался)."""
     run_name = (request.args.get("run_name") or "").strip()
     if not run_name:
-        return jsonify({"error": "run_name обязателен"}), 400
+        return jsonify({"error": translate("api.required.run_name")}), 400
     try:
         publication = load_publication(run_name)
         if not publication:
@@ -1639,7 +1885,7 @@ def publish_confluence():
     run_name = (data.get("run_name") or "").strip()
     service = (data.get("service") or "").strip()
     if not run_name:
-        return jsonify({"error": "run_name обязателен"}), 400
+        return jsonify({"error": translate("api.required.run_name")}), 400
     owner = _job_owner()
     try:
         check_job_slot(*job_store.running_counts(owner))
@@ -1649,7 +1895,9 @@ def publish_confluence():
     ref = _lookup_report_ref(run_name=run_name, service=service) or {}
     source_url = f"{public_base_url()}/reports/{quote(ref.get('run_id') or run_name, safe='')}"
 
-    job = job_runner.create_job(JOB_KIND_CONFLUENCE, run_name=run_name, service=service, message="Публикация в Confluence…", owner=owner)
+    job = job_runner.create_job(
+        JOB_KIND_CONFLUENCE, run_name=run_name, service=service, message=job_message("job.publishing_confluence"), owner=owner,
+    )
     # In the worker or in a thread (loadlens_app.tasks.publish_confluence_task calls publish_report of this module).
     job_runner.submit(tasks.publish_confluence_task, job, run_name=run_name, service=service, source_url=source_url)
-    return jsonify({"status": "accepted", "job_id": job.job_id, "message": "Публикация в Confluence началась."}), 200
+    return jsonify({"status": "accepted", "job_id": job.job_id, "message": translate("api.dashboard.publish_started")}), 200

@@ -12,11 +12,23 @@ statut; поля count, countError, avg, pct95.0, pct99.0, maxAT. Строки t
 семплерам, transaction="internal" — потоки. RPS = count за интервал отправки, делённый на его длину. \
 Перцентили JMeter считает по скользящему окну семплов (backend_metrics_window), значения в мс.
 """
+description_en = """
+The built-in JMeter InfluxdbBackendListenerClient: measurement jmeter, tags application, transaction, statut; \
+fields count, countError, avg, pct95.0, pct99.0, maxAT. Rows with transaction="all" are the summary of all \
+samplers, transaction="internal" are the threads. RPS = count per send interval divided by its length. JMeter \
+computes percentiles over a sliding window of samples (backend_metrics_window); values are in ms.
+"""
 requires_metrics = ["jmeter"]
 prompt_addendum = """
 Метрики JMeter Backend Listener: transaction — имя семплера (all — сводка, internal — потоки), \
 statut — ok/ko/all, count — семплы за интервал отправки, countError — ошибки, avg и pct95.0 — время ответа \
 в мс по скользящему окну семплов, maxAT — максимум активных потоков (аналог VU).
+"""
+prompt_addendum_en = """
+JMeter Backend Listener metrics: transaction is the sampler name (all is the summary, internal is the \
+threads), statut is ok/ko/all, count is samples per send interval, countError is errors, avg and pct95.0 are \
+the response time in ms over a sliding window of samples, maxAT is the maximum of active threads (the VU \
+equivalent).
 """
 
 [variables.measurement]
@@ -26,18 +38,23 @@ pattern = '^[A-Za-z0-9_.-]+$'
 
 [variables.application]
 title = "Application (регулярное выражение)"
+title_en = "Application (regular expression)"
 default = ".*"
 pattern = '^[^/\n\r]*$'
 help = "Значение поля application в Backend Listener. По умолчанию — все приложения."
+help_en = "Value of the application field in the Backend Listener. All applications by default."
 
 [variables.send_interval_sec]
 title = "Интервал отправки, с"
+title_en = "Send interval, s"
 default = "5"
 pattern = '^[1-9][0-9]*$'
 help = "Как часто Backend Listener пишет точки (по умолчанию 5 с)."
+help_en = "How often the Backend Listener writes points (5 s by default)."
 
 [variables.load_model]
 title = "Модель нагрузки сценария"
+title_en = "Load model of the scenario"
 default = "closed"
 choices = ["open", "closed"]
 help = "Thread Group — closed; Arrivals/Free-Form Arrivals Thread Group — open."
@@ -63,6 +80,7 @@ unit = "per_second"
 required = true
 query = '''SELECT sum("count") / {{send_interval_sec}} FROM "{{measurement}}" WHERE "application" =~ /^{{application}}$/ AND "transaction" = 'all' AND "statut" = 'all' AND $timeFilter GROUP BY time({{send_interval_sec}}s) fill(null)'''
 description = "Общий RPS теста: семплы за интервал отправки, делённые на его длину."
+description_en = "Total test RPS: samples per send interval divided by its length."
 
 [[queries]]
 label = "LT (JMeter): RPS by transaction"
@@ -71,6 +89,7 @@ unit = "per_second"
 query = '''SELECT sum("count") / {{send_interval_sec}} FROM "{{measurement}}" WHERE "application" =~ /^{{application}}$/ AND "transaction" <> 'all' AND "transaction" <> 'internal' AND "statut" = 'all' AND $timeFilter GROUP BY time({{send_interval_sec}}s), "transaction" fill(null)'''
 keys = ["transaction"]
 description = "RPS по семплерам."
+description_en = "RPS by sampler."
 
 [[queries]]
 label = "LT (JMeter): p95(ms) total"
@@ -78,6 +97,7 @@ role = "lt.p95_total"
 unit = "ms"
 query = '''SELECT mean("pct95.0") FROM "{{measurement}}" WHERE "application" =~ /^{{application}}$/ AND "transaction" = 'all' AND "statut" = 'all' AND $timeFilter GROUP BY time($__interval) fill(null)'''
 description = "p95 времени ответа всех семплов, мс."
+description_en = "p95 of the response time of all samples, ms."
 
 [[queries]]
 label = "LT (JMeter): p99(ms) total"
@@ -85,6 +105,7 @@ role = "lt.p99_total"
 unit = "ms"
 query = '''SELECT mean("pct99.0") FROM "{{measurement}}" WHERE "application" =~ /^{{application}}$/ AND "transaction" = 'all' AND "statut" = 'all' AND $timeFilter GROUP BY time($__interval) fill(null)'''
 description = "p99 времени ответа всех семплов, мс."
+description_en = "p99 of the response time of all samples, ms."
 
 [[queries]]
 label = "LT (JMeter): p95(ms) by transaction"
@@ -93,6 +114,7 @@ unit = "ms"
 query = '''SELECT mean("pct95.0") FROM "{{measurement}}" WHERE "application" =~ /^{{application}}$/ AND "transaction" <> 'all' AND "transaction" <> 'internal' AND "statut" = 'all' AND $timeFilter GROUP BY time($__interval), "transaction" fill(null)'''
 keys = ["transaction"]
 description = "p95 по семплерам, мс."
+description_en = "p95 by sampler, ms."
 
 [[queries]]
 label = "LT (JMeter): mean response time(ms)"
@@ -101,6 +123,7 @@ unit = "ms"
 required = true
 query = '''SELECT mean("avg") FROM "{{measurement}}" WHERE "application" =~ /^{{application}}$/ AND "transaction" = 'all' AND "statut" = 'all' AND $timeFilter GROUP BY time($__interval) fill(null)'''
 description = "Среднее время ответа, мс."
+description_en = "Average response time, ms."
 
 [[queries]]
 label = "LT (JMeter): error rate (%)"
@@ -108,6 +131,7 @@ role = "lt.error_rate_pct"
 unit = "percent"
 query = '''SELECT sum("countError") / sum("count") * 100 FROM "{{measurement}}" WHERE "application" =~ /^{{application}}$/ AND "transaction" = 'all' AND "statut" = 'all' AND $timeFilter GROUP BY time($__interval) fill(null)'''
 description = "Доля ошибочных семплов, %."
+description_en = "Share of failed samples, %."
 
 [[queries]]
 label = "LT (JMeter): errors per second by transaction"
@@ -116,6 +140,7 @@ unit = "per_second"
 query = '''SELECT sum("count") / {{send_interval_sec}} FROM "{{measurement}}" WHERE "application" =~ /^{{application}}$/ AND "transaction" <> 'all' AND "transaction" <> 'internal' AND "statut" = 'ko' AND $timeFilter GROUP BY time({{send_interval_sec}}s), "transaction" fill(null)'''
 keys = ["transaction"]
 description = "Ошибочные семплы в секунду по семплерам."
+description_en = "Failed samples per second by sampler."
 
 [[queries]]
 label = "LT (JMeter): active threads"
@@ -123,6 +148,7 @@ role = "lt.vus"
 unit = "count"
 query = '''SELECT max("maxAT") FROM "{{measurement}}" WHERE "application" =~ /^{{application}}$/ AND "transaction" = 'internal' AND $timeFilter GROUP BY time({{send_interval_sec}}s) fill(null)'''
 description = "Активные потоки JMeter (аналог VU)."
+description_en = "Active JMeter threads (the VU equivalent)."
 
 [[queries]]
 label = "LT (JMeter): RPS by LoadLens instance"
@@ -132,3 +158,4 @@ query = '''SELECT sum("count") / {{send_interval_sec}} FROM "{{measurement}}" WH
 keys = ["lt_instance"]
 since = 2
 description = "RPS каждого инстанса прогона LoadLens (тег lt_instance) для живых графиков страницы прогона; в отчёт не входит."
+description_en = "RPS of every instance of a LoadLens run (the lt_instance tag) for the live charts of the run page; not part of the report."

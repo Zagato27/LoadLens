@@ -1,15 +1,18 @@
+// SPDX-License-Identifier: Apache-2.0
 // New report page logic (templates/index.html)
 (function () {
   const LL = window.LoadLens;
   const POLL_INTERVAL_MS = 1500;
   const JOBS_REFRESH_MS = 5000;
   const LONG_WINDOW_WARN_MINUTES = 24 * 60;
-  const SERVICE_HINT = 'Список сервисов задаётся в настройках (раздел «Сервисы»).';
-  const TEST_TYPE_HINT = 'Тип теста определяет программный анализ и инструкции для ИИ: поиск максимума, удержание нагрузки, реакцию на всплески или точку насыщения.';
+  // Default hints under the service and test type fields (the same keys as templates/index.html); read lazily,
+  // so the dictionary of the page is used, not the one present when the file loaded.
+  const serviceHint = () => LL.t('new.service.hint');
+  const testTypeHint = () => LL.t('new.test_type.hint');
   // Test window hint: how far back /lt_windows looks and how many chips are shown.
   const WINDOWS_HOURS = 6;
   const WINDOWS_MAX_CHIPS = 5;
-  // Progress card: "обычно около N мин" is the median of this many latest finished report jobs.
+  // Progress card: "usually about N min" is the median of this many latest finished report jobs.
   const TYPICAL_SAMPLE = 10;
   const TYPICAL_MIN_SAMPLES = 3;
   const JOB_KIND_REPORT = 'report';
@@ -77,9 +80,9 @@
     picker = LL.servicePicker({ host, input: hidden, inputId: 'serviceInput', describedBy: 'serviceHint' });
     try {
       const services = await picker.ready;
-      if (!services.length) setHint('serviceHint', 'Добавьте сервис в настройках (раздел «Сервисы»), затем обновите страницу.', 'warn');
+      if (!services.length) setHint('serviceHint', LL.t('new.service.empty'), 'warn');
     } catch (error) {
-      setHint('serviceHint', `Ошибка загрузки списка сервисов: ${error.message}`, 'error');
+      setHint('serviceHint', LL.t('new.service.load_error', { error: error.message }), 'error');
     }
   }
 
@@ -110,7 +113,7 @@
     return items.sort((a, b) => b.start - a.start).slice(0, maxChips || WINDOWS_MAX_CHIPS);
   }
 
-  // '' for today, «вчера», otherwise «14.10» (browser time zone).
+  // '' for today, «yesterday», otherwise «14.10» in ru and «14/10» in en (browser time zone).
   function dayText(ms, nowMs) {
     const d = new Date(ms);
     const key = (x) => `${x.getFullYear()}-${x.getMonth()}-${x.getDate()}`;
@@ -118,11 +121,11 @@
     if (key(d) === key(today)) return '';
     const yesterday = new Date(nowMs);
     yesterday.setDate(yesterday.getDate() - 1);
-    if (key(d) === key(yesterday)) return 'вчера';
-    return `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}`;
+    if (key(d) === key(yesterday)) return LL.t('new.windows.yesterday');
+    return LL.t('new.windows.day_month', { day: pad2(d.getDate()), month: pad2(d.getMonth() + 1) });
   }
 
-  // «release-2.5 · 15:57–16:57 (1 ч 00 мин, пик 249 RPS)»; the clock times are those the chip puts into
+  // «release-2.5 · 15:57–16:57 (1 h 00 min, peak 249 RPS)»; the clock times are those the chip puts into
   // the fields (start rounded down, end rounded up to the minute).
   function windowLabel(item, nowMs) {
     const now = Number.isFinite(nowMs) ? nowMs : Date.now();
@@ -133,8 +136,8 @@
     const endDay = dayText(endMs, now);
     const range = `${startDay ? `${startDay} ` : ''}${clock(startMs)}–${endDay && endDay !== startDay ? `${endDay} ` : ''}${clock(endMs)}`;
     const bits = [LL.formatDuration(item.end - item.start)];
-    if (item.peak !== null && item.peak > 0) bits.push(`пик ${item.peak >= 10 ? Math.round(item.peak) : Math.round(item.peak * 10) / 10} RPS`);
-    if (item.ongoing) bits.push('идёт');
+    if (item.peak !== null && item.peak > 0) bits.push(LL.t('new.windows.peak', { rps: item.peak >= 10 ? Math.round(item.peak) : Math.round(item.peak * 10) / 10 }));
+    if (item.ongoing) bits.push(LL.t('new.windows.ongoing'));
     return `${item.name ? `${item.name} · ` : ''}${range} (${bits.join(', ')})`;
   }
 
@@ -165,7 +168,7 @@
       chip.type = 'button';
       chip.className = 'lt-chip';
       chip.textContent = windowLabel(item);
-      chip.title = 'Подставить начало и окончание';
+      chip.title = LL.t('new.windows.chip_title');
       chip.dataset.start = values.start;
       chip.dataset.end = values.end;
       chip.setAttribute('aria-pressed', 'false');
@@ -194,7 +197,7 @@
     const seq = ++windowsSeq;
     renderWindows([]);
     if (!service) { windowsHint(''); return; }
-    windowsHint('Ищем недавние прогоны сервиса…');
+    windowsHint(LL.t('new.windows.loading'));
     try {
       const resp = await fetch(`/lt_windows?service=${encodeURIComponent(service)}&hours=${WINDOWS_HOURS}`);
       const data = await resp.json().catch(() => ({}));
@@ -204,12 +207,12 @@
       renderWindows(items);
       const message = String(data.message || '').slice(0, 200).replace(/\.$/, '');
       const lower = message ? message.charAt(0).toLowerCase() + message.slice(1) : '';
-      if (data.ok === false && lower) windowsHint(`Окно теста по метрикам не определено: ${lower}.`, 'warn', data.detail);
-      else if (!items.length) windowsHint(`За последние ${data.hours || WINDOWS_HOURS} ч нагрузки на сервис не найдено.`);
+      if (data.ok === false && lower) windowsHint(LL.t('new.windows.undetected', { reason: lower }), 'warn', data.detail);
+      else if (!items.length) windowsHint(LL.t('new.windows.none', { hours: data.hours || WINDOWS_HOURS }));
       else windowsHint('');
     } catch (error) {
       if (seq !== windowsSeq) return;
-      windowsHint('Подсказка окна теста недоступна.', 'warn', error.message);
+      windowsHint(LL.t('new.windows.unavailable'), 'warn', error.message);
     }
   }
 
@@ -230,26 +233,28 @@
     setInvalid('start', false);
     setInvalid('end', false);
     if (!startVal || !endVal) {
-      setHint('rangeHint', 'Укажите начало и окончание теста или выберите быстрый период.');
+      setHint('rangeHint', LL.t('new.range.empty'));
       return false;
     }
     const startMs = new Date(startVal).getTime();
     const endMs = new Date(endVal).getTime();
     if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
-      setHint('rangeHint', 'Некорректная дата.', 'error');
+      setHint('rangeHint', LL.t('new.range.invalid'), 'error');
       return false;
     }
     if (endMs <= startMs) {
       setInvalid('end', true);
-      setHint('rangeHint', 'Окончание должно быть позже начала.', 'error');
+      setHint('rangeHint', LL.t('new.range.order'), 'error');
       return false;
     }
     const minutes = Math.round((endMs - startMs) / 60000);
-    const human = minutes >= 60 ? `${Math.floor(minutes / 60)} ч ${String(minutes % 60).padStart(2, '0')} мин` : `${minutes} мин`;
+    const human = minutes >= 60
+      ? LL.t('new.range.hours_minutes', { hours: Math.floor(minutes / 60), minutes: String(minutes % 60).padStart(2, '0') })
+      : LL.t('new.range.minutes', { minutes });
     if (minutes > LONG_WINDOW_WARN_MINUTES) {
-      setHint('rangeHint', `Окно ${human}: длинные интервалы обрабатываются дольше и агрегируются грубее.`, 'warn');
+      setHint('rangeHint', LL.t('new.range.long', { duration: human }), 'warn');
     } else {
-      setHint('rangeHint', `Длительность окна: ${human}.`);
+      setHint('rangeHint', LL.t('new.range.duration', { duration: human }));
     }
     return true;
   }
@@ -308,20 +313,25 @@
     const service = $('service').value;
     setInvalid('service', !service);
     if (!service) {
-      setHint('serviceHint', 'Выберите сервис.', 'error');
+      setHint('serviceHint', LL.t('new.service.required'), 'error');
       ok = false;
     } else {
-      setHint('serviceHint', SERVICE_HINT);
+      setHint('serviceHint', serviceHint());
     }
     if (!selectedTestType()) {
-      setHint('testTypeHint', 'Выберите тип теста: от него зависят инструкции анализа.', 'error');
+      setHint('testTypeHint', LL.t('new.test_type.required'), 'error');
       ok = false;
     } else {
-      setHint('testTypeHint', TEST_TYPE_HINT);
+      setHint('testTypeHint', testTypeHint());
     }
     setHint('runNameHint', '');
     setInvalid('run_name', false);
     return ok;
+  }
+
+  // /create_report answers code "run_name_taken" when the run name is in use for the service.
+  function runNameTaken(result) {
+    return !!result && result.code === 'run_name_taken';
   }
 
   async function createReport(event) {
@@ -329,7 +339,7 @@
     const formError = $('formError');
     formError.textContent = '';
     if (!validateForm()) {
-      formError.textContent = 'Заполните выделенные поля.';
+      formError.textContent = LL.t('new.form.invalid');
       return;
     }
     const toConfluence = selectedTarget() === 'confluence';
@@ -364,8 +374,8 @@
         });
         return;
       }
-      const message = result.message || result.error || 'Не удалось запустить задачу';
-      if (/уже существует/i.test(message)) {
+      const message = result.message || result.error || LL.t('new.form.start_failed');
+      if (runNameTaken(result)) {
         setInvalid('run_name', true);
         setHint('runNameHint', message, 'error');
         $('run_name').focus();
@@ -373,7 +383,7 @@
         formError.textContent = message;
       }
     } catch (error) {
-      formError.textContent = `Ошибка создания отчёта: ${error.message}`;
+      formError.textContent = LL.t('new.form.create_error', { error: error.message });
     } finally {
       button.disabled = false;
     }
@@ -410,12 +420,12 @@
 
   function typicalText(ms) {
     if (!Number.isFinite(ms) || ms <= 0) return '';
-    return `обычно около ${Math.max(1, Math.round(ms / 60000))} мин`;
+    return LL.t('new.progress.typical', { minutes: Math.max(1, Math.round(ms / 60000)) });
   }
 
   function tickElapsed() {
     const el = $('progressElapsed');
-    if (el) el.textContent = `идёт ${formatElapsed(Date.now() - elapsedStart)}`;
+    if (el) el.textContent = LL.t('new.progress.running', { elapsed: formatElapsed(Date.now() - elapsedStart) });
   }
 
   function startElapsed() {
@@ -445,7 +455,7 @@
     const created = Date.parse(job.created_at);
     const updated = Date.parse(job.updated_at);
     const took = Number.isFinite(created) && Number.isFinite(updated) && updated >= created ? updated - created : Date.now() - elapsedStart;
-    el.textContent = `${job.status === 'done' ? 'заняло' : 'прошло'} ${formatElapsed(took)}`;
+    el.textContent = LL.t(job.status === 'done' ? 'new.progress.took' : 'new.progress.passed', { elapsed: formatElapsed(took) });
   }
 
   async function loadTypicalDuration() {
@@ -506,7 +516,7 @@
     const form = $('reportForm');
     if (form) form.style.display = 'none';
     $('progressContainer').style.display = '';
-    $('progressTitle').textContent = opts.runName ? `Формирование отчёта «${opts.runName}»` : 'Формирование отчёта';
+    $('progressTitle').textContent = opts.runName ? LL.t('new.progress.title_named', { name: opts.runName }) : LL.t('new.progress.title');
     setPhaseMode(!!opts.confluence);
     if (typeof opts.useLlm === 'boolean') setLlmPhasesVisible(opts.useLlm);
     const jobUrl = `/new?job=${encodeURIComponent(jobId)}`;
@@ -533,14 +543,14 @@
     const webHref = [job.page_url, job.report_url].map((value) => String(value || '')).find((url) => url.startsWith('/reports/')) || '';
     if (isConfluenceUrl(job.report_url)) {
       confluenceLink.href = job.report_url;
-      confluenceLink.style.display = 'inline-block';
+      confluenceLink.style.display = 'inline-flex';
       if (webHref) {
         webLink.href = webHref;
-        webLink.style.display = 'inline-block';
+        webLink.style.display = 'inline-flex';
       }
     } else if (webHref || job.report_url) {
       webLink.href = webHref || job.report_url;
-      webLink.style.display = 'inline-block';
+      webLink.style.display = 'inline-flex';
     }
   }
 
@@ -551,18 +561,18 @@
     bar.classList.toggle('error', job.status === 'error');
     $('progressPct').textContent = `${pct}%`;
     $('progressMessage').textContent = job.message || '';
-    if (job.run_name) $('progressTitle').textContent = `Формирование отчёта «${job.run_name}»`;
+    if (job.run_name) $('progressTitle').textContent = LL.t('new.progress.title_named', { name: job.run_name });
     renderPhases(pct, job.status);
     if (job.status === 'done' || job.status === 'error') stopElapsed(job);
     else syncElapsed(job);
     if (job.status === 'done') {
       showResultLinks(job);
-      $('progressMessage').textContent = 'Отчёт готов.';
+      $('progressMessage').textContent = LL.t('new.progress.done');
       $('newReportLink').style.display = '';
       return true;
     }
     if (job.status === 'error') {
-      $('progressMessage').textContent = job.message || 'Ошибка выполнения задачи';
+      $('progressMessage').textContent = job.message || LL.t('new.progress.failed');
       if (job.error) {
         $('progressErrorText').textContent = job.error;
         $('progressErrorDetails').style.display = '';
@@ -581,7 +591,7 @@
         if (r.status === 404) {
           clearInterval(progressTimer);
           stopElapsed(null);
-          $('progressMessage').textContent = 'Задача не найдена: возможно, сервер был перезапущен до сохранения статуса. Проверьте архив.';
+          $('progressMessage').textContent = LL.t('new.progress.not_found');
           $('newReportLink').style.display = '';
           return;
         }
@@ -602,9 +612,9 @@
   // ---- active jobs panel -----------------------------------------------
 
   function jobStatusLabel(status) {
-    if (status === 'running') return 'В работе';
-    if (status === 'error') return 'Ошибка';
-    if (status === 'done') return 'Готово';
+    if (status === 'running') return LL.t('new.job.status_running');
+    if (status === 'error') return LL.t('new.job.status_error');
+    if (status === 'done') return LL.t('new.job.status_done');
     return status || '';
   }
 
@@ -617,12 +627,12 @@
     const info = document.createElement('div');
     const name = document.createElement('div');
     name.className = 'name';
-    name.textContent = job.run_name || '(без названия)';
+    name.textContent = job.run_name || LL.t('new.job.untitled');
     const meta = document.createElement('div');
     meta.className = 'meta';
     const bits = [];
-    if (job.kind === 'confluence') bits.push('публикация в Confluence');
-    if (job.kind === 'forecast_confluence') bits.push('публикация прогноза в Confluence');
+    if (job.kind === 'confluence') bits.push(LL.t('new.job.kind_confluence'));
+    if (job.kind === 'forecast_confluence') bits.push(LL.t('new.job.kind_forecast_confluence'));
     if (job.service) bits.push(job.service);
     if (job.status === 'running') bits.push(`${Number(job.progress) || 0}% — ${job.message || ''}`);
     else bits.push(job.message || '');
@@ -633,13 +643,13 @@
     const link = document.createElement('a');
     if (job.status === 'done' && job.report_url) {
       link.href = job.report_url;
-      link.textContent = 'Открыть отчёт';
+      link.textContent = LL.t('new.action.open_report');
     } else if (job.kind === 'report') {
       link.href = `/new?job=${encodeURIComponent(job.job_id)}`;
-      link.textContent = job.status === 'running' ? 'Следить' : 'Подробности';
+      link.textContent = LL.t(job.status === 'running' ? 'new.job.follow' : 'new.job.details');
     } else if (job.page_url) {
       link.href = job.page_url;
-      link.textContent = 'Открыть страницу';
+      link.textContent = LL.t('new.job.open_page');
     }
     const actions = document.createElement('span');
     actions.className = 'job-actions';
@@ -652,7 +662,7 @@
     return row;
   }
 
-  // Finished rows currently shown: "Очистить завершённые" hides exactly these.
+  // Finished rows currently shown: "Clear finished" hides exactly these.
   let finishedJobIds = [];
 
   async function clearFinishedJobs() {
@@ -682,7 +692,7 @@
       }
       jobs.forEach((job) => list.appendChild(renderJobRow(job)));
       const running = jobs.filter((j) => j.status === 'running').length;
-      $('activeJobsNote').textContent = running ? `в работе: ${running}` : 'завершились с ошибкой';
+      $('activeJobsNote').textContent = running ? LL.t('new.jobs.running', { n: running }) : LL.t('new.jobs.failed_only');
       panel.style.display = '';
       if (running && !jobsTimer) jobsTimer = setInterval(loadActiveJobs, JOBS_REFRESH_MS);
       if (!running && jobsTimer) { clearInterval(jobsTimer); jobsTimer = null; }
@@ -693,7 +703,7 @@
 
   // Pure helpers for tests (tests/test_ui_forms_js.py).
   LL.newReport = {
-    _internals: { mergeWindows, windowLabel, windowInputs, dayText, formatElapsed, medianDurationMs, typicalText }
+    _internals: { mergeWindows, windowLabel, windowInputs, dayText, formatElapsed, medianDurationMs, typicalText, jobStatusLabel, renderJobRow, runNameTaken }
   };
 
   // ---- wiring -----------------------------------------------------------
@@ -716,11 +726,11 @@
       $(id).addEventListener('change', () => { validateRange(); highlightPreset(); });
     });
     $('service').addEventListener('change', () => {
-      if ($('service').value) { setInvalid('service', false); setHint('serviceHint', SERVICE_HINT); }
+      if ($('service').value) { setInvalid('service', false); setHint('serviceHint', serviceHint()); }
       loadWindows($('service').value);
     });
     document.querySelectorAll('input[name="test_type"]').forEach((radio) => {
-      radio.addEventListener('change', () => setHint('testTypeHint', TEST_TYPE_HINT));
+      radio.addEventListener('change', () => setHint('testTypeHint', testTypeHint()));
     });
     $('run_name').addEventListener('input', () => { setInvalid('run_name', false); setHint('runNameHint', ''); });
     $('use_llm_btn_yes').addEventListener('click', () => selectLlm(true));

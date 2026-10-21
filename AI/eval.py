@@ -1,10 +1,19 @@
-"""Offline metrics for stored LLM reports: verification flags, engineer votes, usage."""
+# SPDX-License-Identifier: Apache-2.0
+"""Offline metrics for stored LLM reports: verification flags, engineer votes, usage, report language.
+
+``report_language`` is the language the report was written in (``parsed.report_language``, ``ru`` for reports
+saved before the field); ``language_match`` is the share of the free text of the answer written in that
+language (AI.scoring.language_match), to compare the quality of ru and en runs of the same provider.
+"""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+
+from AI.prompt_store import normalize_lang
+from AI.verdicts import optional_code
 
 
 def _as_dict(raw: Any) -> Dict[str, Any]:
@@ -72,15 +81,26 @@ def _usage_block(scores: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _report_language(payload: Mapping[str, Any], default: Optional[str] = None) -> str:
+    return normalize_lang(payload.get("report_language")) or normalize_lang(default) or "ru"
+
+
 def evaluate_analysis(
     parsed: Mapping[str, Any] | None,
     *,
     feedback: Sequence[Mapping[str, Any]] | None = None,
     scores: Mapping[str, Any] | None = None,
     domain: str = "final",
+    report_language: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Computes offline quality/cost metrics for one stored domain answer."""
+    """Computes offline quality/cost metrics for one stored domain answer.
+
+    ``report_language`` is used when the answer itself does not name its language (domain rows of a run).
+    """
+    from AI.scoring import language_match
+
     payload = _as_dict(parsed)
+    lang = _report_language(payload, report_language)
     findings = [item for item in _as_list(payload.get("findings")) if isinstance(item, dict)]
     actions = [item for item in _as_list(payload.get("recommended_actions") or payload.get("actions")) if isinstance(item, dict)]
     votes = [item for item in (feedback or []) if isinstance(item, dict)]
@@ -122,7 +142,9 @@ def evaluate_analysis(
 
     return {
         "domain": domain_key,
-        "verdict": payload.get("verdict"),
+        "report_language": lang,
+        "language_match": language_match(payload, lang) if payload else None,
+        "verdict": optional_code(payload.get("verdict")),
         "verdict_match": verdict_match,
         "findings_total": total_findings,
         "findings_verified": status_counts["verified"],
@@ -152,6 +174,7 @@ def evaluate_fixture(path: str | Path) -> Dict[str, Any]:
         feedback=_as_list(payload.get("feedback")),
         scores=_as_dict(payload.get("scores")),
         domain=_text(payload.get("domain")) or "final",
+        report_language=_text(payload.get("report_language")) or None,
     )
 
 
@@ -221,6 +244,9 @@ def load_eval_records(
 
 def evaluate_run_records(records: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
     """Aggregates per-domain eval metrics; ``final`` is also copied to the top level."""
+    records = list(records)
+    final_record = next((record for record in records if _text(record.get("domain")) == "final"), None)
+    run_language = _report_language(_as_dict((final_record or {}).get("parsed")))
     domains: Dict[str, Any] = {}
     usage_calls = 0
     prompt_tokens: Optional[int] = None
@@ -233,6 +259,7 @@ def evaluate_run_records(records: Iterable[Mapping[str, Any]]) -> Dict[str, Any]
             feedback=_as_list(record.get("feedback")),
             scores=_as_dict(record.get("scores")),
             domain=domain,
+            report_language=run_language,
         )
         domains[domain] = metrics
         usage = metrics.get("usage") or {}
@@ -246,6 +273,8 @@ def evaluate_run_records(records: Iterable[Mapping[str, Any]]) -> Dict[str, Any]
     final_usage = _as_dict(final_metrics.get("usage"))
     return {
         "domains": domains,
+        "report_language": run_language,
+        "language_match": final_metrics.get("language_match"),
         "verdict_match": final_metrics.get("verdict_match"),
         "findings_verified_share": final_metrics.get("findings_verified_share"),
         "findings_unverified_share": final_metrics.get("findings_unverified_share"),

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Data migrations that must not run inside ordinary GET requests.
 
 The application checks them at every start (unless ``LOADLENS_RUN_MIGRATIONS=0``) in a background thread:

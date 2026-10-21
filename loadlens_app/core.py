@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Shared helpers and runtime utilities for the Flask app."""
 
 from __future__ import annotations
@@ -17,7 +18,8 @@ import psycopg2
 from psycopg2 import sql
 from flask import request
 
-from AI import storage_state
+from AI import prompt_store, storage_state
+from AI.i18n import t as translate
 from AI.db_store import _ensure_engineer_reports_table, _ensure_llm_reports_table, _ensure_schema_and_table
 from metrics_config import METRICS_CONFIG
 from settings import CONFIG
@@ -25,22 +27,10 @@ from settings import CONFIG
 ROOT_DIR = Path(__file__).resolve().parent.parent
 CONFIG_RUNTIME_PATH = ROOT_DIR / "settings_runtime.json"
 METRICS_RUNTIME_PATH = ROOT_DIR / "metrics_config_runtime.json"
-PROMPTS_DIR = ROOT_DIR / "AI" / "prompts"
 logger = logging.getLogger(__name__)
 
-PROMPT_DOMAIN_FILES = {
-    "overall": "overall_prompt.txt",
-    "database": "database_prompt.txt",
-    "kafka": "kafka_prompt.txt",
-    "microservices": "microservices_prompt.txt",
-    "jvm": "jvm_prompt.txt",
-    "hard_resources": "hard_resources_prompt.txt",
-    "lt_framework": "lt_framework_prompt.txt",
-    "lt_generators": "lt_generators_prompt.txt",
-    "application_logs": "application_logs_prompt.txt",
-    "judge": "judge_prompt.txt",
-    "critic": "critic_prompt.txt",
-}
+# Prompt domains of the settings page -> file of AI/prompts/<lang>/ (AI/prompt_store.py owns the table).
+PROMPT_DOMAIN_FILES = dict(prompt_store.DOMAIN_PROMPT_FILES)
 LOCKED_PROMPT_DOMAINS = {"judge", "critic", "_context_guide", "_response_format", "verify"}
 # Sections the settings UI may override per project area (and per service for queries/sla).
 AREA_OVERRIDABLE_SECTIONS = frozenset({"llm", "domain_sources", "logs_source", "default_params", "queries", "sla"})
@@ -250,9 +240,9 @@ def _decode_runtime_json(path: Path, raw: bytes) -> dict:
         text = raw.decode("utf-8-sig")
         data = json.loads(text) if text.strip() else {}
     except ValueError as exc:
-        raise RuntimeConfigError(f"{path.name}: файл не читается или содержит некорректный JSON ({exc})") from exc
+        raise RuntimeConfigError(translate("server.core.json_unreadable", file=path.name, error=exc)) from exc
     if not isinstance(data, dict):
-        raise RuntimeConfigError(f"{path.name}: ожидается JSON-объект")
+        raise RuntimeConfigError(translate("server.core.json_not_object", file=path.name))
     return data
 
 
@@ -280,7 +270,7 @@ def _refresh_cached_json(path: Path, force: bool = False) -> _CachedJson | None:
             _JSON_CACHE.pop(key, None)
             if not path.exists():
                 return None
-            raise RuntimeConfigError(f"{path.name}: файл не читается или содержит некорректный JSON ({exc})") from exc
+            raise RuntimeConfigError(translate("server.core.json_unreadable", file=path.name, error=exc)) from exc
         if entry is not None and entry.raw == raw:
             data = entry.data
         else:
@@ -340,9 +330,9 @@ def _read_json_file(path: Path) -> dict:
             text = path.read_text(encoding="utf-8-sig")
             data = json.loads(text) if text.strip() else {}
         except (OSError, ValueError) as exc:
-            raise RuntimeConfigError(f"{path.name}: файл не читается или содержит некорректный JSON ({exc})") from exc
+            raise RuntimeConfigError(translate("server.core.json_unreadable", file=path.name, error=exc)) from exc
     if not isinstance(data, dict):
-        raise RuntimeConfigError(f"{path.name}: ожидается JSON-объект")
+        raise RuntimeConfigError(translate("server.core.json_not_object", file=path.name))
     return data
 
 
@@ -460,19 +450,16 @@ def _service_disabled_domains(area_name: str | None, service_id: str | None) -> 
     return [d for d in disabled if isinstance(d, str)]
 
 
-def _load_base_prompts() -> dict:
-    prompts: dict[str, str] = {}
-    for domain, fname in PROMPT_DOMAIN_FILES.items():
-        try:
-            path = PROMPTS_DIR / fname
-            if path.exists():
-                with path.open("r", encoding="utf-8") as f:
-                    prompts[domain] = f.read()
-            else:
-                prompts[domain] = ""
-        except Exception:
-            prompts[domain] = ""
-    return prompts
+def _prompts_language(lang: str | None = None) -> str:
+    """``lang`` when supported, else the language of reports and prompts (``appearance.language``)."""
+    from loadlens_app.i18n import report_language
+
+    return prompt_store.normalize_lang(lang) or report_language()
+
+
+def _load_base_prompts(lang: str | None = None) -> dict:
+    """Default prompt texts by domain in ``lang`` (default: the language of reports)."""
+    return prompt_store.default_prompts(_prompts_language(lang), PROMPT_DOMAIN_FILES)
 
 
 def _merged_metrics_config(base: dict, override: dict | None) -> dict:
@@ -731,29 +718,51 @@ def _list_project_areas() -> list[dict]:
     return [{"id": name, "title": name} for name in metrics.keys()]
 
 
-def _prompt_templates_for_scope(area: str | None, service: str | None = None) -> dict:
-    base = _load_base_prompts()
+def _prompt_scope(area: str | None, service: str | None = None, lang: str | None = None) -> dict:
+    """Prompt texts of a scope with their origin.
+
+    ``texts``: the service override, else the area override, else the default in ``lang`` (the language of
+    reports by default); ``sources``: ``service`` | ``area`` | ``default`` by domain; ``override_language``: the
+    language an override is written in (``ru``/``en``, None when it cannot tell), for overridden domains only.
+    An empty text and a copy of a default of any language are not overrides.
+    """
+    code = _prompts_language(lang)
+    base = _load_base_prompts(code)
     area_entry = _area_entry(area)
     area_prompts = area_entry.get("prompts") if isinstance(area_entry, dict) else {}
     service_prompts = {}
     if service:
         meta = _service_meta(area, service)
         service_prompts = meta.get("prompts") if isinstance(meta, dict) else {}
-    out: dict[str, str] = {}
+    texts: dict[str, str] = {}
+    sources: dict[str, str] = {}
+    languages: dict[str, str | None] = {}
     for domain in PROMPT_DOMAIN_FILES.keys():
-        if isinstance(service_prompts, dict) and isinstance(service_prompts.get(domain), str) and service_prompts.get(domain).strip():
-            out[domain] = service_prompts.get(domain, "")
-        elif isinstance(area_prompts, dict) and isinstance(area_prompts.get(domain), str) and area_prompts.get(domain).strip():
-            out[domain] = area_prompts.get(domain, "")
+        for source, scope in (("service", service_prompts), ("area", area_prompts)):
+            text = prompt_store.effective_override(scope.get(domain) if isinstance(scope, dict) else None, domain)
+            if text is not None:
+                texts[domain] = text
+                sources[domain] = source
+                languages[domain] = prompt_store.detect_language(text)
+                break
         else:
-            out[domain] = base.get(domain, "")
-    return out
+            texts[domain] = base.get(domain, "")
+            sources[domain] = "default"
+    return {"language": code, "texts": texts, "sources": sources, "override_language": languages}
 
 
-def _active_area_prompts(area: str | None, service: str | None = None) -> dict:
+def _prompt_templates_for_scope(area: str | None, service: str | None = None, lang: str | None = None) -> dict:
+    return _prompt_scope(area, service, lang)["texts"]
+
+
+def _active_area_prompt_scope(area: str | None, service: str | None = None, lang: str | None = None) -> dict:
     if service and not area:
         area = _find_area_for_service(service)
-    return _prompt_templates_for_scope(area, service)
+    return _prompt_scope(area, service, lang)
+
+
+def _active_area_prompts(area: str | None, service: str | None = None, lang: str | None = None) -> dict:
+    return _active_area_prompt_scope(area, service, lang)["texts"]
 
 
 def _disabled_domains_payload(area: str | None, service: str | None) -> list[str]:
@@ -808,7 +817,7 @@ def convert_to_timestamp(date_str: str) -> int:
     """
     raw = (date_str or "").strip()
     if not raw:
-        raise ValueError("Пустое значение времени")
+        raise ValueError(translate("server.core.empty_time"))
     if raw.endswith("Z"):
         raw = raw[:-1] + "+00:00"
     dt = datetime.fromisoformat(raw)
@@ -856,14 +865,16 @@ def _delete_run_data(run_name: str) -> None:
 RUN_NAME_MAX_LEN = 180
 # Run names appear in URLs, file names and Confluence pages.
 RUN_NAME_FORBIDDEN_CHARS = ("/", "\\", "<", ">", "\x00")
+# The forbidden characters as the messages list them (a parameter: dictionary values hold no markup signs).
+RUN_NAME_FORBIDDEN_TEXT = "/ \\ < >"
 
 
 def run_name_problem(name: str) -> str | None:
     """Why ``name`` cannot name a run, or None when it can."""
     if len(name) > RUN_NAME_MAX_LEN:
-        return f"Имя отчёта: не длиннее {RUN_NAME_MAX_LEN} символов"
+        return translate("server.core.run_name_too_long", max=RUN_NAME_MAX_LEN)
     if any(ch in name for ch in RUN_NAME_FORBIDDEN_CHARS):
-        return "Имя отчёта содержит недопустимые символы: / \\ < >"
+        return translate("server.core.run_name_chars", chars=RUN_NAME_FORBIDDEN_TEXT)
     return None
 
 
@@ -871,13 +882,13 @@ def _rename_run_data(old_run_name: str, new_run_name: str) -> dict:
     old_name = str(old_run_name or "").strip()
     new_name = str(new_run_name or "").strip()
     if not old_name:
-        raise ValueError("Текущее имя отчёта не задано")
+        raise ValueError(translate("server.core.rename_current_missing"))
     if not new_name:
-        raise ValueError("Новое имя отчёта не задано")
+        raise ValueError(translate("server.core.rename_new_missing"))
     if len(new_name) > RUN_NAME_MAX_LEN:
-        raise ValueError("Новое имя отчёта слишком длинное")
+        raise ValueError(translate("server.core.rename_new_too_long"))
     if any(ch in new_name for ch in RUN_NAME_FORBIDDEN_CHARS):
-        raise ValueError("Новое имя отчёта содержит недопустимые символы: / \\ < >")
+        raise ValueError(translate("server.core.rename_new_chars", chars=RUN_NAME_FORBIDDEN_TEXT))
     if old_name == new_name:
         return {"status": "ok", "renamed": 0, "run_name": new_name}
 
@@ -913,9 +924,9 @@ def _rename_run_data(old_run_name: str, new_run_name: str) -> dict:
             logger.exception("Не удалось подготовить таблицы для переименования отчёта")
         with conn, conn.cursor() as cur:
             if not _run_name_exists(cur, old_name):
-                raise LookupError(f"Отчёт '{old_name}' не найден")
+                raise LookupError(translate("server.core.report_not_found", run_name=old_name))
             if _run_name_exists(cur, new_name):
-                raise FileExistsError(f"Отчёт '{new_name}' уже существует")
+                raise FileExistsError(translate("server.core.report_exists", run_name=new_name))
             for table in tables:
                 try:
                     cur.execute("SAVEPOINT run_name_rename")
@@ -985,7 +996,6 @@ __all__ = [
     "CONFIG_RUNTIME_PATH",
     "CONFLUENCE_TEMPLATE_KEYS",
     "METRICS_RUNTIME_PATH",
-    "PROMPTS_DIR",
     "PROMPT_DOMAIN_FILES",
     "LOCKED_PROMPT_DOMAINS",
     "_active_project_area",
@@ -1011,6 +1021,8 @@ __all__ = [
     "_normalize_metrics_config",
     "_per_area_config",
     "_prompt_templates_for_scope",
+    "_prompt_scope",
+    "_active_area_prompt_scope",
     "_rename_run_data",
     "public_base_url",
     "RuntimeConfigError",

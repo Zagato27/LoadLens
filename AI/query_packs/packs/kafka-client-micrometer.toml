@@ -2,6 +2,7 @@ schema_version = 1
 id = "kafka-client-micrometer"
 version = 1
 title = "Kafka клиенты: Micrometer (Spring Kafka)"
+title_en = "Kafka clients: Micrometer (Spring Kafka)"
 category = "messaging"
 stack = ["java", "spring-boot", "kafka", "micrometer"]
 domain = "kafka"
@@ -10,6 +11,10 @@ description = """
 Метрики Kafka-клиентов из Micrometer KafkaClientMetrics (Spring Boot подключает их для фабрик Spring \
 Kafka): отставание консьюмера, скорость чтения и записи, ошибки и задержка продюсера, время listener.
 """
+description_en = """
+Kafka client metrics from Micrometer KafkaClientMetrics (Spring Boot enables them for Spring Kafka factories): \
+consumer lag, read and write rate, producer errors and latency, listener time.
+"""
 requires_metrics = ["kafka_consumer_fetch_manager_records_lag_max", "kafka_producer_record_send_total"]
 prompt_addendum = """
 Метрики Kafka-клиентов Micrometer: kafka_consumer_fetch_manager_records_lag_max — максимальное \
@@ -17,18 +22,27 @@ prompt_addendum = """
 и record_error_total — отправка и ошибки продюсера, request_latency_avg — задержка запроса продюсера в мс, \
 spring_kafka_listener_seconds — время обработки сообщения в @KafkaListener.
 """
+prompt_addendum_en = """
+Micrometer Kafka client metrics: kafka_consumer_fetch_manager_records_lag_max is the maximum consumer lag in \
+records, records_consumed are records read, kafka_producer_record_send_total and record_error_total are \
+producer sends and errors, request_latency_avg is the producer request latency in ms, \
+spring_kafka_listener_seconds is the message handling time in @KafkaListener.
+"""
 
 [variables.service_label]
 title = "Лейбл с именем сервиса"
+title_en = "Label with the service name"
 default = "application"
 pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
 
 [variables.matchers]
 title = "Дополнительные матчеры"
+title_en = "Extra matchers"
 default = ""
 
 [variables.window]
 title = "Окно rate()"
+title_en = "rate() window"
 default = "2m"
 pattern = '^[1-9][0-9]*[smh]$'
 
@@ -40,6 +54,7 @@ required = true
 query = 'max by ({{service_label}}) (kafka_consumer_fetch_manager_records_lag_max{ {{service_label}}!="", {{matchers}} } >= 0)'
 keys = ["{{service_label}}"]
 description = "Максимальное отставание консьюмеров сервиса в записях."
+description_en = "Maximum lag of the service's consumers in records."
 
 [[queries]]
 label = "Kafka clients: consumed records per second by application"
@@ -48,6 +63,7 @@ unit = "per_second"
 query = 'sum by ({{service_label}}) (rate(kafka_consumer_fetch_manager_records_consumed_total{topic="", {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}"]
 description = "Прочитанные записи в секунду (сводная метрика клиента, без топиков)."
+description_en = "Records read per second (aggregate client metric, without topics)."
 
 [[queries]]
 label = "Kafka clients: sent records per second by application"
@@ -56,6 +72,7 @@ unit = "per_second"
 query = 'sum by ({{service_label}}) (rate(kafka_producer_record_send_total{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}"]
 description = "Отправленные записи в секунду."
+description_en = "Records sent per second."
 
 [[queries]]
 label = "Kafka clients: producer errors per second by application"
@@ -64,6 +81,7 @@ unit = "per_second"
 query = 'sum by ({{service_label}}) (rate(kafka_producer_record_error_total{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}"]
 description = "Ошибки отправки в секунду."
+description_en = "Send errors per second."
 
 [[queries]]
 label = "Kafka clients: producer request latency avg (ms) by application"
@@ -72,6 +90,7 @@ unit = "ms"
 query = 'avg by ({{service_label}}) (kafka_producer_request_latency_avg{ {{service_label}}!="", {{matchers}} } >= 0)'
 keys = ["{{service_label}}"]
 description = "Средняя задержка запроса продюсера к брокеру, мс."
+description_en = "Average latency of producer requests to the broker, ms."
 
 [[queries]]
 label = "Kafka clients: listener processing avg (sec) by application"
@@ -80,3 +99,4 @@ unit = "seconds"
 query = 'sum by ({{service_label}}) (rate(spring_kafka_listener_seconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}])) / sum by ({{service_label}}) (rate(spring_kafka_listener_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}"]
 description = "Среднее время обработки сообщения в @KafkaListener, с."
+description_en = "Average message handling time in @KafkaListener, s."

@@ -1,95 +1,63 @@
 {% extends "base.html" %}
 {% set active_nav = 'compare' %}
-{% block title %}Сравнение тестов{% endblock %}
+{% set i18n_ns = ['charts', 'compare'] %}
+{% block title %}{{ t('compare.title') }}{% endblock %}
+{% block container_class %}compare-page{% endblock %}
 {% block head %}
 <script defer src="{{ url_for('static', filename='vendor/chart.umd.js') }}"></script>
-<style>
-  .section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 20px; }
-  .section-head h3 { margin: 0; }
-  .metric-row td.metric-label { font-weight: 600; }
-  .metric-row.open td { background: var(--bg-elev2); }
-  .chart-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
-  .chart-toolbar .chart-zoom-reset { margin-left: auto; }
-  /* A/B overlay: chart on the full width, legend chips (LL.charts.legendChips) under it. */
-  /* nowrap: a wrapping column container sizes its line by content and lets the chart overflow on phones. */
-  .cmp-chart-wrap.cmp-overlay { flex-direction: column; flex-wrap: nowrap; gap: 4px; margin-top: 0; }
-  .cmp-chart-wrap.cmp-overlay > * { min-width: 0; }
-  .cmp-overlay-canvas { position: relative; height: 260px; min-width: 0; }
-  .cmp-overlay-pending { position: absolute; inset: 0; padding: 12px; }
-  .cmp-overlay-pending.is-message { display: flex; align-items: center; justify-content: center; text-align: center; }
-  /* Swatches as line samples: A solid, B dashed like the chart lines. */
-  .cmp-legend .legend-chip-swatch { width: 16px; height: 4px; border: none; border-radius: 2px; background: var(--chip-color); }
-  .cmp-legend .legend-chip[data-name^="B · "] .legend-chip-swatch { background: repeating-linear-gradient(90deg, var(--chip-color) 0 5px, transparent 5px 8px); }
-  .cmp-legend .legend-chip[aria-pressed="false"] .legend-chip-swatch { background: transparent; box-shadow: inset 0 0 0 1px var(--chip-color); }
-  .series-table-wrap { overflow-x: auto; }
-  .compare-empty { margin-top: 16px; }
-  @media (max-width: 720px) {
-    .cmp-overlay-canvas { height: 220px; }
-    /* Three narrow columns instead of a grid wider than the screen. */
-    .verdict-grid { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1fr); font-size: 13px; }
-    .verdict-grid > div { min-width: 0; padding: 8px; overflow-wrap: anywhere; }
-    .verdict-grid .pill { white-space: normal; }
-  }
-  .findings-list { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.5; }
-  .findings-list li + li { margin-top: 6px; }
-  .sev { font-size: 11px; font-weight: 700; text-transform: uppercase; margin-right: 6px; }
-  .sev.critical, .sev.high { color: var(--fail-fg); }
-  .sev.medium { color: var(--warn-fg); }
-  .sev.low { color: var(--text-dim); }
-</style>
 {% endblock %}
 {% block content %}
   <div class="page-header">
     <div class="page-heading">
-      <h2>Сравнение тестов</h2>
-      <p class="page-subtitle">Выберите два прогона: для B можно автоматически подставить предыдущий успешный прогон того же сервиса и типа теста. Сравниваются вердикты, находки итогового анализа и метрики по доменам.</p>
+      <h2>{{ t('compare.title') }}</h2>
+      <p class="page-subtitle">{{ t('compare.subtitle') }}</p>
     </div>
   </div>
 
   <div class="compare-pickers">
-    <div class="picker-card">
-      <div class="picker-title"><span>Прогон A <span class="picker-badge">A</span></span><span id="runAMeta" class="dim"></span></div>
+    <div class="picker-card picker-a">
+      <div class="picker-title"><span>{{ t('compare.picker.run_a') }} <span class="picker-badge">A</span></span><span id="runAMeta" class="dim"></span></div>
       <div id="runAPicker"></div>
-      <div class="field-hint">Обычно новый прогон, который нужно оценить.</div>
+      <div class="field-hint">{{ t('compare.picker.run_a_hint') }}</div>
     </div>
-    <div class="picker-card">
-      <div class="picker-title"><span>Прогон B <span class="picker-badge b">B</span></span><span id="runBMeta" class="dim"></span></div>
+    <div class="picker-card picker-b">
+      <div class="picker-title"><span>{{ t('compare.picker.run_b') }} <span class="picker-badge b">B</span></span><span id="runBMeta" class="dim"></span></div>
       <div id="runBPicker"></div>
       <div class="picker-actions">
-        <button type="button" class="btn btn-sm" id="baselineSuccessBtn" disabled>Предыдущий успешный</button>
-        <button type="button" class="btn btn-sm" id="baselinePrevBtn" disabled>Предыдущий прогон</button>
+        <button type="button" class="btn btn-sm" id="baselineSuccessBtn" disabled>{{ t('compare.baseline.previous_success') }}</button>
+        <button type="button" class="btn btn-sm" id="baselinePrevBtn" disabled>{{ t('compare.baseline.previous') }}</button>
         <span class="dim" id="baselineNote"></span>
       </div>
     </div>
   </div>
-  <div class="form-actions" style="margin-top:12px">
-    <button type="button" class="btn btn-primary" id="compareBtn" disabled>Сравнить</button>
-    <span class="dim" id="compareHint">Выберите оба прогона.</span>
+  <div class="form-actions compare-actions">
+    <button type="button" class="btn btn-primary" id="compareBtn" disabled>{{ t('compare.action.compare') }}</button>
+    <span class="dim" id="compareHint">{{ t('compare.hint.pick_both') }}</span>
   </div>
 
   <section id="verdictCompare" class="verdict-compare" hidden>
-    <div class="section-head"><h3>Вердикты и находки</h3><span class="dim">итог и домены: A против B</span></div>
+    <div class="section-head"><h3>{{ t('compare.verdicts.title') }}</h3><span class="dim">{{ t('compare.verdicts.subtitle') }}</span></div>
     <div class="verdict-grid" id="verdictGrid"></div>
-    <details class="report-collapsible" style="margin-top:10px">
-      <summary><span>Находки итогового анализа</span><small class="report-collapsible-subtitle">что нашёл ИИ в каждом прогоне</small></summary>
+    <details class="report-collapsible compare-findings">
+      <summary><span>{{ t('compare.findings.title') }}</span><small class="report-collapsible-subtitle">{{ t('compare.findings.subtitle') }}</small></summary>
       <div class="report-collapsible-body"><div class="findings-compare" id="findingsCompare"></div></div>
     </details>
   </section>
 
   <section id="metricsCompare" hidden>
     <div class="section-head">
-      <h3>Метрики</h3>
-      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
-        <span class="dim">Агрегат:</span>
-        <div class="seg-group" id="aggGroup" role="group" aria-label="Агрегат">
+      <h3>{{ t('compare.metrics.title') }}</h3>
+      <div class="compare-agg">
+        <span class="dim">{{ t('compare.agg.title') }}:</span>
+        <div class="seg-group" id="aggGroup" role="group" aria-label="{{ t('compare.agg.title') }}">
           <button type="button" class="seg-btn active" data-agg="p95" aria-pressed="true">p95</button>
-          <button type="button" class="seg-btn" data-agg="avg" aria-pressed="false">среднее</button>
-          <button type="button" class="seg-btn" data-agg="max" aria-pressed="false">максимум</button>
+          <button type="button" class="seg-btn" data-agg="avg" aria-pressed="false">{{ t('compare.agg.avg') }}</button>
+          <button type="button" class="seg-btn" data-agg="max" aria-pressed="false">{{ t('compare.agg.max') }}</button>
         </div>
       </div>
     </div>
     <p class="agg-note" id="aggNote"></p>
-    <div id="domainTabs" class="tabs" aria-label="Домены"></div>
+    <div id="domainTabs" class="tabs" aria-label="{{ t('compare.metrics.domains_label') }}"></div>
     <div id="domainPanels"></div>
   </section>
 {% endblock %}

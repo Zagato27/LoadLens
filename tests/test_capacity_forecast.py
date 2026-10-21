@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """USL fit, sample alignment and the forecast HTTP API."""
 
 from __future__ import annotations

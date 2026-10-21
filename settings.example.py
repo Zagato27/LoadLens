@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Пример конфигурации (обезличено). Скопируйте в settings.py и заполните свои значения.
 # Поддерживаются рантайм‑оверрайды (settings_runtime.json), в т.ч. по проектным областям через блок per_area.
 # Ключевые разделы:
@@ -222,7 +223,13 @@ CONFIG = {
 
     # Accent of the whole install: buttons, logo and the browser tab icon. #rrggbb.
     "appearance": {
-        "accent": "#6c5ce7"
+        "accent": "#6c5ce7",
+        # Language of new reports, prompts, forecast explanations and document import: "ru" or "en".
+        # It is also the interface language of a browser that has not chosen one (cookie loadlens.lang).
+        # Ready reports keep the language they were built in.
+        "language": "ru",
+        # Emergency switch: false ignores the loadlens.lang cookie, so everyone sees the interface in "language".
+        "language_switch": True
     },
 
     # Подключения. В источнике только адрес, авторизация и TLS.

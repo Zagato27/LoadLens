@@ -1,4 +1,11 @@
-"""Publish a LoadLens report to Confluence as a tabbed page with chart attachments."""
+# SPDX-License-Identifier: Apache-2.0
+"""Publish a LoadLens report to Confluence as a tabbed page with chart attachments.
+
+The page and its PNG charts are written in the language of the report (``stored_report_language`` of the stored
+rows: ``parsed.report_language``, then ``sla_details.report_language``, else ``ru``), never in the language of the
+person who publishes it. Stored texts (LLM answers, ``domain_titles``, SLA messages) are shown as they were saved.
+Progress messages and errors of the publication job are rendered in the locale of the job.
+"""
 
 from __future__ import annotations
 
@@ -17,10 +24,14 @@ import requests
 from psycopg2 import sql
 
 from AI import report_markers
+from AI.i18n import SUPPORTED, LocalizedError, get_locale, msg, t, with_locale
 from AI.report_sections import test_type_section
-from AI.test_profile import profile_for
+from AI.test_profile import normalize_test_type, test_type_label
+from AI.verdicts import NO_DATA, normalize_report, optional_code, to_code
+from AI.verdicts import label as verdict_label
 from loadlens_app.core import _ts_conn
 from loadlens_app.html_sanitizer import safe_href
+from loadlens_app.i18n import stored_report_language
 from settings import CONFIG
 
 logger = logging.getLogger(__name__)
@@ -51,17 +62,8 @@ LLM_DOMAIN_ORDER = [
     "lt_generators",
     "application_logs",
 ]
-LLM_DOMAIN_TITLES = {
-    "final": "Итог",
-    "jvm": "jvm",
-    "database": "database",
-    "kafka": "kafka",
-    "microservices": "microservices",
-    "hard_resources": "hard_resources",
-    "lt_framework": "lt_framework",
-    "lt_generators": "lt_generators",
-    "application_logs": "application_logs",
-}
+# Tab titles of the LLM domains without stored ``domain_titles``: the domain key; «final» is common.domain.final.
+LLM_DOMAIN_TITLES = {domain: domain for domain in LLM_DOMAIN_ORDER}
 METRIC_DOMAIN_ORDER = [
     "jvm",
     "database",
@@ -77,6 +79,18 @@ ALLOWED_HTML_TAGS = {
 }
 VOID_HTML_TAGS = {"br"}
 ProgressCallback = Callable[[str, int | None], None]
+
+
+class ConfluenceConfigError(LocalizedError, ValueError):
+    """Publishing is off or its settings are incomplete; the text renders in the locale where it is shown."""
+
+
+class ConfluencePublishError(LocalizedError, ValueError):
+    """The run has nothing to publish."""
+
+
+class ConfluenceDependencyError(LocalizedError, RuntimeError):
+    """A package the publication needs is not installed."""
 
 
 def _cfg_dict(value: object) -> dict[str, Any]:
@@ -108,7 +122,7 @@ def _cell_text(value: object, default: str = "—") -> str:
     if value is None:
         return default
     if isinstance(value, bool):
-        return "да" if value else "нет"
+        return t("confluence.yes") if value else t("confluence.no")
     if isinstance(value, int):
         return str(value)
     if isinstance(value, float):
@@ -170,7 +184,7 @@ def wrap_ui_tabs(panels: Iterable[tuple[str, str]]) -> str:
         if title and body is not None
     )
     if not tabs:
-        return "<p>Нет данных.</p>"
+        return p(t("confluence.no_data"))
     return wrap_macro("ui-tabs", tabs)
 
 
@@ -214,7 +228,7 @@ class _HtmlToStorage(HTMLParser):
 def html_to_storage(raw_html: str) -> str:
     text = (raw_html or "").strip()
     if not text:
-        return "<p>Нет комментария инженера.</p>"
+        return p(t("confluence.no_engineer_comment"))
     parser = _HtmlToStorage()
     parser.feed(text)
     parser.close()
@@ -274,10 +288,10 @@ def _step_interval(step: dict[str, Any]) -> str:
 def _step_flag(step: dict[str, Any]) -> str:
     """Why a step is not a clean load level; same precedence as the report page."""
     if step.get("after_drop"):
-        return "после просадки"
+        return t("report.steps.flag_after_drop")
     if step.get("dip"):
-        return "кратковременная просадка"
-    return "нестабильная" if step.get("stable") is False else ""
+        return t("report.steps.flag_dip")
+    return t("report.steps.flag_unstable") if step.get("stable") is False else ""
 
 
 def _step_name(step: dict[str, Any]) -> str:
@@ -302,37 +316,42 @@ def load_step_expand(table: dict[str, Any] | None) -> str:
         "</tr>"
         for step in steps
     )
-    head = "<tr><th>Ступень</th><th>Интервал</th><th>RPS</th><th>Время отклика, p95</th></tr>"
+    head = "<tr>" + "".join(
+        f"<th>{xml_text(title)}</th>"
+        for title in (t("report.steps.col_step"), t("report.steps.col_interval"), "RPS", t("report.steps.col_latency"))
+    ) + "</tr>"
     query = str(table.get("latency_query") or "").strip()
     series = str(table.get("latency_series") or "").strip()
     source_parts = [part for part in (
-        f"запрос «{query}»" if query else "",
-        f"серия «{series}»" if series else "",
+        t("report.steps.source_query", query=query) if query else "",
+        t("report.steps.source_series", series=series) if series else "",
     ) if part]
-    source = p("Источник: " + ", ".join(source_parts)) if source_parts else ""
-    note = p("RPS — уровень ступени. Время отклика — p95 на плато, без хвоста после просадки.")
-    return wrap_expand("Ступени теста", f"<table><thead>{head}</thead><tbody>{body}</tbody></table>{source}{note}")
+    source = p(t("confluence.steps.source", source=", ".join(source_parts))) if source_parts else ""
+    note = p(t("confluence.steps.note"))
+    return wrap_expand(t("report.steps.title"), f"<table><thead>{head}</thead><tbody>{body}</tbody></table>{source}{note}")
 
 
 # ---- SLA criteria (same content as the block at the top of the report page) ----
 
-SLA_CHECK_LABELS = {
-    "target_rps": "Целевой RPS",
-    "error_rate": "Доля ошибок, %",
-    "p95_latency": "P95 latency, мс",
-    "p99_latency": "P99 latency, мс",
-    "cpu_usage": "CPU, %",
-    "memory_usage": "Память, %",
-    "recovery": "Восстановление после всплеска, мин",
+# Checks with a title in report.sla_check.<name> (the same titles as on the report page).
+SLA_CHECK_NAMES = ("target_rps", "error_rate", "p95_latency", "p99_latency", "cpu_usage", "memory_usage", "recovery")
+# Confluence status lozenge per check result: passed, failed, no data (colour, title key).
+_SLA_STATUS = {
+    True: ("Green", "confluence.sla.status_pass"),
+    False: ("Red", "confluence.sla.status_fail"),
+    None: ("Grey", "confluence.sla.status_na"),
 }
-# Confluence status lozenge per check result: passed, failed, no data.
-_SLA_STATUS = {True: ("Green", "Соблюдён"), False: ("Red", "Нарушен"), None: ("Grey", "Нет данных")}
 # Offset the report page assumes when the step times carry none (the page does the same).
 _DEFAULT_OFFSET_HOURS = 3.0
 
 
 def status_macro(title: str, colour: str) -> str:
     return wrap_macro("status", "", {"colour": colour, "title": title})
+
+
+def sla_check_label(name: str) -> str:
+    """Title of an SLA check in the current locale; an unknown check keeps its name."""
+    return t(f"report.sla_check.{name}") if name in SLA_CHECK_NAMES else name
 
 
 def _number_text(value: object) -> str:
@@ -414,20 +433,29 @@ def sla_window_note(window: dict[str, Any], step_table: dict[str, Any] | None) -
     level = "" if level == "—" else level
     kind = str(window.get("kind") or "step")
     if kind == "spike":
-        return "SLA проверено в окнах всплесков: по каждому порогу — худший всплеск."
+        return t("report.steps.sla_spike") + "."
     if kind == "hold":
-        return "SLA проверено на окне удержания" + (f" {span}" if span else "") + (f", средний RPS {level}" if level else "") + "."
+        key = "report.steps.sla_hold" + ("_span" if span else "") + ("_level" if level else "")
+        return t(key, span=span, level=level) + "."
     chosen = next((step for step in steps if step.get("selected")), None) or _step_covering(steps, start)
-    window_bit = (f", окно {span}" if span else "") + (f", RPS окна {level}" if level else "")
     if chosen is None:
-        return ("SLA проверено на стабильной ступени" + window_bit + ".") if window_bit else ""
-    note = f"SLA проверено на ступени {chosen.get('index') or ''} ({_step_interval(chosen)}){window_bit}."
+        if not (span or level):
+            return ""
+        key = "confluence.sla.stable_step" + ("_span" if span else "") + ("_level" if level else "")
+        return t(key, window=span, level=level) + "."
+    keys = {
+        (False, False): "report.steps.sla_step",
+        (True, False): "report.steps.sla_step_window",
+        (True, True): "report.steps.sla_step_window_level",
+        (False, True): "confluence.sla.step_level",
+    }
+    note = t(keys[(bool(span), bool(level))], index=chosen.get("index") or "", interval=_step_interval(chosen), window=span, level=level) + "."
     try:
         differs = level and abs(float(chosen.get("rps")) - float(window.get("level"))) > 1
     except (TypeError, ValueError):
         differs = False
     if differs:
-        note += " RPS в таблице ступеней — среднее всего интервала, пороги считаются по этому окну."
+        note += " " + t("confluence.sla.mean_note")
     return note
 
 
@@ -435,24 +463,27 @@ def sla_criteria_block(final_row: dict[str, Any], step_table: dict[str, Any] | N
     """SLA criteria with status, threshold and actual value, the SLA summary and the checked window."""
     checks = sla_checks_of(final_row)
     if not checks:
-        return p("SLA-критерии для этого сервиса не заданы, поэтому автоматический вердикт — «Недостаточно данных».")
+        return p(t("confluence.sla.empty", verdict=verdict_label(NO_DATA, get_locale())))
     rows = []
     for check in checks:
         name = str(check.get("name") or "")
         passed = check.get("passed") if isinstance(check.get("passed"), bool) else None
-        colour, title = _SLA_STATUS[passed]
+        colour, title_key = _SLA_STATUS[passed]
         note = str(check.get("message") or "").strip()
-        label = xml_text(SLA_CHECK_LABELS.get(name) or name or "—")
+        label = xml_text(sla_check_label(name) or "—")
         criterion = label + (f"<br />{xml_text(note)}" if note else "")
         rows.append(
             "<tr>"
-            f"<td>{status_macro(title, colour)}</td>"
+            f"<td>{status_macro(t(title_key), colour)}</td>"
             f"<td>{criterion}</td>"
             f"<td>{xml_text(_number_text(check.get('threshold')))}</td>"
             f"<td>{xml_text(_number_text(check.get('actual')))}</td>"
             "</tr>"
         )
-    head = "<tr><th>Статус</th><th>Критерий</th><th>Порог</th><th>Факт</th></tr>"
+    head = "<tr>" + "".join(
+        f"<th>{xml_text(title)}</th>"
+        for title in (t("confluence.sla.col_status"), t("report.sla.col_criterion"), t("report.sla.col_threshold"), t("report.sla.col_actual"))
+    ) + "</tr>"
     table = f"<table><thead>{head}</thead><tbody>{''.join(rows)}</tbody></table>"
     summary = str(_as_dict(final_row.get("sla_details")).get("summary") or "").strip()
     note = sla_window_note(sla_window_of(final_row), step_table)
@@ -473,21 +504,9 @@ def two_col_table(left_title: str, right_title: str, rows: list[tuple[str, str]]
     return f"<table><colgroup><col /><col /></colgroup>{head}<tbody>{body}</tbody></table>"
 
 
-def _standardize_verdict(raw: object) -> str:
-    value = str(raw or "").strip().lower()
-    if not value:
-        return "Недостаточно данных"
-    if any(token in value for token in ("успеш", "success", "passed", "ok", "green")):
-        return "Успешно"
-    if any(token in value for token in ("риск", "warn", "degrad")):
-        return "Есть риски"
-    if any(token in value for token in ("провал", "fail", "critical", "error", "red")):
-        return "Провал"
-    if any(token in value for token in ("недостаточно", "no data", "n/a", "unknown")):
-        return "Недостаточно данных"
-    if raw in {"Успешно", "Есть риски", "Провал", "Недостаточно данных"}:
-        return str(raw)
-    return str(raw) if str(raw).strip() else "Недостаточно данных"
+def _verdict_text(raw: object) -> str:
+    """Label of a verdict (a code, an old label or the model's free text) on the page, in the current locale."""
+    return verdict_label(to_code(raw), get_locale())
 
 
 def _as_dict(value: object) -> dict[str, Any]:
@@ -562,9 +581,9 @@ def _evidence_items(value: object) -> list[str]:
         if metric:
             bits.append(metric)
         if observed:
-            bits.append(f"значение: {observed}")
+            bits.append(t("report.evidence.value", value=observed))
         if threshold:
-            bits.append(f"порог: {threshold}")
+            bits.append(t("report.evidence.threshold", value=threshold))
         if note:
             bits.append(note)
         if bits:
@@ -572,15 +591,22 @@ def _evidence_items(value: object) -> list[str]:
     return lines
 
 
-UNVERIFIED_SUFFIX = "(не подтверждено данными)"
+def unverified_suffix() -> str:
+    """Mark of a finding the data did not confirm, in the current locale (the verify prompt writes the same)."""
+    return t("confluence.unverified_suffix")
+
+
+def _has_unverified_mark(summary: str) -> bool:
+    """Whether the model already marked the summary, in any language of the prompts."""
+    return any(t("confluence.unverified_suffix", locale=lang) in summary for lang in SUPPORTED)
 
 
 def _finding_html(item: object) -> str:
     data = _as_dict(item) if not isinstance(item, str) else {"summary": item}
     summary = _cell_text(data.get("summary") or data.get("title") or data.get("text"), "")
     verification = data.get("verification") if isinstance(data.get("verification"), dict) else {}
-    if summary and str(verification.get("status") or "").lower() == "unverified" and UNVERIFIED_SUFFIX not in summary:
-        summary = f"{summary} {UNVERIFIED_SUFFIX}"
+    if summary and str(verification.get("status") or "").lower() == "unverified" and not _has_unverified_mark(summary):
+        summary = f"{summary} {unverified_suffix()}"
     parts: list[str] = []
     if summary:
         parts.append(f"<p><strong>{xml_text(summary)}</strong></p>")
@@ -594,9 +620,9 @@ def _finding_html(item: object) -> str:
     severity = _cell_text(data.get("severity"), "")
     component = _cell_text(data.get("component"), "")
     if severity:
-        meta.append(f"Критичность: {severity}")
+        meta.append(t("confluence.line.severity", value=severity))
     if component:
-        meta.append(f"Компонент: {component}")
+        meta.append(t("confluence.line.component", value=component))
     if meta:
         parts.append(f"<p>{xml_text(' · '.join(meta))}</p>")
     return "".join(parts) or _empty_cell("—")
@@ -702,7 +728,7 @@ def pair_findings_with_actions(findings: list[Any], actions: list[Any]) -> list[
         recommendations = explicit or ([legacy["item"]] if legacy else [])
         rows.append((
             _finding_html(finding["item"]),
-            _action_stack(recommendations, "Нет рекомендации."),
+            _action_stack(recommendations, t("report.findings.no_recommendation")),
         ))
     for action in action_entries:
         dangling = (
@@ -711,13 +737,13 @@ def pair_findings_with_actions(findings: list[Any], actions: list[Any]) -> list[
         )
         if dangling:
             rows.append((
-                _empty_cell("Дополнительная рекомендация"),
-                _action_stack([action["item"]], "Нет рекомендации."),
+                _empty_cell(t("report.findings.extra_recommendation")),
+                _action_stack([action["item"]], t("report.findings.no_recommendation")),
             ))
     if not rows:
         rows.append((
-            _empty_cell("Нет существенных проблем."),
-            _action_stack([entry["item"] for entry in action_entries], "Нет рекомендаций."),
+            _empty_cell(t("report.findings.no_problems")),
+            _action_stack([entry["item"] for entry in action_entries], t("report.findings.no_recommendations")),
         ))
     return rows
 
@@ -726,14 +752,14 @@ def render_llm_domain_body(row: dict[str, Any]) -> str:
     parsed = _as_dict(row.get("parsed"))
     analysis_error = _as_dict(parsed.get("analysis_error"))
     if analysis_error:
-        message = _cell_text(analysis_error.get("message"), "Анализ ИИ не выполнен.")
+        message = _cell_text(analysis_error.get("message"), t("report.analysis_error.default_message"))
         details = [
             _cell_text(analysis_error.get("provider"), ""),
-            f"лимит {analysis_error.get('max_tokens')}" if analysis_error.get("max_tokens") else "",
-            f"выдано {analysis_error.get('output_tokens')}" if analysis_error.get("output_tokens") is not None else "",
+            t("report.analysis_error.limit", value=analysis_error.get("max_tokens")) if analysis_error.get("max_tokens") else "",
+            t("report.analysis_error.output", value=analysis_error.get("output_tokens")) if analysis_error.get("output_tokens") is not None else "",
         ]
         details = [item for item in details if item]
-        body = h3("Анализ ИИ не выполнен") + p(message)
+        body = h3(t("report.analysis_error.title")) + p(message)
         if details:
             body += p(" · ".join(details))
         excerpt = _require_str(analysis_error.get("excerpt"))
@@ -747,24 +773,25 @@ def render_llm_domain_body(row: dict[str, Any]) -> str:
             parsed = _as_dict(raw[start:end + 1])
     if not parsed:
         text = _require_str(row.get("text"))
-        return f"<pre>{xml_text(text[:12000])}</pre>" if text else p("Нет данных.")
+        return f"<pre>{xml_text(text[:12000])}</pre>" if text else p(t("confluence.no_data"))
 
-    verdict = _standardize_verdict(row.get("sla_verdict") or parsed.get("verdict") or row.get("verdict"))
+    verdict = _verdict_text(row.get("sla_verdict") or parsed.get("verdict") or row.get("verdict"))
     manual = row.get("manual_verdict") if row.get("domain") == "final" else None
     if isinstance(manual, dict) and manual.get("verdict"):
         # Set by hand: the page names who, when and why, and keeps the automatic verdict next to it.
         who = ", ".join(part for part in (str(manual.get("author") or ""), _iso_to_text(manual.get("changed_at"))) if part)
         reason = str(manual.get("reason") or "").strip()
-        rows = [("Вердикт", _standardize_verdict(manual["verdict"]))]
-        rows.append(("Изменён вручную", f"{who}. Причина: {reason}" if who else f"Причина: {reason}"))
-        rows.append(("Автоматический вердикт", verdict))
+        rows = [(t("confluence.verdict.title"), _verdict_text(manual["verdict"]))]
+        changed = t("confluence.verdict.manual_by", who=who, reason=reason) if who else t("report.verdict.reason_line", reason=reason)
+        rows.append((t("confluence.verdict.manual"), changed))
+        rows.append((t("confluence.verdict.auto"), verdict))
     else:
-        rows = [("Вердикт", verdict)]
-        llm = _standardize_verdict(row.get("llm_verdict") or parsed.get("verdict"))
+        rows = [(t("confluence.verdict.title"), verdict)]
+        llm = _verdict_text(row.get("llm_verdict") or parsed.get("verdict"))
         # Rows saved before the SLA verdict replaced the model's one keep a different model verdict.
         if row.get("domain") == "final" and row.get("llm_verdict") and row.get("sla_verdict") and llm != verdict:
-            rows.append(("Вердикт LLM", llm))
-            rows.append(("SLA", _standardize_verdict(row.get("sla_verdict"))))
+            rows.append((t("confluence.verdict.llm"), llm))
+            rows.append(("SLA", _verdict_text(row.get("sla_verdict"))))
     parts = [kv_table(rows)]
 
     rationale = _cell_text(
@@ -772,7 +799,7 @@ def render_llm_domain_body(row: dict[str, Any]) -> str:
         "",
     )
     if rationale:
-        parts.append(h3("Обоснование вердикта"))
+        parts.append(h3(t("report.rationale.title")))
         parts.append(_html_paragraphs(rationale))
 
     peak = _as_dict(parsed.get("peak_performance") or parsed.get("peak_perfomance"))
@@ -782,17 +809,17 @@ def render_llm_domain_body(row: dict[str, Any]) -> str:
         parts.append(h3(title))
         parts.append(kv_table(section_rows))
     elif _peak_table_applies(str(row.get("domain") or ""), peak):
-        parts.append(h3("Пиковая производительность"))
+        parts.append(h3(t("report.structured.peak_title")))
         parts.append(kv_table([
-            ("Максимальный RPS", _cell_text(peak.get("max_rps"))),
-            ("Время пиковой производительности", _cell_text(peak.get("max_time"))),
-            ("Время деградации", _cell_text(peak.get("drop_time"))),
+            (t("report.structured.max_rps"), _cell_text(peak.get("max_rps"))),
+            (t("report.section.peak_time"), _cell_text(peak.get("max_time"))),
+            (t("report.section.drop_time"), _cell_text(peak.get("drop_time"))),
         ]))
 
-    parts.append(h3("Проблемы и рекомендации"))
+    parts.append(h3(t("report.findings.title")))
     parts.append(two_col_table(
-        "Проблемы",
-        "Рекомендации по устранению",
+        t("report.findings.problems"),
+        t("report.findings.recommendations"),
         pair_findings_with_actions(
             _as_list(parsed.get("findings")),
             _as_list(parsed.get("recommended_actions") or parsed.get("actions")),
@@ -802,7 +829,7 @@ def render_llm_domain_body(row: dict[str, Any]) -> str:
     affected = [_cell_text(item, "") for item in _as_list(parsed.get("affected_components"))]
     affected = [item for item in affected if item]
     if affected:
-        parts.append(h3("Затронутые компоненты"))
+        parts.append(h3(t("confluence.affected_components")))
         parts.append(p(", ".join(affected)))
     return "".join(parts)
 
@@ -814,28 +841,28 @@ def _system_context_items(ctx: dict[str, Any]) -> list[str]:
     operational = _as_dict(ctx.get("operational_context"))
     items: list[str] = []
     if _require_str(system.get("name")):
-        items.append(f"Система: {_require_str(system.get('name'))}")
+        items.append(t("confluence.line.system", value=_require_str(system.get("name"))))
     if _require_str(system.get("domain")):
-        items.append(f"Домен: {_require_str(system.get('domain'))}")
+        items.append(t("confluence.line.domain", value=_require_str(system.get("domain"))))
     if _require_str(system.get("description")):
         items.append(_require_str(system.get("description")))
     if _require_str(system.get("test_goal")):
-        items.append(f"Цель теста: {_require_str(system.get('test_goal'))}")
+        items.append(t("confluence.line.test_goal", value=_require_str(system.get("test_goal"))))
     if _require_str(architecture.get("style")):
-        items.append(f"Архитектура: {_require_str(architecture.get('style'))}")
+        items.append(t("confluence.line.architecture", value=_require_str(architecture.get("style"))))
     for component in _as_list(architecture.get("components"))[:20]:
         data = _as_dict(component)
         name = _require_str(data.get("name") or data.get("id"))
         if name:
-            items.append(f"Компонент: {name}")
+            items.append(t("confluence.line.component", value=name))
     for flow in _as_list(load_model.get("critical_user_flows"))[:10]:
         data = _as_dict(flow)
         name = _require_str(data.get("name") or data.get("id"))
         if name:
-            items.append(f"Критичный поток: {name}")
+            items.append(t("confluence.line.critical_flow", value=name))
     for risk in _as_list(operational.get("known_risks"))[:10]:
         if _require_str(risk):
-            items.append(f"Риск: {_require_str(risk)}")
+            items.append(t("confluence.line.risk", value=_require_str(risk)))
     return items
 
 
@@ -996,11 +1023,11 @@ def render_series_png(
     fig.patch.set_facecolor("#ffffff")
     ax.set_facecolor("#fafbfc")
     ax.set_title(title)
-    ax.set_xlabel("Время")
+    ax.set_xlabel(t("confluence.chart.time"))
     ax.grid(True, color="#e6e9ef")
     placed: list[dict[str, Any]] = []
     if not labels or not ranked:
-        ax.text(0.5, 0.5, "Нет данных", ha="center", va="center", transform=ax.transAxes)
+        ax.text(0.5, 0.5, t("report.page.no_data"), ha="center", va="center", transform=ax.transAxes)
     else:
         for name, color, values in ranked:
             xs = [i for i, ts in enumerate(labels) if ts in values]
@@ -1029,6 +1056,7 @@ def render_series_png(
 
 
 def _progress(callback: ProgressCallback | None, message: str, pct: int | None = None) -> None:
+    """Reports a stage of the job; ``message`` is a :func:`AI.i18n.msg` so the job list can show it in any locale."""
     if callback:
         callback(message, pct)
 
@@ -1185,12 +1213,12 @@ def load_llm_rows(run_name: str) -> list[dict[str, Any]]:
             "start_ms": int(row[2]) if row[2] is not None else None,
             "end_ms": int(row[3]) if row[3] is not None else None,
             "domain": row[4],
-            "verdict": row[5],
-            "llm_verdict": row[5],
+            "verdict": optional_code(row[5]),
+            "llm_verdict": optional_code(row[5]),
             "text": row[6],
-            "parsed": row[7],
+            "parsed": normalize_report(row[7]),
             "scores": row[8],
-            "sla_verdict": row[9],
+            "sla_verdict": optional_code(row[9]),
             "sla_details": row[10],
             "system_context": row[11],
             "test_type": row[13] if len(row) > 13 else None,
@@ -1519,9 +1547,29 @@ def build_page_body(
     charts: list[dict[str, str]],
     step_table: dict[str, Any] | None = _UNRESOLVED,
 ) -> str:
+    """Storage-format page of the report, in the language the report was written in (``ru`` for older reports)."""
+    with with_locale(stored_report_language(llm_rows)):
+        return _page_body(run_name, service, source_url, llm_rows, engineer_html, charts, step_table)
+
+
+def _llm_domain_title(domain: str, stored_titles: dict[str, str]) -> str:
+    if stored_titles.get(domain):
+        return stored_titles[domain]
+    return t("common.domain.final") if domain == "final" else LLM_DOMAIN_TITLES.get(domain, domain)
+
+
+def _page_body(
+    run_name: str,
+    service: str,
+    source_url: str,
+    llm_rows: list[dict[str, Any]],
+    engineer_html: str,
+    charts: list[dict[str, str]],
+    step_table: Any,
+) -> str:
     first = llm_rows[0] if llm_rows else {}
     test_type = next((str(row.get("test_type")) for row in llm_rows if row.get("test_type")), "")
-    type_label = (profile_for(test_type).label_ru if profile_for(test_type).test_type else test_type) if test_type else ""
+    type_label = (test_type_label(normalize_test_type(test_type), get_locale()) or test_type) if test_type else ""
     start_text = _ms_to_text(first.get("start_ms"))
     end_text = _ms_to_text(first.get("end_ms"))
     system_context = {}
@@ -1534,24 +1582,24 @@ def build_page_body(
     parts = [
         h2(f"LoadLens: {run_name}"),
         kv_table([
-            ("Сервис", service or "—"),
-            ("Запуск", run_name),
-            ("Время теста", f"{start_text} — {end_text}"),
-            *([("Тип теста", type_label)] if type_label else []),
+            (t("report.hero.service"), service or "—"),
+            (t("confluence.header.run"), run_name),
+            (t("confluence.header.test_time"), f"{start_text} — {end_text}"),
+            *([(t("report.section.test_type"), type_label)] if type_label else []),
         ]),
     ]
     if source_url:
-        parts.append(f'<p><a href="{xml_text(source_url)}">Открыть отчёт в LoadLens</a></p>')
+        parts.append(f'<p><a href="{xml_text(source_url)}">{xml_text(t("confluence.open_report"))}</a></p>')
     if step_table is _UNRESOLVED:
         step_table = resolve_load_step_table(run_name, llm_rows)
     final_row = next((row for row in llm_rows if str(row.get("domain")) == "final"), {})
-    parts.append(h2("SLA-критерии"))
+    parts.append(h2(t("report.sla.title")))
     parts.append(sla_criteria_block(final_row if isinstance(final_row, dict) else {}, step_table))
-    parts.append(h2("Итоги от инженера"))
+    parts.append(h2(t("report.engineer.title")))
     parts.append(html_to_storage(engineer_html))
     context_items = _system_context_items(system_context)
     if context_items:
-        parts.append(wrap_expand("Контекст тестируемой системы", li_list(context_items)))
+        parts.append(wrap_expand(t("report.context.title"), li_list(context_items)))
     step_block = load_step_expand(step_table)
     if step_block:
         parts.append(step_block)
@@ -1561,12 +1609,12 @@ def build_page_body(
     llm_panels: list[tuple[str, str]] = []
     for domain in LLM_DOMAIN_ORDER:
         if domain in by_domain:
-            llm_panels.append((stored_titles.get(domain) or LLM_DOMAIN_TITLES.get(domain, domain), render_llm_domain_body(by_domain[domain])))
+            llm_panels.append((_llm_domain_title(domain, stored_titles), render_llm_domain_body(by_domain[domain])))
     for domain, row in by_domain.items():
         if domain not in LLM_DOMAIN_TITLES:
             llm_panels.append((stored_titles.get(domain) or domain, render_llm_domain_body(row)))
-    parts.append(h2("Анализ LLM"))
-    parts.append(wrap_ui_tabs(llm_panels or [("Итог", p("Нет LLM-отчётов."))]))
+    parts.append(h2(t("confluence.llm_analysis")))
+    parts.append(wrap_ui_tabs(llm_panels or [(t("common.domain.final"), p(t("confluence.no_llm_reports")))]))
 
     charts_by_domain: dict[str, list[dict[str, str]]] = {}
     for chart in charts:
@@ -1579,18 +1627,19 @@ def build_page_body(
         for chart in charts_by_domain[domain]:
             body += h3(chart["title"])
             body += attachment_image(chart["filename"])
-        metric_panels.append((stored_titles.get(domain) or domain, body or p("Нет графиков.")))
-    parts.append(h2("Графики метрик"))
-    parts.append(wrap_ui_tabs(metric_panels or [("metrics", p("Нет графиков для этого запуска."))]))
+        metric_panels.append((stored_titles.get(domain) or domain, body or p(t("confluence.no_charts"))))
+    parts.append(h2(t("report.charts.section_title")))
+    parts.append(wrap_ui_tabs(metric_panels or [("metrics", p(t("confluence.no_run_charts")))]))
     return "".join(parts)
 
 
 def validate_confluence_config(cfg: dict[str, Any]) -> None:
+    """Raises :class:`ConfluenceConfigError` (a ValueError) when publishing is off or a setting is empty."""
     if not bool(cfg.get("enabled")):
-        raise ValueError("Публикация в Confluence выключена: установите confluence.enabled=true")
+        raise ConfluenceConfigError("confluence.error.disabled")
     missing = [key for key in ("base_url", "username", "password", "space_key", "parent_page_id") if not _require_str(cfg.get(key))]
     if missing:
-        raise ValueError(f"Не заполнены настройки Confluence: {', '.join(missing)}")
+        raise ConfluenceConfigError("confluence.error.missing_settings", fields=", ".join(missing))
 
 
 def publish_report(
@@ -1599,24 +1648,52 @@ def publish_report(
     source_url: str = "",
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, str]:
+    """Publishes the stored report of ``run_name`` in its own language (see the module docstring)."""
     cfg = confluence_config()
     validate_confluence_config(cfg)
-    _progress(progress_callback, "Загрузка отчёта…", 5)
+    _progress(progress_callback, msg("confluence.progress.loading_report"), 5)
     llm_rows = load_llm_rows(run_name)
     if not llm_rows:
-        raise ValueError(f"Для запуска '{run_name}' нет LLM-отчётов")
+        raise ConfluencePublishError("confluence.error.no_reports", run=run_name)
     service_name = service or _require_str(llm_rows[0].get("service")) or "unknown"
     engineer_html = load_engineer_html(run_name)
     schema = load_domains_schema(run_name)
 
-    _progress(progress_callback, "Подготовка графиков…", 20)
+    _progress(progress_callback, msg("confluence.progress.preparing_charts"), 20)
     if schema:
         try:
             import matplotlib  # noqa: F401
         except ImportError as exc:
-            raise RuntimeError(
-                "Для публикации графиков в Confluence нужен пакет matplotlib. Установите: pip install matplotlib"
-            ) from exc
+            raise ConfluenceDependencyError("confluence.error.matplotlib") from exc
+    # Page text, chart captions, markers and thresholds in the language of the report; the job's own
+    # messages (progress, errors) stay in the job's locale.
+    with with_locale(stored_report_language(llm_rows)):
+        title, body, attachments = _report_page(run_name, service_name, source_url, llm_rows, engineer_html, schema)
+
+    client = ConfluenceClient(cfg)
+    existing = load_publication(run_name)
+    page_id, page_url = upsert_page(client, str((existing or {}).get("page_id") or ""), title, body, attachments, progress_callback)
+    save_publication(
+        run_name=run_name,
+        service=service_name,
+        page_id=page_id,
+        page_url=page_url,
+        space_key=client.space_key,
+        parent_page_id=client.parent_page_id,
+    )
+    _progress(progress_callback, msg("confluence.progress.done"), 100)
+    return {"page_id": page_id, "page_url": page_url, "title": title}
+
+
+def _report_page(
+    run_name: str,
+    service_name: str,
+    source_url: str,
+    llm_rows: list[dict[str, Any]],
+    engineer_html: str,
+    schema: dict[str, list[str]],
+) -> tuple[str, str, dict[str, bytes]]:
+    """Title, storage body and PNG attachments of the report page, in the current locale."""
     step_table = resolve_load_step_table(run_name, llm_rows)
     annotations = chart_annotations(llm_rows, step_table)
     all_labels = [label for labels in schema.values() for label in labels]
@@ -1649,20 +1726,7 @@ def publish_report(
         charts=charts,
         step_table=step_table,
     )
-
-    client = ConfluenceClient(cfg)
-    existing = load_publication(run_name)
-    page_id, page_url = upsert_page(client, str((existing or {}).get("page_id") or ""), title, body, attachments, progress_callback)
-    save_publication(
-        run_name=run_name,
-        service=service_name,
-        page_id=page_id,
-        page_url=page_url,
-        space_key=client.space_key,
-        parent_page_id=client.parent_page_id,
-    )
-    _progress(progress_callback, "Готово", 100)
-    return {"page_id": page_id, "page_url": page_url, "title": title}
+    return title, body, attachments
 
 
 def upsert_page(
@@ -1678,17 +1742,17 @@ def upsert_page(
     if page is None:
         page = client.find_page_by_title(title)
     if page is None:
-        _progress(progress_callback, "Создание страницы Confluence…", 55)
-        page = client.create_page(title, "<p>Публикация отчёта LoadLens…</p>")
+        _progress(progress_callback, msg("confluence.progress.creating_page"), 55)
+        page = client.create_page(title, p(t("confluence.page_placeholder")))
     page_id = str(page.get("id"))
 
-    _progress(progress_callback, "Загрузка графиков…", 70)
+    _progress(progress_callback, msg("confluence.progress.uploading_charts"), 70)
     current_attachments = {str(item.get("title")): str(item.get("id")) for item in client.list_attachments(page_id)}
     for filename, content in attachments.items():
         client.upload_attachment(page_id, filename, content, existing_id=current_attachments.get(filename, ""))
 
     fresh = client.get_page(page_id) or page
     version = int((_as_dict(fresh.get("version")).get("number") or 1))
-    _progress(progress_callback, "Обновление содержимого страницы…", 90)
+    _progress(progress_callback, msg("confluence.progress.updating_page"), 90)
     updated = client.update_page(page_id, title, body, version)
     return str(updated.get("id") or page_id), client.page_url(updated)

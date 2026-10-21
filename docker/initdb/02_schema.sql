@@ -164,16 +164,19 @@ CREATE TABLE IF NOT EXISTS public.report_jobs (
     dismissed_at TIMESTAMPTZ,
     owner        TEXT        NOT NULL DEFAULT '',
     runner       TEXT        NOT NULL DEFAULT 'thread',
-    started_at   TIMESTAMPTZ
+    started_at   TIMESTAMPTZ,
+    message_ref  JSONB
 );
 
 -- Columns newer than the table; for older databases the application adds them as well.
 -- dismissed_at hides a finished job from the list; owner started the job (job limits); runner is where it
 -- runs: 'thread' (the web process) or 'celery' (the worker); started_at is empty while a Celery job is queued.
+-- message_ref is the dictionary key of message with its parameters, rendered in each reader's language.
 ALTER TABLE public.report_jobs ADD COLUMN IF NOT EXISTS dismissed_at TIMESTAMPTZ;
 ALTER TABLE public.report_jobs ADD COLUMN IF NOT EXISTS owner TEXT NOT NULL DEFAULT '';
 ALTER TABLE public.report_jobs ADD COLUMN IF NOT EXISTS runner TEXT NOT NULL DEFAULT 'thread';
 ALTER TABLE public.report_jobs ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
+ALTER TABLE public.report_jobs ADD COLUMN IF NOT EXISTS message_ref JSONB;
 
 -- Job lists by status, newest first; the running-job count and the sweep of stuck jobs read the
 -- status = 'running' prefix.

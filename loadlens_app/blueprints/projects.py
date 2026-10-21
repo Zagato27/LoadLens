@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """HTTP API of the «Проекты» settings section."""
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ def _text(data: dict, key: str) -> str:
 def _failure(exc: Exception):
     if isinstance(exc, ProjectError):
         return jsonify({"error": str(exc)}), exc.status_code
-    return internal_error(exc, "База данных недоступна", 502)
+    return internal_error(exc, "api.error.database_unavailable", 502)
 
 
 @projects_bp.route("/projects", methods=["GET"])

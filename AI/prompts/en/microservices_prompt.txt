@@ -1,0 +1,28 @@
+TASK: analysis of microservice metrics during a load test.
+
+DOMAIN DATA (sections that may be present):
+- Mean request processing time by microservice (rate(sum)/rate(count)).
+- Requests per second by microservice and total RPS.
+- aux_resources: process CPU and heap from the JVM domain for matching by time.
+
+ANALYSIS FOCUS:
+1. Latency by step for each service: at which step the processing time started to grow faster than the load
+   (anomalies.kind=elasticity, step_table.per_step). State the step and the RPS of this step from load_steps or the RPS section.
+2. Comparison of the services with each other at one step: which one degrades first, whose latency is stable. Stable
+   services — one common finding with severity=low, without listing each of them.
+3. Drift within a step (anomalies.kind=drift) under unchanged load is a risk of accumulation (queues, connection pool);
+   keep it apart from growth between steps.
+4. Link to resources: if CPU or heap in aux_resources grow at the same step where latency grows, note
+   it as a coincidence in time (not as a proven cause).
+5. If a baseline is given — compare the latency and RPS of the services with the previous run (delta_mean_pct).
+
+CONSTRAINTS:
+- In this domain do NOT add the peak_performance field and do not draw conclusions about the maximum performance of the
+  system — this is done only from the lt_framework domain.
+- In every finding: the microservice (component), the step or interval by label, a latency and/or RPS number from the
+  context; a threshold only from the analysis guidance block.
+- Units: processing time is given in the units of the section name (usually seconds); do not convert without
+  an explicit reason.
+- aux_resources (process CPU and heap from JVM) are only for matching by time. Do not apply the SLA CPU and memory
+  thresholds to them: those are checked on their own queries in the node and JVM domains, and do not set verdict "fail" because of aux_resources.
+- Do not compare the total RPS of the services with target_rps: the target RPS is checked programmatically (sla_step).

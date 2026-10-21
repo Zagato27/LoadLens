@@ -1,5 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
 import ast
 import collections
+import contextvars
 import copy
 import json
 import json as _json
@@ -17,8 +19,12 @@ from urllib.parse import urlsplit
 
 from requests.auth import HTTPBasicAuth
 
+from AI.i18n import t, with_locale
+from AI.i18n import LocalizedError, msg
 from AI.main import uploadFromLLM
+from AI.prompt_store import DOMAIN_PROMPT_FILES, effective_override, resolve_lang
 from AI.query_packs import apply_run_filter, strip_live_rows
+from AI.verdicts import normalize_report
 from confluence_manager.update_confluence_template import (
     copy_confluence_page,
     render_llm_markdown,
@@ -152,35 +158,13 @@ def _metrics_service_entry(metrics_cfg: dict, service_name: str | None, area_nam
 
 _SETTINGS_RUNTIME_PATH = os.path.join(os.path.dirname(__file__), 'settings_runtime.json')
 
-_PROMPTS_DIR = os.path.join(os.path.dirname(__file__), 'AI', 'prompts')
-_PROMPT_DOMAIN_FILES = {
-    'overall': 'overall_prompt.txt',
-    'jvm': 'jvm_prompt.txt',
-    'database': 'database_prompt.txt',
-    'kafka': 'kafka_prompt.txt',
-    'microservices': 'microservices_prompt.txt',
-    'hard_resources': 'hard_resources_prompt.txt',
-    'lt_framework': 'lt_framework_prompt.txt',
-    'lt_generators': 'lt_generators_prompt.txt',
-    'application_logs': 'application_logs_prompt.txt',
-}
+# Prompt domains a run may override (judge and critic are not editable).
+_PROMPT_DOMAINS = tuple(domain for domain in DOMAIN_PROMPT_FILES if domain not in ('judge', 'critic'))
 
 
 def default_run_name(now: datetime | None = None) -> str:
     """Run name used when the user leaves the name empty."""
     return (now or datetime.now()).strftime("run-%Y%m%d-%H%M%S")
-
-
-def _load_default_prompts() -> dict:
-    prompts: dict[str, str] = {}
-    for domain, fname in _PROMPT_DOMAIN_FILES.items():
-        path = os.path.join(_PROMPTS_DIR, fname)
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                prompts[domain] = f.read()
-        except Exception:
-            prompts[domain] = ''
-    return prompts
 
 
 def _load_settings_runtime_data() -> dict:
@@ -246,18 +230,21 @@ def _service_disabled_domains(area_name: str | None, service_name: str | None) -
     return [d for d in (disabled or []) if isinstance(d, str)]
 
 
-def _prompt_templates_for_scope(area_name: str | None, service_name: str | None) -> dict:
-    templates = _load_default_prompts()
+def _prompt_overrides_for_scope(area_name: str | None, service_name: str | None) -> dict:
+    """Real prompt overrides of the scope (service over area), by domain.
+
+    Domains without one are left out, so the pipeline loads the default in the report language. An empty text and
+    a copy of a default text of any language are not overrides.
+    """
     area_prompts = _prompts_override_for_area(area_name)
     service_prompts = _service_prompts_override(area_name, service_name)
     out: dict[str, str] = {}
-    for domain in _PROMPT_DOMAIN_FILES.keys():
-        if isinstance(service_prompts, dict) and isinstance(service_prompts.get(domain), str) and service_prompts.get(domain).strip():
-            out[domain] = service_prompts.get(domain, '')
-        elif isinstance(area_prompts, dict) and isinstance(area_prompts.get(domain), str) and area_prompts.get(domain).strip():
-            out[domain] = area_prompts.get(domain, '')
-        else:
-            out[domain] = templates.get(domain, '')
+    for domain in _PROMPT_DOMAINS:
+        for scope in (service_prompts, area_prompts):
+            text = effective_override(scope.get(domain) if isinstance(scope, dict) else None, domain)
+            if text is not None:
+                out[domain] = text
+                break
     return out
 
 
@@ -283,6 +270,18 @@ def _transfer_workers(cfg: dict | None = None) -> int:
     except (TypeError, ValueError):
         count = _TRANSFER_WORKERS_DEFAULT
     return max(1, min(count, _TRANSFER_WORKERS_MAX))
+
+
+class ReportBuildError(LocalizedError, RuntimeError):
+    """A step of the report build failed (``job.error.*``); the text renders in the locale where it is shown."""
+
+
+class ServiceConfigError(LocalizedError, ValueError):
+    """The service has no metrics configuration in the area: the report cannot start."""
+
+
+class _TransferTimeoutError(LocalizedError, TimeoutError):
+    """An item of :class:`_TransferPool` did not finish within its timeout."""
 
 
 class _TransferPool:
@@ -342,11 +341,11 @@ class _TransferPool:
         with self._cond:
             while index not in self._outcome:
                 if index in self._abandoned:
-                    raise TimeoutError(f"не завершилось за {self._timeout:g} с")
+                    raise _TransferTimeoutError("job.error.transfer_timeout", seconds=f"{self._timeout:g}")
                 started = self._started[index]
                 if started is None:
                     if index not in self._pending:
-                        raise RuntimeError("отменено: отчёт перестал ждать")
+                        raise ReportBuildError("job.error.transfer_cancelled")
                     self._cond.wait(1.0)
                     continue
                 remaining = started + self._timeout - time.monotonic()
@@ -354,7 +353,7 @@ class _TransferPool:
                     self._abandoned.add(index)
                     if self._pending:
                         self._spawn()
-                    raise TimeoutError(f"не завершилось за {self._timeout:g} с")
+                    raise _TransferTimeoutError("job.error.transfer_timeout", seconds=f"{self._timeout:g}")
                 self._cond.wait(remaining)
             value, error = self._outcome[index]
         if error is not None:
@@ -362,9 +361,15 @@ class _TransferPool:
         return value
 
     def _spawn(self) -> None:
-        """Starts one more thread; the caller holds the lock."""
+        """Starts one more thread; the caller holds the lock.
+
+        The thread runs in a copy of the caller's context, so it keeps the job's locale (``with_locale``).
+        """
         self._spawned += 1
-        threading.Thread(target=self._work, name=f"report-{self._name}-{self._spawned}", daemon=True).start()
+        context = contextvars.copy_context()
+        threading.Thread(
+            target=context.run, args=(self._work,), name=f"report-{self._name}-{self._spawned}", daemon=True,
+        ).start()
 
     def _work(self) -> None:
         while True:
@@ -551,7 +556,7 @@ def download_grafana_image(image_url: str, file_basename: str, settings: dict | 
         return False
     if _download_img_with_retry(image_url, file_basename, settings.get("grafana_login") or "", settings.get("grafana_pass") or ""):
         return True
-    raise RuntimeError(f"Не удалось загрузить изображение {file_basename}")
+    raise ReportBuildError("job.error.image_download", name=file_basename)
 
 
 def download_loki_logs(start_ts: int, end_ts: int, filter_query: str, file_basename: str, settings: dict | None = None) -> bool:
@@ -560,7 +565,7 @@ def download_loki_logs(start_ts: int, end_ts: int, filter_query: str, file_basen
     loki_url = settings.get("loki_url") or ""
     if _download_log_with_retry(loki_url, start_ts, end_ts, filter_query, file_basename):
         return True
-    raise RuntimeError(f"Не удалось получить логи {file_basename}")
+    raise ReportBuildError("job.error.logs_download", name=file_basename)
 
 
 def upload_attachment(kind: str, page_id: str, file_path: str, settings: dict | None = None) -> bool:
@@ -578,7 +583,7 @@ def upload_attachment(kind: str, page_id: str, file_path: str, settings: dict | 
         ok = _attach_with_retry(send_loki_file_to_attachment, url_basic, auth, page_id, file_path)
     if ok:
         return True
-    raise RuntimeError(f"Не удалось загрузить вложение {file_path}")
+    raise ReportBuildError("job.error.attachment_upload", path=file_path)
 
 
 # Names of the former Celery tasks, still called by tests/test_smoke_api.py. Plain functions now.
@@ -647,7 +652,7 @@ def _prompts_override_for_area(area_name: str | None) -> dict:
     return prompts if isinstance(prompts, dict) else {}
 
 
-def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = False, web_only: bool = False, run_name: str | None = None, test_type: str | None = None, project_area: str | None = None, progress_callback=None, run_tag: str | None = None, run_filter_packs: list[str] | None = None):
+def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = False, web_only: bool = False, run_name: str | None = None, test_type: str | None = None, project_area: str | None = None, progress_callback=None, run_tag: str | None = None, run_filter_packs: list[str] | None = None, report_language: str | None = None):
     """Формирует отчёт по нагрузочному тесту (Confluence и/или веб-интерфейс).
 
     Параметры:
@@ -662,6 +667,8 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
         progress_callback (callable | None): Колбэк прогресса (msg, percent).
         run_tag (str | None): Тег прогона, запущенного из LoadLens: запросы пакетов из
             ``run_filter_packs`` читают только его метрики (см. RunFilter в AI/query_packs).
+        report_language (str | None): Язык отчёта (``ru``/``en``), зафиксированный при постановке задачи;
+            без него берётся текущая локаль (настройка ``appearance.language`` процесса).
 
     Возвращает:
         dict: Информация о созданной странице (`page_id`, `page_url`, `run_name`).
@@ -691,7 +698,7 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
     _mc = _active_metrics_config_now()
     service_config = _metrics_service_entry(_mc, service, area_name)
     if not service_config:
-        raise ValueError(f"Конфигурация для сервиса '{service}' в области '{area_name}' не найдена.")
+        raise ServiceConfigError("job.error.service_config_missing", service=service, area=area_name)
     ef_cfg = _effective_config_for_scope(area_name, service)
     # Rows for the live charts of a running test (RPS by LoadLens instance) are not report data.
     ef_cfg["queries"] = strip_live_rows(ef_cfg.get("queries") or {})
@@ -699,7 +706,8 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
         ef_cfg["queries"], _filtered_packs = apply_run_filter(ef_cfg.get("queries") or {}, run_tag, run_filter_packs)
         if _filtered_packs:
             logger.info("Run tag %s applied to query packs: %s", run_tag, ", ".join(_filtered_packs))
-    base_prompt_templates = _prompt_templates_for_scope(area_name, service)
+    report_lang = resolve_lang(report_language)
+    prompt_overrides = _prompt_overrides_for_scope(area_name, service)
     domain_keys = _domain_keys_from_config(ef_cfg)
     disabled_domains = _service_disabled_domains(area_name, service)
     active_domains = [d for d in domain_keys if d not in disabled_domains]
@@ -723,7 +731,7 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
             except Exception:
                 logger.exception("Ошибка колбэка прогресса")
 
-        _progress("Создание веб-отчёта (без Confluence) начато…", 5)
+        _progress(msg("job.progress.web_started"), 5)
 
         # Гарантируем сохранение данных в БД для веб-страниц /reports и графиков
         save_to_db_effective = True if web_only else bool(save_to_db)
@@ -737,6 +745,7 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
             "end_ms": end,
             "project_area": area_name,
             "area_services": _resolve_services_for_area(area_name) or [service],
+            "report_language": report_lang,
         }
 
         results = None
@@ -749,23 +758,26 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
                 run_meta=run_meta,
                 only_collect=not use_llm,
                 ef_config=ef_cfg,
-                prompts_override=base_prompt_templates,
+                prompts_override=prompt_overrides,
                 active_domains=active_domains,
                 system_context=system_context_snapshot,
                 progress_callback=_progress,
+                report_language=report_lang,
             )
         else:
-            _progress("Пропускаем LLM-анализ и сбор доменных данных по запросу пользователя")
+            _progress(msg("job.progress.llm_skipped"))
 
-        _progress("Финализация веб-отчёта…", 98)
+        _progress(msg("job.progress.web_finalizing"), 98)
         page_url = f"/reports/{run_meta['run_id']}"
-        _progress("Отчёт (веб) готов ✅", 100)
+        _progress(msg("job.progress.web_ready"), 100)
         return {"page_id": None, "page_url": page_url, "run_name": run_meta["run_name"], "run_id": run_meta["run_id"]}
 
     # Получаем `page_sample_id` и `page_parent_id` из конфигурации сервиса
     page_parent_id = service_config["page_parent_id"]
     page_sample_id = service_config["page_sample_id"]
-    copy_page_id = copy_confluence_page(url_basic, user, password, page_sample_id, page_parent_id)
+    # Texts LoadLens writes into the page (the title suffix here, the LLM blocks below) use the report language.
+    with with_locale(report_lang):
+        copy_page_id = copy_confluence_page(url_basic, user, password, page_sample_id, page_parent_id)
     page_url = f"{url_basic.rstrip('/')}/pages/viewpage.action?pageId={copy_page_id}"
 
     # Прогресс
@@ -780,7 +792,7 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
         except Exception:
             logger.exception("Ошибка колбэка прогресса")
 
-    _progress("Создание отчёта начато…", 5)
+    _progress(msg("job.progress.started"), 5)
    
 
     # Список задач для обновлений
@@ -791,11 +803,8 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
     def update_with_retry(url, username, password, page_id, data_to_find, replace_text, max_attempts=3):
         for attempt in range(max_attempts):
             try:
-                res = update_confluence_page(url, username, password, page_id, data_to_find, replace_text)
-                # Обработка текстовых ошибок из update_confluence_page
-                if isinstance(res, str) and (res.startswith("Ошибка") or res == "Плейсхолдер не найден"):
-                    raise RuntimeError(res)
-                return res
+                # Returns STATUS_OK; a missing placeholder or a failed update raises TemplateUpdateError.
+                return update_confluence_page(url, username, password, page_id, data_to_find, replace_text)
             except Exception as e:
                 if ("Attempted to update stale data" in str(e) or "conflict" in str(e).lower()) and attempt < max_attempts-1:
                     logger.warning("Попытка %s не удалась, повторяем через 1 секунду...", attempt + 1)
@@ -807,7 +816,7 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
                     raise e
 
     # Двухфазный процесс: 1) скачать всё 2) одним проходом вложить и заменить
-    _progress("Скачивание графиков и логов…", 10)
+    _progress(msg("job.progress.downloading"), 10)
     
     # Сформируем задания на скачивание графиков и логов
     metric_items = []  # элементы: {name, placeholder, file_basename, file_path}
@@ -859,9 +868,9 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
     ) as downloads:
         for index, (kind, item, _call) in enumerate(download_jobs, start=1):
             identifier = item.get("name") if kind == "metric" else item.get("placeholder")
-            kind_label = "графика" if kind == "metric" else "логов"
+            stage_key = "job.progress.download_chart" if kind == "metric" else "job.progress.download_logs"
             _progress(
-                f"Скачивание {kind_label} «{identifier}» ({index}/{download_total})",
+                msg(stage_key, name=identifier, index=index, total=download_total),
                 _span_percent(10, 30, index - 1, download_total),
             )
             try:
@@ -915,7 +924,7 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
     ) as uploads:
         for index, ((placeholder, html), _call) in enumerate(attachment_jobs, start=1):
             _progress(
-                f"Загрузка вложения в Confluence ({index}/{attachment_total})",
+                msg("job.progress.upload_attachment", index=index, total=attachment_total),
                 _span_percent(30, 40, index - 1, attachment_total),
             )
             ok = False
@@ -964,6 +973,7 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
         "end_ms": end,
         "project_area": area_name,
         "area_services": _resolve_services_for_area(area_name) or [service],
+        "report_language": report_lang,
     }
     if use_llm or save_to_db:
         results = uploadFromLLM(
@@ -973,17 +983,18 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
             run_meta=run_meta,
             only_collect=not use_llm,
             ef_config=ef_cfg,
-            prompts_override=base_prompt_templates,
+            prompts_override=prompt_overrides,
             active_domains=active_domains,
             system_context=system_context_snapshot,
             progress_callback=_pipeline_progress,
+            report_language=report_lang,
         )
     else:
-        _progress("Пропускаем LLM-анализ и сбор доменных данных по запросу пользователя")
+        _progress(msg("job.progress.llm_skipped"))
 
     # Мульти-обновление плейсхолдеров LLM за один проход
     try:
-        _progress("Обновление данных LLM (одним проходом)...", 85)
+        _progress(msg("job.progress.llm_placeholders"), 85)
         llm_replacements = {}
         # Подставляем только те плейсхолдеры, для которых есть данные
         def add_if_present(placeholder: str, key: str):
@@ -1000,23 +1011,24 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
         add_if_present("$$answer_hard_resources$$", "hard_resources")
         add_if_present("$$answer_lt_framework$$", "lt_framework")
 
-        # Добавляем финальный плейсхолдер только как $$final_answer$$
-        final_struct = (results or {}).get("final_parsed")
+        # Добавляем финальный плейсхолдер только как $$final_answer$$ (verdicts as codes, old labels mapped)
+        final_struct = normalize_report((results or {}).get("final_parsed"))
         if isinstance(final_struct, dict) and final_struct:
-            md = render_llm_markdown(final_struct, domain="final")
+            md = render_llm_markdown(final_struct, domain="final", lang=report_lang)
             if md.strip():
                 llm_replacements["$$final_answer$$"] = md
         else:
             # Фолбэк: если нет структурированного ответа, отдаем текст как markdown-блок
             final_text = (results or {}).get("final")
             if isinstance(final_text, str) and final_text.strip():
-                md_fallback = f"### Итог LLM\n\n{final_text}"
+                md_fallback = f"### {t('confluence.llm_summary', locale=report_lang)}\n\n{final_text}"
                 llm_replacements["$$final_answer$$"] = md_fallback
 
         # Доменные секции в человекочитаемом markdown при наличии parsed
         def _inject_confidence(rep: dict | None, domain_key: str) -> dict | None:
             if not isinstance(rep, dict):
                 return rep
+            rep = normalize_report(rep)
             try:
                 if rep.get("confidence") in (None, "", "null"):
                     c = ((results or {}).get("scores", {}) or {}).get(domain_key, {}) or {}
@@ -1029,31 +1041,31 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
 
         jvm_struct = _inject_confidence((results or {}).get("jvm_parsed"), "jvm")
         if isinstance(jvm_struct, dict) and jvm_struct:
-            md = render_llm_markdown(jvm_struct, domain="jvm")
+            md = render_llm_markdown(jvm_struct, domain="jvm", lang=report_lang)
             if md.strip():
                 llm_replacements["$$answer_jvm$$"] = md
 
         db_struct = _inject_confidence((results or {}).get("database_parsed"), "database")
         if isinstance(db_struct, dict) and db_struct:
-            md = render_llm_markdown(db_struct, domain="database")
+            md = render_llm_markdown(db_struct, domain="database", lang=report_lang)
             if md.strip():
                 llm_replacements["$$answer_database$$"] = md
 
         kafka_struct = _inject_confidence((results or {}).get("kafka_parsed"), "kafka")
         if isinstance(kafka_struct, dict) and kafka_struct:
-            md = render_llm_markdown(kafka_struct, domain="kafka")
+            md = render_llm_markdown(kafka_struct, domain="kafka", lang=report_lang)
             if md.strip():
                 llm_replacements["$$answer_kafka$$"] = md
 
         ms_struct = _inject_confidence((results or {}).get("ms_parsed"), "microservices")
         if isinstance(ms_struct, dict) and ms_struct:
-            md = render_llm_markdown(ms_struct, domain="microservices")
+            md = render_llm_markdown(ms_struct, domain="microservices", lang=report_lang)
             if md.strip():
                 llm_replacements["$$answer_ms$$"] = md
 
         hr_struct = _inject_confidence((results or {}).get("hard_resources_parsed"), "hard_resources")
         if isinstance(hr_struct, dict) and hr_struct:
-            md = render_llm_markdown(hr_struct, domain="hard_resources")
+            md = render_llm_markdown(hr_struct, domain="hard_resources", lang=report_lang)
             if md.strip():
                 llm_replacements["$$answer_hard_resources$$"] = md
 
@@ -1075,7 +1087,7 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
                     except Exception:
                         parsed = None
                 if isinstance(parsed, dict):
-                    md = render_llm_markdown(parsed, domain=domain)
+                    md = render_llm_markdown(normalize_report(parsed), domain=domain, lang=report_lang)
                     return md.strip() or None
             except Exception:
                 return None
@@ -1126,66 +1138,67 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
                 conf = (s or {}).get("confidence")
                 judge_meta = (s or {}).get("judge_meta") or {}
                 judge_skipped = bool(judge_meta.get("skipped"))
+                # Labels of the assessment table are in the report language (confluence.judge.*).
+                lang = report_lang
+                confidence_row = (t("confluence.judge.model_confidence", locale=lang), _pct(conf if isinstance(conf, (int, float)) else None))
                 if judge_meta.get("unavailable"):
                     # The judge ran but gave no usable scores; the result rests on the data check.
                     rows = [
-                        ("Судья", "не дал оценку"),
-                        ("Эвристическая проверка по данным", _pct(data_score)),
-                        ("Итог без судьи", _pct(final_score)),
+                        (t("confluence.judge.judge", locale=lang), t("confluence.judge.no_score", locale=lang)),
+                        (t("confluence.judge.data_check", locale=lang), _pct(data_score)),
+                        (t("confluence.judge.total_without_judge", locale=lang), _pct(final_score)),
                     ]
                     if isinstance(conf, (int, float)):
-                        rows.append(("Уверенность модели", _pct(float(conf))))
+                        rows.append(confidence_row)
                 elif judge_skipped:
                     # One answer from the model: nothing to choose from, so only the data check ran.
                     rows = [
-                        ("Судья", "не запускался: модель дала один вариант ответа"),
-                        ("Эвристическая проверка по данным", _pct(data_score)),
+                        (t("confluence.judge.judge", locale=lang), t("confluence.judge.skipped", locale=lang)),
+                        (t("confluence.judge.data_check", locale=lang), _pct(data_score)),
                     ]
                     if isinstance(conf, (int, float)):
-                        rows.append(("Уверенность модели", _pct(float(conf))))
+                        rows.append(confidence_row)
                 else:
                     rows = [
-                        ("Оценка текста судьей", _pct(overall)),
-                        ("Эвристическая проверка по данным", _pct(data_score)),
-                        ("Итог для выбора кандидата", _pct(final_score)),
-                        ("Точность относительно данных", _pct(factual)),
-                        ("Полнота покрытия важных наблюдений", _pct(completeness)),
-                        ("Конкретика по метрикам и компонентам", _pct(specificity)),
+                        (t("confluence.judge.text_score", locale=lang), _pct(overall)),
+                        (t("confluence.judge.data_check", locale=lang), _pct(data_score)),
+                        (t("confluence.judge.candidate_total", locale=lang), _pct(final_score)),
+                        (t("confluence.judge.factual", locale=lang), _pct(factual)),
+                        (t("confluence.judge.completeness", locale=lang), _pct(completeness)),
+                        (t("confluence.judge.specificity", locale=lang), _pct(specificity)),
                     ]
                     if isinstance(conf, (int, float)):
-                        rows.insert(3, ("Уверенность модели", _pct(float(conf))))
+                        rows.insert(3, confidence_row)
                 if isinstance(data_score_details, dict) and data_score_details:
-                    rows.append(("Привязка выводов к метрикам и сериям", _pct(data_score_details.get("label_grounding"))))
+                    rows.append((t("confluence.judge.label_grounding", locale=lang), _pct(data_score_details.get("label_grounding"))))
                     claims_total = int(data_score_details.get("numeric_claims_total") or 0)
                     claims_supported = int(data_score_details.get("numeric_claims_supported") or 0)
+                    numeric_label = t("confluence.judge.numeric", locale=lang)
                     if claims_total > 0:
-                        rows.append(
-                            (
-                                "Совпадение чисел из текста",
-                                f"{_pct(data_score_details.get('numeric_grounding'))} "
-                                f"(подтверждено {claims_supported} из {claims_total})",
-                            )
-                        )
+                        numeric_pct = _pct(data_score_details.get("numeric_grounding"))
+                        rows.append((
+                            numeric_label,
+                            t("confluence.judge.numeric_value", locale=lang, pct=numeric_pct, supported=claims_supported, total=claims_total),
+                        ))
                     else:
-                        rows.append(("Совпадение чисел из текста", "не проверялось, в findings не найдено явных числовых утверждений"))
+                        rows.append((numeric_label, t("confluence.judge.numeric_none", locale=lang)))
                     if bool(data_score_details.get("peak_checked")):
-                        rows.append(("Совпадение peak_performance", _pct(data_score_details.get("peak_consistency"))))
+                        rows.append((t("confluence.judge.peak", locale=lang), _pct(data_score_details.get("peak_consistency"))))
                     else:
-                        rows.append(("Совпадение peak_performance", "не проверялось"))
+                        rows.append((t("confluence.judge.peak", locale=lang), t("confluence.judge.not_checked", locale=lang)))
                 def _md_cell(x: object) -> str:
                     return str(x).replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ").strip() or "—"
 
                 judge_lines = [
                     "",
-                    "#### Оценка ответа",
-                    "| Параметр | Значение |",
+                    f"#### {t('confluence.judge.title', locale=lang)}",
+                    f"| {_md_cell(t('confluence.template.col_param', locale=lang))} | {_md_cell(t('confluence.template.col_value', locale=lang))} |",
                     "|---|---:|",
                 ]
                 judge_lines.extend(f"| {_md_cell(label)} | {_md_cell(value)} |" for label, value in rows)
                 judge_lines.extend([
                     "",
-                    "_Проверка по данным остаётся эвристической: она оценивает привязку текста к метрикам, "
-                    "совпадение чисел и согласованность peak_performance._",
+                    f"_{t('confluence.judge.note', locale=lang)}_",
                 ])
                 llm_replacements[ph] = val.rstrip() + "\n\n" + "\n".join(judge_lines)
 
@@ -1202,12 +1215,12 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
         if llm_replacements:
             # Model output is text: it is encoded for the template, never inserted as storage markup.
             update_confluence_page_multi(url_basic, user, password, copy_page_id, llm_replacements, as_text=True)
-        _progress("ИИ-анализ завершён. Финализация отчёта…", 95)
+        _progress(msg("job.progress.llm_finished"), 95)
         logger.info("✓ Плейсхолдеры LLM обновлены за один проход")
     except Exception as e:
         logger.error("Ошибка при мульти-обновлении данных LLM: %s", e)
 
-    _progress("Отчёт готов ✅", 100)
+    _progress(msg("job.progress.ready"), 100)
     return {
         "page_id": copy_page_id,
         "page_url": page_url,

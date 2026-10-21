@@ -2,6 +2,7 @@ schema_version = 1
 id = "db-hikaricp"
 version = 1
 title = "Пул соединений HikariCP (Micrometer)"
+title_en = "HikariCP connection pool (Micrometer)"
 category = "database"
 stack = ["java", "spring-boot", "micrometer"]
 domain = "database"
@@ -10,24 +11,37 @@ description = """
 Метрики пула JDBC HikariCP из Micrometer: активные соединения против размера пула, потоки в ожидании, \
 таймауты, время получения и удержания соединения. Пул часто становится узким местом раньше самой БД.
 """
+description_en = """
+HikariCP JDBC pool metrics from Micrometer: active connections against the pool size, waiting threads, \
+timeouts, connection acquire and usage time. The pool often becomes a bottleneck before the database itself \
+does.
+"""
 requires_metrics = ["hikaricp_connections_active", "hikaricp_connections_max"]
 prompt_addendum = """
 Метрики HikariCP: active равно max и растущий pending — пул исчерпан, потоки ждут соединение \
 (acquire time растёт, возможны timeouts); usage time — сколько запрос держит соединение (рост указывает \
 на медленные запросы или долгие транзакции в приложении).
 """
+prompt_addendum_en = """
+HikariCP metrics: active equal to max with a growing pending count means the pool is exhausted and threads \
+wait for a connection (acquire time grows, timeouts are possible); usage time is how long a request holds a \
+connection (growth points to slow queries or long transactions in the application).
+"""
 
 [variables.service_label]
 title = "Лейбл с именем сервиса"
+title_en = "Label with the service name"
 default = "application"
 pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
 
 [variables.matchers]
 title = "Дополнительные матчеры"
+title_en = "Extra matchers"
 default = ""
 
 [variables.window]
 title = "Окно rate()"
+title_en = "rate() window"
 default = "2m"
 pattern = '^[1-9][0-9]*[smh]$'
 
@@ -39,6 +53,7 @@ required = true
 query = 'sum by ({{service_label}}, pool) (hikaricp_connections_active{ {{service_label}}!="", {{matchers}} })'
 keys = ["{{service_label}}", "pool"]
 description = "Активные соединения всех экземпляров сервиса."
+description_en = "Active connections of all service instances."
 
 [[queries]]
 label = "DB pool (HikariCP): max connections by ({{service_label}}, pool)"
@@ -48,6 +63,7 @@ required = true
 query = 'sum by ({{service_label}}, pool) (hikaricp_connections_max{ {{service_label}}!="", {{matchers}} })'
 keys = ["{{service_label}}", "pool"]
 description = "Размер пулов всех экземпляров сервиса."
+description_en = "Pool sizes of all service instances."
 
 [[queries]]
 label = "DB pool (HikariCP): pending threads by ({{service_label}}, pool)"
@@ -56,6 +72,7 @@ unit = "count"
 query = 'sum by ({{service_label}}, pool) (hikaricp_connections_pending{ {{service_label}}!="", {{matchers}} })'
 keys = ["{{service_label}}", "pool"]
 description = "Потоки, ждущие соединение."
+description_en = "Threads waiting for a connection."
 
 [[queries]]
 label = "DB pool (HikariCP): timeouts per second by ({{service_label}}, pool)"
@@ -64,6 +81,7 @@ unit = "per_second"
 query = 'sum by ({{service_label}}, pool) (rate(hikaricp_connections_timeout_total{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}", "pool"]
 description = "Таймауты получения соединения."
+description_en = "Connection acquire timeouts."
 
 [[queries]]
 label = "DB pool (HikariCP): acquire time avg (sec) by ({{service_label}}, pool)"
@@ -72,6 +90,7 @@ unit = "seconds"
 query = 'sum by ({{service_label}}, pool) (rate(hikaricp_connections_acquire_seconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}])) / sum by ({{service_label}}, pool) (rate(hikaricp_connections_acquire_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}", "pool"]
 description = "Среднее время получения соединения, с."
+description_en = "Average connection acquire time, s."
 
 [[queries]]
 label = "DB pool (HikariCP): usage time avg (sec) by ({{service_label}}, pool)"
@@ -80,3 +99,4 @@ unit = "seconds"
 query = 'sum by ({{service_label}}, pool) (rate(hikaricp_connections_usage_seconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}])) / sum by ({{service_label}}, pool) (rate(hikaricp_connections_usage_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}", "pool"]
 description = "Среднее время удержания соединения, с."
+description_en = "Average connection usage time, s."

@@ -4,29 +4,39 @@
 [[bundles]]
 id = "spring-k8s-k6-influxdb"
 title = "Spring Boot на Kubernetes + k6 (InfluxDB)"
+title_en = "Spring Boot on Kubernetes + k6 (InfluxDB)"
 description = "Java-сервисы на Micrometer, PostgreSQL и Kafka в Kubernetes, нагрузка k6 с выводом в InfluxDB 1.x."
+description_en = "Java services on Micrometer, PostgreSQL and Kafka in Kubernetes, k6 load with output to InfluxDB 1.x."
 packs = ["lt-k6-influxql", "jvm-micrometer", "http-micrometer", "db-hikaricp", "db-postgres-exporter", "kafka-exporter", "node-exporter", "k8s-nodes", "k8s-workload-health"]
 
 [[bundles]]
 id = "spring-vm-jmeter"
 title = "Spring Boot на виртуальных машинах + JMeter"
+title_en = "Spring Boot on virtual machines + JMeter"
 description = "Java-сервисы на Micrometer и PostgreSQL на VM, нагрузка JMeter с Backend Listener в InfluxDB."
+description_en = "Java services on Micrometer and PostgreSQL on VMs, JMeter load with the Backend Listener writing to InfluxDB."
 packs = ["lt-jmeter-influxql", "jvm-micrometer", "http-micrometer", "db-hikaricp", "db-postgres-exporter", "node-exporter"]
 
 [[bundles]]
 id = "java-jmx-gatling"
 title = "Java с JMX exporter + Gatling"
+title_en = "Java with JMX exporter + Gatling"
 description = "JVM-сервисы с javaagent JMX exporter, брокеры Kafka через JMX, нагрузка Gatling через Graphite в InfluxDB."
+description_en = "JVM services with the JMX exporter javaagent, Kafka brokers through JMX, Gatling load through Graphite into InfluxDB."
 packs = ["lt-gatling-influxql", "jvm-jmx-exporter", "http-otel", "kafka-broker-jmx", "node-exporter"]
 
 [[bundles]]
 id = "go-k8s-k6-prometheus"
 title = "Go на Kubernetes + k6 (Prometheus remote write)"
+title_en = "Go on Kubernetes + k6 (Prometheus remote write)"
 description = "Go-сервисы на client_golang с PostgreSQL в Kubernetes, нагрузка k6 с выводом в Prometheus."
+description_en = "Go services on client_golang with PostgreSQL in Kubernetes, k6 load with output to Prometheus."
 packs = ["lt-k6-prometheus-rw", "runtime-go", "http-go", "db-postgres-exporter", "node-exporter", "k8s-nodes", "k8s-workload-health"]
 
 [[bundles]]
 id = "python-k8s-k6-prometheus"
 title = "Python (FastAPI) на Kubernetes + k6 (Prometheus remote write)"
+title_en = "Python (FastAPI) on Kubernetes + k6 (Prometheus remote write)"
 description = "Сервисы FastAPI с PostgreSQL в Kubernetes: CPU и память от лимитов контейнеров, нагрузка k6 в Prometheus."
+description_en = "FastAPI services with PostgreSQL in Kubernetes: CPU and memory against container limits, k6 load into Prometheus."
 packs = ["lt-k6-prometheus-rw", "k8s-workload-cpu", "http-python-fastapi", "db-postgres-exporter", "node-exporter", "k8s-nodes", "k8s-workload-health"]

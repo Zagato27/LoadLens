@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Manual generator: nothing runs anywhere, start and stop only mark the window of the run."""
 
 from __future__ import annotations

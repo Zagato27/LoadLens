@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Runtime config cache in loadlens_app.core: one stat per call while the files are unchanged.
 
 Every test works on temporary runtime files (core.CONFIG_RUNTIME_PATH, core.METRICS_RUNTIME_PATH and

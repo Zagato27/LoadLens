@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """HTTP client for the Docker Engine and Kubernetes APIs: TLS material from the settings, readable errors."""
 
 from __future__ import annotations
@@ -21,8 +22,8 @@ _PEM_LOCK = threading.Lock()
 class ApiError(GeneratorError):
     """The API answered with an error status; ``status`` keeps the HTTP code for the callers' decisions."""
 
-    def __init__(self, message: str, status: int = 0, body: str = "") -> None:
-        super().__init__(message)
+    def __init__(self, message: Any, status: int = 0, body: str = "", **params: Any) -> None:
+        super().__init__(message, **params)
         self.status = status
         self.body = body
 
@@ -97,7 +98,7 @@ class ApiClient:
             return f"{self.base_url}{path}"
         if path == self.base_url or path.startswith(self.base_url + "/"):
             return path
-        raise GeneratorError(f"{self.name}: ответ ссылается на адрес вне {_host(self.base_url)}, LoadLens по нему не идёт")
+        raise GeneratorError("lt.http.foreign_url", name=self.name, host=_host(self.base_url))
 
     def request(
         self,
@@ -112,20 +113,19 @@ class ApiClient:
         try:
             response = self.session.request(method, url, timeout=timeout or self.timeout, **kwargs)
         except requests.exceptions.SSLError as exc:
-            raise GeneratorError(f"{self.name}: ошибка TLS при подключении к {_host(url)}: {exc}") from exc
+            raise GeneratorError("lt.http.tls", name=self.name, host=_host(url), error=str(exc)) from exc
         except requests.exceptions.Timeout as exc:
-            raise GeneratorError(f"{self.name}: {_host(url)} не ответил вовремя") from exc
+            raise GeneratorError("lt.http.timeout", name=self.name, host=_host(url)) from exc
         except requests.exceptions.ConnectionError as exc:
-            raise GeneratorError(f"{self.name}: не удалось подключиться к {_host(url)}: {exc}") from exc
+            raise GeneratorError("lt.http.connect", name=self.name, host=_host(url), error=str(exc)) from exc
         except requests.exceptions.RequestException as exc:
             # Broken chunked answers, bad redirects and the like: still a generator problem, not a watcher crash.
-            raise GeneratorError(f"{self.name}: запрос к {_host(url)} не удался: {exc}") from exc
+            raise GeneratorError("lt.http.request", name=self.name, host=_host(url), error=str(exc)) from exc
         if response.status_code in tuple(ok):
             return response
         body = response.text[:500]
-        if response.status_code in (401, 403):
-            raise ApiError(f"{self.name} отказал в доступе (HTTP {response.status_code}): {_message(body)}", response.status_code, body)
-        raise ApiError(f"{self.name} ответил HTTP {response.status_code}: {_message(body)}", response.status_code, body)
+        key = "lt.http.denied" if response.status_code in (401, 403) else "lt.http.status"
+        raise ApiError(key, response.status_code, body, name=self.name, code=response.status_code, detail=_message(body))
 
     def json(self, method: str, path: str, **kwargs: Any) -> Any:
         response = self.request(method, path, **kwargs)
@@ -134,7 +134,7 @@ class ApiClient:
         try:
             return response.json()
         except ValueError as exc:
-            raise GeneratorError(f"{self.name}: ответ не JSON: {response.text[:200]}") from exc
+            raise GeneratorError("lt.http.not_json", name=self.name, body=response.text[:200]) from exc
 
 
 def _message(body: str) -> str:

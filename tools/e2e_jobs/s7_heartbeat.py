@@ -1,6 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
 """Scenario 7: the heartbeat keeps a job with long silent LLM calls alive (LOADLENS_JOB_STALE_MIN=1).
 
-How to run (sandbox prepared as in docs/perf-baseline.md, "Этап 3"; nothing listening on 127.0.0.1:5070+N
+How to run (sandbox prepared as in plans/perf-baseline.md, "Этап 3"; nothing listening on 127.0.0.1:5070+N
 and no LLM stub on 5090: this check starts its own with a slow model):
 
     C:/Python312/python.exe -X utf8 tools/e2e_jobs/s7_heartbeat.py --sandbox 6 --llm-delay 40

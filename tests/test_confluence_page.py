@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Confluence page as a source of the system context: links, HTML to text, reading with the saved connection."""
 
 import sys

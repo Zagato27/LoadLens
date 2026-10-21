@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # metrics_config.example.py
 #
 # Copy this file to metrics_config.py and replace placeholder values with

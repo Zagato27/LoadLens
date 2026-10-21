@@ -13,11 +13,23 @@ gatling с тегами simulation, request (allRequests — сводка), stat
 в строки request="users", status="allUsers" с полем active. count — запросы за writePeriod \
 (gatling.data.graphite.writePeriod, по умолчанию 1 с). Значения времени в мс.
 """
+description_en = """
+Gatling Graphite output (data.writers = [graphite]) in InfluxDB 1.x with the graphite template \
+`gatling.*.*.*.* measurement.simulation.request.status.field`. Requests then land in the gatling measurement \
+with the simulation, request (allRequests is the summary) and status (ok/ko/all) tags, and users in the rows \
+request="users", status="allUsers" with the active field. count is requests per writePeriod \
+(gatling.data.graphite.writePeriod, 1 s by default). Times are in ms.
+"""
 requires_metrics = ["gatling"]
 prompt_addendum = """
 Метрики Gatling через Graphite: request — имя запроса (allRequests — сводка), status — ok/ko/all, count — \
 запросы за период записи, mean и percentiles95/99 — время ответа в мс за период записи, active — активные \
 пользователи сценария (allUsers — все сценарии).
+"""
+prompt_addendum_en = """
+Gatling metrics through Graphite: request is the request name (allRequests is the summary), status is \
+ok/ko/all, count is requests per write period, mean and percentiles95/99 are the response time in ms per write \
+period, active is the active users of a scenario (allUsers means all scenarios).
 """
 
 [variables.measurement]
@@ -27,17 +39,21 @@ pattern = '^[A-Za-z0-9_.-]+$'
 
 [variables.simulation]
 title = "Simulation (регулярное выражение)"
+title_en = "Simulation (regular expression)"
 default = ".*"
 pattern = '^[^/\n\r]*$'
 help = "Имя симуляции в нижнем регистре, как его пишет Gatling. По умолчанию — все симуляции."
+help_en = "Simulation name in lower case as Gatling writes it. All simulations by default."
 
 [variables.write_period_sec]
 title = "Период записи, с"
+title_en = "Write period, s"
 default = "1"
 pattern = '^[1-9][0-9]*$'
 
 [variables.load_model]
 title = "Модель нагрузки сценария"
+title_en = "Load model of the scenario"
 default = "open"
 choices = ["open", "closed"]
 help = "open — constantUsersPerSec, rampUsersPerSec; closed — constantConcurrentUsers, rampConcurrentUsers."
@@ -59,6 +75,7 @@ unit = "per_second"
 required = true
 query = '''SELECT sum("count") / {{write_period_sec}} FROM "{{measurement}}" WHERE "simulation" =~ /^{{simulation}}$/ AND "request" = 'allRequests' AND "status" = 'all' AND $timeFilter GROUP BY time({{write_period_sec}}s) fill(null)'''
 description = "Общий RPS теста."
+description_en = "Total test RPS."
 
 [[queries]]
 label = "LT (Gatling): RPS by request"
@@ -67,6 +84,7 @@ unit = "per_second"
 query = '''SELECT sum("count") / {{write_period_sec}} FROM "{{measurement}}" WHERE "simulation" =~ /^{{simulation}}$/ AND "request" <> 'allRequests' AND "request" <> 'users' AND "status" = 'all' AND $timeFilter GROUP BY time({{write_period_sec}}s), "request" fill(null)'''
 keys = ["request"]
 description = "RPS по запросам."
+description_en = "RPS by request."
 
 [[queries]]
 label = "LT (Gatling): p95(ms) total"
@@ -74,6 +92,7 @@ role = "lt.p95_total"
 unit = "ms"
 query = '''SELECT mean("percentiles95") FROM "{{measurement}}" WHERE "simulation" =~ /^{{simulation}}$/ AND "request" = 'allRequests' AND "status" = 'all' AND $timeFilter GROUP BY time($__interval) fill(null)'''
 description = "p95 времени ответа всех запросов, мс."
+description_en = "p95 of the response time of all requests, ms."
 
 [[queries]]
 label = "LT (Gatling): p99(ms) total"
@@ -81,6 +100,7 @@ role = "lt.p99_total"
 unit = "ms"
 query = '''SELECT mean("percentiles99") FROM "{{measurement}}" WHERE "simulation" =~ /^{{simulation}}$/ AND "request" = 'allRequests' AND "status" = 'all' AND $timeFilter GROUP BY time($__interval) fill(null)'''
 description = "p99 времени ответа всех запросов, мс."
+description_en = "p99 of the response time of all requests, ms."
 
 [[queries]]
 label = "LT (Gatling): p95(ms) by request"
@@ -89,6 +109,7 @@ unit = "ms"
 query = '''SELECT mean("percentiles95") FROM "{{measurement}}" WHERE "simulation" =~ /^{{simulation}}$/ AND "request" <> 'allRequests' AND "request" <> 'users' AND "status" = 'all' AND $timeFilter GROUP BY time($__interval), "request" fill(null)'''
 keys = ["request"]
 description = "p95 по запросам, мс."
+description_en = "p95 by request, ms."
 
 [[queries]]
 label = "LT (Gatling): mean response time(ms)"
@@ -97,6 +118,7 @@ unit = "ms"
 required = true
 query = '''SELECT mean("mean") FROM "{{measurement}}" WHERE "simulation" =~ /^{{simulation}}$/ AND "request" = 'allRequests' AND "status" = 'all' AND $timeFilter GROUP BY time($__interval) fill(null)'''
 description = "Среднее время ответа, мс."
+description_en = "Average response time, ms."
 
 [[queries]]
 label = "LT (Gatling): error rate (%)"
@@ -104,6 +126,7 @@ role = "lt.error_rate_pct"
 unit = "percent"
 query = '''SELECT sum("ko") / sum("total") * 100 FROM (SELECT "count" AS "ko" FROM "{{measurement}}" WHERE "simulation" =~ /^{{simulation}}$/ AND "request" = 'allRequests' AND "status" = 'ko' AND $timeFilter), (SELECT "count" AS "total" FROM "{{measurement}}" WHERE "simulation" =~ /^{{simulation}}$/ AND "request" = 'allRequests' AND "status" = 'all' AND $timeFilter) WHERE $timeFilter GROUP BY time($__interval) fill(null)'''
 description = "Доля ошибочных запросов, %. Нужны подзапросы InfluxQL (InfluxDB 1.2+); проверьте кнопкой «Проверить». Без ошибок в окне серий нет."
+description_en = 'Share of failed requests, %. Needs InfluxQL subqueries (InfluxDB 1.2+); verify with the "Check" button. With no errors in the window there are no series.'
 
 [[queries]]
 label = "LT (Gatling): errors per second by request"
@@ -112,6 +135,7 @@ unit = "per_second"
 query = '''SELECT sum("count") / {{write_period_sec}} FROM "{{measurement}}" WHERE "simulation" =~ /^{{simulation}}$/ AND "request" <> 'allRequests' AND "request" <> 'users' AND "status" = 'ko' AND $timeFilter GROUP BY time({{write_period_sec}}s), "request" fill(null)'''
 keys = ["request"]
 description = "Ошибочные запросы в секунду по запросам."
+description_en = "Failed requests per second by request."
 
 [[queries]]
 label = "LT (Gatling): active users"
@@ -119,3 +143,4 @@ role = "lt.vus"
 unit = "count"
 query = '''SELECT max("active") FROM "{{measurement}}" WHERE "simulation" =~ /^{{simulation}}$/ AND "request" = 'users' AND "status" = 'allUsers' AND $timeFilter GROUP BY time({{write_period_sec}}s) fill(null)'''
 description = "Активные пользователи всех сценариев (аналог VU)."
+description_en = "Active users of all scenarios (the VU equivalent)."

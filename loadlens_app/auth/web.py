@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Flask integration: session cookie, request gate (authentication, roles, CSRF), audit, headers."""
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from flask.sessions import SecureCookieSessionInterface
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from AI import storage_state
+from AI.i18n import t as translate
 
 from . import recovery
 from .config import AuthSettings, load_auth_settings, resolve_secret_key
@@ -148,13 +150,14 @@ def _unauthenticated(rule: Rule, *, bad_token: bool = False) -> Response:
     if rule.page and request.method in ("GET", "HEAD") and not bad_token:
         target = request.full_path.rstrip("?") if request.query_string else request.path
         return redirect(f"/login?next={quote(safe_next(target), safe='')}")
-    response = json_error("Требуется вход в систему", 401, "unauthorized", login_url="/login")
+    response = json_error(translate("auth.server.login_required"), 401, "unauthorized", login_url="/login")
     if bad_token:
         response.headers["WWW-Authenticate"] = 'Bearer error="invalid_token"'
     return response
 
 
-def _forbidden(rule: Rule, message: str = "Недостаточно прав для этого действия", code: str = "forbidden") -> Response:
+def _forbidden(rule: Rule, message: str = "", code: str = "forbidden") -> Response:
+    message = message or translate("auth.server.forbidden")
     if rule.page and request.method in ("GET", "HEAD"):
         html = render_template("forbidden.html", message=message, active_nav="")
         return Response(html, status=403, mimetype="text/html")
@@ -207,7 +210,7 @@ def storage_unavailable_response(rule: Rule) -> Response:
         response = Response(html, status=503, mimetype="text/html")
     else:
         response = json_error(
-            "Хранилище недоступно: вход и данные отчётов временно не работают",
+            translate("auth.server.storage_unavailable"),
             503,
             "storage_unavailable",
             recovery_url="/login" if settings.enabled else "/recovery",
@@ -235,29 +238,29 @@ def _recovery_gate(service: AuthService, rule: Rule) -> Optional[Response]:
         if not expired:
             g.auth = _RECOVERY
         if request.method not in SAFE_METHODS and rule.csrf and not _csrf_valid():
-            return json_error("Сессия устарела, обновите страницу и повторите действие", 403, "csrf_failed")
+            return json_error(translate("auth.server.csrf_failed"), 403, "csrf_failed")
         return None
     ip = request.remote_addr or ""
     if expired:
         recovery.log("session expired", ip=ip)
         session.clear()
-        return _recovery_ended(rule, "Аварийная сессия истекла, войдите снова", "/login")
+        return _recovery_ended(rule, translate("auth.server.recovery_expired"), "/login")
     if service.store_available():
         recovery.log("session ended: storage is reachable again", ip=ip)
         session.clear()
-        return _recovery_ended(rule, "Хранилище снова доступно, войдите обычным способом", "/login?recovered=1")
+        return _recovery_ended(rule, translate("auth.server.storage_back"), "/login?recovered=1")
     g.auth = _RECOVERY
     if not rule.recovery_ok:
         if rule.page and request.method in ("GET", "HEAD"):
             return redirect("/recovery")
         return json_error(
-            "Недоступно в режиме восстановления: сначала исправьте подключение к хранилищу",
+            translate("auth.server.recovery_only"),
             403,
             "recovery_only",
             recovery_url="/recovery",
         )
     if request.method not in SAFE_METHODS and rule.csrf and not _csrf_valid():
-        return json_error("Сессия устарела, обновите страницу и повторите действие", 403, "csrf_failed")
+        return json_error(translate("auth.server.csrf_failed"), 403, "csrf_failed")
     return None
 
 
@@ -283,12 +286,12 @@ def _gate() -> Optional[Response]:
     except Exception as exc:
         if rule.role is None:
             if request.method not in SAFE_METHODS and rule.csrf and not _csrf_valid():
-                return json_error("Сессия устарела, обновите страницу и повторите действие", 403, "csrf_failed")
+                return json_error(translate("auth.server.csrf_failed"), 403, "csrf_failed")
             return None
         if storage_state.is_storage_error(exc):
             return storage_unavailable_response(rule)
         logger.exception("auth: failed to resolve the current user")
-        return json_error("Сервис авторизации временно недоступен", 503, "auth_unavailable")
+        return json_error(translate("auth.server.unavailable"), 503, "auth_unavailable")
     g.auth = context
 
     if rule.role is not None:
@@ -297,14 +300,14 @@ def _gate() -> Optional[Response]:
         if context.user.must_change_password and not rule.password_change_ok:
             if rule.page and request.method in ("GET", "HEAD"):
                 return redirect("/account?force=1")
-            return json_error("Необходимо сменить пароль", 403, "password_change_required", account_url="/account")
+            return json_error(translate("auth.server.password_change_required"), 403, "password_change_required", account_url="/account")
 
     if request.method not in SAFE_METHODS and rule.csrf and context.via != "token" and not _csrf_valid():
-        return json_error("Сессия устарела, обновите страницу и повторите действие", 403, "csrf_failed")
+        return json_error(translate("auth.server.csrf_failed"), 403, "csrf_failed")
 
     if rule.role is not None:
         if rule.session_only and context.via == "token":
-            return _forbidden(rule, "Это действие доступно только из веб-интерфейса", "session_required")
+            return _forbidden(rule, translate("auth.server.session_only"), "session_required")
         if context.role < rule.role:
             return _forbidden(rule)
     return None

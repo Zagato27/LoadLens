@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Start-up migrations: the registry table app_migrations, the skip of applied one-off migrations, the retry
 while the storage database is unavailable, the environment switch and the CLI."""
 

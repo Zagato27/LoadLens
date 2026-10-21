@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Launch parameters of the team's own CI pipelines: read from GitLab or Jenkins, checked before a run.
 
 A CI generator runs the load test pipeline as it is: the pipeline holds the tool, the scripts and their
@@ -39,6 +40,7 @@ from urllib.parse import quote
 import yaml
 
 from .generators import CiSettings, Generator
+from .messages import as_msg, msg, text_of
 from .tools import ENV_NAME_RE, ToolInputError
 
 AUTO_PREFIX = "LOADLENS_"
@@ -75,6 +77,7 @@ class CiParam:
     secret: bool = False
     multiple: bool = False
     regex: str = ""
+    # A dictionary message (kept in the cache with its key): rendered in the reader's language by to_public().
     note: str = ""
 
     def to_public(self) -> dict[str, Any]:
@@ -90,7 +93,7 @@ class CiParam:
             "secret": self.secret,
             "multiple": self.multiple,
             "regex": self.regex,
-            "note": self.note,
+            "note": text_of(self.note),
         }
 
 
@@ -103,6 +106,7 @@ class CiParams:
     refs: list[str] = field(default_factory=list)
     # graphql | lint | file | jenkins | none (nothing can be read: free-form values only)
     source: str = "none"
+    # Dictionary messages (the parameters are cached for a minute): rendered in the reader's language on output.
     notes: list[str] = field(default_factory=list)
     # GitLab: spec:inputs go to the API (otherwise they are shown with their defaults only).
     inputs_api: bool = False
@@ -124,7 +128,7 @@ class CiParams:
             "ref": self.ref,
             "refs": list(self.refs),
             "source": self.source,
-            "notes": list(self.notes),
+            "notes": [text_of(note) for note in self.notes],
             "inputs_api": self.inputs_api,
             "auto": list(self.auto),
             "version": self.version,
@@ -179,11 +183,11 @@ _GitlabLoader.add_multi_constructor("!", _any_tag)
 
 def gitlab_documents(text: str) -> list[Any]:
     if len(text.encode("utf-8")) > MAX_CONFIG_BYTES:
-        raise CiParamError("Файл конфигурации CI больше 1 МБ")
+        raise CiParamError("lt.ci.config_too_big")
     try:
         return [doc for doc in yaml.load_all(text, Loader=_GitlabLoader) if doc is not None]
     except yaml.YAMLError as exc:
-        raise CiParamError(f"Конфигурация CI не разбирается как YAML: {str(exc)[:200]}") from exc
+        raise CiParamError("lt.ci.yaml_error", error=str(exc)[:200]) from exc
 
 
 def _variable_param(name: str, value: Any, description: str, options: Any) -> CiParam:
@@ -292,8 +296,7 @@ def read_gitlab(api, cfg: CiSettings, ref: str = "", sleep: Sleep = time.sleep) 
 
     project_path = f"/api/v4/projects/{quote(cfg.project, safe='')}"
     if not cfg.api_token:
-        return CiParams(ref=ref or cfg.ref or "main", source="none", notes=[
-            "API-токен GitLab не задан: LoadLens не видит параметры пайплайна, задайте значения переменных вручную"])
+        return CiParams(ref=ref or cfg.ref or "main", source="none", notes=[msg("lt.ci.note.no_api_token")])
     version_text = str((api.json("GET", "/api/v4/version") or {}).get("version") or "")
     version = parse_version(version_text)
     project = api.json("GET", project_path)
@@ -321,16 +324,16 @@ def read_gitlab(api, cfg: CiSettings, ref: str = "", sleep: Sleep = time.sleep) 
         try:
             documents = gitlab_documents(text)
         except CiParamError as exc:
-            notes.append(str(exc))
+            notes.append(as_msg(exc))
     if variables is None:
         variables, source = yaml_variables(documents), "file"
         if text is None:
             source = "none"
-            notes.append("Конфигурация CI не читается: проверьте права API-токена (read_api) и ветку")
+            notes.append(msg("lt.ci.note.config_unreadable"))
     inputs = yaml_inputs(documents)
     supported = inputs_supported(cfg, version)
     if inputs and not supported:
-        notes.append(f"GitLab {version_text or '?'} не принимает входные параметры через API: пайплайн возьмёт их значения по умолчанию")
+        notes.append(msg("lt.ci.note.no_inputs", version=version_text or "?"))
     params, auto = _split_auto(variables + inputs)
     params = _apply_options(params, cfg)
     return CiParams(params=params[:MAX_PARAMS], ref=ref, source=source, notes=notes, inputs_api=supported,
@@ -438,16 +441,15 @@ def _jenkins_param(raw: Mapping[str, Any], scripted: Mapping[str, dict[str, Any]
         if found:
             param.type, param.options, param.multiple = "choice", tuple(found["options"]), bool(found["multiple"])
             param.default = found["default"] or (found["options"][0] if found["options"] and not found["multiple"] else "")
-            param.note = "Варианты из скрипта Active Choices"
+            param.note = msg("lt.ci.note.active_choices_literal")
         else:
             param.type = "string"
-            param.note = ("Варианты считает скрипт Active Choices"
-                          + (" по другим параметрам" if kind == "CascadeChoiceParameter" else "")
-                          + ": введите значение или задайте варианты в настройках генератора")
+            param.note = msg("lt.ci.note.active_choices_cascade" if kind == "CascadeChoiceParameter"
+                             else "lt.ci.note.active_choices_script")
     elif kind == "FileParameterDefinition":
         return None
     else:
-        param.note = f"Тип {kind}: значение передаётся строкой"
+        param.note = msg("lt.ci.note.type_as_string", kind=kind)
     return param
 
 
@@ -462,9 +464,9 @@ def read_jenkins(api, cfg: CiSettings, ref: str = "") -> CiParams:
         wanted = ref or cfg.ref
         ref = wanted if wanted in refs else ("main" if "main" in refs else (refs[0] if refs else ""))
         if wanted and wanted != ref:
-            notes.append(f"Ветки «{wanted}» нет в multibranch-задаче: взята «{ref}»")
+            notes.append(msg("lt.ci.note.branch_missing", wanted=wanted, ref=ref))
         if not ref:
-            return CiParams(source="jenkins", notes=["В multibranch-задаче нет веток"], job_path=base)
+            return CiParams(source="jenkins", notes=[msg("lt.ci.note.no_branches")], job_path=base)
         job = f"{base}/job/{quote(ref, safe='')}"
     else:
         ref = ""
@@ -477,17 +479,17 @@ def read_jenkins(api, cfg: CiSettings, ref: str = "") -> CiParams:
         try:
             scripted = active_choices(api.request("GET", f"{job}/config.xml").text)
         except GeneratorError:
-            notes.append("config.xml задачи не читается (нужно право Job/ExtendedRead): варианты Active Choices не видны")
+            notes.append(msg("lt.ci.note.config_xml"))
     params: list[CiParam] = []
     for item in raw:
         param = _jenkins_param(item, scripted)
         if param is None:
             if str(item.get("type") or "") == "FileParameterDefinition":
-                notes.append(f"Файловый параметр {item.get('name')} не поддерживается: сборка получит его пустым")
+                notes.append(msg("lt.ci.note.file_param", name=item.get("name")))
             continue
         params.append(param)
     if not raw and "WorkflowJob" in str(data.get("_class") or ""):
-        notes.append("У pipeline-задачи нет параметров: если они объявлены в Jenkinsfile, они появятся после первой сборки")
+        notes.append(msg("lt.ci.note.no_params"))
     params, auto = _split_auto(params)
     params = _apply_options(params, cfg)
     return CiParams(params=params[:MAX_PARAMS], ref=ref, refs=refs, source="jenkins", notes=notes,
@@ -519,7 +521,7 @@ def _apply_options(params: list[CiParam], cfg: CiSettings) -> list[CiParam]:
         if options and param.type not in ("boolean", "password"):
             default = default_text(param.default)
             param = replace(param, type="choice", options=tuple(options), default=default if default in options else options[0],
-                            note="Варианты из настроек генератора")
+                            note=msg("lt.ci.note.options_from_settings"))
         out.append(param)
     return out
 
@@ -604,36 +606,37 @@ def check_value(param: CiParam, raw: Any) -> str:
     """The form value as text, checked against the parameter; raises :class:`CiParamError`."""
     text = _value_text(raw)
     if len(text) > MAX_VALUE_CHARS or "\x00" in text:
-        raise CiParamError(f"Параметр {param.name}: значение длиннее {MAX_VALUE_CHARS} символов")
+        raise CiParamError("lt.ci.value.too_long", name=param.name, max=MAX_VALUE_CHARS)
     if param.type == "boolean":
         value = _bool_text(raw)
         if value is None:
-            raise CiParamError(f"Параметр {param.name}: да или нет (true/false)")
+            raise CiParamError("lt.ci.value.boolean", name=param.name)
         return value
     if param.type in ("string", "choice", "number", "array", "password") and "\n" in text:
-        raise CiParamError(f"Параметр {param.name}: значение в одну строку")
+        raise CiParamError("lt.ci.value.one_line", name=param.name)
     if param.type == "number" and text != "":
         try:
             number = float(text)
         except ValueError as exc:
-            raise CiParamError(f"Параметр {param.name}: ожидается число") from exc
+            raise CiParamError("lt.ci.value.number", name=param.name) from exc
         if not math.isfinite(number):
-            raise CiParamError(f"Параметр {param.name}: ожидается число")
+            raise CiParamError("lt.ci.value.number", name=param.name)
     if param.type == "array" and text.startswith("["):
         try:
             if not isinstance(json.loads(text), list):
                 raise ValueError
         except ValueError as exc:
-            raise CiParamError(f"Параметр {param.name}: список JSON или значения через запятую") from exc
+            raise CiParamError("lt.ci.value.array", name=param.name) from exc
     if param.options and text != "":
         chosen = [item.strip() for item in text.split(",")] if param.multiple else [text]
         unknown = [item for item in chosen if item not in param.options]
         if unknown:
-            raise CiParamError(f"Параметр {param.name}: «{unknown[0][:60]}» нет среди вариантов ({', '.join(param.options[:10])})")
+            raise CiParamError("lt.ci.value.not_an_option", name=param.name, value=unknown[0][:60],
+                               options=", ".join(param.options[:10]))
     if param.regex and text != "":
         try:
             if not re.fullmatch(param.regex.strip("/"), text):
-                raise CiParamError(f"Параметр {param.name}: значение не подходит под шаблон {param.regex}")
+                raise CiParamError("lt.ci.value.pattern", name=param.name, regex=param.regex)
         except re.error:
             pass
     return text
@@ -642,35 +645,35 @@ def check_value(param: CiParam, raw: Any) -> str:
 def check_values(params: CiParams, values: Mapping[str, Any], extra: Mapping[str, str], kind: str) -> tuple[dict[str, str], dict[str, str]]:
     """(parameter values, extra GitLab variables) of the form, checked; raises :class:`CiParamError`."""
     if not isinstance(values, Mapping):
-        raise CiParamError("Параметры пайплайна — объект «имя: значение»")
+        raise CiParamError("lt.ci.values_object")
     if len(values) > MAX_PARAMS:
-        raise CiParamError(f"Больше {MAX_PARAMS} параметров пайплайна")
+        raise CiParamError("lt.ci.too_many", max=MAX_PARAMS)
     out: dict[str, str] = {}
     free = params.source == "none"
     for name, raw in values.items():
         name = str(name)
         if is_auto(name):
-            raise CiParamError(f"{name} LoadLens заполняет сам")
+            raise CiParamError("lt.ci.auto_param", name=name)
         param = params.get(name)
         if param is None:
             if not free:
-                raise CiParamError(f"У пайплайна нет параметра {name}: обновите список параметров")
+                raise CiParamError("lt.ci.unknown_param", name=name)
             if not ENV_NAME_RE.fullmatch(name):
-                raise CiParamError(f"Недопустимое имя переменной «{name[:40]}»")
+                raise CiParamError("lt.ci.bad_variable", name=name[:40])
             param = CiParam(name=name, kind="variable")
         out[name] = check_value(param, raw)
     for param in params.params:
         if param.required and out.get(param.name, "") == "" and default_text(param.default) == "":
-            raise CiParamError(f"Параметр {param.name} обязателен")
+            raise CiParamError("lt.ci.required", name=param.name)
     clean_extra: dict[str, str] = {}
     for name, value in (extra or {}).items():
         name = str(name)
         if kind != "gitlab":
-            raise CiParamError("Jenkins принимает только параметры, объявленные в задаче")
+            raise CiParamError("lt.ci.jenkins_declared_only")
         if is_auto(name):
-            raise CiParamError(f"{name} LoadLens заполняет сам")
+            raise CiParamError("lt.ci.auto_param", name=name)
         if params.get(name) is not None:
-            raise CiParamError(f"{name} — параметр пайплайна: задайте его в списке параметров")
+            raise CiParamError("lt.ci.extra_is_param", name=name)
         clean_extra[name] = str(value)
     return out, clean_extra
 

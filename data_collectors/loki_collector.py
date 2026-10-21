@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import requests
 from datetime import datetime
 import os

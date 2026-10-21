@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Grafana query falls back to /api/ds/query when the datasource proxy answers 404."""
 
 import types

@@ -2,15 +2,23 @@ schema_version = 1
 id = "k8s-workload-cpu"
 version = 1
 title = "Контейнеры: CPU и память от лимита (cAdvisor + kube-state-metrics)"
+title_en = "Containers: CPU and memory against the limit (cAdvisor + kube-state-metrics)"
 category = "runtime"
 stack = ["kubernetes", "go", "python", "java", "nodejs"]
 domain = "jvm"
 language = "promql"
 domain_title = "Контейнеры"
+domain_title_en = "Containers"
 description = """
 CPU и память контейнеров для сервиса на любом языке: cAdvisor (kubelet) и лимиты из kube-state-metrics 2.x. \
 Сервис — имя контейнера, экземпляр — под. CPU считается долей лимита контейнера, поэтому подходит для \
 плана ресурсов; контейнеры без CPU-лимита в ряд не попадают. Ряды пишутся в домен «JVM».
+"""
+description_en = """
+Container CPU and memory for a service in any language: cAdvisor (kubelet) and limits from kube-state-metrics \
+2.x. The service is the container name, the instance is the pod. CPU is a fraction of the container limit, so \
+it fits the resource plan; containers without a CPU limit are left out of the series. The series go to the \
+"JVM" domain.
 """
 requires_metrics = ["container_cpu_usage_seconds_total", "kube_pod_container_resource_limits"]
 prompt_addendum = """
@@ -18,24 +26,35 @@ prompt_addendum = """
 дальше троттлинг), working set памяти (при достижении лимита памяти контейнер убивает OOM killer) и лимит \
 памяти. Сервис — имя контейнера, экземпляр — под.
 """
+prompt_addendum_en = """
+"Containers" series are Kubernetes container metrics: CPU as a fraction of the container limit (1.0 means it \
+hits the limit, beyond that comes throttling), the memory working set (when it reaches the memory limit, the \
+OOM killer kills the container) and the memory limit. The service is the container name, the instance is the \
+pod.
+"""
 
 [variables.namespace]
 title = "Namespace (регулярное выражение)"
+title_en = "Namespace (regular expression)"
 default = ".+"
 pattern = '^[^"\n\r{}]*$'
 
 [variables.container]
 title = "Контейнер (регулярное выражение)"
+title_en = "Container (regular expression)"
 default = ".+"
 pattern = '^[^"\n\r{}]*$'
 help = "Ограничьте сервисами теста, например orders|payments."
+help_en = "Limit it to the services of the test, for example orders|payments."
 
 [variables.ksm_matchers]
 title = "Матчеры kube-state-metrics"
+title_en = "kube-state-metrics matchers"
 default = 'job=~".*kube-state-metrics.*"'
 
 [variables.window]
 title = "Окно rate()"
+title_en = "rate() window"
 default = "2m"
 pattern = '^[1-9][0-9]*[smh]$'
 
@@ -50,6 +69,7 @@ required = true
 query = 'label_replace(label_replace(sum by (namespace, pod, container) (rate(container_cpu_usage_seconds_total{namespace=~"{{namespace}}", container=~"{{container}}", container!="", container!="POD"}[{{window}}])) / sum by (namespace, pod, container) (kube_pod_container_resource_limits{resource="cpu", namespace=~"{{namespace}}", container=~"{{container}}", {{ksm_matchers}} }), "application", "$1", "container", "(.*)"), "instance", "$1", "pod", "(.*)")'
 keys = ["application", "instance"]
 description = "CPU контейнера как доля его лимита, 0..1."
+description_en = "Container CPU as a fraction of its limit, 0..1."
 
 [[queries]]
 label = "Containers: memory working set (bytes) by (application, instance)"
@@ -58,6 +78,7 @@ unit = "bytes"
 query = 'label_replace(label_replace(sum by (namespace, pod, container) (container_memory_working_set_bytes{namespace=~"{{namespace}}", container=~"{{container}}", container!="", container!="POD"}), "application", "$1", "container", "(.*)"), "instance", "$1", "pod", "(.*)")'
 keys = ["application", "instance"]
 description = "Working set памяти контейнера: по нему срабатывает OOM killer."
+description_en = "Container memory working set: the OOM killer acts on it."
 
 [[queries]]
 label = "Containers: memory limit (bytes) by (application, instance)"
@@ -66,3 +87,4 @@ unit = "bytes"
 query = 'label_replace(label_replace(sum by (namespace, pod, container) (kube_pod_container_resource_limits{resource="memory", namespace=~"{{namespace}}", container=~"{{container}}", {{ksm_matchers}} }), "application", "$1", "container", "(.*)"), "instance", "$1", "pod", "(.*)")'
 keys = ["application", "instance"]
 description = "Лимит памяти контейнера."
+description_en = "Container memory limit."

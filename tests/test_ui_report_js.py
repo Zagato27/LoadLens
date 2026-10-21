@@ -1,4 +1,5 @@
-"""Report page helpers (static/js/reports.js, LL.charts.topTooltip) and the stage-1 report styles, run under Node."""
+# SPDX-License-Identifier: Apache-2.0
+"""Report page helpers (static/js/reports.js, LL.charts.topTooltip) and the report section of app.css, run under Node."""
 
 import json
 import re
@@ -190,56 +191,68 @@ def test_reports_js_loads_without_a_dom_and_keeps_a_token_background():
     ids = run_js(REPORT_JS, "__harness.registered.map((p) => p.id)")
     assert "cmpBg" in ids
     source = (REPO / "static/js/reports.js").read_text(encoding="utf-8")
-    assert "'#151515'" not in source
+    # The plot area takes --bg; no hard-coded fallback color (instrument stage 1).
+    assert "'#151515'" not in source and "#12151c" not in source
 
 
-def _stage1_css():
+def _report_css():
     css = (REPO / "static/css/app.css").read_text(encoding="utf-8")
-    match = re.search(r"/\* ===== ui-plan stage 1: report ===== \*/(.*?)/\* ===== end stage 1 ===== \*/", css, re.S)
-    assert match, "stage 1 CSS section is missing"
+    match = re.search(r"/\* ===== page: report ===== \*/(.*?)/\* ===== end page: report ===== \*/", css, re.S)
+    assert match, "the report section of app.css is missing"
     return match.group(1)
 
 
 def test_print_styles_force_the_light_tokens():
-    section = _stage1_css()
+    section = _report_css()
     media = section[section.index("@media print"):]
     block = re.search(r':root, :root\[data-theme="dark"\] \{(.*?)\n  \}', media, re.S)
     assert block, "print block must override the dark tokens"
     tokens = dict(re.findall(r"(--[\w-]+):\s*([^;]+);", block.group(1)))
     light = theme_css_vars()["light"]
-    paper = {"--bg", "--bg-sidebar", "--bg-chart", "--shadow", "--shadow-sm"}
+    paper = {"--bg", "--shadow"}
     assert {name for name in tokens if name.startswith("--series-")} == {f"--series-{i}" for i in range(1, 9)}
     for name, value in tokens.items():
         if name in paper:
             continue
         assert value.strip() == light[name], name
-    for selector in (".app-sidebar", ".app-topbar", ".page-actions", ".feedback-votes", ".legend-chips-tools", "break-inside: avoid"):
+    for selector in (".topbar", ".page-actions", ".feedback-votes", ".legend-chips-tools", ".rep-verdict-line", "break-inside: avoid",
+                     "print-color-adjust: exact"):
         assert selector in media
 
 
-@pytest.mark.parametrize("selector", [".report-tabs-bar", ".tabs-sticky-sentinel", ".report-kpis", ".sla-bar", ".report-chart-canvas", ".hero-card-foot"])
-def test_stage1_selectors_exist(selector):
-    assert selector in _stage1_css()
+@pytest.mark.parametrize("selector", [".report-tabs-bar", ".tabs-sticky-sentinel", ".rep-verdict", ".rep-sla-table", ".report-chart-canvas",
+                                      ".rep-verdict-line", ".verdict-choice", ".report-print-title"])
+def test_report_selectors_exist(selector):
+    assert selector in _report_css()
+
+
+def test_retired_report_blocks_are_gone():
+    css = (REPO / "static/css/app.css").read_text(encoding="utf-8")
+    # KPI tiles, the SLA mini bars, hero cards and the old step table of stage 1 of plans/ui-plan.md.
+    for selector in (".report-kpi", ".sla-bar", ".hero-card", ".sla-table", ".report-hero", ".step-badge"):
+        assert not re.search(re.escape(selector) + r"(?![\w-])", css), selector
 
 
 def test_sticky_tabs_sit_under_the_topbar_on_narrow_screens():
-    section = _stage1_css()
+    section = _report_css()
     assert re.search(r"\.report-tabs-bar \{[^}]*position: sticky; top: 0;", section)
     assert re.search(r"@media \(max-width: 1023px\) \{ \.report-tabs-bar \{ top: var\(--topbar-h\); \} \}", section)
 
 
 # ---- manual verdict ---------------------------------------------------------------------------------
 
-MANUAL = {"verdict": "Успешно", "reason": "сбой <генератора>", "author": "ivanov", "changed_at": "2026-10-17T12:00:00+00:00"}
+# Verdicts are codes as the API sends them; the page shows the Russian labels.
+MANUAL = {"verdict": "pass", "reason": "сбой <генератора>", "author": "ivanov", "changed_at": "2026-10-17T12:00:00+00:00"}
 
 
 def test_verdict_source_names_the_manual_change_and_the_sla():
     calls = [
-        {"manual_verdict": MANUAL, "auto_verdict": "Провал", "sla_verdict": "Провал"},
-        {"sla_verdict": "Провал", "llm_verdict": "Провал", "verdict": "Провал"},
-        {"sla_verdict": "Есть риски", "llm_verdict": "Провал", "verdict": "Есть риски"},
-        {"sla_verdict": None, "llm_verdict": "Недостаточно данных", "verdict": "Недостаточно данных"},
-        {"sla_verdict": None, "llm_verdict": "Успешно", "verdict": "Успешно"},
+        {"manual_verdict": MANUAL, "auto_verdict": "fail", "sla_verdict": "fail"},
+        {"sla_verdict": "fail", "llm_verdict": "fail", "verdict": "fail"},
+        {"sla_verdict": "risk", "llm_verdict": "fail", "verdict": "risk"},
+        {"sla_verdict": None, "llm_verdict": "no_data", "verdict": "no_data"},
+        {"sla_verdict": None, "llm_verdict": "pass", "verdict": "pass"},
+        {"sla_verdict": "Есть риски", "llm_verdict": "risk", "verdict": "risk"},  # an old label equals its code
     ]
     texts = run_js(REPORT_JS, f"{js(calls)}.map((row) => {I}.verdictSourceText(row))")
     assert texts[0] == "Изменён вручную: ivanov, 2026-10-17 12:00. Автоматически: Провал."
@@ -247,20 +260,24 @@ def test_verdict_source_names_the_manual_change_and_the_sla():
     assert texts[2] == "Определён по SLA-критериям. Оценка ИИ: Провал."  # a report built before the SLA replaced it
     assert texts[3].startswith("SLA-критерии не заданы, поэтому автоматический вердикт — «Недостаточно данных»")
     assert texts[4] == "SLA-критерии не заданы: вердикт определён оценкой ИИ."
+    assert texts[5] == "Определён по SLA-критериям."
 
 
 def test_verdict_dialog_and_history_markup():
     state = {
-        "verdict": "Успешно", "automatic": "Провал", "manual": MANUAL, "reason_max": 1000,
-        "choices": ["Успешно", "Есть риски", "Провал", "Недостаточно данных"],
+        "verdict": "pass", "automatic": "fail", "manual": MANUAL, "reason_max": 1000,
+        "choices": ["pass", "risk", "fail", "no_data"],
         "history": [
-            {"verdict": None, "previous_verdict": "Есть риски", "auto_verdict": "Провал", "reason": "", "author": "petrov",
+            {"verdict": None, "previous_verdict": "risk", "auto_verdict": "fail", "reason": "", "author": "petrov",
              "changed_at": "2026-10-17T13:00:00+00:00"},
-            {**MANUAL, "previous_verdict": "Провал", "auto_verdict": "Провал"},
+            {**MANUAL, "previous_verdict": "fail", "auto_verdict": "fail"},
         ],
     }
     html = run_js(REPORT_JS, f"{I}.verdictDialogHtml({js(state)})")
-    assert 'value="Успешно" disabled' in html and 'value="Провал">' in html  # the verdict in force cannot be picked
+    # Radio values are codes (the API accepts them), the pills show the labels.
+    assert 'value="pass" disabled' in html and 'value="fail">' in html  # the verdict in force cannot be picked
+    assert '<span class="report-verdict-pill report-verdict-fail">Провал</span>' in html
+    assert "Сейчас «Успешно», изменён вручную" in html
     assert "изменён вручную; автоматический — «Провал»" in html and 'maxlength="1000"' in html
     assert "История изменений (2)" in html and "возвращён автоматический: Провал" in html and "Провал → Успешно" in html
     assert "сбой &lt;генератора&gt;" in html and "<генератора>" not in html
@@ -276,5 +293,32 @@ def test_verdict_dialog_and_history_markup():
 
 
 def test_manual_verdict_tooltip_for_the_archive_and_the_dashboard():
-    titles = run_js(REPORT_JS, f"[LL.manualVerdictTitle({js(MANUAL)}), LL.manualVerdictTitle(null), LL.manualVerdictTitle({{ verdict: 'Провал' }})]")
+    titles = run_js(REPORT_JS, f"[LL.manualVerdictTitle({js(MANUAL)}), LL.manualVerdictTitle(null), LL.manualVerdictTitle({{ verdict: 'fail' }})]")
     assert titles == ["Изменён вручную: ivanov, 2026-10-17 12:00. Причина: сбой <генератора>", "", "Изменён вручную."]
+
+
+# ---- test-type sections from stored codes -----------------------------------------------------------
+
+def test_type_sections_build_names_notes_and_failure_mode_from_codes():
+    """A new report stores codes (normalized_test_type, note_codes, note_code, failure_mode); an old one stored
+    the texts. Both render the same rows."""
+    hold = {"start_iso": "2024-01-01T12:04:00+03:00", "end_iso": "2024-01-01T13:00:00+03:00", "duration_min": 56}
+    early = "RPS упал задолго до конца теста: падение включено в окно удержания"
+    new_soak = {"test_profile": {"mode": "stability", "test_type": "soak", "normalized_test_type": "soak", "label": "x"},
+                "stability_under_load": {"target_rps": 290, "actual_rps": 299.8, "hold": {**hold, "note_codes": ["early_drop"], "note": ""}}}
+    old_soak = {"test_profile": {"mode": "stability", "test_type": "soak", "label_ru": "Долговременный (soak)",
+                                 "focus": "Оценить удержание заданной нагрузки на всем интервале без накопления деградации."},
+                "stability_under_load": {"target_rps": 290, "actual_rps": 299.8, "hold": {**hold, "note": early}}}
+    new_stress = {"saturation": {"saturation_rps": 300, "failure_mode": "latency", "note_code": "limit_not_reached"}, "peak_performance": {}}
+    old_stress = {"saturation": {"saturation_rps": 300, "failure_mode": "latency", "failure_mode_title": "рост задержек",
+                                 "note": "Предел не достигнут: ни одна ступень не нарушила SLA по задержкам и ошибкам, RPS не падал."},
+                  "peak_performance": {}}
+    sections = run_js(REPORT_JS, f"[{js(new_soak)}, {js(old_soak)}, {js(new_stress)}, {js(old_stress)}].map((r) => {I}.testTypeSection(r))")
+    assert sections[0] == sections[1] and sections[2] == sections[3]
+    soak = {row["label"]: row["value"] for row in sections[0]["rows"]}
+    assert soak["Тип теста"] == "Долговременный (soak)" and soak["Примечание"] == early
+    assert soak["Фокус оценки"].startswith("Оценить удержание заданной нагрузки")
+    stress = {row["label"]: row["value"] for row in sections[2]["rows"]}
+    assert stress["Характер деградации"] == "рост задержек" and stress["Примечание"].startswith("Предел не достигнут")
+    entries = run_js(REPORT_JS, f"{I}.heroTypeEntries({js(new_stress)}, {{}})")
+    assert entries[0]["value"] == "рост задержек"

@@ -12,20 +12,33 @@ description = """
 http_reqs, http_req_duration, http_req_failed, vus. Bucket задаётся в привязке домена lt_framework, \
 плейсхолдеры {bucket}, {start} и {end} подставляет LoadLens. Задержки в миллисекундах.
 """
+description_en = """
+The xk6-output-influxdb extension (`--out xk6-influxdb`) writes the same measurements as the built-in k6 \
+output: http_reqs, http_req_duration, http_req_failed, vus. The bucket is set in the binding of the \
+lt_framework domain; LoadLens fills the {bucket}, {start} and {end} placeholders. Latencies are in \
+milliseconds.
+"""
 requires_metrics = ["http_reqs", "http_req_duration", "http_req_failed", "vus"]
 prompt_addendum = """
 Метрики k6: http_reqs — запросы, http_req_duration — время ответа в мс (включая неуспешные запросы), \
 http_req_failed — доля запросов с неожидаемым статусом, vus — активные виртуальные пользователи. \
 Серии name — имя запроса.
 """
+prompt_addendum_en = """
+k6 metrics: http_reqs are requests, http_req_duration is the response time in ms (failed requests included), \
+http_req_failed is the share of requests with an unexpected status, vus are active virtual users. The name \
+series is the request name.
+"""
 
 [variables.window]
 title = "Окно перцентилей и среднего"
+title_en = "Percentile and average window"
 default = "1m"
 pattern = '^[1-9][0-9]*[smh]$'
 
 [variables.load_model]
 title = "Модель нагрузки сценария"
+title_en = "Load model of the scenario"
 default = "open"
 choices = ["open", "closed"]
 help = "open — executors constant/ramping-arrival-rate, closed — ramping-vus, constant-vus, per-vu-iterations."
@@ -53,6 +66,7 @@ from(bucket: "{bucket}")
   |> aggregateWindow(every: 1s, fn: sum, createEmpty: false)
 '''
 description = "Общий RPS теста."
+description_en = "Total test RPS."
 
 [[queries]]
 label = "LT (Flux): RPS by name"
@@ -67,6 +81,7 @@ from(bucket: "{bucket}")
 '''
 keys = ["name"]
 description = "RPS по имени запроса."
+description_en = "RPS by request name."
 
 [[queries]]
 label = "LT (Flux): http_req_duration p95(ms) total"
@@ -80,6 +95,7 @@ from(bucket: "{bucket}")
   |> aggregateWindow(every: {{window}}, fn: (column, tables=<-) => tables |> quantile(q: 0.95, column: column, method: "estimate_tdigest"), createEmpty: false)
 '''
 description = "p95 времени ответа всех запросов, мс."
+description_en = "p95 of the response time of all requests, ms."
 
 [[queries]]
 label = "LT (Flux): http_req_duration p99(ms) total"
@@ -93,6 +109,7 @@ from(bucket: "{bucket}")
   |> aggregateWindow(every: {{window}}, fn: (column, tables=<-) => tables |> quantile(q: 0.99, column: column, method: "estimate_tdigest"), createEmpty: false)
 '''
 description = "p99 времени ответа всех запросов, мс."
+description_en = "p99 of the response time of all requests, ms."
 
 [[queries]]
 label = "LT (Flux): http_req_duration p95(ms) by name"
@@ -107,6 +124,7 @@ from(bucket: "{bucket}")
 '''
 keys = ["name"]
 description = "p95 по имени запроса, мс."
+description_en = "p95 by request name, ms."
 
 [[queries]]
 label = "LT (Flux): http_req_duration mean(ms)"
@@ -121,6 +139,7 @@ from(bucket: "{bucket}")
   |> aggregateWindow(every: {{window}}, fn: mean, createEmpty: false)
 '''
 description = "Среднее время ответа, мс."
+description_en = "Average response time, ms."
 
 [[queries]]
 label = "LT (Flux): error rate (%)"
@@ -135,6 +154,7 @@ from(bucket: "{bucket}")
   |> map(fn: (r) => ({ r with _value: r._value * 100.0 }))
 '''
 description = "Доля неуспешных запросов, %."
+description_en = "Share of failed requests, %."
 
 [[queries]]
 label = "LT (Flux): VUs"
@@ -148,3 +168,4 @@ from(bucket: "{bucket}")
   |> aggregateWindow(every: 1s, fn: max, createEmpty: false)
 '''
 description = "Активные виртуальные пользователи."
+description_en = "Active virtual users."

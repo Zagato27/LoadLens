@@ -1,81 +1,81 @@
 {% extends "base.html" %}
 {% set active_nav = 'archive' %}
-{% block title %}Архив отчётов{% endblock %}
-{% block head %}
-<style>
-  td.run-name { font-weight: 600; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
-  td.actions { white-space: nowrap; }
-  .actions-inner { display: flex; gap: 6px; align-items: center; justify-content: flex-end; }
-</style>
-{% endblock %}
+{% set i18n_ns = ['archive'] %}
+{% block title %}{{ t('archive.title') }}{% endblock %}
+{% block container_class %}archive-page{% endblock %}
 {% block content %}
-  <nav id="archiveBreadcrumbs" class="breadcrumbs" aria-label="Навигация по разделу" hidden></nav>
+  <nav id="archiveBreadcrumbs" class="breadcrumbs" aria-label="{{ t('archive.breadcrumbs_label') }}" hidden></nav>
   <div class="page-header">
     <div class="page-heading">
-      <h2 id="archiveTitle">Архив отчётов</h2>
-      <p class="page-subtitle">Все запуски активной проектной области. Отметьте два запуска, чтобы сравнить их.</p>
+      <h2 id="archiveTitle">{{ t('archive.title') }}</h2>
+      <p class="page-subtitle">{{ t('archive.subtitle') }}</p>
     </div>
     <div class="page-actions">
-      <a class="btn" href="/compare">Сравнение тестов</a>
-      <a class="btn btn-primary" href="/new" data-min-role="engineer">Новый отчёт</a>
+      <a class="btn" href="/compare">{{ t('archive.header.compare_link') }}</a>
+      <a class="btn btn-primary" href="/new" data-min-role="engineer">{{ t('archive.header.new_report') }}</a>
     </div>
   </div>
 
   <section id="jobsStrip" class="jobs-strip" style="display:none" aria-live="polite">
-    <div class="jobs-title"><span>Задачи в работе и с ошибками</span><span class="jobs-actions"><small id="jobsStripNote"></small><button type="button" class="btn btn-sm btn-ghost" id="jobsStripClear" data-min-role="engineer" hidden>Очистить завершённые</button></span></div>
+    <div class="jobs-title"><span>{{ t('archive.jobs.title') }}</span><span class="jobs-actions"><small id="jobsStripNote"></small><button type="button" class="btn btn-sm btn-ghost" id="jobsStripClear" data-min-role="engineer" hidden>{{ t('archive.jobs.clear') }}</button></span></div>
     <div id="jobsStripList"></div>
   </section>
 
-  <form class="toolbar archive-filters" id="filtersForm" role="search">
-    <input type="search" id="searchInput" placeholder="Поиск по названию запуска или сервису…" title="Клавиша / — перейти к поиску" aria-label="Поиск по названию запуска или сервису" aria-keyshortcuts="/" data-slash-focus />
-    <label>Сервис
-      <select id="serviceFilter"><option value="">Все</option></select>
+  <form class="archive-filters" id="filtersForm" role="search">
+    <label class="inp archive-search">
+      <input type="search" id="searchInput" placeholder="{{ t('archive.filter.search_placeholder') }}" title="{{ t('archive.filter.search_title') }}" aria-label="{{ t('archive.filter.search_label') }}" aria-keyshortcuts="/" data-slash-focus />
+      <kbd class="archive-kbd" aria-hidden="true">/</kbd>
     </label>
-    <label>Вердикт
-      <select id="verdictFilter"><option value="">Все</option></select>
+    <label class="inp archive-filter"><span class="archive-filter-key">{{ t('archive.filter.service_key') }}</span>
+      <select id="serviceFilter"><option value="">{{ t('archive.filter.all') }}</option></select>
     </label>
-    <label>Тип теста
-      <select id="testTypeFilter"><option value="">Все</option></select>
+    <label class="inp archive-filter"><span class="archive-filter-key">{{ t('archive.filter.verdict_key') }}</span>
+      <select id="verdictFilter"><option value="">{{ t('archive.filter.all') }}</option></select>
     </label>
-    <button type="button" class="btn btn-primary" id="searchBtn">Применить</button>
-    <button type="button" class="btn" id="clearBtn">Сбросить</button>
+    <label class="inp archive-filter"><span class="archive-filter-key">{{ t('archive.filter.test_type_key') }}</span>
+      <select id="testTypeFilter"><option value="">{{ t('archive.filter.all') }}</option></select>
+    </label>
+    <span class="archive-counter" id="archiveCounter" aria-live="polite"></span>
   </form>
 
-  <div id="filterChips" class="filter-chips" role="group" aria-label="Активные фильтры" hidden></div>
+  <div id="filterChips" class="filter-chips" role="group" aria-label="{{ t('archive.filter.chips_label') }}" hidden></div>
 
   <div class="table-wrap">
     <table class="data-table responsive archive-table" id="runsTable">
       <thead>
         <tr>
-          <th class="select-col"><span class="visually-hidden">Выбор для сравнения</span></th>
-          <th data-sort="run_name" tabindex="0">Запуск</th>
-          <th data-sort="service" tabindex="0">Сервис</th>
-          <th data-sort="test_type" tabindex="0">Тип теста</th>
-          <th data-sort="end_time" tabindex="0" title="Окончание теста; ниже — длительность">Дата теста</th>
-          <th data-sort="report_created_at" tabindex="0">Отчёт создан</th>
-          <th data-sort="verdict" tabindex="0">Вердикт</th>
-          <th data-sort="max_rps" tabindex="0" class="num" title="Пиковый RPS из итогового анализа; для soak — удерживаемый RPS, для spike — уровень всплеска">Max RPS</th>
-          <th><span class="visually-hidden">Действия</span></th>
+          <th class="select-col"><span class="visually-hidden">{{ t('archive.col.select') }}</span></th>
+          <th data-sort="run_name" tabindex="0">{{ t('archive.col.run') }}</th>
+          <th data-sort="service" tabindex="0">{{ t('archive.col.service') }}</th>
+          <th data-sort="test_type" tabindex="0">{{ t('archive.col.test_type') }}</th>
+          <th data-sort="end_time" tabindex="0" title="{{ t('archive.col.end_time_hint') }}">{{ t('archive.col.end_time') }}</th>
+          <th data-sort="verdict" tabindex="0">{{ t('archive.col.verdict') }}</th>
+          <th class="n" title="{{ t('archive.col.sla_hint') }}">{{ t('archive.col.sla') }}</th>
+          <th data-sort="max_rps" tabindex="0" class="n" title="{{ t('archive.col.max_rps_hint') }}">Max RPS</th>
+          <th class="n" title="{{ t('archive.col.p95_hint') }}">p95</th>
+          <th data-sort="report_created_at" tabindex="0" class="n">{{ t('archive.col.report_created') }}</th>
+          <th class="actions-col"><span class="visually-hidden">{{ t('archive.col.actions') }}</span></th>
         </tr>
       </thead>
       <tbody id="tbody"></tbody>
     </table>
   </div>
-  <div class="pager">
-    <button type="button" class="btn" id="prevBtn">Назад</button>
-    <span class="info" id="pageInfo" aria-live="polite"></span>
-    <button type="button" class="btn" id="nextBtn">Вперёд</button>
-  </div>
 
-  <div id="selectionBar" class="selection-bar" role="region" aria-label="Выбранные запуски" hidden>
+  <div id="selectionBar" class="selection-bar" role="region" aria-label="{{ t('archive.selection.label') }}" hidden>
     <span class="selection-count" id="selectionCount" aria-live="polite"></span>
     <span class="selection-names" id="selectionNames"></span>
     <span class="selection-hint" id="selectionHint"></span>
     <span class="selection-actions">
-      <button type="button" class="btn btn-primary btn-sm" id="selectionCompare">Сравнить</button>
-      <button type="button" class="btn btn-ghost btn-sm" id="selectionClear">Снять выбор</button>
+      <button type="button" class="btn btn-primary btn-sm" id="selectionCompare">{{ t('archive.selection.compare') }}</button>
+      <button type="button" class="link selection-clear" id="selectionClear">{{ t('archive.selection.clear') }}</button>
     </span>
   </div>
+
+  <nav class="pager archive-pager" id="archivePager" aria-label="{{ t('archive.pager.label') }}">
+    <button type="button" class="pager-step" id="prevBtn"><span aria-hidden="true">&larr;</span> {{ t('archive.pager.prev') }}</button>
+    <span class="info" id="pageInfo" aria-live="polite"></span>
+    <button type="button" class="pager-step" id="nextBtn">{{ t('archive.pager.next') }} <span aria-hidden="true">&rarr;</span></button>
+  </nav>
 {% endblock %}
 {% block scripts %}
 <script defer src="{{ url_for('static', filename='js/archive.js') }}"></script>

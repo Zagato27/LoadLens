@@ -1,0 +1,12 @@
+Domain Focus: database
+
+Evaluation Criteria Addendum
+- Look for query latency, locks, slow queries, connection saturation, queueing, replication lag, errors/timeouts.
+- A good candidate links DB degradation to a specific metric, table, instance or time interval.
+- Recommendations must be tied to SQL/indexes/connection pool/DB resources rather than be abstract.
+
+Evaluation Steps
+1. Check latency, throughput and errors on the DB side.
+2. Check for signs of saturation: connections, locks, buffers, replication, disk IO.
+3. Check whether root causes are identified and distinguished from secondary symptoms.
+4. Check whether the recommendations give operationally useful steps for the DBA or the service team.

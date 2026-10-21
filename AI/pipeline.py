@@ -1,6 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+import contextvars
 import copy
 import csv
-import os
 import json
 import logging
 import re
@@ -27,7 +28,13 @@ from AI.context_pack import (
     minutes_from,
     step_table,
 )
+from AI.i18n import with_locale
+from AI.i18n import t
+from AI.i18n import LocalizedError, Msg, msg, plural
+from AI.report_texts import LocaleTable
 from AI.prompt_assembly import assemble_prompt, build_analysis_guidance
+from AI.prompt_store import effective_override, load_prompt, resolve_lang, texts_in_all_languages
+from AI.prompt_store import text as prompt_text
 from AI.providers import attach_usage_to_scores, reset_usage, usage_domain
 from AI.scoring import LLMAnalysis, VerificationSummary, fill_missing_verdict_rationale, llm_two_pass_self_consistency, make_failed_llm_analysis, parse_llm_analysis_strict
 from AI.verification import unverified_findings, verify_analysis
@@ -42,11 +49,21 @@ from AI.db_store import (
 from AI.data_sources import ResolvedSource, domain_query_language, resolve_domain_source
 from AI.opensearch_logs import APPLICATION_LOGS_DOMAIN, collect_application_logs
 from AI.query_packs import block_roles, domain_titles, prompt_addenda, resolve_sla_refs, series_annotations
-from AI.sla_evaluator import _find_section_by_label, evaluate_sla, extract_target_rps_from_pack
+from AI.sla_evaluator import (
+    ADJUST_RESOURCES,
+    ADJUST_TREND,
+    _find_section_by_label,
+    evaluate_sla,
+    extract_target_rps_from_pack,
+    format_sla_summary,
+    summary_parts_from_checks,
+)
 from AI.test_profile import is_capacity_like, mode_of, normalize_test_type, profile_for, resolve_step_detection
 from AI.stability import build_stability_payload, compute_trends, hold_window_from_labeled
 from AI.spike import analyze_spikes, build_spike_payload, detect_spikes_from_labeled, spike_load_steps, spike_windows_ctx
 from AI.saturation import build_saturation
+from AI.verdicts import FAIL, PASS, RISK, to_code
+from AI.verdicts import label as verdict_label
 
 
 logger = logging.getLogger(__name__)
@@ -56,18 +73,13 @@ _PROXY_CLOSED = (403, 404, 405)
 
 ProgressCallback = Callable[[str, Optional[int]], None]
 
-# Human-readable domain names for progress messages shown to the user.
-DOMAIN_TITLES: Dict[str, str] = {
-    "jvm": "JVM",
-    "database": "База данных",
-    "kafka": "Kafka",
-    "microservices": "Микросервисы",
-    "hard_resources": "Ресурсы узлов",
-    "lt_framework": "Нагрузочный инструмент",
-    "lt_generators": "Ресурсы генераторов нагрузки",
-    APPLICATION_LOGS_DOMAIN: "Логи приложений",
-    "final": "Итог",
-}
+# Human-readable domain names (common.domain.*) for progress messages and the report, in the current locale
+# (the language of the run inside ``uploadFromLLM``).
+DOMAIN_KEYS = (
+    "jvm", "database", "kafka", "microservices", "hard_resources", "lt_framework", "lt_generators",
+    APPLICATION_LOGS_DOMAIN, "final",
+)
+DOMAIN_TITLES = LocaleTable(DOMAIN_KEYS, lambda key: t(f"common.domain.{key}"))
 # Optional domain: CPU, memory and network of the load generators (node_exporter on the generator hosts).
 GENERATORS_DOMAIN = "lt_generators"
 
@@ -131,9 +143,11 @@ def _has_meaningful_system_context(payload) -> bool:
     return False
 
 
-def _system_context_prompt_summary(system_context: dict | None) -> str:
+def _system_context_prompt_summary(system_context: dict | None, lang: Optional[str] = None) -> str:
+    """Short system description for the prompts, in ``lang`` (the report language)."""
+    code = resolve_lang(lang)
     if not isinstance(system_context, dict) or not _has_meaningful_system_context(system_context):
-        return "Контекст системы не задан."
+        return prompt_text("system_context.none", code)
 
     lines: list[str] = []
     system = system_context.get("system") if isinstance(system_context.get("system"), dict) else {}
@@ -158,17 +172,17 @@ def _system_context_prompt_summary(system_context: dict | None) -> str:
     system_desc = str(system.get("description") or "").strip()
     test_goal = str(system.get("test_goal") or "").strip()
     if system_name:
-        lines.append(f"- Система: {system_name}")
+        lines.append(prompt_text("system_context.system", code, value=system_name))
     if system_domain:
-        lines.append(f"- Домен: {system_domain}")
+        lines.append(prompt_text("system_context.domain", code, value=system_domain))
     if system_desc:
-        lines.append(f"- Описание: {system_desc}")
+        lines.append(prompt_text("system_context.description", code, value=system_desc))
     if test_goal:
-        lines.append(f"- Цель теста: {test_goal}")
+        lines.append(prompt_text("system_context.test_goal", code, value=test_goal))
 
     style = str(architecture.get("style") or "").strip()
     if style:
-        lines.append(f"- Архитектурный стиль: {style}")
+        lines.append(prompt_text("system_context.style", code, value=style))
 
     components = []
     for item in architecture.get("components") if isinstance(architecture.get("components"), list) else []:
@@ -183,8 +197,8 @@ def _system_context_prompt_summary(system_context: dict | None) -> str:
     if components:
         preview = ", ".join(components[:6])
         if len(components) > 6:
-            preview += f" и еще {len(components) - 6}"
-        lines.append(f"- Ключевые компоненты: {preview}")
+            preview += prompt_text("system_context.components_more", code, n=len(components) - 6)
+        lines.append(prompt_text("system_context.components", code, value=preview))
 
     flows = []
     for item in load_model.get("critical_user_flows") if isinstance(load_model.get("critical_user_flows"), list) else []:
@@ -200,8 +214,8 @@ def _system_context_prompt_summary(system_context: dict | None) -> str:
     if flows:
         preview = "; ".join(flows[:4])
         if len(flows) > 4:
-            preview += f"; и еще {len(flows) - 4}"
-        lines.append(f"- Критичные потоки: {preview}")
+            preview += prompt_text("system_context.flows_more", code, n=len(flows) - 4)
+        lines.append(prompt_text("system_context.flows", code, value=preview))
 
     hotspots = [
         str(item).strip()
@@ -209,7 +223,7 @@ def _system_context_prompt_summary(system_context: dict | None) -> str:
         if str(item).strip()
     ]
     if hotspots:
-        lines.append(f"- Ожидаемые точки нагрузки: {', '.join(hotspots[:8])}")
+        lines.append(prompt_text("system_context.hotspots", code, value=", ".join(hotspots[:8])))
 
     focus = [
         str(item).strip()
@@ -217,7 +231,7 @@ def _system_context_prompt_summary(system_context: dict | None) -> str:
         if str(item).strip()
     ]
     if focus:
-        lines.append(f"- Фокус анализа: {'; '.join(focus[:6])}")
+        lines.append(prompt_text("system_context.focus", code, value="; ".join(focus[:6])))
 
     risks = [
         str(item).strip()
@@ -225,21 +239,16 @@ def _system_context_prompt_summary(system_context: dict | None) -> str:
         if str(item).strip()
     ]
     if risks:
-        lines.append(f"- Известные риски: {'; '.join(risks[:4])}")
+        lines.append(prompt_text("system_context.risks", code, value="; ".join(risks[:4])))
 
-    return "\n".join(lines) if lines else "Контекст системы не задан."
+    return "\n".join(lines) if lines else prompt_text("system_context.none", code)
 
 
-def _augment_prompt_with_system_context(prompt: str, system_context_brief: str) -> str:
+def _augment_prompt_with_system_context(prompt: str, system_context_brief: str, lang: Optional[str] = None) -> str:
     brief = (system_context_brief or "").strip()
-    if not brief or brief == "Контекст системы не задан.":
+    if not brief or brief in texts_in_all_languages("system_context.none"):
         return prompt
-    prefix = (
-        "СПРАВОЧНЫЙ КОНТЕКСТ ТЕСТИРУЕМОЙ СИСТЕМЫ:\n"
-        f"{brief}\n\n"
-        "Используй этот контекст только как справочную информацию. "
-        "Не подменяй им факты из метрик и не делай выводов, которые не подтверждаются данными."
-    )
+    prefix = prompt_text("system_context.prefix", lang, brief=brief)
     return f"{prefix}\n\n{prompt}" if prompt else prefix
 
 
@@ -251,8 +260,9 @@ def _deterministic_sla_context(sla_result: Dict[str, Any] | None) -> Dict[str, A
         (dict(item) for item in checks if str(item.get("name") or "") == "target_rps"),
         None,
     )
+    verdict = to_code(result.get("verdict"))
     return {
-        "verdict": str(result.get("verdict") or "Недостаточно данных"),
+        "verdict": verdict,
         "summary": str(result.get("summary") or ""),
         "test_mode": str(result.get("test_mode") or ""),
         "checks": checks,
@@ -294,7 +304,7 @@ def _sla_step_context(
         "start_iso": format_iso(start, shift_hours),
         "end_iso": format_iso(end, shift_hours),
         "rps": window.get("level"),
-        "verdict": result.get("verdict"),
+        "verdict": to_code(result.get("verdict")),
         "primary_passed": (target is None or target.get("passed") is True) and not primary_failed,
         "checks": checks,
         "degraded_level": window.get("degraded_level"),
@@ -310,14 +320,16 @@ def _align_domain_verdict_with_sla(
     text: str,
     parsed: Optional[Dict[str, Any]],
     sla_step: Optional[Dict[str, Any]],
+    lang: Optional[str] = None,
 ) -> Optional[tuple[str, Dict[str, Any]]]:
-    """Turns a domain «Провал» into «Есть риски» when every severe finding starts after the SLA step.
+    """Turns a domain ``fail`` into ``risk`` when every severe finding starts after the SLA step.
 
-    Returns None when the verdict stays unchanged.
+    The model's rationale is kept as written, after a note on the correction; ``verdict_adjusted_from``
+    records the verdict of the model. Returns None when the verdict stays unchanged.
     """
     if not sla_step or sla_step.get("primary_passed") is not True or not sla_step.get("end_iso"):
         return None
-    if not isinstance(parsed, dict) or parsed.get("verdict") != "Провал":
+    if not isinstance(parsed, dict) or to_code(parsed.get("verdict")) != FAIL:
         return None
     raw = str(text or "").strip()
     if not (raw.startswith("{") and raw.endswith("}")):
@@ -335,15 +347,20 @@ def _align_domain_verdict_with_sla(
             return None
         if pd.isna(started) or started < cutoff:
             return None
-    note = (
-        f"Статус скорректирован по ступени SLA: на ступени «{sla_step.get('step_label') or 'SLA'}» пороги SLA "
-        "выполнены, серьёзные проблемы домена начались после неё. Исходная оценка модели — «Провал»."
+    code = resolve_lang(lang)
+    note = prompt_text(
+        "verdict.sla_step_adjusted", code, step=sla_step.get("step_label") or "SLA", label=verdict_label(FAIL, code),
     )
-    rationale = str(parsed.get("verdict_rationale") or "").strip().replace("Статус «Провал»", "Исходный статус «Провал»", 1)
-    aligned = {**parsed, "verdict": "Есть риски", "verdict_rationale": f"{note}\n\n{rationale}" if rationale else note}
+    rationale = str(parsed.get("verdict_rationale") or "").strip()
+    aligned = {
+        **parsed,
+        "verdict": RISK,
+        "verdict_adjusted_from": FAIL,
+        "verdict_rationale": f"{note}\n\n{rationale}" if rationale else note,
+    }
     payload = json.loads(raw)
-    payload["verdict"] = aligned["verdict"]
-    payload["verdict_rationale"] = aligned["verdict_rationale"]
+    for key in ("verdict", "verdict_adjusted_from", "verdict_rationale"):
+        payload[key] = aligned[key]
     return json.dumps(payload, ensure_ascii=False), aligned
 
 
@@ -421,29 +438,32 @@ _PRIMARY_CHECK_NAMES = frozenset({"target_rps", "error_rate", "p95_latency", "p9
 _SECONDARY_CHECK_NAMES = frozenset({"cpu_usage", "memory_usage"})
 
 
-def _downgrade_verdict(result: Dict[str, Any], verdict: str, note: str) -> None:
-    """Sets the reconciled verdict and keeps the «SLA verdict: …» prefix of the summary in step."""
-    previous = str(result.get("verdict") or "")
+def _downgrade_verdict(result: Dict[str, Any], verdict: str, adjustment: Dict[str, Any], lang: Optional[str] = None) -> None:
+    """Sets the reconciled verdict code and rebuilds the summary (in ``lang``) from its parts plus the adjustment."""
+    parts = summary_parts_from_checks(result)
+    parts["verdict"] = verdict
+    parts["adjustments"] = [*parts.get("adjustments", []), adjustment]
     result["verdict"] = verdict
-    summary = str(result.get("summary") or "").strip()
-    prefix = f"SLA verdict: {previous}."
-    if previous and summary.startswith(prefix):
-        summary = f"SLA verdict: {verdict}." + summary[len(prefix):]
-    result["summary"] = f"{summary}; {note}" if summary else note
+    result["summary_parts"] = parts
+    result["summary"] = format_sla_summary(parts, resolve_lang(lang))
 
 
 def _reconcile_sla_for_test_profile(
     sla_result: Dict[str, Any] | None,
     test_profile: Dict[str, Any] | None,
     flagged_trends: Optional[List[str]] = None,
+    lang: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Приводит SLA verdict к политике конкретного профиля теста.
 
     Для soak и spike тестов ресурсные превышения являются рисками, но не
-    самостоятельным основанием для "Провал", если primary SLA не нарушены.
-    Для soak неблагоприятный тренд (``flagged_trends``) понижает «Успешно» до «Есть риски».
+    самостоятельным основанием для ``fail``, если primary SLA не нарушены.
+    Для soak неблагоприятный тренд (``flagged_trends``) понижает ``pass`` до ``risk``.
+    The verdict of the result is a code (old labels of a passed-in result are mapped).
     """
     result = dict(sla_result or {})
+    if "verdict" in result:
+        result["verdict"] = to_code(result.get("verdict"))
     mode = mode_of(test_profile) if test_profile else str(result.get("test_mode") or "").strip().lower()
     checks = [dict(item) for item in (result.get("checks") or []) if isinstance(item, dict)]
     if mode not in _RECONCILED_MODES or not checks:
@@ -460,13 +480,8 @@ def _reconcile_sla_for_test_profile(
     ]
     if failed_primary:
         return result
-    if failed_secondary and str(result.get("verdict") or "") == "Провал":
-        _downgrade_verdict(
-            result,
-            "Есть риски",
-            f"Режим {mode}: ресурсные превышения CPU/memory трактуются как риски, "
-            "но без нарушений target_rps/error_rate/p95/p99 не переводят тест в «Провал».",
-        )
+    if failed_secondary and result.get("verdict") == FAIL:
+        _downgrade_verdict(result, RISK, {"code": ADJUST_RESOURCES, "mode": mode}, lang)
         for item in checks:
             if str(item.get("name") or "") in _SECONDARY_CHECK_NAMES:
                 item.setdefault("category", "secondary")
@@ -474,32 +489,9 @@ def _reconcile_sla_for_test_profile(
                 item.setdefault("category", "primary")
         result["checks"] = checks
     trends = [str(item) for item in (flagged_trends or []) if str(item).strip()]
-    if mode == "stability" and trends and str(result.get("verdict") or "") == "Успешно":
-        _downgrade_verdict(
-            result,
-            "Есть риски",
-            "Пороги SLA выполнены, но за окно удержания найден неблагоприятный тренд: " + ", ".join(trends),
-        )
+    if mode == "stability" and trends and result.get("verdict") == PASS:
+        _downgrade_verdict(result, RISK, {"code": ADJUST_TREND, "trends": trends}, lang)
     return result
-
-
-def read_prompt_from_file(filename: str) -> str:
-    """Читает текст промпта из файла в кодировке UTF-8.
-
-    Параметры:
-        filename (str): Абсолютный или относительный путь к шаблону.
-
-    Возвращает:
-        str: Содержимое файла.
-
-    Побочные эффекты:
-        Выполняет чтение с файловой системы.
-
-    Исключения:
-        OSError: если файл не найден или недоступен.
-    """
-    with open(filename, 'r', encoding='utf-8') as f:
-        return f.read()
 
 
 def parse_step_to_seconds(step: str) -> int:
@@ -560,8 +552,16 @@ class GrafanaDatasource:
     uid: str
 
 
-class GrafanaFallbackError(RuntimeError):
+class GrafanaError(LocalizedError, RuntimeError):
+    """Grafana gave an answer the collection cannot use; the text (``job.error.*``) renders where it is shown."""
+
+
+class GrafanaFallbackError(GrafanaError):
     """The datasource proxy was closed and the ``/api/ds/query`` fallback failed as well."""
+
+
+class CollectionShapeError(LocalizedError, ValueError):
+    """Queries, labels or frames given to a collection helper do not line up (``job.error.*``)."""
 
 
 def _datasource_cfg(g_cfg: dict, influx: bool) -> dict:
@@ -595,7 +595,7 @@ def _lookup_grafana_datasource(g_cfg: dict, influx: bool) -> GrafanaDatasource:
     for item in resp.json():
         if isinstance(item, dict) and item.get("type") in wanted:
             return _grafana_datasource_from(item, "")
-    raise RuntimeError("Не найден InfluxDB datasource в Grafana" if influx else "Не найден Prometheus datasource в Grafana")
+    raise GrafanaError("job.error.grafana_no_influx" if influx else "job.error.grafana_no_prometheus")
 
 
 def _grafana_datasource_from(payload: Any, configured_uid: str) -> GrafanaDatasource:
@@ -604,7 +604,7 @@ def _grafana_datasource_from(payload: Any, configured_uid: str) -> GrafanaDataso
     ds_id = raw_id if isinstance(raw_id, int) and not isinstance(raw_id, bool) else None
     uid = str(data.get("uid") or configured_uid or "").strip()
     if ds_id is None and not uid:
-        raise RuntimeError("Grafana не вернула ни id, ни uid датасорса")
+        raise GrafanaError("job.error.grafana_no_datasource_id")
     return GrafanaDatasource(id=ds_id, uid=uid)
 
 
@@ -656,9 +656,7 @@ def _via_ds_query(kind: str, proxy_status: int, run: Callable[[], Any]) -> Any:
     try:
         return run()
     except Exception as exc:
-        raise GrafanaFallbackError(
-            f"Grafana: прокси датасорса ответил {proxy_status}, запасной запрос через /api/ds/query не прошёл: {_http_error_text(exc)}"
-        ) from exc
+        raise GrafanaFallbackError("job.error.grafana_fallback", status=proxy_status, error=_http_error_text(exc)) from exc
 
 
 def fetch_influx_data_via_grafana(
@@ -1020,7 +1018,7 @@ def _grafana_uid(g_cfg: dict, ds: GrafanaDatasource) -> str:
     resp.raise_for_status()
     uid = str((resp.json() or {}).get("uid") or "").strip()
     if not uid:
-        raise RuntimeError(f"У Grafana datasource id={ds.id} нет uid")
+        raise GrafanaError("job.error.grafana_no_uid", id=ds.id)
     return uid
 
 
@@ -1036,7 +1034,7 @@ def _post_ds_query(g_cfg: dict, payload: dict) -> dict:
     resp.raise_for_status()
     body = resp.json()
     if not isinstance(body, dict):
-        raise RuntimeError("Grafana /api/ds/query вернул не объект")
+        raise GrafanaError("job.error.grafana_not_object")
     result = (body.get("results") or {}).get("A")
     error = result.get("error") if isinstance(result, dict) else None
     if error:
@@ -1302,7 +1300,7 @@ def fetch_and_aggregate_with_label_keys(
         ValueError: Если длины списков запросов и лейблов не совпадают.
     """
     if len(promql_queries) != len(label_keys_list):
-        raise ValueError("Количество запросов и количество списков лейблов не совпадает!")
+        raise CollectionShapeError("job.error.queries_labels_mismatch")
     dfs = []
     for query, keys_for_this_query in zip(promql_queries, label_keys_list):
         try:
@@ -1448,7 +1446,7 @@ def dataframes_to_markdown(labeled: List[Dict[str, object]]) -> str:
                 pass
         lines.append(f"### {label}")
         try:
-            md = (df.fillna("") if hasattr(df, 'fillna') else df).head(20).to_markdown() if df is not None else "(пусто)"
+            md = (df.fillna("") if hasattr(df, 'fillna') else df).head(20).to_markdown() if df is not None else t("report.analysis.empty_table")
         except Exception:
             md = str(getattr(df, 'shape', None))
         lines.append(md)
@@ -2291,16 +2289,16 @@ def _load_baseline_context(
     """Previous run of the same service (within the project area) and its series statistics."""
     settings = _baseline_settings(cfg)
     if not settings["enabled"]:
-        return {"available": False, "reason": "baseline отключён в настройках (llm.baseline.enabled=false)"}
+        return {"available": False, "reason": prompt_text("baseline.disabled")}
     if not save_to_db or not storage_cfg:
-        return {"available": False, "reason": "хранилище метрик не используется для этого запуска"}
+        return {"available": False, "reason": prompt_text("baseline.no_storage")}
     service = str((run_meta or {}).get("service") or "").strip()
     run_name = str((run_meta or {}).get("run_name") or "").strip()
     project_area = str((run_meta or {}).get("project_area") or "").strip()
     area_services = (run_meta or {}).get("area_services")
     services = [str(item).strip() for item in area_services] if isinstance(area_services, list) else None
     if not service and not services:
-        return {"available": False, "reason": "сервис запуска не задан"}
+        return {"available": False, "reason": prompt_text("baseline.no_service")}
     test_type = normalize_test_type(str((run_meta or {}).get("test_type") or "")) or None
     schema = str(storage_cfg.get("schema", "public"))
     try:
@@ -2314,16 +2312,21 @@ def _load_baseline_context(
                 test_type=test_type,
             )
             if previous is None:
-                label = "успешный прогон" if settings["mode"] == BASELINE_MODE_PREVIOUS_SUCCESS else "прогон"
-                scope = f"области «{project_area}»" if project_area else f"сервиса «{service}»"
-                type_note = f" типа «{test_type}»" if test_type else ""
-                return {"available": False, "reason": f"для {scope} нет более раннего {label}а{type_note}", "test_type": test_type}
+                # The reason is part of the model context: written in the report language.
+                key = "baseline.none_success" if settings["mode"] == BASELINE_MODE_PREVIOUS_SUCCESS else "baseline.none_any"
+                scope = (
+                    prompt_text("baseline.scope_area", name=project_area)
+                    if project_area
+                    else prompt_text("baseline.scope_service", name=service)
+                )
+                type_note = prompt_text("baseline.type_note", type=test_type) if test_type else ""
+                return {"available": False, "reason": prompt_text(key, scope=scope, type_note=type_note), "test_type": test_type}
             stats = load_run_metric_stats(conn, schema, str(storage_cfg.get("table", "metrics")), previous.run_name)
         finally:
             conn.close()
     except Exception as exc:
         logger.error("Baseline lookup failed for service '%s': %s", service, exc)
-        return {"available": False, "reason": f"ошибка чтения baseline из БД: {exc}"}
+        return {"available": False, "reason": prompt_text("baseline.read_error", error=exc)}
     return {
         "available": True,
         "mode": settings["mode"],
@@ -2371,7 +2374,7 @@ def _baseline_for_domain(baseline_ctx: Dict[str, Any], domain: str, pack: Dict[s
         "verdict": baseline_ctx.get("verdict"),
         "created_at": baseline_ctx.get("created_at"),
         "sections": sections,
-        "note": "delta_*_pct — изменение текущего прогона относительно baseline в процентах.",
+        "note": t("report.analysis.baseline_note"),
     }
 
 
@@ -2463,11 +2466,11 @@ def _compact_verification_context(base_ctx: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _run_verification_pass(final_parsed: LLMAnalysis, base_ctx: Dict[str, Any], prompt_dir: str) -> Optional[LLMAnalysis]:
+def _run_verification_pass(final_parsed: LLMAnalysis, base_ctx: Dict[str, Any], lang: Optional[str] = None) -> Optional[LLMAnalysis]:
     """Asks the model to re-evaluate the final verdict using only verified findings."""
     from AI.providers import ask_llm_with_text_data
 
-    prompt = read_prompt_from_file(os.path.join(prompt_dir, "verify_prompt.txt"))
+    prompt = load_prompt("verify_prompt.txt", lang)
     payload = {
         "analysis": final_parsed.dict(exclude_none=True),
         "unverified_findings": unverified_findings(final_parsed),
@@ -2656,6 +2659,12 @@ def _prepare_metric_domains(cfg: dict, queries: dict, collect_keys: List[str]) -
     return prepared
 
 
+def report_language_of(report_language: Optional[str] = None, run_meta: dict | None = None) -> str:
+    """Language of a run: the explicit argument, then ``run_meta["report_language"]``, then the current locale."""
+    meta_lang = (run_meta or {}).get("report_language") if isinstance(run_meta, dict) else None
+    return resolve_lang(report_language or meta_lang)
+
+
 def uploadFromLLM(
     start_ts: float,
     end_ts: float,
@@ -2667,6 +2676,42 @@ def uploadFromLLM(
     active_domains: List[str] | None = None,
     system_context: dict | None = None,
     progress_callback: ProgressCallback | None = None,
+    report_language: str | None = None,
+) -> Dict[str, object]:
+    """Runs the pipeline in the report language (``with_locale``): prompts, model answers and report texts.
+
+    ``report_language`` (``ru``/``en``) falls back to ``run_meta["report_language"]`` and then to the current
+    locale; the other parameters are those of :func:`_upload_from_llm`.
+    """
+    lang = report_language_of(report_language, run_meta)
+    with with_locale(lang):
+        return _upload_from_llm(
+            start_ts,
+            end_ts,
+            save_to_db=save_to_db,
+            run_meta=run_meta,
+            only_collect=only_collect,
+            ef_config=ef_config,
+            prompts_override=prompts_override,
+            active_domains=active_domains,
+            system_context=system_context,
+            progress_callback=progress_callback,
+            lang=lang,
+        )
+
+
+def _upload_from_llm(
+    start_ts: float,
+    end_ts: float,
+    save_to_db: bool = False,
+    run_meta: dict | None = None,
+    only_collect: bool = False,
+    ef_config: dict | None = None,
+    prompts_override: dict | None = None,
+    active_domains: List[str] | None = None,
+    system_context: dict | None = None,
+    progress_callback: ProgressCallback | None = None,
+    lang: str = "ru",
 ) -> Dict[str, object]:
     """Основной pipeline: сбор метрик, подготовка контекста и вызов LLM.
 
@@ -2676,10 +2721,12 @@ def uploadFromLLM(
         run_meta (dict | None): Служебные атрибуты запуска (`run_id`, `run_name`, `service`, `test_type`, `start_ms`, `end_ms`).
         only_collect (bool): При True собирает метрики и сохраняет их в БД, не вызывая LLM.
         ef_config (dict | None): Эффективная конфигурация (используется для override источников/LLM/запросов).
-        prompts_override (dict | None): Пользовательские промпты по доменам.
+        prompts_override (dict | None): Пользовательские промпты по доменам; пустой текст и копия стандартного
+            текста любого языка не считаются переопределением (стандартный текст берётся на языке прогона).
         active_domains (list[str] | None): Ограничение списка доменов, которые нужно обрабатывать.
         system_context (dict | None): Снимок описания тестируемой системы на момент запуска отчета.
         progress_callback (callable | None): Принимает `(message, percent)` на каждой фазе pipeline.
+        lang (str): Язык отчёта (``ru``/``en``): файлы промптов, тексты склейки и детерминированные тексты.
 
     Возвращает:
         dict: Структура с текстовыми блоками, JSON-парсами и оценками качества.
@@ -2702,7 +2749,7 @@ def uploadFromLLM(
         if isinstance(system_context, dict)
         else copy.deepcopy(cfg.get("system_context") or {})
     )
-    system_context_brief = _system_context_prompt_summary(active_system_context)
+    system_context_brief = _system_context_prompt_summary(active_system_context, lang)
     step = (cfg.get("default_params", {}) or {}).get("step") or CONFIG["default_params"]["step"]
     resample = (cfg.get("default_params", {}) or {}).get("resample_interval") or CONFIG["default_params"]["resample_interval"]
     logger.info("Metric sampling: step=%s resample_interval=%s", step, resample)
@@ -2714,7 +2761,7 @@ def uploadFromLLM(
         min_stable_min = 5.0
     run_test_type = str((run_meta or {}).get("test_type") or "").strip().lower()
     profile = profile_for(run_test_type)
-    test_profile = profile.to_dict()
+    test_profile = profile.to_dict(lang)
     peak_performance_applicable = profile.peak_performance_applicable
     use_step_profile = resolve_step_detection(profile, sla_early)
     peak_not_applicable_reason = f"not_applicable_for_{profile.test_type or 'this'}_test"
@@ -2812,6 +2859,13 @@ def uploadFromLLM(
     queries = cfg.get("queries") or CONFIG.get("queries") or {}
     report_titles = _report_domain_titles(queries)
     title_of = lambda key: report_titles.get(key) or _domain_title(key)  # noqa: E731
+
+    def stage_domain(key: str) -> Any:
+        """Domain of a progress message: a dictionary message (shown in each reader's language) unless the
+        report names it itself (a stack title of a query pack)."""
+        if report_titles.get(key):
+            return report_titles[key]
+        return msg(f"common.domain.{key}") if key in DOMAIN_KEYS else key
     # Определяем доступные домены (включая lt_framework и application_logs, если заданы)
     domain_keys = ["jvm", "database", "kafka", "microservices", "hard_resources"]
     if isinstance(queries.get("lt_framework"), dict):
@@ -2837,7 +2891,7 @@ def uploadFromLLM(
                 domain_data[key] = _empty_domain_payload(key)
                 continue
             _progress(
-                f"Сбор метрик: {title_of(key)} ({collected_count + 1}/{len(collect_keys)})",
+                msg("job.progress.collect", domain=stage_domain(key), index=collected_count + 1, total=len(collect_keys)),
                 _phase_percent(PROGRESS_COLLECT_START, PROGRESS_COLLECT_END, collected_count, len(collect_keys)),
             )
             collected_count += 1
@@ -2866,7 +2920,7 @@ def uploadFromLLM(
 
     storage_cfg = ((cfg.get("storage", {}) or {}).get("timescale") or (CONFIG.get("storage", {}) or {}).get("timescale") or {})
 
-    _progress("Подготовка контекста: ступени нагрузки и baseline", PROGRESS_COLLECT_END)
+    _progress(msg("job.progress.context"), PROGRESS_COLLECT_END)
     shift_hours = _time_shift_hours()
     lt_labeled_all = domain_data.get("lt_framework", {}).get("labeled") or []
     perf_label_early = str(sla_early.get("max_performance_query") or "")
@@ -2961,14 +3015,14 @@ def uploadFromLLM(
                 designated_peak, designated_source_label, designated_series, designated_method, rps_pick.get("reason"),
             )
 
-    _progress("Проверка SLA-критериев", PROGRESS_SLA)
+    _progress(msg("job.progress.sla"), PROGRESS_SLA)
     sla_cfg = copy.deepcopy(sla_early)
-    sla_result = evaluate_sla(domain_data, sla_cfg, test_profile=test_profile)
+    sla_result = evaluate_sla(domain_data, sla_cfg, test_profile=test_profile, lang=lang)
     soak_trends: List[Dict[str, Any]] = []
     if profile.mode == "stability":
         soak_trends = compute_trends(domain_data, sla_cfg, lt_mode_entries.get("hold_window"), anomaly_cfg["step_drift_pct"])
     sla_result = _reconcile_sla_for_test_profile(
-        sla_result, test_profile, flagged_trends=[t["title"] for t in soak_trends if t.get("flagged")],
+        sla_result, test_profile, flagged_trends=[t["title"] for t in soak_trends if t.get("flagged")], lang=lang,
     )
     sla_window = sla_result.get("stable_window") if isinstance(sla_result.get("stable_window"), dict) else None
     if sla_window is not None and peak_performance_applicable and is_capacity_like(profile.mode):
@@ -2992,7 +3046,7 @@ def uploadFromLLM(
     mode_payloads: Dict[str, Any] = {}
     if profile.mode == "stability":
         mode_payloads["stability_under_load"] = build_stability_payload(
-            focus=profile.focus,
+            focus=profile.focus(lang),
             hold=lt_mode_entries.get("hold_window"),
             trends=soak_trends,
             target_check=deterministic_sla.get("target_rps_check"),
@@ -3002,7 +3056,7 @@ def uploadFromLLM(
     elif profile.mode == "spike":
         mode_payloads["spike_analysis"] = build_spike_payload(
             lt_mode_entries.get("spike_profile"),
-            focus=profile.focus,
+            focus=profile.focus(lang),
             target_rps=(deterministic_sla.get("target_rps_check") or {}).get("threshold"),
             sla_summary=deterministic_sla.get("summary"),
         )
@@ -3043,7 +3097,7 @@ def uploadFromLLM(
 
     # Сохранение метрик доменов в TimescaleDB
     if save_to_db:
-        _progress("Сохранение метрик в базу данных", PROGRESS_SAVE_METRICS)
+        _progress(msg("job.progress.save_metrics"), PROGRESS_SAVE_METRICS)
         try:
             for key in domain_keys:
                 if key == APPLICATION_LOGS_DOMAIN:
@@ -3067,39 +3121,34 @@ def uploadFromLLM(
     if only_collect:
         return {}
 
-    prompt_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
-    prompt_jvm = read_prompt_from_file(os.path.join(prompt_dir, "jvm_prompt.txt"))
-    prompt_database = read_prompt_from_file(os.path.join(prompt_dir, "database_prompt.txt"))
-    prompt_kafka = read_prompt_from_file(os.path.join(prompt_dir, "kafka_prompt.txt"))
-    prompt_microservices = read_prompt_from_file(os.path.join(prompt_dir, "microservices_prompt.txt"))
-    prompt_hard_resources = read_prompt_from_file(os.path.join(prompt_dir, "hard_resources_prompt.txt"))
-    prompt_overall = read_prompt_from_file(os.path.join(prompt_dir, "overall_prompt.txt"))
-    prompt_lt_framework = read_prompt_from_file(os.path.join(prompt_dir, "lt_framework_prompt.txt")) if os.path.exists(os.path.join(prompt_dir, "lt_framework_prompt.txt")) else "Проанализируйте метрики инструмента нагрузочного тестирования (lt_framework)."
-    prompt_application_logs = read_prompt_from_file(os.path.join(prompt_dir, "application_logs_prompt.txt")) if os.path.exists(os.path.join(prompt_dir, "application_logs_prompt.txt")) else "Проанализируйте агрегированные ERROR-логи приложений из OpenSearch."
-    _generators_prompt_path = os.path.join(prompt_dir, f"{GENERATORS_DOMAIN}_prompt.txt")
-    prompt_generators = read_prompt_from_file(_generators_prompt_path) if os.path.exists(_generators_prompt_path) else "Проанализируйте ресурсы генераторов нагрузки: не упёрлись ли они в CPU, память или сеть."
-    if isinstance(prompts_override, dict):
-        prompt_jvm = prompts_override.get("jvm", prompt_jvm)
-        prompt_database = prompts_override.get("database", prompt_database)
-        prompt_kafka = prompts_override.get("kafka", prompt_kafka)
-        prompt_microservices = prompts_override.get("microservices", prompt_microservices)
-        prompt_hard_resources = prompts_override.get("hard_resources", prompt_hard_resources)
-        prompt_overall = prompts_override.get("overall", prompt_overall)
-        prompt_lt_framework = prompts_override.get("lt_framework", prompt_lt_framework)
-        prompt_application_logs = prompts_override.get(APPLICATION_LOGS_DOMAIN, prompt_application_logs)
-        prompt_generators = prompts_override.get(GENERATORS_DOMAIN) or prompt_generators
+    # Default prompts in the report language; an override is used only when it is not empty and not a copy
+    # of a default of any language (the settings UI may store the default text it showed).
+    overrides = prompts_override if isinstance(prompts_override, dict) else {}
 
-    context_guide = read_prompt_from_file(os.path.join(prompt_dir, "_context_guide.txt"))
-    response_format = read_prompt_from_file(os.path.join(prompt_dir, "_response_format.txt"))
-    analysis_guidance = build_analysis_guidance(sla_early, active_system_context, profile.test_type or run_test_type)
+    def _prompt_for(domain: str, fname: str) -> str:
+        return effective_override(overrides.get(domain), domain) or load_prompt(fname, lang)
+
+    prompt_jvm = _prompt_for("jvm", "jvm_prompt.txt")
+    prompt_database = _prompt_for("database", "database_prompt.txt")
+    prompt_kafka = _prompt_for("kafka", "kafka_prompt.txt")
+    prompt_microservices = _prompt_for("microservices", "microservices_prompt.txt")
+    prompt_hard_resources = _prompt_for("hard_resources", "hard_resources_prompt.txt")
+    prompt_overall = _prompt_for("overall", "overall_prompt.txt")
+    prompt_lt_framework = _prompt_for("lt_framework", "lt_framework_prompt.txt")
+    prompt_application_logs = _prompt_for(APPLICATION_LOGS_DOMAIN, "application_logs_prompt.txt")
+    prompt_generators = _prompt_for(GENERATORS_DOMAIN, f"{GENERATORS_DOMAIN}_prompt.txt")
+
+    context_guide = load_prompt("_context_guide.txt", lang)
+    response_format = load_prompt("_response_format.txt", lang)
+    analysis_guidance = build_analysis_guidance(sla_early, active_system_context, profile.test_type or run_test_type, lang=lang)
 
     def _domain_prompt(base_text: str, domain: str) -> str:
         return assemble_prompt(
-            _augment_prompt_with_system_context(base_text, system_context_brief),
+            _augment_prompt_with_system_context(base_text, system_context_brief, lang),
             context_guide,
             build_analysis_guidance(
                 sla_early, active_system_context, profile.test_type or run_test_type, domain=domain,
-                stack_notes=_stack_notes(queries.get(domain)),
+                stack_notes=_stack_notes(queries.get(domain)), lang=lang,
             ),
             response_format,
         )
@@ -3168,11 +3217,15 @@ def uploadFromLLM(
     results_map: dict[str, tuple[str, object, dict]] = {}
     jobs_by_key = {k: (p, c) for (k, p, c) in domains_jobs}
     if domains_jobs:
-        _progress(f"Анализ ИИ: {len(domains_jobs)} доменов, ожидание ответов модели", PROGRESS_LLM_START)
+        domain_count = len(domains_jobs)
+        _progress(
+            Msg(plural("job.progress.llm_start", domain_count), "job.progress.llm_start", {"n": domain_count}),
+            PROGRESS_LLM_START,
+        )
         llm_done = 0
         with ThreadPoolExecutor(max_workers=min(domain_workers, len(domains_jobs))) as executor:
             future_to_key = {
-                executor.submit(llm_two_pass_self_consistency, p, c, self_consistency_k, True, k): k
+                executor.submit(contextvars.copy_context().run, llm_two_pass_self_consistency, p, c, self_consistency_k, True, k): k
                 for (k, p, c) in domains_jobs
             }
             for fut in as_completed(future_to_key):
@@ -3189,7 +3242,7 @@ def uploadFromLLM(
                     results_map[key] = ("{}", None, {})
                 llm_done += 1
                 _progress(
-                    f"Анализ ИИ: готово {llm_done}/{len(domains_jobs)} ({title_of(key)})",
+                    msg("job.progress.llm_done", done=llm_done, total=len(domains_jobs), domain=stage_domain(key)),
                     _phase_percent(PROGRESS_LLM_START, PROGRESS_LLM_END, llm_done, len(domains_jobs)),
                 )
 
@@ -3200,7 +3253,7 @@ def uploadFromLLM(
         import time as _time
         logger.info("Retrying %d failed domain(s) sequentially: %s", len(failed_keys), failed_keys)
         for retry_key in failed_keys:
-            _progress(f"Повторный анализ ИИ: {title_of(retry_key)}", PROGRESS_LLM_END)
+            _progress(msg("job.progress.llm_retry", domain=stage_domain(retry_key)), PROGRESS_LLM_END)
             _time.sleep(5)
             prompt_r, ctx_r = jobs_by_key[retry_key]
             try:
@@ -3256,9 +3309,9 @@ def uploadFromLLM(
 
     for k in list(results_map.keys()):
         txt, prs, scr = results_map[k]
-        aligned = _align_domain_verdict_with_sla(txt, _parsed_to_dict(prs), sla_step_ctx)
+        aligned = _align_domain_verdict_with_sla(txt, _parsed_to_dict(prs), sla_step_ctx, lang)
         if aligned is not None:
-            logger.info("Domain '%s' verdict aligned with SLA step: Провал -> Есть риски", k)
+            logger.info("Domain '%s' verdict aligned with SLA step: fail -> risk", k)
             results_map[k] = (aligned[0], aligned[1], scr)
 
     def _result_or_blank(key: str):
@@ -3297,7 +3350,7 @@ def uploadFromLLM(
         .replace("{system_context_brief}", system_context_brief)
     )
     if "{system_context_brief}" not in prompt_overall:
-        merged_prompt_overall = _augment_prompt_with_system_context(merged_prompt_overall, system_context_brief)
+        merged_prompt_overall = _augment_prompt_with_system_context(merged_prompt_overall, system_context_brief, lang)
     merged_prompt_overall = assemble_prompt(merged_prompt_overall, context_guide, analysis_guidance, response_format)
 
     base_ctx = {
@@ -3325,12 +3378,9 @@ def uploadFromLLM(
             "method": designated_method,
             "stable_window": _designated_window_ctx(sla_window if is_capacity_like(profile.mode) else None, shift_hours),
             "note": (
-                f"Для теста «{profile.label_ru}» peak_performance не применяется. {profile.focus}"
+                prompt_text("peak.not_applicable", lang, test=profile.label(lang), focus=profile.focus(lang))
                 if not peak_performance_applicable
-                else (
-                    "ЕДИНСТВЕННЫЙ источник peak_performance.max_rps. "
-                    "НЕ использовать RPS из домена microservices для определения максимальной производительности системы."
-                )
+                else prompt_text("peak.designated", lang)
             ),
         },
         "deterministic_sla": deterministic_sla,
@@ -3367,7 +3417,7 @@ def uploadFromLLM(
         base_ctx["domains_tables_markdown"][APPLICATION_LOGS_DOMAIN] = application_logs_full_data
     overall_ctx = json.dumps(_compact_overall_context(base_ctx), ensure_ascii=False)
     logger.info("Final LLM context size: %d chars", len(overall_ctx))
-    _progress("Итоговый анализ ИИ по всем доменам", PROGRESS_FINAL_LLM)
+    _progress(msg("job.progress.final_llm"), PROGRESS_FINAL_LLM)
     try:
         with usage_domain("final"):
             final_answer, final_parsed, final_score = llm_two_pass_self_consistency(
@@ -3389,9 +3439,9 @@ def uploadFromLLM(
         and final_verification.unverified > 0
         and _cfg_bool(llm_cfg.get("verification_pass"), default=True)
     ):
-        _progress("Верификационный проход: вердикт по подтверждённым находкам", PROGRESS_FINAL_LLM)
+        _progress(msg("job.progress.verification"), PROGRESS_FINAL_LLM)
         try:
-            revised = _run_verification_pass(final_parsed, base_ctx, prompt_dir)
+            revised = _run_verification_pass(final_parsed, base_ctx, lang)
         except Exception as exc:
             logger.error("Verification pass failed, keeping the flagged final analysis: %s", exc)
             revised = None
@@ -3421,6 +3471,7 @@ def uploadFromLLM(
 
     final_payload = _to_dict_maybe(final_parsed) or _extract_json_obj(final_answer)
     if isinstance(final_payload, dict):
+        final_payload["report_language"] = lang
         final_payload["test_profile"] = test_profile
         final_payload["deterministic_sla"] = deterministic_sla
         if report_titles:
@@ -3430,11 +3481,11 @@ def uploadFromLLM(
         for payload_key, payload_value in mode_payloads.items():
             final_payload[payload_key] = payload_value
         if not peak_performance_applicable:
+            # ``reason`` names why; no prose note (nobody read it and it tied the payload to one language).
             final_payload["peak_performance"] = {
                 "not_applicable": True,
                 "reason": peak_not_applicable_reason,
                 "method": None,
-                "note": f"Для теста «{profile.label_ru}» максимальная производительность не рассчитывается.",
             }
         elif designated_peak is not None:
             peak_obj = final_payload.get("peak_performance")
@@ -3452,17 +3503,15 @@ def uploadFromLLM(
                 peak_obj["source_label"] = str(designated_source_label)
             final_payload["peak_performance"] = peak_obj
         if isinstance(sla_result, dict) and sla_result.get("verdict"):
-            sla_verdict = str(sla_result["verdict"])
-            original_verdict = str(final_payload.get("verdict") or "")
+            # The final verdict is the SLA one (a code); the model's verdict stays only in the rationale.
+            sla_verdict = to_code(sla_result["verdict"])
+            original_verdict = to_code(final_payload.get("verdict"))
             final_payload["verdict"] = sla_verdict
-            if sla_verdict == "Есть риски" and original_verdict == "Провал":
+            if sla_verdict == RISK and original_verdict == FAIL:
                 rationale = str(final_payload.get("verdict_rationale") or "").strip()
-                correction = (
-                    f"Итоговый вердикт скорректирован по deterministic_sla: для теста «{profile.label_ru}» "
-                    "ресурсные превышения CPU/memory считаются рисками, а не самостоятельным провалом, "
-                    "если primary SLA по target RPS, error rate и latency не нарушены."
-                )
+                correction = prompt_text("verdict.final_adjusted", lang, test=profile.label(lang))
                 final_payload["verdict_rationale"] = f"{correction}\n\n{rationale}" if rationale else correction
+                final_payload["verdict_adjusted_from"] = FAIL
         final_parsed = final_payload
         try:
             trimmed = (final_answer or "").strip()
@@ -3477,18 +3526,22 @@ def uploadFromLLM(
             return f"{full_md}\n\n{header}\n{analysis}"
         return analysis
 
+    def _header(domain: str) -> str:
+        return prompt_text(f"result_header.{domain}", lang)
+
     results = {
-        "jvm": _compose_text(jvm_full_data, "Анализ JVM:", answer_jvm),
-        "database": _compose_text(database_full_data, "Анализ Database:", answer_database),
-        "kafka": _compose_text(kafka_full_data, "Анализ Kafka:", answer_kafka),
-        "ms": _compose_text(ms_full_data, "Анализ микросервисов:", answer_ms),
-        "hard_resources": _compose_text(hr_full_data, "Анализ ресурсов (CPU/MEM/Disk):", answer_hr),
+        "report_language": lang,
+        "jvm": _compose_text(jvm_full_data, _header("jvm"), answer_jvm),
+        "database": _compose_text(database_full_data, _header("database"), answer_database),
+        "kafka": _compose_text(kafka_full_data, _header("kafka"), answer_kafka),
+        "ms": _compose_text(ms_full_data, _header("microservices"), answer_ms),
+        "hard_resources": _compose_text(hr_full_data, _header("hard_resources"), answer_hr),
         "lt_framework": answer_lt,
         **({
-            APPLICATION_LOGS_DOMAIN: _compose_text(application_logs_full_data, "Анализ логов приложений:", answer_application_logs),
+            APPLICATION_LOGS_DOMAIN: _compose_text(application_logs_full_data, _header("application_logs"), answer_application_logs),
         } if APPLICATION_LOGS_DOMAIN in domain_keys else {}),
         **({
-            GENERATORS_DOMAIN: _compose_text(generators_full_data, "Анализ ресурсов генераторов нагрузки:", answer_generators),
+            GENERATORS_DOMAIN: _compose_text(generators_full_data, _header("lt_generators"), answer_generators),
             f"{GENERATORS_DOMAIN}_parsed": _to_dict_maybe(generators_parsed),
         } if GENERATORS_DOMAIN in domain_keys else {}),
         "final": final_answer,
@@ -3527,7 +3580,7 @@ def uploadFromLLM(
 
     # Сохранение LLM результатов в отдельную таблицу (если включено)
     if save_to_db:
-        _progress("Сохранение результатов анализа", PROGRESS_SAVE_RESULTS)
+        _progress(msg("job.progress.save_results"), PROGRESS_SAVE_RESULTS)
         try:
             save_llm_results(
                 results=results,
@@ -3558,7 +3611,7 @@ def label_dataframes(dfs: List[pd.DataFrame], labels: List[str]) -> List[Dict[st
         ValueError: Если количество таблиц и подписей различается.
     """
     if len(dfs) != len(labels):
-        raise ValueError("Количество DataFrame и количество меток не совпадает!")
+        raise CollectionShapeError("job.error.frames_labels_mismatch")
     labeled_list = []
     for df, label in zip(dfs, labels):
         labeled_list.append({

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Live charts of a running test: windows, reads of new points only, instances, events, SLA lines, and the
 live-only rows that reports do not read."""
 
@@ -223,11 +224,28 @@ def test_live_rows_are_read_at_the_same_time(monkeypatch):
     assert "p95 source timed out" in snapshot["message"]  # the failed row is reported, the others arrive
 
 
-def test_run_page_shows_a_spinner_until_the_first_live_read():
-    page = (ROOT_DIR / "templates" / "launch_run.html").read_text(encoding="utf-8")
+@pytest.fixture
+def page_client(monkeypatch, tmp_path):
+    import update_page
+    from app import create_app
+    from loadlens_app import core
+
+    monkeypatch.setattr(core, "CONFIG_RUNTIME_PATH", tmp_path / "settings_runtime.json")
+    monkeypatch.setattr(core, "METRICS_RUNTIME_PATH", tmp_path / "metrics_config_runtime.json")
+    monkeypatch.setattr(update_page, "_SETTINGS_RUNTIME_PATH", tmp_path / "settings_runtime.json")
+    app = create_app()
+    app.config["TESTING"] = True
+    return app.test_client()
+
+
+def test_run_page_shows_a_spinner_until_the_first_live_read(page_client):
+    page = page_client.get("/launch/abc").get_data(as_text=True)
     script = (ROOT_DIR / "static" / "js" / "launch_run.js").read_text(encoding="utf-8")
     assert 'class="charts-grid is-loading" id="liveCharts" aria-busy="true"' in page
-    assert ".charts-grid.is-loading .chart-box::before" in page and "Загружаем метрики…" in page
+    assert ".charts-grid.is-loading .chart-box::before" in page
+    # The text under the spinner is the dictionary text in an attribute of every chart box (CSS attr()).
+    assert "content: attr(data-loading-text)" in page
+    assert page.count('data-loading-text="Загружаем метрики…"') == 3
     assert "prefers-reduced-motion" in page
     # The spinner is shown for the first read of a window and removed after a render or a failure.
     assert "if (firstRead) setLiveLoading(true);" in script

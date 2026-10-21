@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Pure helpers of the stage 4 forms (ui-plan section 4) run under node: the service picker, the test
 window chips and progress timing of the new report form, the launch form instance cards and the project
 readiness checklist."""
@@ -224,7 +225,11 @@ def test_readiness_list_markup():
     readiness = dict(FULL, target_rps=None, performance_query="", has_system_context=False, query_counts={},
                      query_packs=[{"title": "k6", "outdated": True}])
     html = run_js(PROJECTS, f"{PROJECTS_INTERNALS}.readinessList({{id: 'a\"b', readiness: {_js(readiness)}}})")
-    assert "Настроено 2 из 6" in html and 'aria-valuenow="2"' in html and "width:33%" in html
+    assert "Настроено 2 из 6" in html and 'aria-valuenow="2"' in html
+    # Squares instead of a bar: one per point, the points done first; a square before every point.
+    assert 'class="readiness-squares" role="progressbar"' in html and "readiness-bar" not in html and "width:" not in html
+    assert html.count('<i class="ok"></i>') == 2 and html.count("<i></i>") == 4
+    assert html.count('<span class="sq ok" aria-hidden="true"></span>') == 2 and html.count('<span class="sq warn" aria-hidden="true"></span>') == 4
     assert 'href="#sla:sla-val-target_rps"' in html and 'data-link="queries:addFromPackBtn"' in html
     assert 'data-project="a&quot;b"' in html and 'data-action="goto"' in html
     assert html.count("readiness-item is-ok") == 2 and html.count("readiness-item is-todo") == 4

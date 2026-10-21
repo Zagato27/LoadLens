@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Types shared by the executors: what to launch, what a probe says, what a generator check found."""
 
 from __future__ import annotations
@@ -5,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol
 
+from ..messages import LtError
 from ..tools import CommandLine, ToolTemplate
 
 LOG_TAIL_BYTES = 64 * 1024
@@ -14,8 +16,12 @@ SCRIPT_LIST_LIMIT = 500
 SKIPPED_DIRS = ("node_modules", ".git", "target", "build", ".venv", "venv", "__pycache__", "results")
 
 
-class GeneratorError(RuntimeError):
-    """The generator cannot be reached or refused an operation; the message is for the user."""
+class GeneratorError(LtError, RuntimeError):
+    """The generator cannot be reached or refused an operation; the message is for the user.
+
+    ``GeneratorError("lt.some.key", name=value)`` is a dictionary message (rendered in the reader's language, kept
+    with its key when the watcher stores it); any other text (third-party, tests) is shown as it is.
+    """
 
 
 @dataclass(frozen=True)
@@ -57,6 +63,7 @@ class LaunchResult:
     already_running: bool = False
     # Where people can see it: the GitLab pipeline or the Jenkins build page.
     url: str = ""
+    # A dictionary message (``msg``) keeps its key in the stored instance message; plain text is shown as it is.
     message: str = ""
 
 
@@ -67,7 +74,7 @@ class Probe:
     ``state``: ``starting`` (accepted, the tool has not started yet), ``running``, ``exited`` (exit code
     known, may be ``None`` when the platform does not report one), ``dead`` (gone without an exit code)
     or ``missing`` (nothing left on the generator). ``message`` explains waiting states, e.g. an image
-    that cannot be pulled.
+    that cannot be pulled: a dictionary message (``msg``) or the platform's own text.
     """
 
     state: str

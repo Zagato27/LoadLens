@@ -1,0 +1,23 @@
+{
+  "charts.legend.all": "All",
+  "charts.legend.all_title": "Show all series",
+  "charts.legend.average": "Average: {value}",
+  "charts.legend.chip_aria": "{name}, average {avg}",
+  "charts.legend.chip_title": "{name} — average {avg}",
+  "charts.legend.empty": "Nothing found",
+  "charts.legend.none": "None",
+  "charts.legend.none_title": "Hide all series",
+  "charts.legend.png_title": "Download the chart with its legend as PNG",
+  "charts.legend.search_aria": "Find a series by name",
+  "charts.legend.search_placeholder": "Find a series",
+  "charts.legend.series_aria": "Chart series: click to hide or show",
+  "charts.legend.series_n": "Series {n}",
+  "charts.legend.title": "Legend",
+  "charts.legend.tools_aria": "Legend controls",
+  "charts.profile.aria.one": "Load profile: {n} step, peak {max} RPS",
+  "charts.profile.aria.other": "Load profile: {n} steps, peak {max} RPS",
+  "charts.profile.sla": "SLA",
+  "charts.profile.sla_step": "SLA · step {index}",
+  "charts.profile.target": "{value} · target",
+  "charts.tooltip.more": "{n} more"
+}

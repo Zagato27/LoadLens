@@ -1,12 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
 // Searchable service picker of the new report and launch forms (templates/index.html, launch.html).
 // Options come from GET /services and are filtered locally. Recently used services (LL.prefs
-// "recentServices": ids, newest first, up to five) are listed first with the meta «недавно». The chosen
+// "recentServices": ids, newest first, up to five) are listed first with the meta «recent». The chosen
 // id is mirrored into a hidden input (with a "change" event), so the form code reads it as before.
 (function () {
   const LL = window.LoadLens = window.LoadLens || {};
   const RECENT_KEY = 'recentServices';
   const RECENT_MAX = 5;
-  const PLACEHOLDER = 'Начните вводить название сервиса';
 
   function normalizeServices(list) {
     const seen = new Set();
@@ -35,7 +35,7 @@
     const option = (svc, isRecent) => ({
       value: svc.id,
       label: svc.title,
-      meta: [isRecent ? 'недавно' : '', svc.title !== svc.id ? svc.id : ''].filter(Boolean).join(' · ')
+      meta: [isRecent ? LL.t('picker.recent') : '', svc.title !== svc.id ? svc.id : ''].filter(Boolean).join(' · ')
     });
     return first.map((svc) => option(svc, true)).concat(rest.map((svc) => option(svc, false)));
   }
@@ -69,8 +69,8 @@
     let silent = false;
     let fromUser = true;
     const cb = LL.ui.combobox(opts.host, {
-      placeholder: 'Загрузка списка сервисов…',
-      emptyText: 'Сервис не найден',
+      placeholder: LL.t('picker.loading'),
+      emptyText: LL.t('picker.not_found'),
       debounceMs: 80,
       fetchOptions: async (query) => {
         const item = cb.getItem();
@@ -86,7 +86,7 @@
     });
     const input = cb.input;
     if (opts.inputId) input.id = opts.inputId;
-    input.setAttribute('aria-label', opts.label || 'Сервис');
+    input.setAttribute('aria-label', opts.label || LL.t('picker.label'));
     if (opts.describedBy) input.setAttribute('aria-describedby', opts.describedBy);
     input.disabled = true;
 
@@ -133,16 +133,16 @@
         payload = await resp.json().catch(() => ({}));
         if (!resp.ok) throw new Error(payload.error || payload.message || `HTTP ${resp.status}`);
       } catch (e) {
-        input.placeholder = 'Сервисы не загрузились';
+        input.placeholder = LL.t('picker.load_failed');
         throw e;
       }
       services = normalizeServices(payload && payload.services);
       if (!services.length) {
-        input.placeholder = 'Нет настроенных сервисов';
+        input.placeholder = LL.t('picker.empty');
         return services;
       }
       input.disabled = false;
-      input.placeholder = opts.placeholder || PLACEHOLDER;
+      input.placeholder = opts.placeholder || LL.t('picker.placeholder');
       const wanted = (opts.selected && services.find((s) => s.id === opts.selected)) || (services.length === 1 ? services[0] : null);
       if (wanted) setValue(wanted.id, { silent: true });
       return services;

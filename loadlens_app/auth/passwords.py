@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Password hashing and policy."""
 
 from __future__ import annotations
@@ -6,6 +7,8 @@ import hashlib
 import threading
 
 from werkzeug.security import check_password_hash, generate_password_hash
+
+from AI.i18n import t
 
 MAX_PASSWORD_LENGTH = 256
 _COMMON_PASSWORDS = frozenset(
@@ -65,16 +68,16 @@ def burn_time(password: str) -> None:
 def validate_password(password: object, *, username: str = "", min_length: int = 10) -> str:
     """Returns the password when acceptable, otherwise raises PasswordPolicyError."""
     if not isinstance(password, str) or not password:
-        raise PasswordPolicyError("Укажите пароль")
+        raise PasswordPolicyError(t("auth.server.password.required"))
     if not password.strip():
-        raise PasswordPolicyError("Пароль не может состоять только из пробелов")
+        raise PasswordPolicyError(t("auth.server.password.blank"))
     if len(password) < min_length:
-        raise PasswordPolicyError(f"Пароль должен содержать не менее {min_length} символов")
+        raise PasswordPolicyError(t("auth.server.password.too_short", min_length=min_length))
     if len(password) > MAX_PASSWORD_LENGTH:
-        raise PasswordPolicyError(f"Пароль не должен быть длиннее {MAX_PASSWORD_LENGTH} символов")
+        raise PasswordPolicyError(t("auth.server.password.too_long", max_length=MAX_PASSWORD_LENGTH))
     lowered = password.lower()
     if len(username) >= 3 and username.lower() in lowered:
-        raise PasswordPolicyError("Пароль не должен содержать имя пользователя")
+        raise PasswordPolicyError(t("auth.server.password.contains_username"))
     if lowered in _COMMON_PASSWORDS or len(set(password)) == 1:
-        raise PasswordPolicyError("Слишком простой пароль, выберите другой")
+        raise PasswordPolicyError(t("auth.server.password.too_simple"))
     return password

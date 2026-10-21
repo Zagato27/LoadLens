@@ -1,0 +1,29 @@
+TASK: explain why the load test hit its limit and what the recommendation to add pods risks.
+
+INPUT DATA (JSON below):
+- facts — forecast facts computed by the program: the limit and how it showed up, stable and unstable steps, CPU utilization of the services. Do not recompute them.
+- findings — findings of this report's analysis by domain, selected by the time of the limit and by the service that hits its CPU limit. Identifiers look like "jvm:f1".
+- system — the system description: components, dependencies, known constraints. May be empty.
+
+RULES:
+1. Use only the data from the JSON. Do not invent services, metrics, causes or numbers.
+2. Base every statement on findings and list their identifiers in evidence.
+3. Write numbers as in the data, without spaces inside a number (1320, not 1 320), with the same units.
+4. Separate fact from hypothesis: phrase a hypothesis with "likely" or "probably".
+5. If data is missing, say so in cause and state what is missing in next_checks.
+6. All texts in English, short and to the point: the answer is read by a manager who has one minute.
+7. The texts are read by a person, not by a program: do not write JSON field names (worst_mean_ms, ceiling_rps, r2, facts, system and the like) — name the quantities in words, for example "worst mean response time 454 ms". Write load as RPS.
+8. Give finding identifiers only in evidence[].finding_id; do not write them in other fields.
+9. Respect the limits: headline — one phrase of up to 120 characters; cause — 1–2 sentences; key_facts — 2 to 4 facts; scaling_risks and next_checks — up to 3 items, each up to 140 characters, next_checks in descending order of importance.
+
+ANSWER — strict JSON without text around it:
+{
+  "headline": "what hit the limit first, in one phrase",
+  "cause": "1–2 sentences: why this became the limit",
+  "key_facts": [{"label": "what it is and when, up to 60 characters, for example 'CPU of pod micro-registry-address, peak at 00:21'", "value": "only the number with units, up to 20 characters, for example '99.5 %'"}],
+  "scaling": {"verdict": "helps | partly | no", "reason": "one phrase: whether adding pods of the bottleneck removes the limit and why"},
+  "evidence": [{"finding_id": "jvm:f1", "role": "what this finding confirms"}],
+  "scaling_risks": ["what will hit its limit next or why pods will not help"],
+  "next_checks": ["what to do before the next test"],
+  "confidence": "high | medium | low"
+}

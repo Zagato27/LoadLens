@@ -1,15 +1,49 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Template flow of the Confluence report: copy the user's template page and fill its placeholders.
+
+The template page belongs to the user and is not translated. The texts this module inserts (tables, labels,
+the « - отчет » title suffix) are rendered in the current locale; ``update_page.update_report`` runs them in the
+language of the report (the ``lang`` argument of the renderers, or a ``with_locale`` scope).
+
+Results are codes, never Russian status texts: :func:`update_confluence_page` returns :data:`STATUS_OK` or raises
+:class:`TemplateUpdateError`; :func:`update_confluence_page_multi` returns one of the ``STATUS_*`` codes.
+"""
+
 import base64
 import requests
 import pandas as pd
 import json
 from bs4 import BeautifulSoup
 from atlassian import Confluence
+from contextlib import nullcontext
 from datetime import datetime
 from getpass import getpass
 from html import escape
 
 from requests.auth import HTTPBasicAuth
 import re
+
+from AI.i18n import LocalizedError, get_locale, t, with_locale
+from AI.verdicts import label as verdict_label, tone as verdict_tone
+
+# Results of the placeholder updates (compared by callers instead of message texts).
+STATUS_OK = "ok"
+STATUS_NO_REPLACEMENTS = "no_replacements"
+STATUS_LOAD_FAILED = "load_failed"
+STATUS_UPDATE_FAILED = "update_failed"
+
+
+class TemplateUpdateError(LocalizedError, RuntimeError):
+    """A placeholder of the template page could not be replaced; ``str()`` renders in the current locale."""
+
+
+class PlaceholderNotFoundError(TemplateUpdateError):
+    """The template page has no such placeholder."""
+
+
+def _in_locale(lang):
+    """Scope of ``lang`` for the renderers, or no change when it is not given."""
+    return with_locale(lang) if lang else nullcontext()
 
 
 
@@ -41,7 +75,7 @@ def copy_confluence_page(url, username, password ,page_id, page_parent_id):
     # Создаем новую страницу
     new_page = {
         "type": "page",
-        "title": page["title"] + " - отчет " + str(date),
+        "title": t("confluence.template.page_title", title=page["title"], date=str(date)),
         "space": {
             "key": page["space"]["key"]
         },
@@ -127,7 +161,7 @@ def update_confluence_page(url, username, password, page_id, data_to_find, repla
         page = confluence.get_page_by_id(page_id, expand='body.storage,history,space,version')
     except Exception as e:
         print(f"Ошибка при загрузке страницы: {e}")
-        return
+        raise TemplateUpdateError("confluence.template.load_failed", page=page_id, error=str(e)) from e
     
     # Преобразуем replace_text в строку, если это не строка
     replace_content = str(replace_text) if not isinstance(replace_text, str) else replace_text
@@ -138,7 +172,7 @@ def update_confluence_page(url, username, password, page_id, data_to_find, repla
     # Проверка наличия плейсхолдера перед заменой
     if data_to_find not in original_html:
         print(f"ВНИМАНИЕ: Плейсхолдер '{data_to_find}' не найден на странице!")
-        return "Плейсхолдер не найден"
+        raise PlaceholderNotFoundError("confluence.template.placeholder_missing", placeholder=data_to_find, page=page_id)
     
     modified_html, _ = _replace_placeholder_storage(original_html, str(data_to_find), replace_content)
     
@@ -153,20 +187,26 @@ def update_confluence_page(url, username, password, page_id, data_to_find, repla
             minor_edit=True
         )
         print("Страница успешно обновлена.")
-        return "Успешно"
+        return STATUS_OK
     except Exception as e:
         print(f"Ошибка при обновлении страницы: {e}")
-        return f"Ошибка: {e}"
+        raise TemplateUpdateError("confluence.template.update_failed", page=page_id, error=str(e)) from e
 
 
-def render_llm_report_placeholders(report: dict) -> dict:
+def render_llm_report_placeholders(report: dict, lang: str | None = None) -> dict:
     """Формирует словарь {placeholder: html} с фолбэками из структурированного отчёта LLM.
     Ожидается структура {verdict, confidence, findings[], recommended_actions[]}.
     При отсутствии полей подставляются безопасные значения.
     """
+    with _in_locale(lang):
+        return _llm_report_placeholders(report)
+
+
+def _llm_report_placeholders(report: dict) -> dict:
     safe = lambda x: str(x).strip() if x is not None else ""
 
-    verdict = safe((report or {}).get("verdict") or "нет данных")
+    raw_verdict = (report or {}).get("verdict")
+    verdict = verdict_label(raw_verdict, get_locale()) if safe(raw_verdict) else t("confluence.template.no_data")
     conf_val = (report or {}).get("confidence")
     confidence_str = f"{int(conf_val * 100)}%" if isinstance(conf_val, (int, float)) else "—"
 
@@ -192,7 +232,7 @@ def render_llm_report_placeholders(report: dict) -> dict:
             s = safe(f)
             if s:
                 items.append(f"<li>{s}</li>")
-    findings_html = "<ul>" + "".join(items) + "</ul>" if items else "<em>Нет существенных находок</em>"
+    findings_html = "<ul>" + "".join(items) + "</ul>" if items else f"<em>{escape(t('confluence.template.no_findings'))}</em>"
 
     actions = (report or {}).get("recommended_actions") or (report or {}).get("actions") or []
     aitems = []
@@ -200,12 +240,15 @@ def render_llm_report_placeholders(report: dict) -> dict:
         s = safe(a)
         if s:
             aitems.append(f"<li>{s}</li>")
-    actions_html = "<ul>" + "".join(aitems) + "</ul>" if aitems else "<em>Нет рекомендаций</em>"
+    actions_html = "<ul>" + "".join(aitems) + "</ul>" if aitems else f"<em>{escape(t('confluence.template.no_actions'))}</em>"
 
     affected = (report or {}).get("affected_components") or []
     affected_html = ""
     if affected:
-        affected_html = "<p><strong>Затронутые компоненты:</strong> " + ", ".join([f"<code>{safe(a)}</code>" for a in affected]) + "</p>"
+        affected_html = (
+            f"<p><strong>{escape(t('confluence.affected_components'))}:</strong> "
+            + ", ".join([f"<code>{safe(a)}</code>" for a in affected]) + "</p>"
+        )
 
     return {
         "${LLM_VERDICT}": f"<strong>{verdict}</strong>",
@@ -305,20 +348,21 @@ def _render_rich_text(text: object) -> str:
     return "".join(parts)
 
 
+# Pill colours by verdict tone (AI.verdicts.TONES).
+_VERDICT_PILL_STYLES = {
+    "ok": "background:#e3fcef;color:#006644;border:1px solid #57d9a3;",
+    "warn": "background:#fff7d6;color:#974f0c;border:1px solid #ffab00;",
+    "fail": "background:#ffebe6;color:#bf2600;border:1px solid #ff7452;",
+    "na": "background:#f4f5f7;color:#42526e;border:1px solid #dfe1e6;",
+}
+
+
 def _verdict_pill(verdict: object) -> str:
-    text = _safe_text(verdict) or "Недостаточно данных"
-    lower = text.lower()
-    if "усп" in lower:
-        style = "background:#e3fcef;color:#006644;border:1px solid #57d9a3;"
-    elif "риск" in lower:
-        style = "background:#fff7d6;color:#974f0c;border:1px solid #ffab00;"
-    elif "провал" in lower or "fail" in lower:
-        style = "background:#ffebe6;color:#bf2600;border:1px solid #ff7452;"
-    else:
-        style = "background:#f4f5f7;color:#42526e;border:1px solid #dfe1e6;"
+    """Pill with the label of a verdict (a code, an old label or free text) in the colour of its tone."""
+    style = _VERDICT_PILL_STYLES[verdict_tone(verdict)]
     return (
         f"<span style=\"display:inline-block;padding:4px 10px;border-radius:12px;"
-        f"font-weight:600;{style}\">{_html(text)}</span>"
+        f"font-weight:600;{style}\">{_html(verdict_label(verdict, get_locale()))}</span>"
     )
 
 
@@ -347,12 +391,12 @@ def _render_rationale_box(report: dict) -> str:
         (report or {}).get("verdict_rationale")
         or (report or {}).get("verdict_reason")
         or (report or {}).get("rationale")
-        or "Нет пояснения."
+        or t("confluence.template.no_rationale")
     )
     return (
         "<div style=\"border:1px solid #b3d4ff;border-left:4px solid #2684ff;"
         "background:#f4f9ff;border-radius:8px;padding:10px 12px;margin:8px 0 14px 0;\">"
-        "<p style=\"margin:0 0 6px 0;\"><strong>Обоснование вердикта</strong></p>"
+        f"<p style=\"margin:0 0 6px 0;\"><strong>{_html(t('report.rationale.title'))}</strong></p>"
         f"{_render_rich_text(text)}"
         "</div>"
     )
@@ -463,6 +507,23 @@ def _pair_findings_with_actions(findings: object, actions: object) -> list[dict]
     return rows
 
 
+def _evidence_text(evidence: dict) -> str:
+    """``metric | value: … | threshold: … | note`` of one evidence item, in the current locale."""
+    observed = _safe_text(evidence.get("observed_value") or evidence.get("value") or evidence.get("actual"))
+    threshold = _safe_text(evidence.get("threshold") or evidence.get("limit") or evidence.get("baseline"))
+    bits = [
+        _safe_text(evidence.get("metric") or evidence.get("name") or evidence.get("label")),
+        t("report.evidence.value", value=observed) if observed else "",
+        t("report.evidence.threshold", value=threshold) if threshold else "",
+        _safe_text(evidence.get("note") or evidence.get("details") or evidence.get("evidence")),
+    ]
+    return " | ".join([bit for bit in bits if bit])
+
+
+def _no_recommendation_html() -> str:
+    return f"<em>{_html(t('report.findings.no_recommendation'))}</em>"
+
+
 def _render_evidence(item: dict) -> str:
     evidence_summary = _safe_text(item.get("evidence_summary") or item.get("evidence"))
     evidence_items = _as_list(item.get("evidence_items") or item.get("evidence_list") or item.get("evidence_rows"))
@@ -472,15 +533,7 @@ def _render_evidence(item: dict) -> str:
     bullets: list[str] = []
     for evidence in evidence_items:
         if isinstance(evidence, dict):
-            bits = [
-                _safe_text(evidence.get("metric") or evidence.get("name") or evidence.get("label")),
-                f"значение: {_safe_text(evidence.get('observed_value') or evidence.get('value') or evidence.get('actual'))}"
-                if _safe_text(evidence.get("observed_value") or evidence.get("value") or evidence.get("actual")) else "",
-                f"порог: {_safe_text(evidence.get('threshold') or evidence.get('limit') or evidence.get('baseline'))}"
-                if _safe_text(evidence.get("threshold") or evidence.get("limit") or evidence.get("baseline")) else "",
-                _safe_text(evidence.get("note") or evidence.get("details") or evidence.get("evidence")),
-            ]
-            text = " | ".join([b for b in bits if b])
+            text = _evidence_text(evidence)
         else:
             text = _safe_text(evidence)
         if text:
@@ -492,16 +545,16 @@ def _render_evidence(item: dict) -> str:
 
 def _render_problem(problem: object) -> str:
     if not isinstance(problem, dict):
-        text = _safe_text(problem) or "Нет существенных проблем."
+        text = _safe_text(problem) or t("report.findings.no_problems")
         return f"<div><strong>{_html(text)}</strong></div>"
     summary = _safe_text(problem.get("summary") or problem.get("title") or problem.get("text")) or "—"
     meta = []
     severity = _safe_text(problem.get("severity"))
     component = _safe_text(problem.get("component"))
     if severity:
-        meta.append(("Критичность", severity))
+        meta.append((t("report.finding.severity"), severity))
     if component:
-        meta.append(("Компонент", component))
+        meta.append((t("report.finding.component"), component))
     meta_html = ""
     if meta:
         chips = "".join(
@@ -523,7 +576,7 @@ def _render_problem(problem: object) -> str:
 def _render_action(action: object) -> str:
     if not isinstance(action, dict):
         text = _safe_text(action)
-        return f"<div>{_html(text) if text else '<em>Нет рекомендации.</em>'}</div>"
+        return f"<div>{_html(text) if text else _no_recommendation_html()}</div>"
     summary = _safe_text(action.get("summary") or action.get("action") or action.get("text")) or "—"
     details = _render_rich_text(
         action.get("details") or action.get("description") or action.get("implementation_details")
@@ -538,7 +591,7 @@ def _render_action(action: object) -> str:
 
 def _render_actions(actions: list) -> str:
     if not actions:
-        return "<em>Нет рекомендации.</em>"
+        return _no_recommendation_html()
     return "".join(
         f"<div style=\"margin-bottom:10px;\">{_render_action(action)}</div>"
         for action in actions
@@ -559,7 +612,7 @@ def _render_problem_recommendation_table(report: dict) -> str:
     )
     body = []
     for row in rows:
-        problem_html = _render_problem(row.get("problem")) if row.get("problem") else "<em>Нет существенных проблем.</em>"
+        problem_html = _render_problem(row.get("problem")) if row.get("problem") else f"<em>{_html(t('report.findings.no_problems'))}</em>"
         action_html = _render_actions(row.get("actions") or [])
         body.append(
             "<tr>"
@@ -568,12 +621,12 @@ def _render_problem_recommendation_table(report: dict) -> str:
             "</tr>"
         )
     return (
-        "<h4>Проблемы и рекомендации</h4>"
+        f"<h4>{_html(t('report.findings.title'))}</h4>"
         "<table style=\"width:100%;border-collapse:separate;border-spacing:0;"
         "border:1px solid #dfe1e6;border-radius:8px;margin:8px 0 14px 0;\">"
         "<thead><tr>"
-        "<th style=\"text-align:left;background:#f4f5f7;border:1px solid #dfe1e6;padding:8px;\">Проблемы</th>"
-        "<th style=\"text-align:left;background:#f4f5f7;border:1px solid #dfe1e6;padding:8px;\">Рекомендации по устранению</th>"
+        f"<th style=\"text-align:left;background:#f4f5f7;border:1px solid #dfe1e6;padding:8px;\">{_html(t('report.findings.problems'))}</th>"
+        f"<th style=\"text-align:left;background:#f4f5f7;border:1px solid #dfe1e6;padding:8px;\">{_html(t('report.findings.recommendations'))}</th>"
         "</tr></thead>"
         f"<tbody>{''.join(body)}</tbody></table>"
     )
@@ -584,23 +637,32 @@ def _peak_section_applies(domain: str | None) -> bool:
     return domain is None or domain in {"final", "lt_framework"}
 
 
-def render_llm_markdown(report: dict, domain: str | None = None) -> str:
-    """Возвращает Markdown для Confluence Markdown macro."""
+def _md_table_head() -> str:
+    return f"| {_md(t('confluence.template.col_param'))} | {_md(t('confluence.template.col_value'))} |"
+
+
+def render_llm_markdown(report: dict, domain: str | None = None, lang: str | None = None) -> str:
+    """Возвращает Markdown для Confluence Markdown macro (тексты — на языке ``lang`` или текущей локали)."""
+    with _in_locale(lang):
+        return _llm_markdown(report, domain)
+
+
+def _llm_markdown(report: dict, domain: str | None) -> str:
     report = report if isinstance(report, dict) else {}
     peak = report.get("peak_performance") or report.get("peak_perfomance") or {}
     peak = peak if isinstance(peak, dict) else {}
 
     lines: list[str] = [
-        "| Параметр | Значение |",
+        _md_table_head(),
         "|---|---:|",
-        f"| Вердикт по тесту | **{_md_cell(report.get('verdict') or 'Недостаточно данных')}** |",
+        f"| {_md_cell(t('report.hero.verdict_title'))} | **{_md_cell(verdict_label(report.get('verdict'), get_locale()))}** |",
         "",
-        "#### Обоснование вердикта",
+        f"#### {t('report.rationale.title')}",
         _md_rich_text(
             report.get("verdict_rationale")
             or report.get("verdict_reason")
             or report.get("rationale")
-            or "Нет пояснения."
+            or t("confluence.template.no_rationale")
         ),
         "",
     ]
@@ -610,32 +672,32 @@ def render_llm_markdown(report: dict, domain: str | None = None) -> str:
         pass
     elif section is not None:
         title, rows = section
-        lines.extend([f"#### {title}", "| Параметр | Значение |", "|---|---:|"])
+        lines.extend([f"#### {title}", _md_table_head(), "|---|---:|"])
         lines.extend(f"| {_md_cell(label)} | {_md_cell(value)} |" for label, value in rows)
         lines.append("")
     elif any(peak.get(key) not in (None, "") for key in ("max_rps", "max_time", "drop_time")):
         lines.extend([
-            "#### Пиковая производительность",
-            "| Параметр | Значение |",
+            f"#### {t('report.structured.peak_title')}",
+            _md_table_head(),
             "|---|---:|",
-            f"| Максимальный RPS | {_md_cell(peak.get('max_rps') or '—')} |",
-            f"| Время пиковой производительности | {_md_cell(peak.get('max_time') or '—')} |",
-            f"| Время деградации | {_md_cell(peak.get('drop_time') or '—')} |",
+            f"| {_md_cell(t('report.structured.max_rps'))} | {_md_cell(peak.get('max_rps') or '—')} |",
+            f"| {_md_cell(t('report.section.peak_time'))} | {_md_cell(peak.get('max_time') or '—')} |",
+            f"| {_md_cell(t('report.section.drop_time'))} | {_md_cell(peak.get('drop_time') or '—')} |",
             "",
         ])
 
-    lines.append("#### Проблемы и рекомендации")
+    lines.append(f"#### {t('report.findings.title')}")
     rows = _pair_findings_with_actions(
         report.get("findings") or [],
         report.get("recommended_actions") or report.get("actions") or [],
     )
     if not rows:
-        lines.append("Существенных проблем и рекомендаций нет.")
+        lines.append(t("confluence.template.no_problems_actions"))
     for idx, row in enumerate(rows, start=1):
         problem = row.get("problem")
         actions = row.get("actions") or []
         if isinstance(problem, dict):
-            summary = _safe_text(problem.get("summary") or problem.get("title") or problem.get("text")) or "Нет существенных проблем."
+            summary = _safe_text(problem.get("summary") or problem.get("title") or problem.get("text")) or t("report.findings.no_problems")
             lines.extend(["", f"##### {idx}. {_md(summary)}"])
             evidence_summary = _md_rich_text(problem.get("evidence_summary") or problem.get("evidence"))
             if evidence_summary:
@@ -643,35 +705,27 @@ def render_llm_markdown(report: dict, domain: str | None = None) -> str:
             evidence_items = _as_list(problem.get("evidence_items") or problem.get("evidence_list") or problem.get("evidence_rows"))
             for evidence in evidence_items:
                 if isinstance(evidence, dict):
-                    bits = [
-                        _safe_text(evidence.get("metric") or evidence.get("name") or evidence.get("label")),
-                        f"значение: {_safe_text(evidence.get('observed_value') or evidence.get('value') or evidence.get('actual'))}"
-                        if _safe_text(evidence.get("observed_value") or evidence.get("value") or evidence.get("actual")) else "",
-                        f"порог: {_safe_text(evidence.get('threshold') or evidence.get('limit') or evidence.get('baseline'))}"
-                        if _safe_text(evidence.get("threshold") or evidence.get("limit") or evidence.get("baseline")) else "",
-                        _safe_text(evidence.get("note") or evidence.get("details") or evidence.get("evidence")),
-                    ]
-                    evidence_text = " | ".join([bit for bit in bits if bit])
+                    evidence_text = _evidence_text(evidence)
                 else:
                     evidence_text = _safe_text(evidence)
                 if evidence_text:
                     lines.append(f"- {_md(evidence_text)}")
             meta = []
             if _safe_text(problem.get("severity")):
-                meta.append(f"**Критичность:** `{_md(problem.get('severity'))}`")
+                meta.append(f"**{_md(t('report.finding.severity'))}:** `{_md(problem.get('severity'))}`")
             if _safe_text(problem.get("component")):
-                meta.append(f"**Компонент:** `{_md(problem.get('component'))}`")
+                meta.append(f"**{_md(t('report.finding.component'))}:** `{_md(problem.get('component'))}`")
             if meta:
                 lines.extend(["", "  ".join(meta)])
         else:
-            lines.extend(["", f"##### {idx}. Нет существенных проблем."])
+            lines.extend(["", f"##### {idx}. {t('report.findings.no_problems')}"])
 
-        lines.extend(["", "**Рекомендации по устранению:**"])
+        lines.extend(["", f"**{_md(t('report.findings.recommendations'))}:**"])
         if not actions:
-            lines.append("- Нет рекомендации.")
+            lines.append(f"- {t('report.findings.no_recommendation')}")
         for action in actions:
             if isinstance(action, dict):
-                summary = _safe_text(action.get("summary") or action.get("action") or action.get("text")) or "Рекомендация"
+                summary = _safe_text(action.get("summary") or action.get("action") or action.get("text")) or t("confluence.template.recommendation")
                 lines.append(f"- **{_md(summary)}**")
                 details = _md_rich_text(action.get("details") or action.get("description") or action.get("implementation_details"))
                 if details:
@@ -679,13 +733,18 @@ def render_llm_markdown(report: dict, domain: str | None = None) -> str:
                         lines.append(f"  {detail_line}" if detail_line else "")
             else:
                 action_text = _safe_text(action)
-                lines.append(f"- {_md(action_text)}" if action_text else "- Нет рекомендации.")
+                lines.append(f"- {_md(action_text)}" if action_text else f"- {t('report.findings.no_recommendation')}")
 
     return "\n".join(lines).strip()
 
 
-def render_llm_html(report: dict, domain: str | None = None) -> str:
-    """HTML-версия рендера LLM-ответа для вставки в Confluence storage."""
+def render_llm_html(report: dict, domain: str | None = None, lang: str | None = None) -> str:
+    """HTML-версия рендера LLM-ответа для вставки в Confluence storage (на языке ``lang`` или текущей локали)."""
+    with _in_locale(lang):
+        return _llm_html(report, domain)
+
+
+def _llm_html(report: dict, domain: str | None) -> str:
     report = report if isinstance(report, dict) else {}
     peak = report.get("peak_performance") or report.get("peak_perfomance") or {}
     peak = peak if isinstance(peak, dict) else {}
@@ -693,7 +752,7 @@ def render_llm_html(report: dict, domain: str | None = None) -> str:
     parts: list[str] = [
         _render_key_value_table(
             "",
-            [("Вердикт по тесту", _verdict_pill(report.get("verdict")))],
+            [(t("report.hero.verdict_title"), _verdict_pill(report.get("verdict")))],
         ),
         _render_rationale_box(report),
     ]
@@ -706,11 +765,11 @@ def render_llm_html(report: dict, domain: str | None = None) -> str:
         parts.append(_render_key_value_table(title, [(label, _html(value)) for label, value in rows]))
     elif any(peak.get(key) not in (None, "") for key in ("max_rps", "max_time", "drop_time")):
         parts.append(_render_key_value_table(
-            "Пиковая производительность",
+            t("report.structured.peak_title"),
             [
-                ("Максимальный RPS", _html(peak.get("max_rps") or "—")),
-                ("Время пиковой производительности", _html(peak.get("max_time") or "—")),
-                ("Время деградации", _html(peak.get("drop_time") or "—")),
+                (t("report.structured.max_rps"), _html(peak.get("max_rps") or "—")),
+                (t("report.section.peak_time"), _html(peak.get("max_time") or "—")),
+                (t("report.section.drop_time"), _html(peak.get("drop_time") or "—")),
             ],
         ))
 
@@ -791,7 +850,7 @@ def update_confluence_page_multi(url, username, password, page_id, replacements:
         as_text (bool): значения — недоверенный текст (вывод LLM), а не разметка storage.
 
     Возвращает:
-        str: Текст статуса.
+        str: Код результата: STATUS_OK, STATUS_NO_REPLACEMENTS, STATUS_LOAD_FAILED или STATUS_UPDATE_FAILED.
     """
     confluence = Confluence(
         url=url,
@@ -804,7 +863,7 @@ def update_confluence_page_multi(url, username, password, page_id, replacements:
         page = confluence.get_page_by_id(page_id, expand='body.storage,history,space,version')
     except Exception as e:
         print(f"Ошибка при загрузке страницы: {e}")
-        return "Ошибка загрузки"
+        return STATUS_LOAD_FAILED
 
     html = page["body"]["storage"]["value"]
     replaced_any = False
@@ -842,7 +901,7 @@ def update_confluence_page_multi(url, username, password, page_id, replacements:
 
     if not replaced_any:
         print("Нет совпавших плейсхолдеров. Обновление не требуется.")
-        return "Нет замен"
+        return STATUS_NO_REPLACEMENTS
 
     try:
         confluence.update_page(
@@ -854,10 +913,10 @@ def update_confluence_page_multi(url, username, password, page_id, replacements:
             minor_edit=True
         )
         print("Страница успешно обновлена (мульти-замена).")
-        return "Успешно"
+        return STATUS_OK
     except Exception as e:
         print(f"Ошибка при обновлении страницы: {e}")
-        return f"Ошибка: {e}"
+        return STATUS_UPDATE_FAILED
 
 
 

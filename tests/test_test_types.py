@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Soak, spike and stress analysis: deterministic metrics, SLA policy, rendering and the pipeline."""
 
 import json
@@ -103,8 +104,13 @@ def test_soak_sla_checks_use_hold_window_and_target_by_mean():
     assert target["name"] == "target_rps" and target["passed"] is True
     assert target["actual"] == pytest.approx(300.0, abs=1.0) and "Удержание" in target["message"]
     assert p95["passed"] is False and "окна удержания" in p95["message"]
-    assert result["verdict"] == "Провал"  # any primary breach fails a soak test
+    assert result["verdict"] == "fail"  # any primary breach fails a soak test
     assert result["stable_window"]["kind"] == "hold"
+    # The verdict is a code; the summary is the same Russian text as before the codes.
+    assert result["summary"] == (
+        "SLA verdict: Провал. Пройдено: target_rps; Нарушено: p95_latency; "
+        "Режим stability: пороги проверены на окне удержания, target_rps — удержание среднего уровня; CPU/memory трактуются как вторичные риски и сами по себе не переводят тест в «Провал»"
+    )
 
 
 def test_soak_without_hold_window_reports_unknown_target_and_uses_whole_run():
@@ -113,7 +119,7 @@ def test_soak_without_hold_window_reports_unknown_target_and_uses_whole_run():
     target, p95 = result["checks"]
     assert target["passed"] is None and "окна удержания" in target["message"]
     assert p95["passed"] is True and "всего окна" in p95["message"]
-    assert result["verdict"] == "Успешно"
+    assert result["verdict"] == "pass"
 
 
 def test_soak_resource_breach_is_a_risk_not_a_failure():
@@ -123,7 +129,7 @@ def test_soak_resource_breach_is_a_risk_not_a_failure():
     sla = {"target_rps": 290, "max_cpu_pct": 80, "cpu_query": "CPU", "max_performance_query": RPS_LABEL}
     result = evaluate_sla(data, sla, test_profile={"mode": "stability"})
     assert [c["name"] for c in result["checks"] if c["passed"] is False] == ["cpu_usage"]
-    assert result["verdict"] == "Есть риски"
+    assert result["verdict"] == "risk"
 
 
 def test_compute_trends_flags_adverse_drift_only():
@@ -142,10 +148,33 @@ def test_reconcile_downgrades_success_to_risk_for_flagged_trends():
     base = {"verdict": "Успешно", "summary": "SLA verdict: Успешно. Пройдено: target_rps",
             "checks": [{"name": "target_rps", "passed": True}]}
     result = _reconcile_sla_for_test_profile(base, {"mode": "stability"}, flagged_trends=["p95 latency"])
-    assert result["verdict"] == "Есть риски"
+    assert result["verdict"] == "risk"
     assert result["summary"].startswith("SLA verdict: Есть риски.") and "p95 latency" in result["summary"]
     untouched = _reconcile_sla_for_test_profile(base, {"mode": "capacity"}, flagged_trends=["p95 latency"])
-    assert untouched["verdict"] == "Успешно"
+    assert untouched["verdict"] == "pass"  # a result saved with a label comes back with the code
+
+
+def test_reconciled_summary_is_rebuilt_from_parts_with_the_same_text():
+    """The adjusted summary equals the text the old prefix surgery produced: new label, the same parts, the note."""
+    sla = {"target_rps": 290, "max_p95_ms": 500, "max_performance_query": RPS_LABEL, "p95_query": P95_LABEL}
+    evaluated = evaluate_sla(_soak_domain_data(), sla, test_profile={"mode": "stability"})
+    assert evaluated["verdict"] == "pass" and evaluated["summary_parts"]["passed"] == ["target_rps", "p95_latency"]
+    assert evaluated["summary"] == "SLA verdict: Успешно. Пройдено: target_rps, p95_latency; Режим stability: пороги проверены на окне удержания, target_rps — удержание среднего уровня; CPU/memory трактуются как вторичные риски и сами по себе не переводят тест в «Провал»"
+    result = _reconcile_sla_for_test_profile(evaluated, {"mode": "stability"}, flagged_trends=["p95 latency", "CPU"])
+    assert result["verdict"] == "risk"
+    assert result["summary"] == (
+        "SLA verdict: Есть риски. Пройдено: target_rps, p95_latency; Режим stability: пороги проверены на окне удержания, target_rps — удержание среднего уровня; CPU/memory трактуются как вторичные риски и сами по себе не переводят тест в «Провал»; "
+        "Пороги SLA выполнены, но за окно удержания найден неблагоприятный тренд: p95 latency, CPU"
+    )
+    assert result["summary_parts"]["adjustments"] == [{"code": "adverse_trend", "trends": ["p95 latency", "CPU"]}]
+    failed = {**evaluated, "verdict": "fail", "summary_parts": {**evaluated["summary_parts"], "verdict": "fail"},
+              "checks": [*evaluated["checks"], {"name": "memory_usage", "passed": False, "category": "secondary"}]}
+    downgraded = _reconcile_sla_for_test_profile(failed, {"mode": "stability"})
+    assert downgraded["verdict"] == "risk" and downgraded["summary"] == (
+        "SLA verdict: Есть риски. Пройдено: target_rps, p95_latency; Режим stability: пороги проверены на окне удержания, target_rps — удержание среднего уровня; CPU/memory трактуются как вторичные риски и сами по себе не переводят тест в «Провал»; "
+        "Режим stability: ресурсные превышения CPU/memory трактуются как риски, "
+        "но без нарушений target_rps/error_rate/p95/p99 не переводят тест в «Провал»."
+    )
 
 
 def test_sla_step_context_ignores_non_step_windows():
@@ -232,7 +261,7 @@ def test_spike_sla_checks_use_spike_window():
     assert checks["target_rps"]["passed"] is True and "всплеск 1" in checks["target_rps"]["message"]
     assert checks["p95_latency"]["passed"] is False and "окна всплеска «всплеск 1" in checks["p95_latency"]["message"]
     assert checks["recovery"]["passed"] is True and checks["recovery"]["actual"] == pytest.approx(2.0)
-    assert result["verdict"] == "Есть риски"  # latency broke during the spike but recovered
+    assert result["verdict"] == "risk"  # latency broke during the spike but recovered
     assert result["stable_window"]["kind"] == "spike"
 
 
@@ -240,7 +269,7 @@ def test_spike_sla_fails_without_recovery():
     sla = {"target_rps": 350, "max_p95_ms": 500, "max_performance_query": RPS_LABEL, "p95_query": P95_LABEL}
     result = evaluate_sla(_spike_domain_data(recover=False), sla, test_profile={"mode": "spike"})
     assert {c["name"]: c["passed"] for c in result["checks"]}["recovery"] is False
-    assert result["verdict"] == "Провал"
+    assert result["verdict"] == "fail"
 
 
 def test_spike_sla_without_detected_spike_is_insufficient_data():
@@ -250,17 +279,18 @@ def test_spike_sla_without_detected_spike_is_insufficient_data():
     sla = {"target_rps": 350, "max_p95_ms": 500, "max_performance_query": RPS_LABEL, "p95_query": P95_LABEL}
     result = evaluate_sla({"lt_framework": {"pack": {"spike_profile": profile}, "labeled": labeled}}, sla, test_profile={"mode": "spike"})
     assert profile["detected"] is False and "порога всплеска" in profile["reason"]
-    assert result["verdict"] == "Недостаточно данных" and "не обнаружен" in result["summary"]
+    assert result["verdict"] == "no_data" and result["summary"].startswith("SLA verdict: Недостаточно данных. ")
+    assert result["summary"].endswith("; всплеск нагрузки не обнаружен")
 
 
 @pytest.mark.parametrize(
     "checks, verdict",
     [
-        ([("target_rps", True, "primary"), ("p95_latency", True, "primary"), ("recovery", True, "primary")], "Успешно"),
-        ([("target_rps", True, "primary"), ("p95_latency", False, "primary"), ("recovery", True, "primary")], "Есть риски"),
-        ([("target_rps", True, "primary"), ("recovery", False, "primary")], "Провал"),
-        ([("target_rps", False, "primary"), ("recovery", True, "primary")], "Провал"),
-        ([("target_rps", True, "primary"), ("cpu_usage", False, "secondary")], "Есть риски"),
+        ([("target_rps", True, "primary"), ("p95_latency", True, "primary"), ("recovery", True, "primary")], "pass"),
+        ([("target_rps", True, "primary"), ("p95_latency", False, "primary"), ("recovery", True, "primary")], "risk"),
+        ([("target_rps", True, "primary"), ("recovery", False, "primary")], "fail"),
+        ([("target_rps", False, "primary"), ("recovery", True, "primary")], "fail"),
+        ([("target_rps", True, "primary"), ("cpu_usage", False, "secondary")], "risk"),
     ],
 )
 def test_spike_verdict_policy(checks, verdict):
@@ -334,7 +364,7 @@ def test_stress_sla_keeps_capacity_window_and_reports_mode_stress():
     result = evaluate_sla({"lt_framework": {"pack": pack, "labeled": []}}, sla, test_profile={"mode": "stress"})
     assert result["test_mode"] == "stress"
     assert result["stable_window"]["level"] == pytest.approx(400.0) and "kind" not in result["stable_window"]
-    assert result["verdict"] == "Успешно"
+    assert result["verdict"] == "pass"
 
 
 # ---- rendering ----------------------------------------------------------------
@@ -373,6 +403,79 @@ def test_legacy_soak_payload_still_renders():
     title, rows = test_type_section({"test_profile": {"mode": "stability", "test_type": "soak"},
                                      "stability_under_load": {"target_rps": 200, "actual_rps": 210, "sla_summary": "ok"}})
     assert title == "Стабильность под нагрузкой" and dict(rows)["Фактический RPS"] == "210"
+
+
+def _coded_payloads():
+    """The same sections as a new report stores them (codes) and as an old one did (texts)."""
+    from AI.saturation import failure_mode_title, saturation_note_text
+    from AI.spike import spike_note_text
+    from AI.stability import hold_note_text
+    from AI.test_profile import TEST_TYPE_TEXTS
+
+    soak_texts = TEST_TYPE_TEXTS["ru"]["soak"]
+    new_soak = {
+        "test_profile": {"mode": "stability", "test_type": "soak", "normalized_test_type": "soak", "label": soak_texts["label"]},
+        "stability_under_load": {"target_rps": 290, "actual_rps": 299.8, "sla_summary": "s", "focus": soak_texts["focus"],
+                                 "hold": {"start_iso": "2024-01-01T12:04:00+03:00", "end_iso": "2024-01-01T13:00:00+03:00",
+                                          "note_codes": ["early_drop", "long_ramp_up"], "note": "старый текст"}},
+    }
+    old_soak = {
+        "test_profile": {"mode": "stability", "test_type": "soak", "normalized_test_type": "soak", "label_ru": soak_texts["label"],
+                         "focus": soak_texts["focus"]},
+        "stability_under_load": {**new_soak["stability_under_load"], "focus": soak_texts["focus"],
+                                 "hold": {**new_soak["stability_under_load"]["hold"], "note_codes": None,
+                                          "note": hold_note_text(["early_drop", "long_ramp_up"])}},
+    }
+    del old_soak["stability_under_load"]["hold"]["note_codes"]
+    spike = {"index": 1, "label": "всплеск 1 · ≈350 RPS", "start_iso": "2024-01-01T12:10:00+03:00", "end_iso": "2024-01-01T12:12:00+03:00",
+             "duration_sec": 120, "recovered": None}
+    new_spike = {"test_profile": {"mode": "spike", "normalized_test_type": "spike"},
+                 "spike_analysis": {"detected": True, "spikes": [{**spike, "note_code": "no_latency_query", "note": ""}], "sla_summary": "s"}}
+    old_spike = {"test_profile": {"mode": "spike", "normalized_test_type": "spike", "label_ru": "Всплески (spike)"},
+                 "spike_analysis": {"detected": True, "spikes": [{**spike, "note": spike_note_text("no_latency_query")}], "sla_summary": "s"}}
+    new_stress = {"saturation": {"saturation_rps": 300, "failure_mode": "throughput_drop", "note_code": "no_sla_step", "note": ""},
+                  "peak_performance": {"max_rps": 300}}
+    old_stress = {"saturation": {"saturation_rps": 300, "failure_mode": "throughput_drop",
+                                 "failure_mode_title": failure_mode_title("throughput_drop"), "note": saturation_note_text("no_sla_step")},
+                  "peak_performance": {"max_rps": 300}}
+    return (new_soak, old_soak), (new_spike, old_spike), (new_stress, old_stress)
+
+
+def test_sections_build_type_names_notes_and_failure_mode_from_codes():
+    for new, old in _coded_payloads():
+        assert test_type_section(new) == test_type_section(old)
+    (new_soak, _), (new_spike, _), (new_stress, _) = _coded_payloads()
+    soak_rows = dict(test_type_section(new_soak)[1])
+    assert soak_rows["Фокус оценки"] == "Оценить удержание заданной нагрузки на всем интервале без накопления деградации."
+    assert soak_rows["Примечание"] == ("RPS упал задолго до конца теста: падение включено в окно удержания; "
+                                       "разгон занял больше половины теста: окно удержания — весь тест")
+    spike_rows = dict(test_type_section(new_spike)[1])
+    assert spike_rows["Тип теста"] == "Всплески (spike)"
+    assert spike_rows["всплеск 1 · ≈350 RPS"].endswith("запрос p95/p99 не выбран в SLA: рост задержек и восстановление не оцениваются")
+    stress_rows = dict(test_type_section(new_stress)[1])
+    assert stress_rows["Характер деградации"] == "падение пропускной способности"
+    assert stress_rows["Примечание"].startswith("Ступень, на которой выполнялись пороги SLA, не найдена")
+    # An unknown type of an old report keeps its saved name; a code without a known text shows the stored title.
+    legacy = {"test_profile": {"mode": "spike", "label_ru": "Особый"}, "spike_analysis": {"detected": False}}
+    assert dict(test_type_section(legacy)[1])["Тип теста"] == "Особый"
+    custom = {"saturation": {"saturation_rps": 1, "failure_mode": "custom", "failure_mode_title": "своё"}, "peak_performance": {}}
+    assert dict(test_type_section(custom)[1])["Характер деградации"] == "своё"
+
+
+def test_profile_texts_by_language_and_stored_fallbacks():
+    from AI.test_profile import profile_for, stored_type_label, test_type_label
+
+    soak = profile_for("soak")
+    assert soak.label() == "Долговременный (soak)" and soak.peak_label() == "Удерживаемый RPS"
+    assert soak.label("en") == "Soak (long-running)" and soak.focus("en").startswith("Check that the target load is held")
+    assert profile_for("garbage").label() == "Ступенчатый (max perf)"  # analysed and named as step
+    stored = soak.to_dict()
+    assert stored["label"] == "Долговременный (soak)" and stored["focus"] == soak.focus()
+    assert "label_ru" not in stored and "peak_label_ru" not in stored
+    assert soak.to_dict("en")["label"] == "Soak (long-running)"
+    assert test_type_label("stress") == "Стресс" and test_type_label("nope") == ""
+    assert stored_type_label({"normalized_test_type": "spike", "label_ru": "старое"}) == "Всплески (spike)"
+    assert stored_type_label({"label_ru": "старое"}) == "старое" and stored_type_label(None) == ""
 
 
 def test_confluence_export_and_legacy_markdown_render_test_type_sections():
@@ -419,7 +522,7 @@ def test_upload_from_llm_payload_per_test_type(monkeypatch, kind):
         "sla": {"max_performance_query": RPS_LABEL, "p95_query": P95_LABEL, **sla},
     }
     captured = {}
-    monkeypatch.setattr(pipeline_module, "read_prompt_from_file", lambda filename: "prompt")
+    monkeypatch.setattr(pipeline_module, "load_prompt", lambda name, lang=None: "prompt")
     monkeypatch.setattr(pipeline_module, "fetch_and_aggregate_with_label_keys", lambda *a, **k: _pipeline_frames(kind))
 
     def fake_llm(user_prompt, data_context, k, return_scores, domain_key):
@@ -437,6 +540,11 @@ def test_upload_from_llm_payload_per_test_type(monkeypatch, kind):
     final_ctx = captured["final"][1]
 
     assert final["test_profile"]["mode"] == mode and final["deterministic_sla"]["test_mode"] == mode
+    # A new report names its type by normalized_test_type; label_ru/peak_label_ru are no longer written.
+    assert final["test_profile"]["normalized_test_type"] == kind and "label_ru" not in final["test_profile"]
+    assert "peak_label_ru" not in final["test_profile"] and final["test_profile"]["label"]
+    assert final["verdict"] == final["deterministic_sla"]["verdict"] == result["sla_verdict"]
+    assert final["deterministic_sla"]["verdict"] in {"pass", "risk", "fail", "no_data"}
     assert lt_prompt.count("[Профиль теста") == 1
     assert ctx_key in lt_ctx
     for other in {"sla_step", "hold_window", "spike_windows"} - {ctx_key}:
@@ -453,12 +561,14 @@ def test_upload_from_llm_payload_per_test_type(monkeypatch, kind):
         hold = final["stability_under_load"]["hold"]
         assert hold["actual_rps_mean"] == pytest.approx(300.0, abs=1.0)
         assert "p95" in final["stability_under_load"]["flagged_trends"]
-        assert result["sla_verdict"] == "Есть риски"
+        assert result["sla_verdict"] == "risk"
+        assert result["sla_summary"].startswith("SLA verdict: Есть риски. ")
+        assert "за окно удержания найден неблагоприятный тренд" in result["sla_summary"]
     if kind == "spike":
         assert final["spike_analysis"]["detected"] is True
         assert [s["label"].split(" · ")[0] for s in final_ctx["load_steps"]] == ["фон 1", "всплеск 1", "фон 2"]
         assert {c["name"] for c in final["deterministic_sla"]["checks"]} >= {"target_rps", "recovery"}
-        assert result["sla_verdict"] == "Успешно"
+        assert result["sla_verdict"] == "pass"
     if kind == "stress":
         saturation = final["saturation"]
         assert saturation["saturation_rps"] == pytest.approx(300.0, abs=2.0)

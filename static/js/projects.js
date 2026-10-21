@@ -1,20 +1,32 @@
-// Settings → «Проекты»: overview of project areas, card edits, copies, service moves,
+// SPDX-License-Identifier: Apache-2.0
+// Settings → Projects: overview of project areas, card edits, copies, service moves,
 // resetting overrides and deletion with or without reports.
 (function () {
   const LL = window.LoadLens;
   const ui = LL.ui;
   const esc = ui.escapeHtml;
   const $ = (id) => document.getElementById(id);
+  // Labels are read when shown: they follow the UI language.
   const SECTION_LABELS = {
-    llm: 'LLM', domain_sources: 'Источники доменов', logs_source: 'Логи приложений',
-    default_params: 'Параметры сбора', queries: 'Запросы', sla: 'SLA', system_context: 'Контекст системы', prompts: 'Промпты'
+    llm: () => LL.t('projects.section.llm'),
+    domain_sources: () => LL.t('projects.section.domain_sources'),
+    logs_source: () => LL.t('projects.section.logs_source'),
+    default_params: () => LL.t('projects.section.default_params'),
+    queries: () => LL.t('projects.section.queries'),
+    sla: () => LL.t('projects.section.sla'),
+    system_context: () => LL.t('projects.section.system_context'),
+    prompts: () => LL.t('projects.section.prompts')
   };
-  const STATUS_VIEW = { inherited: ['na', 'общие'], same: ['na', 'копия общих'], own: ['warn', 'свои'] };
+  const STATUS_VIEW = {
+    inherited: () => ['na', LL.t('projects.status.inherited')],
+    same: () => ['na', LL.t('projects.status.same')],
+    own: () => ['warn', LL.t('projects.status.own')]
+  };
   let overview = { projects: [], active_project: '', reports_error: null };
 
   const projectUrl = (id) => '/projects/' + encodeURIComponent(id);
-  const sectionLabel = (key) => SECTION_LABELS[key] || key;
-  const domainLabel = (key) => (key === 'overall' ? 'Итог' : LL.domainTitle(key));
+  const sectionLabel = (key) => (Object.prototype.hasOwnProperty.call(SECTION_LABELS, key) ? SECTION_LABELS[key]() : key);
+  const domainLabel = (key) => (key === 'overall' ? LL.t('common.domain.final') : LL.domainTitle(key));
 
   async function api(method, url, body) {
     const init = { method };
@@ -27,24 +39,30 @@
   const switchProject = (id) => api('POST', '/project_area', { project_area: id || '' });
 
   const SLA_FIELD_TITLES = {
-    max_performance_query: 'макс. RPS', mean_latency_query: 'среднее время',
-    service_cpu_query: 'CPU сервисов', cpu_query: 'CPU узлов'
+    max_performance_query: () => LL.t('projects.sla_field.max_performance_query'),
+    mean_latency_query: () => LL.t('projects.sla_field.mean_latency_query'),
+    service_cpu_query: () => LL.t('projects.sla_field.service_cpu_query'),
+    cpu_query: () => LL.t('projects.sla_field.cpu_query')
   };
+  const slaFieldTitle = (field) => (Object.prototype.hasOwnProperty.call(SLA_FIELD_TITLES, field) ? SLA_FIELD_TITLES[field]() : field);
   // Settings links of the checklist: "<section>:<element id>" (activateFromHash in settings.js
   // opens the section, scrolls to the element and highlights it).
   const SLA_FIELD_LINKS = {
     max_performance_query: 'sla:sla-query-target_rps', mean_latency_query: 'sla:sla-peak-mean_latency_query',
     service_cpu_query: 'sla:sla-peak-service_cpu_query', cpu_query: 'sla:sla-query-max_cpu_pct'
   };
-  const CHECK_ICONS = {
-    ok: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.5 2.5L16 9.5"/></svg>',
-    todo: '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/></svg>'
+  // Status squares of the checklist: a point done is ok, a point to do is a warning (the text says which).
+  const CHECK_MARKS = {
+    ok: '<span class="sq ok" aria-hidden="true"></span>',
+    todo: '<span class="sq warn" aria-hidden="true"></span>'
   };
   function packsChip(packs) {
     if (!Array.isArray(packs) || !packs.length) return '';
     const outdated = packs.filter((p) => p.outdated).length;
     const names = packs.map((p) => p.title).join(', ');
-    const text = outdated ? `Пакетов запросов: ${packs.length}, есть обновления: ${outdated}` : `Пакетов запросов: ${packs.length}`;
+    const text = outdated
+      ? LL.t('projects.packs.with_updates', { count: packs.length, outdated })
+      : LL.t('projects.packs.count', { count: packs.length });
     return `<span class="pill ${outdated ? 'warn' : 'na'}" title="${esc(names)}">${esc(text)}</span>`;
   }
   function featureItem(key, missing, okText, title, fallbackLink) {
@@ -52,7 +70,7 @@
     return {
       key,
       ok: !fields.length,
-      text: fields.length ? `${title}: не заданы ${fields.map((f) => SLA_FIELD_TITLES[f] || f).join(', ')}` : okText,
+      text: fields.length ? LL.t('projects.readiness.feature_missing', { feature: title, fields: fields.map(slaFieldTitle).join(', ') }) : okText,
       link: (fields.length && SLA_FIELD_LINKS[fields[0]]) || fallbackLink
     };
   }
@@ -64,25 +82,46 @@
     const missing = r.missing_sla || {};
     const hasTarget = r.target_rps !== null && r.target_rps !== undefined;
     return [
-      { key: 'target_rps', ok: hasTarget, text: hasTarget ? `Целевой RPS: ${r.target_rps}` : 'Целевой RPS не задан', link: 'sla:sla-val-target_rps' },
-      { key: 'performance_query', ok: !!r.performance_query, text: r.performance_query ? 'Запрос производительности выбран' : 'Запрос производительности не выбран', link: 'sla:sla-query-target_rps' },
-      { key: 'system_context', ok: !!r.has_system_context, text: r.has_system_context ? 'Контекст системы заполнен' : 'Контекст системы пуст', link: 'context:contextForm' },
-      { key: 'queries', ok: total > 0, text: total > 0 ? `Запросов: ${total}, доменов: ${Object.keys(counts).length}` : 'Запросов нет', link: 'queries:addFromPackBtn' },
-      featureItem('forecast', missing.forecast, 'Прогноз: ссылки SLA заданы', 'Прогноз', 'sla:sla-peak-mean_latency_query'),
-      featureItem('resource_plan', missing.resource_plan, 'План ресурсов: ссылки SLA заданы', 'План ресурсов', 'sla:sla-peak-service_cpu_query')
+      {
+        key: 'target_rps',
+        ok: hasTarget,
+        text: hasTarget ? LL.t('projects.readiness.target_rps', { value: r.target_rps }) : LL.t('projects.readiness.target_rps_missing'),
+        link: 'sla:sla-val-target_rps'
+      },
+      {
+        key: 'performance_query',
+        ok: !!r.performance_query,
+        text: LL.t(r.performance_query ? 'projects.readiness.performance_query_ok' : 'projects.readiness.performance_query_missing'),
+        link: 'sla:sla-query-target_rps'
+      },
+      {
+        key: 'system_context',
+        ok: !!r.has_system_context,
+        text: LL.t(r.has_system_context ? 'projects.readiness.system_context_ok' : 'projects.readiness.system_context_missing'),
+        link: 'context:contextForm'
+      },
+      {
+        key: 'queries',
+        ok: total > 0,
+        text: total > 0 ? LL.t('projects.readiness.queries', { queries: total, domains: Object.keys(counts).length }) : LL.t('projects.readiness.queries_missing'),
+        link: 'queries:addFromPackBtn'
+      },
+      featureItem('forecast', missing.forecast, LL.t('projects.readiness.forecast_ok'), LL.t('projects.readiness.forecast'), 'sla:sla-peak-mean_latency_query'),
+      featureItem('resource_plan', missing.resource_plan, LL.t('projects.readiness.resource_plan_ok'), LL.t('projects.readiness.resource_plan'), 'sla:sla-peak-service_cpu_query')
     ];
   }
   function readinessList(p) {
     const items = readinessItems(p.readiness);
     const done = items.filter((item) => item.ok).length;
-    const pct = Math.round((done / items.length) * 100);
-    const label = `Настроено ${done} из ${items.length}`;
+    const label = LL.t('projects.readiness.progress', { done, total: items.length });
     const rows = items.map((item) => `<li class="readiness-item ${item.ok ? 'is-ok' : 'is-todo'}">
-        <a href="#${esc(item.link)}" data-action="goto" data-project="${esc(p.id)}" data-link="${esc(item.link)}">${item.ok ? CHECK_ICONS.ok : CHECK_ICONS.todo}<span>${esc(item.text)}</span></a></li>`).join('');
+        <a href="#${esc(item.link)}" data-action="goto" data-project="${esc(p.id)}" data-link="${esc(item.link)}">${item.ok ? CHECK_MARKS.ok : CHECK_MARKS.todo}<span>${esc(item.text)}</span></a></li>`).join('');
+    // One square per point, the points done first: a progress meter without a bar.
+    const squares = items.map((item, i) => `<i${i < done ? ' class="ok"' : ''}></i>`).join('');
     return `<div class="readiness${done === items.length ? ' is-complete' : ''}">
       <div class="readiness-head">
         <span class="readiness-count">${esc(label)}</span>
-        <span class="readiness-bar" role="progressbar" aria-label="${esc(label)}" aria-valuemin="0" aria-valuemax="${items.length}" aria-valuenow="${done}"><span style="width:${pct}%"></span></span>
+        <span class="readiness-squares" role="progressbar" aria-label="${esc(label)}" aria-valuemin="0" aria-valuemax="${items.length}" aria-valuenow="${done}">${squares}</span>
         ${packsChip((p.readiness || {}).query_packs)}
       </div>
       <ul class="readiness-list">${rows}</ul>
@@ -101,30 +140,35 @@
     else location.hash = link;
   }
   function lastReport(p) {
-    if (!p.last_report_at) return 'нет';
-    return `${esc(LL.formatDateTime(p.last_report_at))} <span class="pill ${LL.verdictClass(p.last_verdict)}">${esc(p.last_verdict || '—')}</span>`;
+    if (!p.last_report_at) return esc(LL.t('projects.card.last_none'));
+    return `${esc(LL.formatDateTime(p.last_report_at))} <span class="pill ${LL.verdictClass(p.last_verdict)}">${esc(p.last_verdict ? LL.verdictLabel(p.last_verdict) : '—')}</span>`;
   }
   function servicesTable(p, attrs) {
-    if (!p.services.length) return '<p class="dim">Сервисов нет.</p>';
+    if (!p.services.length) return `<p class="dim">${esc(LL.t('projects.services.empty'))}</p>`;
     const rows = p.services.map((s) => {
-      const own = s.own_sections.map((section) => `<button type="button" class="btn btn-sm" title="Вернуть к настройкам проекта" ${attrs('reset-service', ` data-service="${esc(s.id)}" data-section="${esc(section)}"`)}>${esc(sectionLabel(section))} ×</button>`).join(' ') || '<span class="dim">нет</span>';
-      return `<tr><td><strong>${esc(s.title)}</strong>${s.title !== s.id ? `<div class="dim">${esc(s.id)}</div>` : ''}</td>
+      const own = s.own_sections.map((section) => `<button type="button" class="btn btn-sm" title="${esc(LL.t('projects.services.reset_title'))}" ${attrs('reset-service', ` data-service="${esc(s.id)}" data-section="${esc(section)}"`)}>${esc(sectionLabel(section))} ×</button>`).join(' ')
+        || `<span class="dim">${esc(LL.t('projects.services.own_none'))}</span>`;
+      return `<tr><td><strong>${esc(s.title)}</strong>${s.title !== s.id ? `<div class="dim mono">${esc(s.id)}</div>` : ''}</td>
         <td class="num">${s.reports === null ? '—' : s.reports}</td>
-        <td class="nowrap">${s.last_report_at ? esc(LL.formatDateTime(s.last_report_at)) : '—'}</td>
+        <td class="nowrap m">${s.last_report_at ? esc(LL.formatDateTime(s.last_report_at)) : '—'}</td>
         <td>${own}</td>
-        <td class="actions"><button type="button" class="btn btn-sm" ${attrs('move', ` data-service="${esc(s.id)}"`)}>Перенести…</button></td></tr>`;
+        <td class="actions"><button type="button" class="btn btn-sm" ${attrs('move', ` data-service="${esc(s.id)}"`)}>${esc(LL.t('projects.services.move'))}</button></td></tr>`;
     }).join('');
-    return `<div class="table-wrap"><table class="data-table"><thead><tr><th>Сервис</th><th class="num">Отчётов</th><th>Последний отчёт</th><th>Свои настройки</th><th><span class="visually-hidden">Действия</span></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    const head = `<th>${esc(LL.t('projects.services.col_service'))}</th><th class="num">${esc(LL.t('projects.services.col_reports'))}</th>`
+      + `<th>${esc(LL.t('projects.services.col_last_report'))}</th><th>${esc(LL.t('projects.services.col_own'))}</th>`
+      + `<th><span class="visually-hidden">${esc(LL.t('projects.services.col_actions'))}</span></th>`;
+    return `<div class="table-wrap"><table class="data-table"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div>`;
   }
   function overridesBlock(p, attrs) {
     const rows = p.overrides.map((o) => {
-      const [tone, label] = STATUS_VIEW[o.status] || ['na', o.status];
+      const [tone, label] = Object.prototype.hasOwnProperty.call(STATUS_VIEW, o.status) ? STATUS_VIEW[o.status]() : ['na', o.status];
       const domains = o.own_domains && o.own_domains.length ? `<div class="dim">${esc(o.own_domains.map(domainLabel).join(', '))}</div>` : '';
-      const action = o.status === 'inherited' ? '' : `<button type="button" class="btn btn-sm" ${attrs('reset-area', ` data-section="${esc(o.section)}"`)}>Вернуть к общим</button>`;
+      const action = o.status === 'inherited' ? '' : `<button type="button" class="btn btn-sm" ${attrs('reset-area', ` data-section="${esc(o.section)}"`)}>${esc(LL.t('projects.overrides.reset'))}</button>`;
       return `<tr><td>${esc(sectionLabel(o.section))}${domains}</td><td><span class="pill ${tone}">${esc(label)}</span></td><td class="actions">${action}</td></tr>`;
     }).join('');
     const own = p.overrides.filter((o) => o.status === 'own').length;
-    return `<details class="report-collapsible"><summary><span>Что переопределено</span><small class="report-collapsible-subtitle">своих разделов: ${own}</small></summary><div class="report-collapsible-body"><table class="data-table"><tbody>${rows}</tbody></table></div></details>`;
+    const summary = `<span>${esc(LL.t('projects.overrides.title'))}</span><small class="report-collapsible-subtitle">${esc(LL.t('projects.overrides.own_count', { count: own }))}</small>`;
+    return `<details class="report-collapsible"><summary>${summary}</summary><div class="report-collapsible-body"><table class="data-table"><tbody>${rows}</tbody></table></div></details>`;
   }
   function projectCard(p) {
     const attrs = (action, extra) => `data-action="${action}" data-project="${esc(p.id)}"${extra || ''}`;
@@ -132,18 +176,18 @@
     return `<article class="card project-card">
       <div class="project-head">
         <div>
-          <div class="project-title">${esc(p.title)} ${active ? '<span class="pill ok">Текущий</span>' : ''}</div>
-          ${p.title !== p.id ? `<div class="dim">${esc(p.id)}</div>` : ''}
+          <div class="project-title">${esc(p.title)} ${active ? `<span class="pill ok">${esc(LL.t('projects.card.current'))}</span>` : ''}</div>
+          ${p.title !== p.id ? `<div class="dim project-id">${esc(p.id)}</div>` : ''}
           ${p.description ? `<p class="help">${esc(p.description)}</p>` : ''}
         </div>
         <div class="project-actions">
-          ${active ? '' : `<button type="button" class="btn btn-sm" ${attrs('select')}>Выбрать</button>`}
-          <button type="button" class="btn btn-sm" ${attrs('edit')}>Изменить</button>
-          <button type="button" class="btn btn-sm" ${attrs('copy')}>Копировать</button>
-          <button type="button" class="btn btn-sm btn-danger" ${attrs('delete')}>Удалить…</button>
+          ${active ? '' : `<button type="button" class="btn btn-sm" ${attrs('select')}>${esc(LL.t('projects.card.select'))}</button>`}
+          <button type="button" class="btn btn-sm" ${attrs('edit')}>${esc(LL.t('projects.card.edit'))}</button>
+          <button type="button" class="btn btn-sm" ${attrs('copy')}>${esc(LL.t('projects.card.copy'))}</button>
+          <button type="button" class="btn btn-sm btn-danger" ${attrs('delete')}>${esc(LL.t('projects.card.delete'))}</button>
         </div>
       </div>
-      <div class="dim">Сервисов: ${p.services.length} · Отчётов: ${p.reports === null ? '—' : p.reports} · Последний: ${lastReport(p)}</div>
+      <div class="dim">${LL.tHtml('projects.card.summary', { services: p.services.length, reports: p.reports === null ? '—' : p.reports, last: LL.html(lastReport(p)) })}</div>
       ${readinessList(p)}
       ${servicesTable(p, attrs)}
       ${overridesBlock(p, attrs)}
@@ -151,7 +195,7 @@
   }
   function renderProjects() {
     const banner = overview.reports_error ? `<div class="report-note">${esc(overview.reports_error)}</div>` : '';
-    const cards = overview.projects.length ? overview.projects.map(projectCard).join('') : '<div class="card">Проектов пока нет. Создайте первый.</div>';
+    const cards = overview.projects.length ? overview.projects.map(projectCard).join('') : `<div class="card">${esc(LL.t('projects.list.empty'))}</div>`;
     $('projectsList').innerHTML = banner + cards;
   }
   async function loadProjects() {
@@ -161,7 +205,7 @@
       overview = await api('GET', '/projects');
       renderProjects();
     } catch (e) {
-      list.innerHTML = `<div class="report-note">Не удалось загрузить проекты: ${esc(e.message)}</div>`;
+      list.innerHTML = `<div class="report-note">${LL.tHtml('projects.list.load_failed', { error: e.message })}</div>`;
     }
   }
 
@@ -170,10 +214,13 @@
     const sources = overview.projects.map((x) => `<option value="${esc(x.id)}"${x.id === copyFrom ? ' selected' : ''}>${esc(x.title)}</option>`).join('');
     const currentTitle = editing && project.title !== project.id ? project.title : '';
     const bodyHtml = [
-      editing ? `<p class="dim">Идентификатор: ${esc(project.id)}</p>` : '<label>Идентификатор<input id="pfId" type="text" maxlength="40" placeholder="без пробелов, например NSI" /></label>',
-      `<label>Отображаемое имя<input id="pfTitle" type="text" maxlength="80" value="${esc(currentTitle)}" /></label>`,
-      `<label>Описание<textarea id="pfDescription" rows="3" maxlength="500">${esc(editing ? project.description : '')}</textarea></label>`,
-      editing ? '' : `<label>Скопировать настройки из<select id="pfCopyFrom"><option value="">Не копировать</option>${sources}</select></label><p class="dim">Копируются подключения, запросы, SLA, промпты и контекст системы. Сервисы и отчёты не копируются.</p>`,
+      editing
+        ? `<p class="dim">${LL.tHtml('projects.form.id_value', { id: project.id })}</p>`
+        : `<label>${esc(LL.t('projects.form.id'))}<input id="pfId" type="text" maxlength="40" placeholder="${esc(LL.t('projects.form.id_placeholder'))}" /></label>`,
+      `<label>${esc(LL.t('projects.form.title'))}<input id="pfTitle" type="text" maxlength="80" value="${esc(currentTitle)}" /></label>`,
+      `<label>${esc(LL.t('projects.form.description'))}<textarea id="pfDescription" rows="3" maxlength="500">${esc(editing ? project.description : '')}</textarea></label>`,
+      editing ? '' : `<label>${esc(LL.t('projects.form.copy_from'))}<select id="pfCopyFrom"><option value="">${esc(LL.t('projects.form.no_copy'))}</option>${sources}</select></label>`
+        + `<p class="dim">${esc(LL.t('projects.form.copy_hint'))}</p>`,
       '<div class="dialog-error" id="pfError"></div>'
     ].join('');
     const submit = async (close, body) => {
@@ -193,26 +240,32 @@
       }
     };
     return ui.dialog({
-      title: editing ? `Проект «${project.title}»` : 'Новый проект',
+      title: editing ? LL.t('projects.form.edit_title', { title: project.title }) : LL.t('projects.form.create_title'),
       bodyHtml,
-      actions: [{ label: 'Отмена' }, { label: editing ? 'Сохранить' : 'Создать', primary: true, onClick: submit }]
+      actions: [{ label: LL.t('common.action.cancel') }, { label: LL.t(editing ? 'common.action.save' : 'projects.form.create'), primary: true, onClick: submit }]
     });
   }
   async function openDeleteDialog(p) {
-    const reports = p.reports === null ? 'неизвестно, база недоступна' : String(p.reports);
-    const services = p.services.map((s) => s.id).join(', ') || 'нет';
+    const reports = p.reports === null ? LL.t('projects.delete.reports_unknown') : String(p.reports);
+    const services = p.services.map((s) => s.id).join(', ') || LL.t('projects.delete.services_none');
     const choice = await ui.dialog({
-      title: `Удалить проект «${p.title}»`,
-      bodyHtml: `<p>Сервисы: ${esc(services)}. Отчётов: ${esc(reports)}.</p><p>«Только настройки» удаляет проект и настройки его сервисов. Отчёты и метрики остаются и будут видны в «Все области».</p>`,
+      title: LL.t('projects.delete.title', { title: p.title }),
+      bodyHtml: `<p>${LL.tHtml('projects.delete.summary', { services, reports })}</p>`
+        + `<p>${LL.tHtml('projects.delete.settings_only_hint', { all_areas: LL.t('ui.project_area.all') })}</p>`,
       actions: [
-        { label: 'Отмена' },
-        { label: 'Удалить только настройки', danger: true, value: 'settings' },
-        { label: 'Удалить вместе с отчётами', danger: true, value: 'data' }
+        { label: LL.t('common.action.cancel') },
+        { label: LL.t('projects.delete.settings_only'), danger: true, value: 'settings' },
+        { label: LL.t('projects.delete.with_reports'), danger: true, value: 'data' }
       ]
     });
     if (!choice) return;
     if (choice === 'data') {
-      const sure = await ui.confirm({ title: 'Удалить отчёты', message: `Будут безвозвратно удалены отчёты (${reports}) и метрики сервисов: ${services}.`, confirmText: 'Удалить навсегда', danger: true });
+      const sure = await ui.confirm({
+        title: LL.t('projects.delete.reports_title'),
+        message: LL.t('projects.delete.reports_message', { reports, services }),
+        confirmText: LL.t('projects.delete.forever'),
+        danger: true
+      });
       if (!sure) return;
     }
     await api('DELETE', `${projectUrl(p.id)}?with_data=${choice === 'data' ? '1' : '0'}`);
@@ -221,28 +274,42 @@
   }
   async function openMoveDialog(p, serviceId) {
     const targets = overview.projects.filter((x) => x.id !== p.id);
-    if (!targets.length) { ui.toast('Нет другого проекта для переноса', { tone: 'warn' }); return; }
+    if (!targets.length) { ui.toast(LL.t('projects.move.no_target'), { tone: 'warn' }); return; }
     const service = p.services.find((s) => s.id === serviceId);
     const reports = service && service.reports !== null ? service.reports : '—';
     const options = targets.map((x) => `<option value="${esc(x.id)}">${esc(x.title)}</option>`).join('');
     const target = await ui.dialog({
-      title: `Перенести сервис «${serviceId}»`,
-      bodyHtml: `<label>В проект<select id="moveTarget">${options}</select></label><p class="dim">Настройки сервиса и его отчёты (${esc(reports)}) перейдут в выбранный проект.</p>`,
-      actions: [{ label: 'Отмена' }, { label: 'Перенести', primary: true, onClick: (close, body) => close(body.querySelector('#moveTarget').value) }]
+      title: LL.t('projects.move.title', { service: serviceId }),
+      bodyHtml: `<label>${esc(LL.t('projects.move.target'))}<select id="moveTarget">${options}</select></label>`
+        + `<p class="dim">${LL.tHtml('projects.move.hint', { reports })}</p>`,
+      actions: [
+        { label: LL.t('common.action.cancel') },
+        { label: LL.t('projects.move.confirm'), primary: true, onClick: (close, body) => close(body.querySelector('#moveTarget').value) }
+      ]
     });
     if (!target) return;
     await api('POST', `${projectUrl(p.id)}/services/${encodeURIComponent(serviceId)}/move`, { target });
-    ui.toast(`Сервис «${serviceId}» перенесён`, { tone: 'ok' });
+    ui.toast(LL.t('projects.move.done', { service: serviceId }), { tone: 'ok' });
     location.reload();
   }
   async function resetArea(p, section) {
-    const ok = await ui.confirm({ title: 'Вернуть к общим', message: `Раздел «${sectionLabel(section)}» проекта «${p.title}» станет общим. Свои значения проекта в этом разделе удалятся.`, confirmText: 'Вернуть', danger: true });
+    const ok = await ui.confirm({
+      title: LL.t('projects.overrides.reset'),
+      message: LL.t('projects.reset_area.message', { section: sectionLabel(section), project: p.title }),
+      confirmText: LL.t('projects.reset.confirm'),
+      danger: true
+    });
     if (!ok) return;
     await api('DELETE', `${projectUrl(p.id)}/overrides/${encodeURIComponent(section)}`);
     location.reload();
   }
   async function resetService(p, serviceId, section) {
-    const ok = await ui.confirm({ title: 'Вернуть к настройкам проекта', message: `Раздел «${sectionLabel(section)}» сервиса «${serviceId}» будет браться из проекта «${p.title}».`, confirmText: 'Вернуть', danger: true });
+    const ok = await ui.confirm({
+      title: LL.t('projects.services.reset_title'),
+      message: LL.t('projects.reset_service.message', { section: sectionLabel(section), service: serviceId, project: p.title }),
+      confirmText: LL.t('projects.reset.confirm'),
+      danger: true
+    });
     if (!ok) return;
     await api('DELETE', `${projectUrl(p.id)}/services/${encodeURIComponent(serviceId)}/overrides/${encodeURIComponent(section)}`);
     location.reload();
@@ -268,7 +335,7 @@
     try { await handler(project, btn); } catch (e) { ui.toast(e.message, { tone: 'error' }); }
   }
 
-  LL.projects = { _internals: { readinessItems, readinessList } };
+  LL.projects = { _internals: { readinessItems, readinessList, packsChip, servicesTable, overridesBlock, projectCard } };
 
   document.addEventListener('DOMContentLoaded', () => {
     const list = $('projectsList');

@@ -1,22 +1,24 @@
 {% extends "base.html" %}
 {% set active_nav = 'forecasting' %}
-{% block title %}Прогноз мощностей{% endblock %}
+{% set i18n_ns = ['forecast'] %}
+{% block title %}{{ t('forecast.page.title') }}{% endblock %}
+{% block container_class %}forecast-page forecast-report-page{% endblock %}
 {% block head %}
 <script defer src="{{ url_for('static', filename='vendor/chart.umd.js') }}"></script>
 {% endblock %}
 {% block content %}
-  <nav id="forecastBreadcrumbs" class="breadcrumbs" aria-label="Навигация по разделу">
-    <a href="/forecasting">Прогнозирование</a><span class="sep" aria-hidden="true">›</span><span class="current" aria-current="page">Отчёт</span>
+  <nav id="forecastBreadcrumbs" class="breadcrumbs" aria-label="{{ t('forecast.page.breadcrumbs') }}">
+    <a href="/forecasting">{{ t('forecast.list.title') }}</a><span class="sep" aria-hidden="true">›</span><span class="current" aria-current="page">{{ t('forecast.page.report') }}</span>
   </nav>
   <div class="page-header">
     <div class="page-heading">
-      <h1 id="forecastTitle">Прогноз мощностей</h1>
-      <p class="page-subtitle">Сколько нагрузки выдержит сервис по модели USL, построенной на ступенях теста.</p>
+      <h1 id="forecastTitle">{{ t('forecast.page.title') }}</h1>
+      <p class="page-subtitle">{{ t('forecast.page.subtitle') }}</p>
     </div>
     <div class="page-actions">
-      <a id="forecastReportLink" class="btn" href="#" hidden>Открыть отчёт</a>
-      <button type="button" id="forecastConfluence" class="btn" data-min-role="engineer" hidden>Добавить отчёт в Confluence</button>
-      <a id="forecastConfluenceLink" href="#" target="_blank" rel="noopener noreferrer" hidden>Открыть в Confluence</a>
+      <a id="forecastReportLink" class="btn" href="#" hidden>{{ t('forecast.page.open_report') }}</a>
+      <button type="button" id="forecastConfluence" class="btn btn-primary" data-min-role="engineer" hidden>{{ t('forecast.confluence.add') }}</button>
+      <a id="forecastConfluenceLink" class="link" href="#" target="_blank" rel="noopener noreferrer" hidden>{{ t('forecast.confluence.open') }}</a>
       <span id="forecastConfluenceStatus" class="dim" aria-live="polite"></span>
     </div>
   </div>

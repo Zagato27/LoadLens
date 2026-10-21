@@ -1,24 +1,26 @@
+{% macro code(text) %}<code>{{ text }}</code>{% endmacro -%}
 <!DOCTYPE html>
-<html lang="ru" data-theme="dark">
+<html lang="{{ locale }}" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Вход — LoadLens</title>
+  <title>{{ t('auth.login.title') }} — LoadLens</title>
   <script nonce="{{ csp_nonce }}">
-    // Apply the saved theme before first paint to avoid a flash (same logic as base.html).
-    // ui.js is not loaded here, so "system" keeps following the OS setting from this script.
+    // Apply the theme before first paint to avoid a flash (same logic as base.html): a stored "light" or "dark"
+    // wins, anything else follows the OS setting. ui.js is not loaded here, so this script keeps following it.
     (function () {
+      var root = document.documentElement;
+      var saved = null;
+      try { saved = localStorage.getItem('loadlens.theme'); } catch (e) {}
+      if (saved === 'light' || saved === 'dark') {
+        root.setAttribute('data-theme', saved);
+        return;
+      }
       try {
-        var root = document.documentElement;
-        var saved = localStorage.getItem('loadlens.theme');
-        if (saved === 'system') {
-          var query = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null;
-          var follow = function () { root.setAttribute('data-theme', query && query.matches ? 'light' : 'dark'); };
-          follow();
-          if (query && query.addEventListener) query.addEventListener('change', follow);
-        } else if (saved === 'light' || saved === 'dark') {
-          root.setAttribute('data-theme', saved);
-        }
+        var query = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null;
+        var follow = function () { root.setAttribute('data-theme', query && query.matches ? 'light' : 'dark'); };
+        follow();
+        if (query && query.addEventListener) query.addEventListener('change', follow);
       } catch (e) {}
     })();
   </script>
@@ -37,25 +39,25 @@
       <div class="auth-alert" role="alert">{{ error }}</div>
       {% endif %}
       {% if recovered %}
-      <div class="auth-info" role="status">Хранилище снова доступно. Войдите обычным способом.</div>
+      <div class="auth-info" role="status">{{ t('auth.login.recovered') }}</div>
       {% endif %}
       {% if recovery_login %}
       <div class="auth-alert outage-banner" role="status">
-        <strong>Хранилище недоступно: {{ storage.title | lower }}.</strong>
-        Обычный вход временно не работает: пользователи хранятся в этой базе.
+        <strong>{{ t('auth.outage.title', reason=storage.title | lower) }}</strong>
+        {{ t('auth.outage.text') }}
       </div>
       {% if recovery_configured %}
-      <p class="auth-note recovery-note">Войдите как аварийный администратор. Сессия действует до 30 минут, открывает только настройку подключения к хранилищу и завершится сама, когда база ответит.</p>
+      <p class="auth-note recovery-note">{{ t('auth.outage.recovery_note') }}</p>
       {% else %}
       {% include "_recovery_setup.html" %}
       {% endif %}
       {% endif %}
       {% if no_users %}
       <div class="auth-info">
-        <strong>Пользователей пока нет.</strong>
-        Создайте администратора на сервере командой:
+        <strong>{{ t('auth.no_users.title') }}</strong>
+        {{ t('auth.no_users.command') }}
         <code>python -m loadlens_app.auth create-user admin --role admin</code>
-        Либо задайте переменные <code>LOADLENS_ADMIN_USER</code> и <code>LOADLENS_ADMIN_PASSWORD</code> и перезагрузите страницу.
+        {{ t('auth.no_users.env', user_var=code('LOADLENS_ADMIN_USER'), password_var=code('LOADLENS_ADMIN_PASSWORD')) }}
       </div>
       {% endif %}
       {% if not recovery_login or recovery_configured %}
@@ -64,20 +66,21 @@
         <input type="hidden" name="next" value="{{ next_url }}" />
         <div class="form-grid">
           <div>
-            <label for="username">Логин</label>
+            <label for="username">{{ t('auth.login.username') }}</label>
             <input id="username" name="username" type="text" value="{{ username }}" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus />
           </div>
           <div>
-            <label for="password">Пароль</label>
+            <label for="password">{{ t('auth.login.password') }}</label>
             <input id="password" name="password" type="password" autocomplete="current-password" required />
           </div>
         </div>
-        <button type="submit" class="btn btn-primary btn-lg">{% if recovery_login %}Войти для восстановления{% else %}Войти{% endif %}</button>
+        <button type="submit" class="btn btn-primary btn-lg">{{ t('auth.login.submit_recovery') if recovery_login else t('auth.login.submit') }}</button>
       </form>
       {% endif %}
       {% if providers %}
       <p class="auth-note">{{ providers | join(' · ') }}</p>
       {% endif %}
+      {% include "_lang_switch.html" %}
     </div>
   </main>
 </body>

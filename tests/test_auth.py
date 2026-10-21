@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import json
 import re
 import sys
@@ -31,6 +32,7 @@ from loadlens_app.auth import cli, passwords, policy, providers, tokens, web
 from loadlens_app.auth.config import AuthSettings, load_auth_settings, resolve_secret_key
 from loadlens_app.auth.service import ConflictError, ForbiddenError, LoginStatus, NotFoundError, ValidationError
 from loadlens_app.auth.throttle import LoginThrottle
+from loadlens_app.i18n import install as install_i18n
 
 PASSWORD = "Correct-Horse-1"
 SAFE = {"GET", "HEAD", "OPTIONS"}
@@ -576,6 +578,7 @@ def _matrix_app(repo):
     flask_app = Flask(__name__, template_folder=str(ROOT_DIR / "templates"))
     flask_app.config["TESTING"] = True
     flask_app.context_processor(lambda: {"appearance": {"key": "t", "css": ""}})
+    install_i18n(flask_app)  # forbidden.html extends base.html, which needs the locale and i18n_script
 
     def view(**_):
         return jsonify(job_id="job-1")

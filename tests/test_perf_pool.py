@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Storage connection pool (AI/storage_state.py): one warm session per thread instead of a connect per call.
 
 psycopg2.connect is replaced by a fake whose sessions track transaction status, autocommit, rollbacks and

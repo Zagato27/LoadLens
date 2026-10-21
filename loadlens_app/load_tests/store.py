@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Load test runs in the ``load_test_runs`` table (instances in a JSONB column).
 
 The table is the source of truth: the watcher of any process can pick up a run whose watcher stopped
@@ -15,7 +16,12 @@ from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 
+import psycopg2
 from psycopg2 import sql
+
+from AI.i18n import is_ref
+
+from .messages import Titles
 
 logger = logging.getLogger(__name__)
 
@@ -49,28 +55,29 @@ INST_CANCELLED = "cancelled"
 INST_ACTIVE = (INST_PENDING, INST_STARTING, INST_RUNNING)
 INST_TERMINAL = (INST_FINISHED, INST_CHECKS_FAILED, INST_FAILED, INST_STOPPED, INST_TIMED_OUT, INST_LOST, INST_CANCELLED)
 
-RUN_STATUS_TITLES = {
-    RUN_STARTING: "Запускается",
-    RUN_RUNNING: "Идёт",
-    RUN_STOPPING: "Останавливается",
-    RUN_DRAINING: "Ждёт метрики",
-    RUN_REPORTING: "Строится отчёт",
-    RUN_DONE: "Завершён",
-    RUN_FAILED: "Не запустился",
-    RUN_CANCELLED: "Отменён",
-}
-INSTANCE_STATUS_TITLES = {
-    INST_PENDING: "Ожидает старта",
-    INST_STARTING: "Запускается",
-    INST_RUNNING: "Идёт",
-    INST_FINISHED: "Завершён",
-    INST_CHECKS_FAILED: "Завершён, пороги не пройдены",
-    INST_FAILED: "Ошибка",
-    INST_STOPPED: "Остановлен",
-    INST_TIMED_OUT: "Остановлен по лимиту длительности",
-    INST_LOST: "Потерян",
-    INST_CANCELLED: "Отменён",
-}
+# Titles of the statuses in the reader's language (common.lt_run_status.* / common.lt_instance_status.*).
+RUN_STATUS_TITLES = Titles({
+    RUN_STARTING: "common.lt_run_status.starting",
+    RUN_RUNNING: "common.lt_run_status.running",
+    RUN_STOPPING: "common.lt_run_status.stopping",
+    RUN_DRAINING: "common.lt_run_status.draining",
+    RUN_REPORTING: "common.lt_run_status.reporting",
+    RUN_DONE: "common.lt_run_status.done",
+    RUN_FAILED: "common.lt_run_status.failed",
+    RUN_CANCELLED: "common.lt_run_status.cancelled",
+})
+INSTANCE_STATUS_TITLES = Titles({
+    INST_PENDING: "common.lt_instance_status.pending",
+    INST_STARTING: "common.lt_instance_status.starting",
+    INST_RUNNING: "common.lt_instance_status.running",
+    INST_FINISHED: "common.lt_instance_status.finished",
+    INST_CHECKS_FAILED: "common.lt_instance_status.checks_failed",
+    INST_FAILED: "common.lt_instance_status.failed",
+    INST_STOPPED: "common.lt_instance_status.stopped",
+    INST_TIMED_OUT: "common.lt_instance_status.timed_out",
+    INST_LOST: "common.lt_instance_status.lost",
+    INST_CANCELLED: "common.lt_instance_status.cancelled",
+})
 
 
 def utcnow() -> datetime:
@@ -96,6 +103,16 @@ def _parse_dt(value: Any) -> Optional[datetime]:
 _TIME_FIELDS = ("launched_at", "started_at", "finished_at", "stop_sent_at", "seen_at", "status_at", "stop_failed_at")
 
 
+def _ref(value: Any) -> Optional[dict[str, Any]]:
+    """A stored ``{"key", "params"}`` (JSON text in old drivers); anything else is no ref."""
+    if isinstance(value, str) and value:
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    return dict(value) if is_ref(value) else None
+
+
 @dataclass
 class InstanceRecord:
     index: int
@@ -114,6 +131,8 @@ class InstanceRecord:
     ref: str = ""
     exit_code: Optional[int] = None
     message: str = ""
+    # {"key", "params"} of the message: rendered again in the language of each reader (None: show the text).
+    message_ref: Optional[dict[str, Any]] = None
     launched_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
@@ -131,6 +150,7 @@ class InstanceRecord:
     timed_out: bool = False
     # Last answer of the tool status command (k6: VUs), and when it was asked.
     status_text: str = ""
+    status_text_ref: Optional[dict[str, Any]] = None
     status_at: Optional[datetime] = None
     # First failed attempt to deliver the stop: a generator that keeps refusing it is given up on later.
     stop_failed_at: Optional[datetime] = None
@@ -163,6 +183,8 @@ class InstanceRecord:
             raw = values.get(key)
             values[key] = {str(k): "" if v is None else str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
         values["ci_secret"] = [str(name) for name in values.get("ci_secret") or [] if name]
+        for key in ("message_ref", "status_text_ref"):
+            values[key] = _ref(values.get(key))
         return cls(**values)
 
     @property
@@ -196,6 +218,8 @@ class RunRecord:
     updated_at: datetime = field(default_factory=utcnow)
     # Events reported by CI jobs: {"index", "event": "started" | "finished", "exit_code", "message", "at"}.
     events: list[dict[str, Any]] = field(default_factory=list)
+    # {"key", "params"} of the message: rendered again in the language of each reader (None: show the text).
+    message_ref: Optional[dict[str, Any]] = None
 
     @property
     def active(self) -> bool:
@@ -213,10 +237,13 @@ _COLUMNS = (
     "options", "instances", "report_job_id", "report_url", "stop_all_at", "stop_instances", "started_at",
     "finished_at", "watcher", "watcher_seen", "created_at", "updated_at", "events",
 )
+# Added after the table: an older table gets it through ALTER TABLE when the role may do it; without it the
+# messages are shown as stored, in the language of the installation.
+_REF_COLUMN = "message_ref"
 
 
-def _from_row(row: tuple) -> RunRecord:
-    values = dict(zip(_COLUMNS, row))
+def _from_row(row: tuple, columns: tuple[str, ...] = _COLUMNS) -> RunRecord:
+    values = dict(zip(columns, row))
     options = values.get("options")
     instances = values.get("instances")
     events = values.get("events")
@@ -249,7 +276,12 @@ def _from_row(row: tuple) -> RunRecord:
         created_at=_parse_dt(values.get("created_at")) or utcnow(),
         updated_at=_parse_dt(values.get("updated_at")) or utcnow(),
         events=[event for event in (events or []) if isinstance(event, dict)],
+        message_ref=_ref(values.get(_REF_COLUMN)),
     )
+
+
+def _ref_json(ref: Optional[dict[str, Any]]) -> Optional[str]:
+    return json.dumps(ref, ensure_ascii=False) if ref else None
 
 
 class LoadTestStore:
@@ -387,6 +419,8 @@ class PgLoadTestStore(LoadTestStore):
     def __init__(self) -> None:
         self._ensured = False
         self._lock = threading.Lock()
+        # Whether the table has the message_ref column (False when it is old and the role may not ALTER it).
+        self._refs = False
 
     def _conn(self):
         from loadlens_app.core import _ts_conn
@@ -434,7 +468,8 @@ class PgLoadTestStore(LoadTestStore):
                             watcher_seen    TIMESTAMPTZ,
                             created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
                             updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-                            events          JSONB NOT NULL DEFAULT '[]'::jsonb
+                            events          JSONB NOT NULL DEFAULT '[]'::jsonb,
+                            message_ref     JSONB
                         )
                         """
                     ).format(sql.Identifier(schema), sql.Identifier(table)))
@@ -450,31 +485,64 @@ class PgLoadTestStore(LoadTestStore):
                         sql.Identifier(f"idx_{table}_status_created"), sql.Identifier(schema), sql.Identifier(table)))
                     cur.execute(sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {}.{} (service, run_name)").format(
                         sql.Identifier(f"idx_{table}_service_name"), sql.Identifier(schema), sql.Identifier(table)))
+                    self._refs = self._ensure_ref_column(cur, schema, table)
             finally:
                 conn.autocommit = prev
             self._ensured = True
+
+    @staticmethod
+    def _ensure_ref_column(cur, schema: str, table: str) -> bool:
+        """Adds ``message_ref`` to a table created before it; ``False`` when the role may not ALTER the table."""
+        # Checked first: ALTER TABLE needs ownership even when the column is already there.
+        cur.execute(
+            "SELECT 1 FROM information_schema.columns WHERE table_schema = %s AND table_name = %s AND column_name = %s",
+            (schema, table, _REF_COLUMN),
+        )
+        if cur.fetchall():
+            return True
+        try:
+            cur.execute(sql.SQL("ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS message_ref JSONB").format(
+                sql.Identifier(schema), sql.Identifier(table)))
+        except psycopg2.Error:
+            logger.warning(
+                "Cannot add message_ref to %s.%s (the table belongs to another role?): run messages are shown in the"
+                " language they were written in", schema, table, exc_info=True,
+            )
+            return False
+        return True
+
+    def _columns(self) -> tuple[str, ...]:
+        return _COLUMNS + ((_REF_COLUMN,) if self._refs else ())
+
+    def _row(self, row: tuple) -> RunRecord:
+        return _from_row(row, self._columns())
 
     def _ref(self) -> sql.Composed:
         schema, table = _table_ref()
         return sql.SQL("{}.{}").format(sql.Identifier(schema), sql.Identifier(table))
 
     def _select(self) -> sql.Composed:
-        return sql.SQL("SELECT {} FROM {}").format(sql.SQL(", ").join(sql.Identifier(c) for c in _COLUMNS), self._ref())
+        return sql.SQL("SELECT {} FROM {}").format(sql.SQL(", ").join(sql.Identifier(c) for c in self._columns()), self._ref())
 
     def create(self, run: RunRecord) -> None:
         conn = self._conn()
         try:
             with conn, conn.cursor() as cur:
+                ref_column, ref_value = (", message_ref", ", %s::jsonb") if self._refs else ("", "")
+                params = [
+                    run.run_id, run.run_name, run.run_tag, run.service, run.project_area, run.test_type, run.status,
+                    run.message, run.owner, json.dumps(run.options), json.dumps([i.to_json() for i in run.instances]),
+                    run.created_at, run.updated_at,
+                ]
+                if self._refs:
+                    params.append(_ref_json(run.message_ref))
                 cur.execute(
                     sql.SQL(
                         "INSERT INTO {} (run_id, run_name, run_tag, service, project_area, test_type, status, message, owner,"
-                        " options, instances, created_at, updated_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)"
+                        " options, instances, created_at, updated_at" + ref_column + ") VALUES"
+                        " (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s" + ref_value + ")"
                     ).format(self._ref()),
-                    (
-                        run.run_id, run.run_name, run.run_tag, run.service, run.project_area, run.test_type, run.status,
-                        run.message, run.owner, json.dumps(run.options), json.dumps([i.to_json() for i in run.instances]),
-                        run.created_at, run.updated_at,
-                    ),
+                    tuple(params),
                 )
         finally:
             conn.close()
@@ -487,7 +555,7 @@ class PgLoadTestStore(LoadTestStore):
                 row = cur.fetchone()
         finally:
             conn.close()
-        return _from_row(row) if row else None
+        return self._row(row) if row else None
 
     def list(self, limit: int = 50, statuses: Optional[Iterable[str]] = None, services: Optional[list[str]] = None) -> list[RunRecord]:
         wanted = [s for s in (statuses or RUN_STATUSES) if s in RUN_STATUSES]
@@ -507,7 +575,7 @@ class PgLoadTestStore(LoadTestStore):
                 rows = cur.fetchall() or []
         finally:
             conn.close()
-        return [_from_row(row) for row in rows]
+        return [self._row(row) for row in rows]
 
     def claim(self, watcher_id: str, stale_after_sec: int) -> list[RunRecord]:
         conn = self._conn()
@@ -528,22 +596,26 @@ class PgLoadTestStore(LoadTestStore):
                 rows = cur.fetchall() or []
         finally:
             conn.close()
-        return [_from_row(row) for row in rows]
+        return [self._row(row) for row in rows]
 
     def save_progress(self, run: RunRecord, watcher_id: str) -> bool:
         conn = self._conn()
         try:
             with conn, conn.cursor() as cur:
+                ref_set = ", message_ref = %s::jsonb" if self._refs else ""
+                params = [
+                    run.status, run.message, json.dumps([i.to_json() for i in run.instances]), run.report_job_id,
+                    run.report_url, run.started_at, run.finished_at, run.run_name,
+                ]
+                if self._refs:
+                    params.append(_ref_json(run.message_ref))
                 cur.execute(
                     sql.SQL(
                         "UPDATE {} SET status = %s, message = %s, instances = %s::jsonb, report_job_id = %s, report_url = %s,"
-                        " started_at = %s, finished_at = %s, run_name = %s, watcher_seen = now(), updated_at = now()"
+                        " started_at = %s, finished_at = %s, run_name = %s" + ref_set + ", watcher_seen = now(), updated_at = now()"
                         " WHERE run_id = %s AND watcher = %s"
                     ).format(self._ref()),
-                    (
-                        run.status, run.message, json.dumps([i.to_json() for i in run.instances]), run.report_job_id,
-                        run.report_url, run.started_at, run.finished_at, run.run_name, run.run_id, watcher_id,
-                    ),
+                    tuple(params + [run.run_id, watcher_id]),
                 )
                 return cur.rowcount == 1
         finally:

@@ -1,6 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
 """Scenario 8: jobs wait in the queue for a free worker; a job no worker takes is marked after the limit.
 
-How to run (sandbox prepared as in docs/perf-baseline.md, "Этап 3"; nothing listening on 127.0.0.1:5070+N):
+How to run (sandbox prepared as in plans/perf-baseline.md, "Этап 3"; nothing listening on 127.0.0.1:5070+N):
 
     C:/Python312/python.exe -X utf8 tools/e2e_jobs/s8_queue_wait.py --sandbox 6
 

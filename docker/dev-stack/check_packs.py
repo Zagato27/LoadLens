@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Runs the query packs against docker/dev-stack and reports which queries return data.
 
 Every query goes through LoadLens's own preview (the «Проверить» button): Prometheus directly,
@@ -66,6 +67,7 @@ PLAN: dict[str, tuple[str, dict[str, str], str]] = {
     "db-pgbouncer": ("prom", {}, "core"),
     "db-redis-exporter": ("prom", {}, "core"),
     "kafka-exporter": ("prom", {}, "kafka"),
+    "db-arangodb": ("prom", {"matchers": 'job="arangodb"'}, "arangodb"),
 }
 
 
@@ -104,7 +106,7 @@ def check_pack(pack_id: str, start_ts: float, end_ts: float) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--packs", default="", help="comma-separated pack ids (default: every pack of the plan)")
-    parser.add_argument("--profiles", default="core,load,kafka,locust,gatling", help="compose profiles that are running")
+    parser.add_argument("--profiles", default="core,load,kafka,locust,gatling,arangodb", help="compose profiles that are running")
     parser.add_argument("--minutes", type=float, default=15.0, help="window that ends now")
     parser.add_argument("--json", default="", help="write the full results to this file")
     args = parser.parse_args()

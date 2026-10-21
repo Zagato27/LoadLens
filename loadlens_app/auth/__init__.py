@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Authentication and authorization for the web app.
 
 Local users with roles (viewer < engineer < admin), pluggable providers, API tokens, CSRF

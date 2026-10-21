@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Authentication and user-management logic, independent of Flask."""
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 
+from AI.i18n import t
 from AI.storage_state import is_storage_error
 
 from . import passwords
@@ -233,7 +235,7 @@ class AuthService:
         """Entry point for redirect-based providers (OIDC callback): maps the identity and records the login."""
         user = self._provision(provider, identity)
         if not user.is_active:
-            raise ForbiddenError("Учётная запись отключена")
+            raise ForbiddenError(t("auth.server.account_disabled"))
         self._finish_login(user, f"{ip}|{identity.username.lower()}", ip, provider)
         return user
 
@@ -249,14 +251,14 @@ class AuthService:
     def _provision(self, provider: str, identity: Optional[ExternalIdentity]) -> User:
         """Finds or creates the stored user for an externally verified identity."""
         if identity is None:
-            raise ValidationError("Провайдер не вернул учётные данные")
+            raise ValidationError(t("auth.server.provider_no_identity"))
         username = self._clean_username(identity.username)
         external_id = (identity.external_id or username).strip().lower()
         user = self.repo.get_by_external(provider, external_id)
         if user is None:
             # Never attach an external identity to an existing account of another provider by name.
             if self.repo.get_by_username(username) is not None:
-                raise ConflictError(f"Логин {username!r} уже занят другой учётной записью")
+                raise ConflictError(t("auth.server.username_taken", username=repr(username)))
             try:
                 user = self.repo.create_user(
                     username=username,
@@ -269,7 +271,7 @@ class AuthService:
             except DuplicateUserError:
                 user = self.repo.get_by_external(provider, external_id)
                 if user is None:
-                    raise ConflictError(f"Логин {username!r} уже занят другой учётной записью") from None
+                    raise ConflictError(t("auth.server.username_taken", username=repr(username))) from None
             else:
                 self.audit("user.provision", Actor(name=provider), target=username, details={"role": user.role.key})
             return user
@@ -347,22 +349,20 @@ class AuthService:
     def _clean_username(raw: object) -> str:
         name = str(raw or "").strip()
         if not _USERNAME_RE.match(name):
-            raise ValidationError(
-                "Логин: от 3 до 64 символов, латиница, цифры и . _ @ -, начинается с буквы или цифры"
-            )
+            raise ValidationError(t("auth.server.username_format"))
         return name
 
     @staticmethod
     def _clean_text(raw: object, limit: int, label: str) -> str:
         text = str(raw or "").strip()
         if len(text) > limit:
-            raise ValidationError(f"{label}: не более {limit} символов")
+            raise ValidationError(t("auth.server.field_too_long", label=label, limit=limit))
         return text
 
     def _clean_email(self, raw: object) -> str:
-        email = self._clean_text(raw, _MAX_EMAIL, "Email")
+        email = self._clean_text(raw, _MAX_EMAIL, t("auth.server.field.email"))
         if email and not re.match(r"^[^@\s]+@[^@\s]+$", email):
-            raise ValidationError("Email указан в неверном формате")
+            raise ValidationError(t("auth.server.email_invalid"))
         return email
 
     @staticmethod
@@ -381,7 +381,7 @@ class AuthService:
     def _require_user(self, user_id: int) -> User:
         user = self.repo.get_user(user_id)
         if user is None:
-            raise NotFoundError("Пользователь не найден")
+            raise NotFoundError(t("auth.server.user_not_found"))
         return user
 
     def list_users(self) -> list[User]:
@@ -406,13 +406,13 @@ class AuthService:
                 username=name,
                 role=parsed_role,
                 password_hash=passwords.hash_password(password),
-                display_name=self._clean_text(display_name, _MAX_DISPLAY_NAME, "Имя"),
+                display_name=self._clean_text(display_name, _MAX_DISPLAY_NAME, t("auth.server.field.display_name")),
                 email=self._clean_email(email),
                 provider=LOCAL_PROVIDER,
                 must_change_password=must_change_password,
             )
         except DuplicateUserError:
-            raise ConflictError("Пользователь с таким логином уже существует") from None
+            raise ConflictError(t("auth.server.user_exists")) from None
         self.audit("user.create", actor, target=name, details={"role": parsed_role.key})
         return user
 
@@ -429,7 +429,7 @@ class AuthService:
         target = self._require_user(user_id)
         fields: dict[str, Any] = {}
         if display_name is not None:
-            fields["display_name"] = self._clean_text(display_name, _MAX_DISPLAY_NAME, "Имя")
+            fields["display_name"] = self._clean_text(display_name, _MAX_DISPLAY_NAME, t("auth.server.field.display_name"))
         if email is not None:
             fields["email"] = self._clean_email(email)
         security_change = False
@@ -443,18 +443,18 @@ class AuthService:
             security_change = True
 
         if actor.user is not None and actor.user.id == target.id and fields.get("is_active") is False:
-            raise ForbiddenError("Нельзя отключить собственную учётную запись")
+            raise ForbiddenError(t("auth.server.cannot_disable_self"))
         loses_admin = target.role is Role.ADMIN and target.is_active and (
             fields.get("role", target.role) is not Role.ADMIN or not fields.get("is_active", target.is_active)
         )
         if loses_admin and self.repo.count_active_admins(exclude_id=target.id) == 0:
-            raise ConflictError("В системе должен остаться хотя бы один активный администратор")
+            raise ConflictError(t("auth.server.last_admin"))
         if not fields:
             return target
 
         updated = self.repo.update_user(target.id, fields, bump_epoch=security_change)
         if updated is None:
-            raise NotFoundError("Пользователь не найден")
+            raise NotFoundError(t("auth.server.user_not_found"))
         self.invalidate_user(target.id)
         details: dict[str, Any] = {"fields": sorted(fields)}
         if "role" in fields:
@@ -467,9 +467,9 @@ class AuthService:
     def delete_user(self, user_id: int, *, actor: Actor) -> None:
         target = self._require_user(user_id)
         if actor.user is not None and actor.user.id == target.id:
-            raise ForbiddenError("Нельзя удалить собственную учётную запись")
+            raise ForbiddenError(t("auth.server.cannot_delete_self"))
         if target.role is Role.ADMIN and target.is_active and self.repo.count_active_admins(exclude_id=target.id) == 0:
-            raise ConflictError("В системе должен остаться хотя бы один активный администратор")
+            raise ConflictError(t("auth.server.last_admin"))
         self.repo.delete_user(target.id)
         self.invalidate_user(target.id)
         self.audit("user.delete", actor, target=target.username)
@@ -477,7 +477,7 @@ class AuthService:
     def reset_password(self, user_id: int, new_password: str, *, actor: Actor, must_change: bool = True) -> User:
         target = self._require_user(user_id)
         if target.provider != LOCAL_PROVIDER:
-            raise ValidationError("Пароль этой учётной записи управляется внешним провайдером")
+            raise ValidationError(t("auth.server.external_password"))
         password = self._validate_password(new_password, target.username)
         self.repo.set_password(target.id, passwords.hash_password(password), must_change)
         self.invalidate_user(target.id)
@@ -487,10 +487,10 @@ class AuthService:
     def change_own_password(self, user: User, current_password: str, new_password: str, *, actor: Actor) -> User:
         fresh = self._require_user(user.id)
         if fresh.provider != LOCAL_PROVIDER or not fresh.password_hash:
-            raise ValidationError("Пароль этой учётной записи управляется внешним провайдером")
+            raise ValidationError(t("auth.server.external_password"))
         now = self._clock()
         if fresh.is_locked(now):
-            raise ForbiddenError("Учётная запись временно заблокирована из-за неудачных попыток", code="locked")
+            raise ForbiddenError(t("auth.server.account_locked"), code="locked")
         if not passwords.verify_password(fresh.password_hash, current_password):
             # Counts towards the account lockout, so a stolen session cannot be used to guess the password.
             self.repo.register_failed_login(
@@ -499,9 +499,9 @@ class AuthService:
                 lock_until=now + timedelta(minutes=self.settings.lockout_minutes),
             )
             self.audit("password.change", actor, target=fresh.username, success=False)
-            raise ValidationError("Текущий пароль указан неверно", code="wrong_password")
+            raise ValidationError(t("auth.server.wrong_current_password"), code="wrong_password")
         if current_password == new_password:
-            raise ValidationError("Новый пароль должен отличаться от текущего")
+            raise ValidationError(t("auth.server.same_password"))
         password = self._validate_password(new_password, fresh.username)
         self.repo.set_password(fresh.id, passwords.hash_password(password), False)
         self.invalidate_user(fresh.id)
@@ -527,17 +527,17 @@ class AuthService:
         expires_in_days: Optional[int] = None,
     ) -> tuple[ApiToken, str]:
         if not self.settings.api_tokens:
-            raise ForbiddenError("API-токены отключены")
-        label = self._clean_text(name, _MAX_TOKEN_NAME, "Название")
+            raise ForbiddenError(t("auth.server.tokens_disabled"))
+        label = self._clean_text(name, _MAX_TOKEN_NAME, t("auth.server.field.token_name"))
         if not label:
-            raise ValidationError("Укажите название токена")
+            raise ValidationError(t("auth.server.token_name_required"))
         # A token is a long-lived credential that leaves the browser: read-only unless asked otherwise.
         token_role = self._parse_role(role) if role else Role.VIEWER
         if token_role > user.role:
-            raise ForbiddenError("Роль токена не может быть выше вашей роли")
+            raise ForbiddenError(t("auth.server.token_role_too_high"))
         days = self.settings.token_default_days if expires_in_days is None else expires_in_days
         if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= self.settings.token_max_days:
-            raise ValidationError(f"Срок действия токена: от 1 до {self.settings.token_max_days} дней")
+            raise ValidationError(t("auth.server.token_days", max_days=self.settings.token_max_days))
         plain, prefix, digest = generate_token()
         token = self.repo.create_token(
             user_id=user.id,
@@ -558,7 +558,7 @@ class AuthService:
     def revoke_token(self, user: User, token_id: int, *, actor: Actor) -> None:
         # Administrators may revoke anybody's token; everyone else only their own.
         if not self.repo.revoke_token(token_id, None if user.role is Role.ADMIN else user.id):
-            raise NotFoundError("Токен не найден или уже отозван")
+            raise NotFoundError(t("auth.server.token_not_found"))
         self.audit("token.revoke", actor, details={"token_id": token_id})
 
     def authenticate_token(self, raw: str) -> Optional[TokenIdentity]:

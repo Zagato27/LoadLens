@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Catalog, domain bindings and the legacy metrics_source conversion."""
 
 import pandas as pd

@@ -1,6 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
 """Scenario 5: with the broker down a new job runs in a thread of the web process; after it is back, in the worker.
 
-How to run (sandbox prepared as in docs/perf-baseline.md, "Этап 3"; nothing listening on 127.0.0.1:5070+N;
+How to run (sandbox prepared as in plans/perf-baseline.md, "Этап 3"; nothing listening on 127.0.0.1:5070+N;
 Redis is the local throwaway container of the sandboxes, by default ll-perf-redis):
 
     C:/Python312/python.exe -X utf8 tools/e2e_jobs/s5_redis_down.py --sandbox 6 --redis-container ll-perf-redis

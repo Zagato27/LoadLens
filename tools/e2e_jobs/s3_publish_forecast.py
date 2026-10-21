@@ -1,6 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
 """Scenario 3: publishing a capacity forecast to Confluence runs in the Celery worker.
 
-How to run (sandbox prepared as in docs/perf-baseline.md, "Этап 3"; nothing listening on 127.0.0.1:5070+N):
+How to run (sandbox prepared as in plans/perf-baseline.md, "Этап 3"; nothing listening on 127.0.0.1:5070+N):
 
     C:/Python312/python.exe -X utf8 tools/e2e_jobs/s3_publish_forecast.py --sandbox 6 --run-id <run_id>
     C:/Python312/python.exe -X utf8 tools/e2e_jobs/s3_publish_forecast.py --sandbox 6     # builds a report first

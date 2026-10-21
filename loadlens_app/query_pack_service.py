@@ -1,8 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
 """Query packs in the settings: catalog with compatibility, preview, check and apply for one scope.
 
 The scope is the one the «Запросы» section edits: global defaults, a project area, or a service
 inside an area. Reading and writing the scope is passed in by the blueprint, so this module holds
 only pack logic and stays testable without Flask.
+
+Texts (pack titles, descriptions, role and unit titles, errors) are in the current locale: the
+request's language in a web request.
 """
 
 from __future__ import annotations
@@ -14,17 +18,20 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
 from AI.data_sources import DataSourceConfigError, resolve_domain_source, source_accepts_language
+from AI.i18n import get_locale, t, with_locale
 from AI.query_packs import (
     CATEGORY_TITLES,
     LANGUAGE_TITLES,
     ROLES,
     UNIT_TITLES,
     BlockConflictError,
+    Bundle,
     PackRenderError,
     QueryPack,
     RenderedPack,
     installed_packs,
     load_catalog,
+    localized,
     merge_conflict,
     merge_pack,
     render_pack,
@@ -112,19 +119,26 @@ def compatibility(cfg: Mapping[str, Any], queries: Mapping[str, Any], pack: Quer
     try:
         resolved = resolve_domain_source(dict(cfg), pack.domain)
     except DataSourceConfigError as exc:
-        return Compatibility(STATUS_INCOMPATIBLE, f"Домен не привязан к источнику: {exc}")
+        return Compatibility(STATUS_INCOMPATIBLE, t("packs.error.domain_unbound", error=exc))
     source = _source_title(cfg, resolved.source_id)
     lang = LANGUAGE_TITLES[pack.language]
     if not source_accepts_language(resolved.source_type, pack.language):
-        return Compatibility(STATUS_INCOMPATIBLE, f"Источник «{source}» не выполняет {lang}", source)
+        return Compatibility(STATUS_INCOMPATIBLE, t("packs.error.source_language", source=source, language=lang), source)
     conflict = merge_conflict(queries.get(pack.domain), pack.language)
     if conflict:
-        return Compatibility(STATUS_REPLACE_ONLY, f"{_sentence(conflict)}: пакет можно применить только с заменой запросов домена", source)
+        return Compatibility(STATUS_REPLACE_ONLY, t("packs.error.replace_only", reason=_sentence(conflict)), source)
     return Compatibility(STATUS_OK, "", source)
 
 
 def _variable_view(name: str, var) -> dict[str, Any]:
-    return {"name": name, "title": var.title, "default": var.default, "choices": list(var.choices), "help": var.help, "pattern": var.pattern}
+    return {
+        "name": name,
+        "title": localized(var, "title"),
+        "default": var.default,
+        "choices": list(var.choices),
+        "help": localized(var, "help"),
+        "pattern": var.pattern,
+    }
 
 
 def _query_view(query) -> dict[str, Any]:
@@ -155,34 +169,49 @@ def _installed_view(pack: QueryPack, block: Any) -> Optional[dict[str, Any]]:
     }
 
 
+def _bundle_view(bundle: Bundle) -> dict[str, Any]:
+    return {
+        "id": bundle.id,
+        "title": localized(bundle, "title"),
+        "description": localized(bundle, "description"),
+        "packs": list(bundle.packs),
+    }
+
+
+def _ordered_packs(packs: list[QueryPack]) -> list[QueryPack]:
+    """Catalog order (category, then title) by the titles of the current locale; in ru it is the catalog order."""
+    categories = {name: index for index, name in enumerate(CATEGORY_TITLES)}
+    return sorted(packs, key=lambda pack: (categories.get(pack.category, len(categories)), localized(pack, "title").lower()))
+
+
 def catalog_view(state: ScopeState) -> dict[str, Any]:
     catalog = load_catalog()
     packs = []
-    for pack in catalog.packs.values():
+    for pack in _ordered_packs(list(catalog.packs.values())):
         rendered = render_pack(pack)
         installed = _installed_view(pack, state.queries.get(pack.domain))
         packs.append({
             "id": pack.id,
             "version": pack.version,
-            "title": pack.title,
+            "title": localized(pack, "title"),
             "category": pack.category,
             "stack": list(pack.stack),
             "domain": pack.domain,
             "language": pack.language,
             "language_title": LANGUAGE_TITLES[pack.language],
-            "description": " ".join(pack.description.split()),
+            "description": " ".join(localized(pack, "description").split()),
             "requires_metrics": list(pack.requires_metrics),
             "variables": [_variable_view(name, var) for name, var in pack.variables.items()],
             "queries": [_query_view(query) for query in rendered.queries],
             "sla_fields": sorted(rendered.sla_refs),
             "compatibility": compatibility(state.effective_cfg, state.queries, pack).to_dict(),
             "installed": installed,
-            "domain_title": pack.domain_title,
+            "domain_title": localized(pack, "domain_title"),
             "verified": pack.verified,
         })
     return {
         "packs": packs,
-        "bundles": [bundle.model_dump() for bundle in catalog.bundles.values()],
+        "bundles": [_bundle_view(bundle) for bundle in catalog.bundles.values()],
         "categories": dict(CATEGORY_TITLES),
         "roles": {
             name: {"title": role.title, "unit": UNIT_TITLES.get(role.unit, role.unit), "domain": role.domain, "sla_field": role.sla_field}
@@ -194,7 +223,7 @@ def catalog_view(state: ScopeState) -> dict[str, Any]:
 def _pack(pack_id: str) -> QueryPack:
     pack = load_catalog().pack(str(pack_id or "").strip())
     if pack is None:
-        raise PackRequestError(f"Пакет «{pack_id}» не найден", 404)
+        raise PackRequestError(t("packs.error.pack_not_found", pack=pack_id), 404)
     return pack
 
 
@@ -202,15 +231,15 @@ def _include(raw: Any) -> Optional[set[str]]:
     if raw is None:
         return None
     if not isinstance(raw, list):
-        raise PackRequestError("include должен быть списком названий запросов")
+        raise PackRequestError(t("packs.error.include_list"))
     return {str(item) for item in raw}
 
 
 def _include_indexes(raw: Any, count: int) -> set[int]:
     if not isinstance(raw, list) or not all(isinstance(item, int) and not isinstance(item, bool) for item in raw):
-        raise PackRequestError("include_indexes должен быть списком номеров запросов")
+        raise PackRequestError(t("packs.error.include_indexes_list"))
     if any(item < 0 or item >= count for item in raw):
-        raise PackRequestError("include_indexes: номер запроса вне пакета")
+        raise PackRequestError(t("packs.error.include_indexes_range"))
     return set(raw)
 
 
@@ -223,7 +252,7 @@ def _render(body: Mapping[str, Any]) -> RenderedPack:
     pack = _pack(body.get("pack_id"))
     variables = body.get("variables") or {}
     if not isinstance(variables, Mapping):
-        raise PackRequestError("variables должен быть объектом")
+        raise PackRequestError(t("packs.error.variables_object"))
     try:
         include = _include(body.get("include"))
         if body.get("include_indexes") is not None:
@@ -234,7 +263,7 @@ def _render(body: Mapping[str, Any]) -> RenderedPack:
     except PackRenderError as exc:
         raise PackRequestError(str(exc)) from exc
     if not rendered.queries:
-        raise PackRequestError("Не выбрано ни одного запроса пакета")
+        raise PackRequestError(t("packs.error.nothing_selected"))
     return rendered
 
 
@@ -244,20 +273,20 @@ def plan_apply(state: ScopeState, body: Mapping[str, Any]) -> ApplyResult:
     pack = rendered.pack
     mode = str(body.get("mode") or "merge")
     if mode not in MODES:
-        raise PackRequestError(f"mode: допустимо {', '.join(MODES)}")
+        raise PackRequestError(t("packs.error.mode", modes=", ".join(MODES)))
     compat = compatibility(state.effective_cfg, state.queries, pack)
     if compat.status == STATUS_INCOMPATIBLE:
         raise PackRequestError(compat.reason, 409)
     try:
         block, plan = merge_pack(state.queries.get(pack.domain), rendered, mode)  # type: ignore[arg-type]
     except BlockConflictError as exc:
-        raise PackRequestError(f"{_sentence(str(exc))}: выберите замену запросов домена", 409) from exc
+        raise PackRequestError(t("packs.error.choose_replace", reason=_sentence(str(exc))), 409) from exc
     queries = copy.deepcopy(state.queries)
     queries[pack.domain] = block
     try:
         validate_queries(queries)
     except QueryConfigError as exc:
-        raise PackRequestError(f"Запросы после применения не проходят проверку: {exc}") from exc
+        raise PackRequestError(t("packs.error.queries_invalid", error=exc)) from exc
     sla = copy.deepcopy(state.sla)
     sla_report: dict[str, Any] = {"changes": {}, "kept": {}, "warnings": []}
     warnings: list[str] = []
@@ -299,16 +328,20 @@ def check_pack(
     if compat.status == STATUS_INCOMPATIBLE:
         raise PackRequestError(compat.reason, 409)
 
+    # Worker threads do not see the request: they answer in the locale of the request that started them.
+    locale = get_locale()
+
     def run(query) -> dict[str, Any]:
-        result = preview(
-            state.effective_cfg,
-            domain=pack.domain,
-            lang=pack.language,
-            query=query.query,
-            label_keys=list(query.keys),
-            start_ts=start_ts,
-            end_ts=end_ts,
-        )
+        with with_locale(locale):
+            result = preview(
+                state.effective_cfg,
+                domain=pack.domain,
+                lang=pack.language,
+                query=query.query,
+                label_keys=list(query.keys),
+                start_ts=start_ts,
+                end_ts=end_ts,
+            )
         return {"label": query.label, "role": query.role, "required": query.required, **result.to_dict()}
 
     with ThreadPoolExecutor(max_workers=CHECK_WORKERS) as pool:

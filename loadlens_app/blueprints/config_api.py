@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Blueprint for configuration APIs."""
 
 from __future__ import annotations
@@ -21,7 +22,8 @@ from AI.data_sources import (
 )
 from settings import CONFIG
 
-from loadlens_app.appearance import AppearanceError
+from AI.i18n import t as translate
+from loadlens_app.appearance import AppearanceError, parse_language
 from loadlens_app.errors import internal_error
 from loadlens_app.config_schema import (
     QueryConfigError,
@@ -47,6 +49,7 @@ from loadlens_app.load_tests.tools import (
     ToolConfigError,
     effective_tools,
     merged_tool_configs,
+    shown_default,
     tools_overrides,
     validate_tools_section,
 )
@@ -86,6 +89,20 @@ def _config_node(section: str) -> dict:
             return {}
         node = node.get(part)
     return node if isinstance(node, dict) else {}
+
+
+def _shown_tool_configs() -> dict:
+    """Effective load tool templates for the settings form: a built-in title or help in the reader's language.
+
+    Only the display changes: the form sends the text back and ``tools_overrides`` treats a built-in text of any
+    language as the default, so nothing is stored for it.
+    """
+    tools = merged_tool_configs(CONFIG)
+    for tool_id, raw in tools.items():
+        for field_name in ("title", "help"):
+            if field_name in raw:
+                raw[field_name] = shown_default(tool_id, field_name, raw[field_name])
+    return tools
 
 
 def _set_nested(target: dict, parts: list[str], value: dict) -> None:
@@ -228,7 +245,7 @@ def get_config():
             "appearance": copy.deepcopy(CONFIG.get("appearance", {}) or {}),
             "load_generators": copy.deepcopy(CONFIG.get("load_generators") or {}),
             # Effective templates: defaults with the saved overrides applied.
-            "load_tools": merged_tool_configs(CONFIG),
+            "load_tools": _shown_tool_configs(),
             CONFLUENCE_TEMPLATE_SECTION: _confluence_template_node(),
             "metrics_config": area_metrics_cfg,
         }
@@ -345,7 +362,7 @@ def _update_metrics_config(area: str, service: str, payload: dict) -> tuple[dict
         current[area]["services"][service] = payload_copy
     else:
         if not isinstance(payload.get("services"), dict):
-            return {"error": "metrics_config должен содержать ключ 'services' с объектом сервисов"}, 400
+            return {"error": translate("api.config.metrics_services")}, 400
         current[area] = payload_copy
         current[area]["__replace__"] = True
     _save_metrics_runtime(current)
@@ -365,10 +382,10 @@ def update_config():
     area = (data.get("area") or "").strip()
     service = (data.get("service") or "").strip()
     if not section or not isinstance(payload, dict):
-        return jsonify({"error": "section и data обязательны"}), 400
+        return jsonify({"error": translate("api.required.section_data")}), 400
     if section.split(".")[0] == "auth":
         # Authentication settings (and the session key) must not be writable from the browser.
-        return jsonify({"error": "Раздел auth не меняется через API: задайте его в settings.py или переменных окружения"}), 403
+        return jsonify({"error": translate("api.config.auth_readonly")}), 403
     if section != "metrics_config":
         try:
             payload = restore_secrets(payload, _current_scope_value(section, area, service))
@@ -391,6 +408,8 @@ def update_config():
             validate_appearance(payload)
         except AppearanceError as exc:
             return jsonify({"error": str(exc)}), 400
+        if "language" in payload:
+            payload = {**payload, "language": parse_language(payload["language"])}
     if section == "data_sources":
         rejected = _reject_data_sources(payload)
         if rejected is not None:
@@ -412,6 +431,10 @@ def update_config():
         # Only what differs from the built-in templates is stored, so later default fixes still apply.
         payload = tools_overrides(payload)
     warnings = warnings_for(section, payload)
+    if section == "appearance":
+        # The accent and the language are saved by separate controls (and API clients may send one key):
+        # a payload changes only the keys it carries.
+        payload = {**copy.deepcopy(_config_node("appearance")), **payload}
     _audit_addresses(payload)
     try:
         if section == CONFLUENCE_TEMPLATE_SECTION:
@@ -425,7 +448,7 @@ def update_config():
 
         if section == "metrics_config":
             if not area:
-                return jsonify({"error": "area обязательна для metrics_config"}), 400
+                return jsonify({"error": translate("api.required.metrics_area")}), 400
             body, status = _update_metrics_config(area, service, payload)
             return jsonify(body), status
 
@@ -543,13 +566,13 @@ def _restored_section(section: str, payload: object, area: str, service: str) ->
 def _check_catalog_source(payload: dict, source_id: str):
     entry = payload.get(source_id)
     if not source_id or not isinstance(entry, dict):
-        return jsonify({"error": f"Источник «{source_id or '—'}» не найден"}), 400
+        return jsonify({"error": translate("api.config.source_not_found", source=source_id or "—")}), 400
     return jsonify(check_data_source(entry).to_dict()), 200
 
 
 def _check_domain_binding(payload: dict, domain: str, area: str):
     if not domain:
-        return jsonify({"error": "Укажите домен"}), 400
+        return jsonify({"error": translate("api.config.domain_required")}), 400
     try:
         resolved = resolve_domain_source({"data_sources": _config_node("data_sources"), "domain_sources": payload}, domain)
     except DataSourceConfigError as exc:
@@ -567,7 +590,7 @@ def _check_domain_binding(payload: dict, domain: str, area: str):
 def _check_generator(payload: dict, generator_id: str):
     entry = payload.get(generator_id)
     if not generator_id or not isinstance(entry, dict):
-        return jsonify({"error": f"Генератор «{generator_id or '—'}» не найден"}), 400
+        return jsonify({"error": translate("api.config.generator_not_found", generator=generator_id or "—")}), 400
     try:
         generator = parse_generator(generator_id, entry)
     except GeneratorConfigError as exc:
@@ -596,7 +619,7 @@ def test_connection():
     area = (data.get("area") or "").strip()
     service = (data.get("service") or "").strip()
     if section not in CHECKABLE_SECTIONS:
-        return jsonify({"error": f"Проверка недоступна для раздела «{section}». Допустимо: {', '.join(CHECKABLE_SECTIONS)}"}), 400
+        return jsonify({"error": translate("api.config.check_unavailable", section=section, allowed=", ".join(CHECKABLE_SECTIONS))}), 400
     restored = _restored_section(section, payload, area, service)
     if isinstance(restored, tuple):
         return restored
@@ -626,7 +649,7 @@ def grafana_datasources():
     source_id = (request.args.get("source") or "").strip()
     entry = _config_node("data_sources").get(source_id)
     if not isinstance(entry, dict) or entry.get("type") != "grafana_proxy":
-        return jsonify({"error": f"Источник Grafana «{source_id or '—'}» не найден в сохранённом каталоге"}), 404
+        return jsonify({"error": translate("api.config.grafana_source_not_found", source=source_id or "—")}), 404
     grafana = entry.get("grafana") if isinstance(entry.get("grafana"), dict) else {}
     return jsonify(list_grafana_datasources(grafana).to_dict()), 200
 
@@ -654,7 +677,7 @@ def llm_models():
 @config_bp.route("/config/query_preview", methods=["POST"])
 def query_preview():
     """Runs one unsaved metrics query for the last 15 minutes and reports whether it returned series."""
-    from loadlens_app.query_preview import parse_preview_ts, preview_metric_query
+    from loadlens_app.query_preview import INPUT_ERROR_CODES, parse_preview_ts, preview_metric_query
     from update_page import _effective_config_for_scope
 
     data = request.get_json(silent=True) or {}
@@ -666,7 +689,7 @@ def query_preview():
         start_ts = parse_preview_ts(data.get("start"))
         end_ts = parse_preview_ts(data.get("end"))
     except ValueError:
-        return jsonify({"ok": False, "message": "Некорректное окно проверки"}), 400
+        return jsonify({"ok": False, "message": translate("api.common.bad_window")}), 400
     result = preview_metric_query(
         cfg,
         domain=str(data.get("domain") or ""),
@@ -676,10 +699,8 @@ def query_preview():
         start_ts=start_ts,
         end_ts=end_ts,
     )
-    rejected = result.message in {
-        "Запрос пустой",
-    } or result.message.startswith(("Неизвестный домен", "Укажите язык", "Этот источник", "Источник типа"))
-    return jsonify(result.to_dict()), (400 if rejected else 200)
+    # The request itself is wrong (no query, unknown domain or language): 400; source answers are 200.
+    return jsonify(result.to_dict()), (400 if result.code in INPUT_ERROR_CODES else 200)
 
 
 # ---- system context from a document ------------------------------------------------------------------
@@ -743,10 +764,10 @@ def import_system_context():
     )
     from loadlens_app.limits import LimitError, consume_llm, refund_llm
 
-    too_large = jsonify({"error": f"Файл больше {MAX_FILE_BYTES // (1024 * 1024)} МБ", "code": "too_large"}), 413
+    too_large = jsonify({"error": translate("api.config.file_too_large", mb=MAX_FILE_BYTES // (1024 * 1024)), "code": "too_large"}), 413
     # The body size must be known before Werkzeug parses it; browsers always send Content-Length.
     if request.content_length is None:
-        return jsonify({"error": "Нужен заголовок Content-Length", "code": "length_required"}), 411
+        return jsonify({"error": translate("api.config.length_required"), "code": "length_required"}), 411
     if request.content_length > MAX_FILE_BYTES + _IMPORT_BODY_SLACK:
         return too_large
     try:
@@ -763,13 +784,13 @@ def import_system_context():
     mode = str(body.get("mode") or "fill").strip()
     try:
         if mode not in MODES:
-            raise ContextImportError(f"mode: допустимо {', '.join(MODES)}")
+            raise ContextImportError(translate("api.config.import_mode", allowed=", ".join(MODES)))
         if service and not area:
-            raise ContextImportError("Для сервиса укажите область")
+            raise ContextImportError(translate("api.config.import_area_required"))
         if area and area not in {item["id"] for item in _list_project_areas()}:
-            raise ContextImportError(f"Область «{area}» не найдена", 404, "not_found")
+            raise ContextImportError(translate("api.scope.area_not_found", area=area), 404, "not_found")
         if service and service not in _services_map_for_area(area):
-            raise ContextImportError(f"Сервис «{service}» не найден в области «{area}»", 404, "not_found")
+            raise ContextImportError(translate("api.scope.service_not_in_area", service=service, area=area), 404, "not_found")
         # The model is checked first: without it there is no point in reading a page or a file.
         llm_section = _area_section(area, "llm") if area else _config_node("llm")
         provider, _settings = llm_for_scope(llm_section)
@@ -785,7 +806,7 @@ def import_system_context():
 
             page = read_page(confluence_url)
             extracted = page.extracted
-            name, size = (page.title or f"страница {page.page_id}")[:120], len(extracted.text.encode("utf-8"))
+            name, size = (page.title or translate("api.config.page_name", page_id=page.page_id))[:120], len(extracted.text.encode("utf-8"))
         else:
             text = body.get("text")
             extracted = text_from_paste(text)

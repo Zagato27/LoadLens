@@ -1,2 +1,6 @@
 # Shell scripts run inside Linux containers (docker/initdb is bind-mounted): keep LF on every checkout.
 *.sh text eol=lf
+# Dictionaries and prompts are compared byte for byte by the tests (canonical JSON, same files per language):
+# keep LF on every checkout.
+locales/** text eol=lf
+AI/prompts/** text eol=lf

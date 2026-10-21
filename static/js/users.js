@@ -1,4 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
 // Settings → «Пользователи»: accounts, roles, API tokens of everybody and the audit log.
+// UI text comes from the `users` namespace (the settings page declares it) and common.role.* / common.action.*.
 (function () {
   const LL = window.LoadLens;
   const ui = LL.ui;
@@ -11,19 +13,33 @@
     if (!body.querySelector('tr:not(.empty-row):not(.skeleton-row)')) body.innerHTML = ui.skeletonRows(cols, 3);
   }
 
-  const ACTION_LABELS = {
-    login: 'Вход', 'login.failed': 'Неудачный вход', logout: 'Выход',
-    'user.create': 'Пользователь создан', 'user.update': 'Пользователь изменён', 'user.delete': 'Пользователь удалён',
-    'user.password_reset': 'Пароль сброшен', 'user.unlock': 'Пользователь разблокирован', 'user.provision': 'Пользователь создан провайдером',
-    'password.change': 'Смена пароля', 'token.create': 'Токен создан', 'token.revoke': 'Токен отозван',
-    'config.update': 'Изменение настроек', 'config.test_connection': 'Проверка соединения', 'config.query_preview': 'Предпросмотр запроса',
-    'report.create': 'Запуск отчёта', 'run.delete': 'Удаление прогона', 'run.rename': 'Переименование прогона',
-    'confluence.publish': 'Публикация в Confluence', 'engineer_summary.save': 'Заметка инженера',
-    'forecast.explain': 'Объяснение прогноза', 'forecast.publish': 'Публикация прогноза', 'demo.seed': 'Демо-данные',
-    'prompts.save': 'Сохранение промпта', 'service.delete': 'Удаление сервиса', 'service.meta_update': 'Изменение сервиса', 'service.meta_delete': 'Сброс сервиса',
-    'project.create': 'Проект создан', 'project.update': 'Проект изменён', 'project.delete': 'Проект удалён',
-    'project.move_service': 'Сервис перенесён', 'project.override_delete': 'Сброс переопределения'
-  };
+  // Audit action codes -> labels in the UI language; built on first use, when the dictionary is in place.
+  let actionLabels = null;
+  function actionLabel(action) {
+    if (!actionLabels) {
+      actionLabels = {
+        login: LL.t('users.audit_action.login'), 'login.failed': LL.t('users.audit_action.login_failed'), logout: LL.t('users.audit_action.logout'),
+        'user.create': LL.t('users.audit_action.user_create'), 'user.update': LL.t('users.audit_action.user_update'),
+        'user.delete': LL.t('users.audit_action.user_delete'), 'user.password_reset': LL.t('users.audit_action.user_password_reset'),
+        'user.unlock': LL.t('users.audit_action.user_unlock'), 'user.provision': LL.t('users.audit_action.user_provision'),
+        'password.change': LL.t('users.audit_action.password_change'), 'token.create': LL.t('users.audit_action.token_create'),
+        'token.revoke': LL.t('users.audit_action.token_revoke'), 'config.update': LL.t('users.audit_action.config_update'),
+        'config.test_connection': LL.t('users.audit_action.config_test_connection'),
+        'config.query_preview': LL.t('users.audit_action.config_query_preview'), 'report.create': LL.t('users.audit_action.report_create'),
+        'run.delete': LL.t('users.audit_action.run_delete'), 'run.rename': LL.t('users.audit_action.run_rename'),
+        'confluence.publish': LL.t('users.audit_action.confluence_publish'),
+        'engineer_summary.save': LL.t('users.audit_action.engineer_summary_save'),
+        'forecast.explain': LL.t('users.audit_action.forecast_explain'), 'forecast.publish': LL.t('users.audit_action.forecast_publish'),
+        'demo.seed': LL.t('users.audit_action.demo_seed'), 'prompts.save': LL.t('users.audit_action.prompts_save'),
+        'service.delete': LL.t('users.audit_action.service_delete'), 'service.meta_update': LL.t('users.audit_action.service_meta_update'),
+        'service.meta_delete': LL.t('users.audit_action.service_meta_delete'), 'project.create': LL.t('users.audit_action.project_create'),
+        'project.update': LL.t('users.audit_action.project_update'), 'project.delete': LL.t('users.audit_action.project_delete'),
+        'project.move_service': LL.t('users.audit_action.project_move_service'),
+        'project.override_delete': LL.t('users.audit_action.project_override_delete')
+      };
+    }
+    return actionLabels[action] || action;
+  }
 
   async function api(method, url, body) {
     const init = { method };
@@ -33,8 +49,10 @@
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
     return data;
   }
-  const roleLabel = (key) => (state.roles.find((r) => r.key === key) || {}).label || key;
-  const roleOptions = (selected) => state.roles.map((r) => `<option value="${esc(r.key)}"${r.key === selected ? ' selected' : ''}>${esc(r.label)}</option>`).join('');
+  // Role names of the UI language; a role the dictionary does not know keeps the label the server sent.
+  const ROLE_KEYS = ['viewer', 'engineer', 'admin'];
+  const roleLabel = (key) => (ROLE_KEYS.includes(key) ? LL.t(`common.role.${key}`) : ((state.roles.find((r) => r.key === key) || {}).label || key));
+  const roleOptions = (selected) => state.roles.map((r) => `<option value="${esc(r.key)}"${r.key === selected ? ' selected' : ''}>${esc(roleLabel(r.key))}</option>`).join('');
 
   function randomPassword() {
     const alphabet = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -45,29 +63,29 @@
 
   // ---- users ----------------------------------------------------------------------
   function statusPill(user) {
-    if (!user.is_active) return '<span class="pill na">отключён</span>';
-    if (user.locked) return '<span class="pill warn">заблокирован</span>';
-    if (user.must_change_password) return '<span class="pill warn">ждёт смены пароля</span>';
-    return '<span class="pill ok">активен</span>';
+    if (!user.is_active) return `<span class="pill na">${LL.tHtml('users.status.disabled')}</span>`;
+    if (user.locked) return `<span class="pill warn">${LL.tHtml('users.status.locked')}</span>`;
+    if (user.must_change_password) return `<span class="pill warn">${LL.tHtml('users.status.must_change')}</span>`;
+    return `<span class="pill ok">${LL.tHtml('users.status.active')}</span>`;
   }
   function userRow(user) {
     const self = user.id === state.currentUserId;
     const local = user.provider === 'local';
     const act = (action, label, extra) => `<button type="button" class="btn btn-sm${extra || ''}" data-action="${action}" data-id="${user.id}">${label}</button>`;
     const actions = [
-      act('edit', 'Изменить'),
-      local ? act('password', 'Пароль…') : '',
-      user.locked ? act('unlock', 'Разблокировать') : '',
-      self ? '' : act('toggle', user.is_active ? 'Отключить' : 'Включить'),
-      self ? '' : act('delete', 'Удалить…', ' btn-danger')
+      act('edit', LL.tHtml('users.action.edit')),
+      local ? act('password', LL.tHtml('users.action.password')) : '',
+      user.locked ? act('unlock', LL.tHtml('users.action.unlock')) : '',
+      self ? '' : act('toggle', LL.tHtml(user.is_active ? 'users.action.disable' : 'users.action.enable')),
+      self ? '' : act('delete', LL.tHtml('users.action.delete'), ' btn-danger')
     ].join(' ');
     return `<tr>
-      <td><strong>${esc(user.username)}</strong>${self ? ' <span class="pill ok">это вы</span>' : ''}${user.email ? `<div class="dim">${esc(user.email)}</div>` : ''}</td>
+      <td><strong>${esc(user.username)}</strong>${self ? ` <span class="pill ok">${LL.tHtml('users.self')}</span>` : ''}${user.email ? `<div class="dim">${esc(user.email)}</div>` : ''}</td>
       <td>${esc(user.display_name || '—')}</td>
       <td>${esc(roleLabel(user.role))}</td>
-      <td>${esc(local ? 'локальная' : user.provider)}</td>
+      <td>${esc(local ? LL.t('users.provider_local') : user.provider)}</td>
       <td>${statusPill(user)}</td>
-      <td class="nowrap">${esc(fmt(user.last_login_at))}</td>
+      <td class="nowrap m">${esc(fmt(user.last_login_at))}</td>
       <td class="actions">${actions}</td>
     </tr>`;
   }
@@ -77,30 +95,30 @@
     try {
       const data = await api('GET', '/auth/users');
       state = { users: data.users, roles: data.roles, currentUserId: data.current_user_id };
-      body.innerHTML = state.users.length ? state.users.map(userRow).join('') : ui.emptyRow(7, 'Пользователей нет');
+      body.innerHTML = state.users.length ? state.users.map(userRow).join('') : ui.emptyRow(7, LL.t('users.empty'));
       $('usersStatus').textContent = '';
     } catch (e) {
-      body.innerHTML = ui.emptyRow(7, `Не удалось загрузить пользователей: ${e.message}`);
+      body.innerHTML = ui.emptyRow(7, LL.t('users.load_failed', { error: e.message }));
     }
   }
 
   function createDialog() {
     const generated = randomPassword();
     const bodyHtml = [
-      '<label>Логин<input id="ufUsername" type="text" maxlength="64" autocomplete="off" spellcheck="false" /></label>',
-      '<label>Имя<input id="ufName" type="text" maxlength="120" autocomplete="off" /></label>',
-      '<label>Email <span class="optional">(необязательно)</span><input id="ufEmail" type="text" maxlength="254" autocomplete="off" /></label>',
-      `<label>Роль<select id="ufRole">${roleOptions('viewer')}</select></label>`,
-      `<label>Временный пароль<input id="ufPassword" type="text" autocomplete="off" spellcheck="false" value="${esc(generated)}" /></label>`,
-      '<label class="checkbox-row"><input id="ufMustChange" type="checkbox" checked /> Потребовать смену пароля при первом входе</label>',
-      '<p class="dim">Передайте пароль пользователю безопасным способом: после закрытия окна он не отображается.</p>',
+      `<label>${LL.tHtml('users.form.username')}<input id="ufUsername" type="text" maxlength="64" autocomplete="off" spellcheck="false" /></label>`,
+      `<label>${LL.tHtml('users.form.name')}<input id="ufName" type="text" maxlength="120" autocomplete="off" /></label>`,
+      `<label>Email <span class="optional">${LL.tHtml('users.form.optional')}</span><input id="ufEmail" type="text" maxlength="254" autocomplete="off" /></label>`,
+      `<label>${LL.tHtml('users.form.role')}<select id="ufRole">${roleOptions('viewer')}</select></label>`,
+      `<label>${LL.tHtml('users.form.temp_password')}<input id="ufPassword" type="text" autocomplete="off" spellcheck="false" value="${esc(generated)}" /></label>`,
+      `<label class="checkbox-row"><input id="ufMustChange" type="checkbox" checked /> ${LL.tHtml('users.form.must_change_first')}</label>`,
+      `<p class="dim">${LL.tHtml('users.form.handover')}</p>`,
       '<div class="dialog-error" id="ufError"></div>'
     ].join('');
     return ui.dialog({
-      title: 'Новый пользователь',
+      title: LL.t('users.create.title'),
       bodyHtml,
-      actions: [{ label: 'Отмена' }, {
-        label: 'Создать',
+      actions: [{ label: LL.t('common.action.cancel') }, {
+        label: LL.t('users.create.submit'),
         primary: true,
         onClick: async (close, body) => {
           const value = (selector) => body.querySelector(selector).value.trim();
@@ -124,18 +142,18 @@
 
   function editDialog(user) {
     const bodyHtml = [
-      `<p class="dim">Логин: ${esc(user.username)}</p>`,
-      `<label>Имя<input id="ufName" type="text" maxlength="120" value="${esc(user.display_name)}" /></label>`,
+      `<p class="dim">${LL.tHtml('users.edit.username', { username: user.username })}</p>`,
+      `<label>${LL.tHtml('users.form.name')}<input id="ufName" type="text" maxlength="120" value="${esc(user.display_name)}" /></label>`,
       `<label>Email<input id="ufEmail" type="text" maxlength="254" value="${esc(user.email)}" /></label>`,
-      `<label>Роль<select id="ufRole">${roleOptions(user.role)}</select></label>`,
-      '<p class="dim">Смена роли завершает все открытые сессии пользователя.</p>',
+      `<label>${LL.tHtml('users.form.role')}<select id="ufRole">${roleOptions(user.role)}</select></label>`,
+      `<p class="dim">${LL.tHtml('users.edit.role_note')}</p>`,
       '<div class="dialog-error" id="ufError"></div>'
     ].join('');
     return ui.dialog({
-      title: 'Пользователь',
+      title: LL.t('users.edit.title'),
       bodyHtml,
-      actions: [{ label: 'Отмена' }, {
-        label: 'Сохранить',
+      actions: [{ label: LL.t('common.action.cancel') }, {
+        label: LL.t('common.action.save'),
         primary: true,
         onClick: async (close, body) => {
           try {
@@ -155,16 +173,16 @@
 
   function passwordDialog(user) {
     const bodyHtml = [
-      `<p>Новый пароль для <strong>${esc(user.username)}</strong>. Все его сессии будут завершены.</p>`,
-      `<label>Пароль<input id="ufPassword" type="text" autocomplete="off" spellcheck="false" value="${esc(randomPassword())}" /></label>`,
-      '<label class="checkbox-row"><input id="ufMustChange" type="checkbox" checked /> Потребовать смену пароля при следующем входе</label>',
+      `<p>${LL.tHtml('users.password.intro', { username: LL.html(`<strong>${esc(user.username)}</strong>`) })}</p>`,
+      `<label>${LL.tHtml('users.password.field')}<input id="ufPassword" type="text" autocomplete="off" spellcheck="false" value="${esc(randomPassword())}" /></label>`,
+      `<label class="checkbox-row"><input id="ufMustChange" type="checkbox" checked /> ${LL.tHtml('users.password.must_change_next')}</label>`,
       '<div class="dialog-error" id="ufError"></div>'
     ].join('');
     return ui.dialog({
-      title: 'Сброс пароля',
+      title: LL.t('users.password.title'),
       bodyHtml,
-      actions: [{ label: 'Отмена' }, {
-        label: 'Установить пароль',
+      actions: [{ label: LL.t('common.action.cancel') }, {
+        label: LL.t('users.password.submit'),
         primary: true,
         onClick: async (close, body) => {
           try {
@@ -182,18 +200,18 @@
   }
 
   const ACTIONS = {
-    edit: async (user) => { if (await editDialog(user)) ui.toast('Сохранено', { tone: 'ok' }); },
-    password: async (user) => { if (await passwordDialog(user)) ui.toast('Пароль изменён', { tone: 'ok' }); },
-    unlock: async (user) => { await api('POST', `/auth/users/${user.id}/unlock`); ui.toast('Пользователь разблокирован', { tone: 'ok' }); },
+    edit: async (user) => { if (await editDialog(user)) ui.toast(LL.t('users.edit.done'), { tone: 'ok' }); },
+    password: async (user) => { if (await passwordDialog(user)) ui.toast(LL.t('users.password.done'), { tone: 'ok' }); },
+    unlock: async (user) => { await api('POST', `/auth/users/${user.id}/unlock`); ui.toast(LL.t('users.unlock.done'), { tone: 'ok' }); },
     toggle: async (user) => {
       if (user.is_active) {
-        const ok = await ui.confirm({ title: 'Отключить пользователя', message: `«${user.username}» не сможет войти, его сессии и API-токены перестанут работать.`, confirmText: 'Отключить', danger: true });
+        const ok = await ui.confirm({ title: LL.t('users.disable.title'), message: LL.t('users.disable.message', { username: user.username }), confirmText: LL.t('users.action.disable'), danger: true });
         if (!ok) return;
       }
       await api('PATCH', `/auth/users/${user.id}`, { is_active: !user.is_active });
     },
     delete: async (user) => {
-      const ok = await ui.confirm({ title: 'Удалить пользователя', message: `Учётная запись «${user.username}» и её API-токены будут удалены безвозвратно. Если нужно лишь запретить вход, используйте «Отключить».`, confirmText: 'Удалить', danger: true });
+      const ok = await ui.confirm({ title: LL.t('users.delete.title'), message: LL.t('users.delete.message', { username: user.username }), confirmText: LL.t('common.action.delete'), danger: true });
       if (!ok) return;
       await api('DELETE', `/auth/users/${user.id}`);
     }
@@ -216,25 +234,27 @@
   // ---- tokens of all users ------------------------------------------------------------
   function tokenRow(token) {
     const expired = token.expires_at && new Date(token.expires_at) <= new Date();
-    const [tone, label] = token.revoked_at ? ['na', 'отозван'] : (expired ? ['warn', 'истёк'] : ['ok', 'действует']);
-    const action = token.active ? `<button type="button" class="btn btn-sm btn-danger" data-revoke="${token.id}" data-name="${esc(token.name)}">Отозвать</button>` : '';
+    const [tone, label] = token.revoked_at
+      ? ['na', LL.tHtml('users.tokens.status.revoked')]
+      : (expired ? ['warn', LL.tHtml('users.tokens.status.expired')] : ['ok', LL.tHtml('users.tokens.status.active')]);
+    const action = token.active ? `<button type="button" class="btn btn-sm btn-danger" data-revoke="${token.id}" data-name="${esc(token.name)}">${LL.tHtml('users.tokens.revoke')}</button>` : '';
     return `<tr><td>${esc(token.name)}</td><td>${esc(token.owner)}</td><td><code>${esc(token.prefix)}…</code></td><td>${esc(roleLabel(token.role))}</td>
-      <td class="nowrap">${esc(fmt(token.expires_at))}</td><td class="nowrap">${esc(fmt(token.last_used_at))}</td><td><span class="pill ${tone}">${label}</span></td><td class="actions">${action}</td></tr>`;
+      <td class="nowrap m">${esc(fmt(token.expires_at))}</td><td class="nowrap m">${esc(fmt(token.last_used_at))}</td><td><span class="pill ${tone}">${label}</span></td><td class="actions">${action}</td></tr>`;
   }
   async function loadAllTokens() {
     const body = $('allTokensBody');
     showLoading(body, 8);
     try {
       const data = await api('GET', '/auth/tokens?all=1');
-      body.innerHTML = data.tokens.length ? data.tokens.map(tokenRow).join('') : ui.emptyRow(8, 'Токенов нет');
+      body.innerHTML = data.tokens.length ? data.tokens.map(tokenRow).join('') : ui.emptyRow(8, LL.t('users.tokens.empty'));
     } catch (e) {
-      body.innerHTML = ui.emptyRow(8, `Не удалось загрузить токены: ${e.message}`);
+      body.innerHTML = ui.emptyRow(8, LL.t('users.tokens.load_failed', { error: e.message }));
     }
   }
   async function onTokensClick(event) {
     const btn = event.target.closest('[data-revoke]');
     if (!btn) return;
-    const ok = await ui.confirm({ title: 'Отозвать токен', message: `Токен «${btn.dataset.name}» перестанет работать сразу.`, confirmText: 'Отозвать', danger: true });
+    const ok = await ui.confirm({ title: LL.t('users.tokens.revoke_confirm.title'), message: LL.t('users.tokens.revoke_confirm.message', { name: btn.dataset.name }), confirmText: LL.t('users.tokens.revoke'), danger: true });
     if (!ok) return;
     try {
       await api('DELETE', `/auth/tokens/${encodeURIComponent(btn.dataset.revoke)}`);
@@ -247,22 +267,22 @@
   // ---- audit -------------------------------------------------------------------------
   function auditRow(event) {
     const details = Object.entries(event.details || {}).map(([k, v]) => `${k}: ${v}`).join(', ');
-    const label = ACTION_LABELS[event.action] || event.action;
-    const failed = event.success ? '' : ' <span class="pill fail">отказ</span>';
-    return `<tr><td class="nowrap">${esc(LL.formatDateTime(event.created_at))}</td><td>${esc(event.actor || '—')}${event.via && event.via !== 'session' ? ` <span class="dim">(${esc(event.via)})</span>` : ''}</td>
-      <td>${esc(label)}${failed}</td><td>${esc(event.target || '')}</td><td class="dim">${esc(details)}</td><td class="nowrap dim">${esc(event.ip || '')}</td></tr>`;
+    const label = actionLabel(event.action);
+    const failed = event.success ? '' : ` <span class="pill fail">${LL.tHtml('users.audit.failed')}</span>`;
+    return `<tr><td class="nowrap m">${esc(LL.formatDateTime(event.created_at))}</td><td>${esc(event.actor || '—')}${event.via && event.via !== 'session' ? ` <span class="dim">(${esc(event.via)})</span>` : ''}</td>
+      <td>${esc(label)}${failed}</td><td>${esc(event.target || '')}</td><td class="dim">${esc(details)}</td><td class="nowrap dim m">${esc(event.ip || '')}</td></tr>`;
   }
   async function loadAudit() {
     const body = $('auditBody');
-    $('auditStatus').textContent = 'Загрузка…';
+    $('auditStatus').textContent = LL.t('users.audit.loading');
     showLoading(body, 6);
     try {
       const data = await api('GET', '/auth/audit?limit=100');
-      body.innerHTML = data.events.length ? data.events.map(auditRow).join('') : ui.emptyRow(6, 'Записей нет');
-      $('auditStatus').textContent = `Последние ${data.events.length}`;
+      body.innerHTML = data.events.length ? data.events.map(auditRow).join('') : ui.emptyRow(6, LL.t('users.audit.empty'));
+      $('auditStatus').textContent = LL.t('users.audit.latest', { n: data.events.length });
     } catch (e) {
       body.innerHTML = '';
-      $('auditStatus').textContent = `Ошибка: ${e.message}`;
+      $('auditStatus').textContent = LL.t('users.audit.error', { error: e.message });
     }
   }
 
@@ -270,7 +290,7 @@
     if (!$('usersBody')) return;
     $('usersBody').addEventListener('click', onUsersClick);
     $('userCreateBtn').addEventListener('click', async () => {
-      if (await createDialog()) { ui.toast('Пользователь создан', { tone: 'ok' }); await loadUsers(); }
+      if (await createDialog()) { ui.toast(LL.t('users.create.done'), { tone: 'ok' }); await loadUsers(); }
     });
     $('allTokensBody').addEventListener('click', onTokensClick);
     $('tokensBox').addEventListener('toggle', () => { if ($('tokensBox').open) loadAllTokens(); });
@@ -278,4 +298,12 @@
     $('auditRefreshBtn').addEventListener('click', loadAudit);
     await loadUsers();
   });
+
+  // Builders for tests (tests/test_i18n_account.py); setState replaces the loaded users/roles.
+  LL.users = {
+    _internals: {
+      statusPill, userRow, tokenRow, auditRow, actionLabel, roleLabel, roleOptions, createDialog, editDialog, passwordDialog,
+      ACTIONS, loadUsers, loadAllTokens, loadAudit, onTokensClick, setState: (next) => { state = next; }
+    }
+  };
 })();

@@ -1,0 +1,6 @@
+[Test profile: stress]
+- Behaviour beyond the design capacity. Look for the saturation point: the step after which the throughput
+  stops growing while latency and errors grow. The saturation point is the last stable
+  step, not a short peak; the value is already computed in designated_peak_performance and saturation.
+- Name the limiting resource (saturation.limiting_resource, if found) and the kind of degradation
+  (saturation.failure_mode): growing latency, errors or falling throughput.

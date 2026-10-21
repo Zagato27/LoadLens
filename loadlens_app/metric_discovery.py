@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Names of metrics (Prometheus) or measurements (InfluxDB) that the source of each domain holds.
 
 Used to recommend query packs: a pack lists the names it needs in ``requires_metrics``. Only names are
@@ -18,6 +19,7 @@ import pandas as pd
 import requests
 
 from AI.data_sources import DataSourceConfigError, ResolvedSource, resolve_domain_source
+from AI.i18n import get_locale, t, with_locale
 from AI.pipeline import (
     _PROXY_CLOSED,
     _grafana_influx_auth,
@@ -77,7 +79,7 @@ def _grafana_mode(g_cfg: dict) -> str:
     uid = str(datasource.get("uid") or "").strip()
     name = str(datasource.get("name") or "").strip()
     if not uid and not name:
-        raise RuntimeError("в привязке домена не выбран датасорс Grafana")
+        raise RuntimeError(t("server.discovery.no_datasource"))
     path = f"uid/{quote(uid, safe='')}" if uid else f"name/{quote(name, safe='')}"
     resp = requests.get(f"{base_url}/api/datasources/{path}", headers=headers, auth=auth, timeout=TIMEOUT_SEC, verify=verify)
     resp.raise_for_status()
@@ -91,12 +93,12 @@ def _grafana_mode(g_cfg: dict) -> str:
             return "flux"
         if version == "influxql":
             return "influxql"
-    raise RuntimeError(f"датасорс типа {data.get('type') or '?'} не поддерживается")
+    raise RuntimeError(t("server.discovery.unsupported_type", type=data.get("type") or "?"))
 
 
 def _label_values(payload: Any) -> frozenset[str]:
     if not isinstance(payload, dict) or payload.get("status") != "success" or not isinstance(payload.get("data"), list):
-        raise RuntimeError("источник не вернул список метрик")
+        raise RuntimeError(t("server.discovery.no_metric_list"))
     return frozenset(str(name) for name in payload["data"])
 
 
@@ -165,7 +167,7 @@ def _fetch(resolved: ResolvedSource) -> tuple[str, frozenset[str]]:
 
 def _error_text(exc: Exception) -> str:
     if getattr(getattr(exc, "response", None), "status_code", None) is not None:
-        return f"источник ответил {_http_error_text(exc)}"
+        return t("server.discovery.source_answered", error=_http_error_text(exc))
     return str(exc).strip() or exc.__class__.__name__
 
 
@@ -182,12 +184,16 @@ def discover(cfg: Mapping[str, Any], domains: Iterable[str]) -> dict[str, Domain
     for item in resolved.values():
         unique.setdefault(_key(item), item)
 
+    # Error texts are read by the caller of the request: the pool threads do not inherit its locale.
+    locale = get_locale()
+
     def run(item: ResolvedSource) -> tuple[str, frozenset[str], str]:
-        try:
-            language, names = _fetch(item)
-            return language, names, ""
-        except Exception as exc:  # each source fails on its own; the others are still reported
-            return "", frozenset(), _error_text(exc)
+        with with_locale(locale):
+            try:
+                language, names = _fetch(item)
+                return language, names, ""
+            except Exception as exc:  # each source fails on its own; the others are still reported
+                return "", frozenset(), _error_text(exc)
 
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         fetched = dict(zip(unique, pool.map(run, unique.values())))

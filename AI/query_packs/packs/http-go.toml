@@ -2,6 +2,7 @@ schema_version = 1
 id = "http-go"
 version = 1
 title = "HTTP и gRPC: Go (promhttp, go-grpc-prometheus)"
+title_en = "HTTP and gRPC: Go (promhttp, go-grpc-prometheus)"
 category = "http"
 stack = ["go"]
 domain = "microservices"
@@ -13,39 +14,56 @@ HTTP-гистограмма, которую Go-сервисы обычно ре�
 и серверные метрики gRPC из go-grpc-prometheus / go-grpc-middleware (grpc_server_handled_total, \
 grpc_server_handling_seconds — гистограмма включается EnableHandlingTimeHistogram).
 """
+description_en = """
+The HTTP histogram Go services usually register through promhttp.InstrumentHandlerDuration (by default \
+http_request_duration_seconds with the handler and code labels; the names are set in the variables) and the \
+gRPC server metrics of go-grpc-prometheus / go-grpc-middleware (grpc_server_handled_total, \
+grpc_server_handling_seconds; the histogram is enabled by EnableHandlingTimeHistogram).
+"""
 requires_metrics = ["http_request_duration_seconds_count", "grpc_server_handled_total"]
 prompt_addendum = """
 Метрики Go-сервиса: гистограмма HTTP по маршруту (handler) и коду ответа (code), \
 grpc_server_handled_total — завершённые gRPC-вызовы по grpc_method и grpc_code (OK — успех), \
 grpc_server_handling_seconds — время обработки gRPC. Времена в секундах.
 """
+prompt_addendum_en = """
+Go service metrics: an HTTP histogram by route (handler) and response code (code); grpc_server_handled_total \
+counts completed gRPC calls by grpc_method and grpc_code (OK means success); grpc_server_handling_seconds is \
+the gRPC handling time. Times are in seconds.
+"""
 
 [variables.service_label]
 title = "Лейбл с именем сервиса"
+title_en = "Label with the service name"
 default = "job"
 pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
 
 [variables.matchers]
 title = "Дополнительные матчеры"
+title_en = "Extra matchers"
 default = ""
 
 [variables.metric_prefix]
 title = "Имя HTTP-гистограммы"
+title_en = "HTTP histogram name"
 default = "http_request_duration_seconds"
 pattern = '^[a-zA-Z_:][a-zA-Z0-9_:]*$'
 
 [variables.route_label]
 title = "Лейбл маршрута"
+title_en = "Route label"
 default = "handler"
 pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
 
 [variables.status_label]
 title = "Лейбл кода ответа"
+title_en = "Response code label"
 default = "code"
 pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
 
 [variables.window]
 title = "Окно rate()"
+title_en = "rate() window"
 default = "1m"
 pattern = '^[1-9][0-9]*[smh]$'
 
@@ -57,6 +75,7 @@ required = true
 query = 'sum by ({{service_label}}) (rate({{metric_prefix}}_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}"]
 description = "Входящие HTTP-запросы в секунду."
+description_en = "Incoming HTTP requests per second."
 
 [[queries]]
 label = "HTTP (Go): average request time (sec) by service"
@@ -65,6 +84,7 @@ unit = "seconds"
 query = 'sum by ({{service_label}}) (rate({{metric_prefix}}_sum{ {{service_label}}!="", {{matchers}} }[{{window}}])) / sum by ({{service_label}}) (rate({{metric_prefix}}_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}"]
 description = "Среднее время обработки, с."
+description_en = "Average handling time, s."
 
 [[queries]]
 label = "HTTP (Go): p95 request time (sec) by service"
@@ -73,6 +93,7 @@ unit = "seconds"
 query = 'histogram_quantile(0.95, sum by (le, {{service_label}}) (rate({{metric_prefix}}_bucket{ {{service_label}}!="", {{matchers}} }[{{window}}])))'
 keys = ["{{service_label}}"]
 description = "p95 времени обработки, с."
+description_en = "p95 of the handling time, s."
 
 [[queries]]
 label = "HTTP (Go): 5xx error rate (%) by service"
@@ -81,6 +102,7 @@ unit = "percent"
 query = '100 * (sum by ({{service_label}}) (rate({{metric_prefix}}_count{ {{status_label}}=~"5..", {{service_label}}!="", {{matchers}} }[{{window}}])) or 0 * sum by ({{service_label}}) (rate({{metric_prefix}}_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))) / sum by ({{service_label}}) (rate({{metric_prefix}}_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}"]
 description = "Доля ответов 5xx, %."
+description_en = "Share of 5xx responses, %."
 
 [[queries]]
 label = "HTTP (Go): RPS by service & route (top 20)"
@@ -89,6 +111,7 @@ unit = "per_second"
 query = 'topk(20, sum by ({{service_label}}, {{route_label}}) (rate({{metric_prefix}}_count{ {{service_label}}!="", {{matchers}} }[{{window}}])))'
 keys = ["{{service_label}}", "{{route_label}}"]
 description = "Самые нагруженные маршруты."
+description_en = "Busiest routes."
 
 [[queries]]
 label = "HTTP (Go): p95 request time (sec) by service & route (top 20)"
@@ -97,6 +120,7 @@ unit = "seconds"
 query = 'topk(20, histogram_quantile(0.95, sum by (le, {{service_label}}, {{route_label}}) (rate({{metric_prefix}}_bucket{ {{service_label}}!="", {{matchers}} }[{{window}}]))))'
 keys = ["{{service_label}}", "{{route_label}}"]
 description = "Самые медленные маршруты по p95."
+description_en = "Slowest routes by p95."
 
 [[queries]]
 label = "gRPC (Go): calls per second by service"
@@ -105,6 +129,7 @@ unit = "per_second"
 query = 'sum by ({{service_label}}) (rate(grpc_server_handled_total{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}"]
 description = "Завершённые gRPC-вызовы в секунду."
+description_en = "Completed gRPC calls per second."
 
 [[queries]]
 label = "gRPC (Go): error rate (%) by service"
@@ -113,6 +138,7 @@ unit = "percent"
 query = '100 * (sum by ({{service_label}}) (rate(grpc_server_handled_total{grpc_code!="OK", {{service_label}}!="", {{matchers}} }[{{window}}])) or 0 * sum by ({{service_label}}) (rate(grpc_server_handled_total{ {{service_label}}!="", {{matchers}} }[{{window}}]))) / sum by ({{service_label}}) (rate(grpc_server_handled_total{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}"]
 description = "Доля gRPC-вызовов с кодом, отличным от OK, %."
+description_en = "Share of gRPC calls with a code other than OK, %."
 
 [[queries]]
 label = "gRPC (Go): p95 handling time (sec) by service"
@@ -121,3 +147,4 @@ unit = "seconds"
 query = 'histogram_quantile(0.95, sum by (le, {{service_label}}) (rate(grpc_server_handling_seconds_bucket{ {{service_label}}!="", {{matchers}} }[{{window}}])))'
 keys = ["{{service_label}}"]
 description = "p95 обработки gRPC, с. Нужна гистограмма времени обработки."
+description_en = "p95 of gRPC handling, s. Needs the handling time histogram."

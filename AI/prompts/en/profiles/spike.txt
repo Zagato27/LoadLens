@@ -1,0 +1,8 @@
+[Test profile: spikes (spike)]
+- This is not a search for the maximum throughput: do not determine peak_performance.
+- The spike windows are found programmatically: load_steps alternate "background" and "spike" steps, spike_windows and
+  spike_analysis contain the spike level, the growth of p95 and errors relative to the background (overshoot) and the
+  recovery time. This is the source of numbers for conclusions.
+- Of interest is the reaction to a sharp change of the load: latency overshoot, errors and RPS dips
+  in the spike window, queue growth and the time to return to the background level.
+- Compare the spike step with the background steps before and after it; name the vulnerable components.

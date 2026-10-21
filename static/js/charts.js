@@ -1,21 +1,24 @@
+// SPDX-License-Identifier: Apache-2.0
 // Shared Chart.js helpers: series palette, time lookup on category axes, marker and threshold
-// plugins, synchronized hover, drag-to-zoom and legend chips. Loaded after ui.js on pages that
+// plugins, synchronized hover, drag-to-zoom and legend chips, plus the SVG load profile (stepProfile,
+// no Chart.js). Loaded after ui.js on pages that
 // include Chart.js. The x axis stays a category axis whose labels are sorted ISO strings or epoch
 // milliseconds; every time-based helper maps a timestamp to a label index by binary search.
 (function () {
   const LL = window.LoadLens = window.LoadLens || {};
   const charts = LL.charts = LL.charts || {};
 
-  const FONT_FALLBACK = "'Inter', 'Segoe UI', system-ui, Arial, sans-serif";
+  // JetBrains Mono, the --mono stack of app.css; ui.js puts it into Chart.defaults.font.family.
+  const FONT_FALLBACK = "'JetBrains Mono', Consolas, 'Courier New', monospace";
   // Used only when the stylesheet is not available (the CSS variables are the source of truth).
   const SERIES_FALLBACK = ['#268beb', '#c35cb4', '#908e30', '#199eaa', '#894f9a', '#8c5e1a', '#9d86d0', '#2569a8'];
   const SERIES_COUNT = 8;
   const TONES = {
     accent: ['--accent', '#6c5ce7'],
-    ok: ['--status-ok', '#22c55e'],
-    warn: ['--status-warn', '#f59e0b'],
-    fail: ['--status-fail', '#ef4444'],
-    muted: ['--text-dim', '#8a92a3']
+    ok: ['--ok', '#52c483'],
+    warn: ['--warn', '#e4a93b'],
+    fail: ['--fail', '#e4574f'],
+    muted: ['--dim', '#84837d']
   };
   const raf = (cb) => (window.requestAnimationFrame ? window.requestAnimationFrame(cb) : setTimeout(cb, 16));
   const caf = (id) => (window.cancelAnimationFrame ? window.cancelAnimationFrame(id) : clearTimeout(id));
@@ -31,9 +34,9 @@
     return {
       get,
       tone(name) { const spec = TONES[name] || TONES.accent; return get(spec[0], spec[1]); },
-      text: get('--text', '#e8eaf0'),
-      background: get('--bg-chart', '#12151c'),
-      border: get('--border-strong', 'rgba(255, 255, 255, 0.16)')
+      text: get('--text', '#e9e7e2'),
+      background: get('--bg', '#131416'),
+      border: get('--line-2', 'rgba(255, 255, 255, 0.18)')
     };
   }
   function fontFamily() {
@@ -547,7 +550,7 @@
         footer(items) {
           if (!Array.isArray(items) || !items.length || !items[0].chart) return '';
           const more = visibleValueCount(items[0].chart, items[0].dataIndex) - items.length;
-          return more > 0 ? `ещё ${more}` : '';
+          return more > 0 ? LL.t('charts.tooltip.more', { n: more }) : '';
         }
       }
     };
@@ -1002,7 +1005,7 @@
     if (!Number.isFinite(value)) return '—';
     const abs = Math.abs(value);
     const opts = abs >= 100 ? { maximumFractionDigits: 0 } : abs >= 10 ? { maximumFractionDigits: 1 } : abs >= 1 ? { maximumFractionDigits: 2 } : { maximumSignificantDigits: 3 };
-    try { return value.toLocaleString('ru-RU', opts); } catch (e) { return String(Math.round(value * 100) / 100); }
+    try { return LL.fmt.number(value, opts); } catch (e) { return String(Math.round(value * 100) / 100); }
   }
   charts.formatAverage = formatAverage;
   function datasetColor(ds) {
@@ -1017,7 +1020,7 @@
   }
 
   // downloadPng(chart, { filename }): the chart canvas (markers and thresholds included) plus a
-  // legend of the visible series, on a background of --bg-chart.
+  // legend of the visible series, on a background of --bg.
   charts.downloadPng = function downloadPng(chart, opts) {
     if (!alive(chart)) return false;
     const options = opts || {};
@@ -1048,14 +1051,14 @@
       ctx.textBaseline = 'middle';
       ctx.fillStyle = theme.text;
       ctx.font = `600 14px ${family}`;
-      ctx.fillText('Легенда', pad, y + 8);
+      ctx.fillText(LL.t('charts.legend.title'), pad, y + 8);
       y += titleH;
       ctx.font = `13px ${family}`;
       rows.forEach((row) => {
         const mid = y + rowH / 2 - 2;
         ctx.fillStyle = row.color;
         ctx.fillRect(pad, mid - 6, 12, 12);
-        const avgText = `Среднее: ${formatAverage(row.avg)}`;
+        const avgText = LL.t('charts.legend.average', { value: formatAverage(row.avg) });
         const avgWidth = ctx.measureText(avgText).width;
         ctx.fillStyle = theme.text;
         ctx.textAlign = 'left';
@@ -1075,26 +1078,28 @@
     return true;
   };
 
-  // legendChips(chart, host, { filename, maxVisible = 12, onToggle }): chips under a chart.
+  // legendChips(chart, host, { filename, maxVisible = 12, onToggle, separator = '· ' }): chips under a chart.
+  // separator goes before the value of a chip; '' renders a list entry "dash, name, value" (the report legend).
   charts.legendChips = function legendChips(chart, host, opts) {
     const options = opts || {};
     const maxVisible = Number.isFinite(Number(options.maxVisible)) ? Math.max(1, Number(options.maxVisible)) : 12;
+    const separator = typeof options.separator === 'string' ? options.separator : '· ';
     if (!host) return { refresh() {}, destroy() {} };
     host.classList.add('legend-chips');
     host.innerHTML = '';
     const list = document.createElement('div');
     list.className = 'legend-chips-list';
     list.setAttribute('role', 'group');
-    list.setAttribute('aria-label', 'Серии графика: нажмите, чтобы скрыть или показать');
+    list.setAttribute('aria-label', LL.t('charts.legend.series_aria'));
     const tools = document.createElement('div');
     tools.className = 'legend-chips-tools';
     tools.setAttribute('role', 'group');
-    tools.setAttribute('aria-label', 'Управление легендой');
+    tools.setAttribute('aria-label', LL.t('charts.legend.tools_aria'));
     const search = document.createElement('input');
     search.type = 'search';
     search.className = 'legend-chips-search';
-    search.placeholder = 'Найти серию';
-    search.setAttribute('aria-label', 'Найти серию по имени');
+    search.placeholder = LL.t('charts.legend.search_placeholder');
+    search.setAttribute('aria-label', LL.t('charts.legend.search_aria'));
     search.hidden = true;
     const toolButton = (act, text, title) => {
       const btn = document.createElement('button');
@@ -1105,12 +1110,12 @@
       if (title) btn.title = title;
       return btn;
     };
-    const btnAll = toolButton('all', 'Все', 'Показать все серии');
-    const btnNone = toolButton('none', 'Ни одной', 'Скрыть все серии');
-    const btnPng = toolButton('png', 'PNG', 'Скачать график с легендой в PNG');
+    const btnAll = toolButton('all', LL.t('charts.legend.all'), LL.t('charts.legend.all_title'));
+    const btnNone = toolButton('none', LL.t('charts.legend.none'), LL.t('charts.legend.none_title'));
+    const btnPng = toolButton('png', 'PNG', LL.t('charts.legend.png_title'));
     const empty = document.createElement('div');
     empty.className = 'legend-chips-empty';
-    empty.textContent = 'Ничего не найдено';
+    empty.textContent = LL.t('charts.legend.empty');
     empty.hidden = true;
     tools.appendChild(search);
     tools.appendChild(btnAll);
@@ -1144,7 +1149,7 @@
       search.hidden = !many;
       if (!many) search.value = '';
       datasets.forEach((ds, i) => {
-        const name = String((ds && ds.label) || `Серия ${i + 1}`);
+        const name = String((ds && ds.label) || LL.t('charts.legend.series_n', { n: i + 1 }));
         const avgText = formatAverage(average(ds && ds.data));
         const chip = document.createElement('button');
         chip.type = 'button';
@@ -1152,8 +1157,8 @@
         chip.dataset.index = String(i);
         chip.dataset.name = name;
         chip.dataset.avg = avgText;
-        chip.title = `${name} — среднее ${avgText}`;
-        chip.setAttribute('aria-label', `${name}, среднее ${avgText}`);
+        chip.title = LL.t('charts.legend.chip_title', { name, avg: avgText });
+        chip.setAttribute('aria-label', LL.t('charts.legend.chip_aria', { name, avg: avgText }));
         chip.style.setProperty('--chip-color', datasetColor(ds));
         const swatch = document.createElement('span');
         swatch.className = 'legend-chip-swatch';
@@ -1164,7 +1169,7 @@
         const avg = document.createElement('span');
         avg.className = 'legend-chip-avg';
         avg.setAttribute('aria-hidden', 'true');
-        avg.textContent = `· ${avgText}`;
+        avg.textContent = `${separator}${avgText}`;
         chip.appendChild(swatch);
         chip.appendChild(label);
         chip.appendChild(avg);
@@ -1189,7 +1194,7 @@
       chips().forEach((chip) => {
         const span = chip.querySelector('.legend-chip-avg');
         if (!span) return;
-        span.textContent = `· ${live ? formatAverage(valueAt(datasets[Number(chip.dataset.index)], liveIndex)) : chip.dataset.avg}`;
+        span.textContent = `${separator}${live ? formatAverage(valueAt(datasets[Number(chip.dataset.index)], liveIndex)) : chip.dataset.avg}`;
       });
     }
     function setVisible(indices, visible) {
@@ -1201,7 +1206,7 @@
         try { options.onToggle(chart); } catch (e) { /* page callback error */ }
       }
     }
-    // «Все» / «Ни одной» act on the chips that match the search, or on all chips without a search.
+    // «All» / «None» act on the chips that match the search, or on all chips without a search.
     function targetIndices() {
       return chips().filter((chip) => !chip.hidden).map((chip) => Number(chip.dataset.index));
     }
@@ -1264,5 +1269,353 @@
     // charts.crosshair finds the legend here to show live values while the chart is hovered.
     if (alive(chart)) chart.$llLegend = api;
     return api;
+  };
+
+  // ---- load profile: SVG staircase of the load steps (no Chart.js) ---------------------------------------
+  // charts.stepProfileModel(opts) -> the geometry below, or null when no step has a time range and an RPS.
+  // opts (the same object charts.stepProfile takes, plus an explicit width):
+  //   steps    sla_details.load_step_table.steps: [{index, label, start_iso, end_iso, plateau_start_iso,
+  //            plateau_end_iso, rps, selected, after_drop, dip}]; a step without a range or a finite rps is skipped.
+  //   window   SLA zone, sla_details.stable_window ({start|start_iso, end|end_iso}); without it a marker band of
+  //            role 'sla', else the plateau of the selected step.
+  //   markers  items of the report page's reportMarkers(): {kind: 'band'|'line'|'tick', t, to, label, tone, role}
+  //            (t and to in epoch ms or ISO). Lines (degradation, rps_drop) become dashed verticals with their
+  //            label; bands of other roles (hold, spike) are drawn in their tone; ticks are ignored, the staircase
+  //            shows the step starts. Markers outside the time range are skipped, bands are clipped to it.
+  //   target   target RPS: a dashed line with "200 · target".
+  //   width, height  size in px (1 unit = 1 px); 560×150 compact and 1000×190 full by default.
+  //   compact  dashboard variant: level labels on the steps and a short "SLA" caption instead of the y grid.
+  //   offsetHours  clock of the time labels; by default the offset of the steps' ISO strings (+3 without one,
+  //            like the report markers).
+  //   highlight  index of a step (load_step_table index) to shade, e.g. the step under the pointer in the step row.
+  // Result: {width, height, compact, plot: {top, bottom}, x0, x1, yMax, maxRps, offsetHours, path,
+  //   steps: [{x, w, y, rps, index, label, start, end, selected, afterDrop, level: {x, y, text, anchor}|null}],
+  //   bands: [{x, w, label, labelX, labelY, tone, role}], lines: [{x, t, label, labelX, labelY, anchor, tone, role}],
+  //   target: {y, value, text, x, anchor}|null, grid: [{y, value, text}], ticks: [{x, t, text, anchor}],
+  //   sla: {index, rps, start, end, startText, endText}|null, highlight: {index, x, w, y, path}|null, aria}.
+  const PROFILE_CHAR_W = 6.7; // JetBrains Mono 11px advance, for fitting labels
+  const PROFILE_TONES = ['accent', 'ok', 'warn', 'fail', 'muted'];
+  function profileMs(value) {
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    if (value instanceof Date) return Number.isFinite(value.getTime()) ? value.getTime() : null;
+    let text = typeof value === 'string' ? value.trim() : '';
+    if (!text) return null;
+    // A naive ISO date-time is UTC, as in the report markers.
+    text = text.replace(' ', 'T');
+    if (/T\d/.test(text) && !/(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(text)) text += 'Z';
+    const ms = Date.parse(text);
+    return Number.isFinite(ms) ? ms : null;
+  }
+  function profileOffsetHours(steps) {
+    const sample = steps.map((s) => s.end_iso || s.start_iso).find((v) => typeof v === 'string' && v) || '';
+    const match = String(sample).match(/([+-])(\d{2}):(\d{2})$/);
+    if (!match) return 3;
+    return (match[1] === '-' ? -1 : 1) * (Number(match[2]) + Number(match[3]) / 60);
+  }
+  function profileClock(ms, offsetHours) {
+    const shifted = new Date(ms + offsetHours * 3600000);
+    return `${String(shifted.getUTCHours()).padStart(2, '0')}:${String(shifted.getUTCMinutes()).padStart(2, '0')}`;
+  }
+  // Smallest "round" number >= value: units × a power of ten (the fine list keeps the top of the scale close).
+  const ROUND_UNITS = [1, 2, 2.5, 5, 10];
+  const FINE_UNITS = [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10];
+  function niceCeil(value, units) {
+    if (!(value > 0)) return 1;
+    const power = 10 ** Math.floor(Math.log10(value));
+    const unit = (units || ROUND_UNITS).find((m) => m * power >= value - 1e-9);
+    return unit * power;
+  }
+  function rpsText(value) {
+    const digits = Math.abs(value) >= 100 || Number.isInteger(value) ? 0 : 1;
+    if (LL.fmt && typeof LL.fmt.number === 'function') return LL.fmt.number(value, { maximumFractionDigits: digits });
+    return String(Number(value.toFixed(digits)));
+  }
+  const round1 = (v) => Math.round(v * 10) / 10;
+  function profileTone(tone, fallback) { return PROFILE_TONES.indexOf(tone) >= 0 ? tone : fallback; }
+  // The shaded step of a model: its column and its level drawn again over the staircase; null for no or an unknown step.
+  function profileHighlight(steps, target) {
+    if (target === null || target === undefined || target === '' || typeof target === 'object') return null;
+    const step = (steps || []).find((s) => s.index !== null && s.index !== undefined && String(s.index) === String(target));
+    if (!step) return null;
+    return { index: step.index, x: step.x, w: step.w, y: step.y, path: `M${step.x} ${step.y}H${round1(step.x + step.w)}` };
+  }
+  function textWidth(text) { return String(text || '').length * PROFILE_CHAR_W; }
+  charts.stepProfileModel = function stepProfileModel(opts) {
+    const o = opts || {};
+    const rawSteps = (Array.isArray(o.steps) ? o.steps : []).filter((s) => s && typeof s === 'object');
+    const steps = rawSteps.map((s) => {
+      const start = profileMs(s.start_iso);
+      const end = profileMs(s.end_iso);
+      const rps = s.rps === null || s.rps === undefined || s.rps === '' ? NaN : Number(s.rps);
+      if (start === null || end === null || !(end > start) || !Number.isFinite(rps)) return null;
+      return {
+        index: s.index === undefined ? null : s.index,
+        label: typeof s.label === 'string' ? s.label : '',
+        start,
+        end,
+        plateauStart: profileMs(s.plateau_start_iso),
+        plateauEnd: profileMs(s.plateau_end_iso),
+        rps,
+        selected: s.selected === true,
+        afterDrop: s.after_drop === true,
+        dip: s.dip === true
+      };
+    }).filter(Boolean).sort((a, b) => a.start - b.start);
+    if (!steps.length) return null;
+    const compact = !!o.compact;
+    const width = Math.max(120, Number(o.width) > 0 ? Number(o.width) : (compact ? 560 : 1000));
+    const height = Math.max(80, Number(o.height) > 0 ? Number(o.height) : (compact ? 150 : 190));
+    const top = compact ? 8 : 10;
+    const bottom = height - (compact ? 22 : 34);
+    const offsetHours = Number.isFinite(Number(o.offsetHours)) && o.offsetHours !== null && o.offsetHours !== ''
+      ? Number(o.offsetHours) : profileOffsetHours(rawSteps);
+    const x0 = steps[0].start;
+    const x1 = Math.max(...steps.map((s) => s.end));
+    const maxRps = Math.max(...steps.map((s) => s.rps));
+    const target = Number(o.target) > 0 ? Number(o.target) : null;
+    const yMax = niceCeil(Math.max(maxRps, target || 0, 1) * 1.12, FINE_UNITS);
+    const xOf = (t) => round1(((t - x0) / (x1 - x0)) * width);
+    const yOf = (v) => round1(bottom - (Math.max(0, v) / yMax) * (bottom - top));
+    const inRange = (t) => t !== null && t >= x0 && t <= x1;
+
+    // Staircase: every step runs to the start of the next one (across a pause too) or, the last, to its end.
+    let path = '';
+    const outSteps = steps.map((s, i) => {
+      const next = steps[i + 1];
+      const end = next ? next.start : s.end;
+      const x = xOf(s.start);
+      const w = round1(xOf(end) - x);
+      const y = yOf(s.rps);
+      path += i === 0 ? `M${x} ${y}H${round1(x + w)}` : `V${y}H${round1(x + w)}`;
+      const text = `${s.afterDrop || s.dip ? '~' : ''}${rpsText(s.rps)}`;
+      let level = null;
+      if (compact && w >= textWidth(text) + 8) {
+        const below = y + 14 <= bottom - 3;
+        level = { x: round1(x + w / 2), y: below ? round1(y + 14) : round1(y - 6), text, anchor: 'middle' };
+      }
+      return { x, w, y, rps: s.rps, index: s.index, label: s.label, start: s.start, end, selected: s.selected, afterDrop: s.afterDrop, level };
+    });
+
+    // SLA zone: the window, else the SLA band of the markers, else the plateau of the selected step.
+    const markers = (Array.isArray(o.markers) ? o.markers : []).filter((m) => m && typeof m === 'object');
+    const win = o.window && typeof o.window === 'object' ? o.window : null;
+    let slaRange = null;
+    let slaLabel = '';
+    if (win) {
+      const a = profileMs(win.start !== undefined ? win.start : win.start_iso);
+      const b = profileMs(win.end !== undefined ? win.end : win.end_iso);
+      if (a !== null && b !== null && b > a) slaRange = [a, b];
+    }
+    const slaMarker = markers.find((m) => m.kind === 'band' && m.role === 'sla');
+    if (!slaRange && slaMarker) {
+      const a = profileMs(slaMarker.t);
+      const b = profileMs(slaMarker.to);
+      if (a !== null && b !== null && b > a) { slaRange = [a, b]; slaLabel = String(slaMarker.label || ''); }
+    }
+    const selected = steps.find((s) => s.selected) || null;
+    if (!slaRange && selected) slaRange = [selected.plateauStart !== null ? selected.plateauStart : selected.start, selected.plateauEnd !== null ? selected.plateauEnd : selected.end];
+    const slaFrom = slaRange ? Math.max(slaRange[0], x0) : null;
+    const slaStep = selected || (slaRange ? steps.find((s) => s.start <= slaFrom && slaFrom < s.end) || null : null);
+    const bands = [];
+    const addBand = (range, label, tone, role) => {
+      const a = Math.max(range[0], x0);
+      const b = Math.min(range[1], x1);
+      if (!(b > a)) return null;
+      const x = xOf(a);
+      const w = Math.max(1, round1(xOf(b) - x));
+      const band = { x, w, label, labelX: round1(x + 4), labelY: compact ? round1(bottom - 6) : round1(bottom + 14), tone, role };
+      bands.push(band);
+      return band;
+    };
+    let sla = null;
+    if (slaRange) {
+      let label = LL.t('charts.profile.sla');
+      if (!compact) label = slaLabel || (slaStep && slaStep.index !== null && slaStep.index !== '' ? LL.t('charts.profile.sla_step', { index: slaStep.index }) : label);
+      if (addBand(slaRange, label, 'accent', 'sla')) {
+        sla = {
+          index: slaStep ? slaStep.index : null,
+          rps: slaStep ? slaStep.rps : null,
+          start: Math.max(slaRange[0], x0),
+          end: Math.min(slaRange[1], x1),
+          startText: profileClock(Math.max(slaRange[0], x0), offsetHours),
+          endText: profileClock(Math.min(slaRange[1], x1), offsetHours)
+        };
+      }
+    }
+    markers.forEach((m) => {
+      if (m.kind !== 'band' || m.role === 'sla') return;
+      const a = profileMs(m.t);
+      const b = profileMs(m.to);
+      if (a === null || b === null || !(b > a)) return;
+      addBand([a, b], String(m.label || ''), profileTone(m.tone, 'muted'), String(m.role || ''));
+    });
+
+    // Event lines with their labels in rows, so neighbours do not overlap.
+    const lines = [];
+    const rows = [];
+    markers.filter((m) => m.kind === 'line').map((m) => ({ m, t: profileMs(m.t) }))
+      .filter((item) => inRange(item.t)).sort((a, b) => a.t - b.t).forEach(({ m, t }) => {
+        const x = xOf(t);
+        const label = String(m.label || '');
+        const w = textWidth(label);
+        const anchor = x + 5 + w > width ? 'end' : 'start';
+        const from = anchor === 'start' ? x + 5 : x - 5 - w;
+        const to = from + w;
+        let row = 0;
+        while (rows[row] !== undefined && rows[row] > from - 8) row += 1;
+        rows[row] = to;
+        lines.push({ x, t, label, labelX: round1(anchor === 'start' ? x + 5 : x - 5), labelY: round1(top + 10 + row * 13), anchor, tone: profileTone(m.tone, 'fail'), role: String(m.role || '') });
+      });
+
+    const valueText = target !== null ? rpsText(target) : '';
+    const targetLine = target !== null ? {
+      y: yOf(target),
+      value: target,
+      text: LL.t('charts.profile.target', { value: valueText }),
+      x: compact ? 4 : round1(width - 2),
+      anchor: compact ? 'start' : 'end'
+    } : null;
+
+    // Y grid of the full variant: two or three round levels.
+    const grid = [];
+    if (!compact) {
+      const step = niceCeil(yMax / 3);
+      for (let v = step; v < yMax - 1e-9; v += step) grid.push({ y: yOf(v), value: v, text: rpsText(v) });
+    }
+
+    // Time labels: both ends plus round clock times that keep clear of them.
+    const ticks = [{ x: 0, t: x0, text: profileClock(x0, offsetHours), anchor: 'start' }];
+    const minGap = compact ? 70 : 60;
+    const spanMin = (x1 - x0) / 60000;
+    const maxTicks = Math.max(2, Math.floor(width / (compact ? 120 : 100)));
+    const stepMin = [1, 2, 5, 10, 15, 20, 30, 60, 120, 180, 360, 720, 1440].find((m) => spanMin / m <= maxTicks) || 1440;
+    const offsetMs = offsetHours * 3600000;
+    const stepMs = stepMin * 60000;
+    for (let t = Math.ceil((x0 + offsetMs) / stepMs) * stepMs - offsetMs; t < x1; t += stepMs) {
+      const x = xOf(t);
+      if (x - 0 < minGap || width - x < minGap) continue;
+      ticks.push({ x, t, text: profileClock(t, offsetHours), anchor: 'middle' });
+    }
+    ticks.push({ x: width, t: x1, text: profileClock(x1, offsetHours), anchor: 'end' });
+
+    return {
+      width,
+      height,
+      compact,
+      plot: { top, bottom },
+      x0,
+      x1,
+      yMax,
+      maxRps,
+      offsetHours,
+      path,
+      steps: outSteps,
+      bands,
+      lines,
+      target: targetLine,
+      grid,
+      ticks,
+      sla,
+      highlight: profileHighlight(outSteps, o.highlight),
+      aria: LL.tn('charts.profile.aria', steps.length, { max: rpsText(maxRps) })
+    };
+  };
+
+  function profileEsc(value) {
+    return String(value === undefined || value === null ? '' : value)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+  function profileSvg(model) {
+    const { width, height, plot } = model;
+    const text = (x, y, value, cls, anchor) => `<text x="${x}" y="${y}"${anchor && anchor !== 'start' ? ` text-anchor="${anchor}"` : ''}${cls ? ` class="${cls}"` : ''}>${profileEsc(value)}</text>`;
+    const parts = [];
+    const hl = model.highlight;
+    model.bands.forEach((b) => parts.push(`<rect class="pf-band tone-${b.tone}" x="${b.x}" y="${plot.top}" width="${b.w}" height="${round1(plot.bottom - plot.top)}"/>`));
+    if (hl) parts.push(`<rect class="pf-hl" x="${hl.x}" y="${plot.top}" width="${hl.w}" height="${round1(plot.bottom - plot.top)}"/>`);
+    model.grid.forEach((g) => {
+      parts.push(`<line class="pf-grid" x1="0" x2="${width}" y1="${g.y}" y2="${g.y}"/>`);
+      parts.push(text(0, round1(g.y - 4), g.text));
+    });
+    parts.push(`<line class="pf-axis" x1="0" x2="${width}" y1="${plot.bottom + 0.5}" y2="${plot.bottom + 0.5}"/>`);
+    if (model.target) {
+      const t = model.target;
+      parts.push(`<line class="pf-target" x1="0" x2="${width}" y1="${t.y}" y2="${t.y}"/>`);
+      parts.push(text(t.x, round1(t.y - 5), t.text, 'pf-target-label', t.anchor));
+    }
+    parts.push(`<path class="pf-path" d="${model.path}"/>`);
+    if (hl) parts.push(`<path class="pf-hl-path" d="${hl.path}"/>`);
+    model.steps.forEach((s) => {
+      if (!s.level) return;
+      const cls = `pf-level${s.selected ? ' is-selected' : ''}${hl && hl.index === s.index ? ' is-highlighted' : ''}`;
+      parts.push(text(s.level.x, s.level.y, s.level.text, cls, s.level.anchor));
+    });
+    model.lines.forEach((l) => {
+      parts.push(`<line class="pf-mark tone-${l.tone}" x1="${l.x + 0.5}" x2="${l.x + 0.5}" y1="${plot.top}" y2="${plot.bottom}"/>`);
+      if (l.label) parts.push(text(l.labelX, l.labelY, l.label, `pf-mark-label tone-${l.tone}`, l.anchor));
+    });
+    model.bands.forEach((b) => { if (b.label) parts.push(text(b.labelX, b.labelY, b.label, 'pf-band-label')); });
+    model.ticks.forEach((t) => parts.push(text(t.x, height - 4, t.text, '', t.anchor)));
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="100%" height="${height}" preserveAspectRatio="none" role="img" aria-label="${profileEsc(model.aria)}">${parts.join('')}</svg>`;
+  }
+  charts.stepProfileSvg = profileSvg;
+
+  // charts.stepProfile(host, opts): draws the profile into host (class ll-profile) at the host's width and
+  // redraws when the width changes; with nothing to draw the host is emptied and hidden. opts as for
+  // stepProfileModel. Returns {model, update(nextOpts), highlight(stepIndex|null), destroy()}; highlight shades one
+  // step (the report does it while a cell of its step row is hovered or focused) and keeps it over redraws.
+  charts.stepProfile = function stepProfile(host, opts) {
+    if (!host) return null;
+    const previous = host.$llProfile;
+    if (previous && typeof previous.destroy === 'function') previous.destroy();
+    const options = Object.assign({}, opts || {});
+    let observer = null;
+    let lastWidth = 0;
+    const measure = () => {
+      let w = Number(host.clientWidth) || 0;
+      if (!w && typeof host.getBoundingClientRect === 'function') w = Number(host.getBoundingClientRect().width) || 0;
+      return Math.round(w);
+    };
+    const handle = {
+      model: null,
+      update(next) {
+        Object.assign(options, next || {});
+        lastWidth = measure();
+        const model = charts.stepProfileModel(Object.assign({}, options, { width: options.width || lastWidth || undefined }));
+        if (host.classList) host.classList.add('ll-profile');
+        if (!model) {
+          host.innerHTML = '';
+          host.hidden = true;
+        } else {
+          host.hidden = false;
+          host.innerHTML = profileSvg(model);
+        }
+        handle.model = model;
+        return handle;
+      },
+      highlight(target) {
+        options.highlight = target === undefined ? null : target;
+        if (!handle.model) return handle;
+        const next = profileHighlight(handle.model.steps, options.highlight);
+        const current = handle.model.highlight;
+        if ((next && current && next.index === current.index) || (!next && !current)) return handle;
+        handle.model = Object.assign({}, handle.model, { highlight: next });
+        host.innerHTML = profileSvg(handle.model);
+        return handle;
+      },
+      destroy() {
+        if (observer) { try { observer.disconnect(); } catch (e) { /* already gone */ } observer = null; }
+        if (host.$llProfile === handle) delete host.$llProfile;
+      }
+    };
+    handle.update();
+    if (!options.width && typeof window.ResizeObserver === 'function') {
+      observer = new window.ResizeObserver(() => {
+        const w = measure();
+        if (w && w !== lastWidth) handle.update();
+      });
+      observer.observe(host);
+    }
+    host.$llProfile = handle;
+    return handle;
   };
 })();

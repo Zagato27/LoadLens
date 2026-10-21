@@ -11,20 +11,32 @@ description = """
 Метрики kafka_exporter: отставание consumer group, скорость записи в топики по смещениям партиций, \
 участники групп и недореплицированные партиции. Служебные топики (__consumer_offsets и т. п.) исключены.
 """
+description_en = """
+kafka_exporter metrics: consumer group lag, topic write rate from partition offsets, group members and \
+under-replicated partitions. Internal topics (__consumer_offsets and the like) are excluded.
+"""
 requires_metrics = ["kafka_consumergroup_lag", "kafka_topic_partition_current_offset"]
 prompt_addendum = """
 Метрики kafka_exporter: kafka_consumergroup_lag — отставание группы в сообщениях (рост на ступени \
 означает, что консьюмеры не успевают), kafka_topic_partition_current_offset — смещение конца партиции \
 (его скорость — входящие сообщения), kafka_consumergroup_current_offset — прочитанное группой.
 """
+prompt_addendum_en = """
+kafka_exporter metrics: kafka_consumergroup_lag is the group lag in messages (growth on a step means the \
+consumers cannot keep up), kafka_topic_partition_current_offset is the partition end offset (its rate is the \
+incoming messages), kafka_consumergroup_current_offset is what the group has read.
+"""
 
 [variables.matchers]
 title = "Дополнительные матчеры"
+title_en = "Extra matchers"
 default = ""
 help = 'Например topic=~"orders.*".'
+help_en = 'For example topic=~"orders.*".'
 
 [variables.window]
 title = "Окно rate()"
+title_en = "rate() window"
 default = "2m"
 pattern = '^[1-9][0-9]*[smh]$'
 
@@ -36,6 +48,7 @@ required = true
 query = 'sum by (topic, consumergroup) (kafka_consumergroup_lag{topic!~"__.+", {{matchers}} })'
 keys = ["topic", "consumergroup"]
 description = "Отставание consumer group в сообщениях."
+description_en = "Consumer group lag in messages."
 
 [[queries]]
 label = "Kafka: messages in per second by topic"
@@ -44,6 +57,7 @@ unit = "per_second"
 query = 'sum by (topic) (rate(kafka_topic_partition_current_offset{topic!~"__.+", {{matchers}} }[{{window}}]))'
 keys = ["topic"]
 description = "Запись в топик, сообщений в секунду."
+description_en = "Writes to the topic, messages per second."
 
 [[queries]]
 label = "Kafka: consumed messages per second by topic & group"
@@ -52,6 +66,7 @@ unit = "per_second"
 query = 'sum by (topic, consumergroup) (rate(kafka_consumergroup_current_offset{topic!~"__.+", {{matchers}} }[{{window}}]))'
 keys = ["topic", "consumergroup"]
 description = "Чтение группой, сообщений в секунду."
+description_en = "Reads by the group, messages per second."
 
 [[queries]]
 label = "Kafka: consumer group members by group"
@@ -60,6 +75,7 @@ unit = "count"
 query = 'max by (consumergroup) (kafka_consumergroup_members{ {{matchers}} })'
 keys = ["consumergroup"]
 description = "Участники consumer group: падение означает ребалансировку или упавший консьюмер."
+description_en = "Consumer group members: a drop means a rebalance or a failed consumer."
 
 [[queries]]
 label = "Kafka: under-replicated partitions by topic"
@@ -68,6 +84,7 @@ unit = "count"
 query = 'sum by (topic) (kafka_topic_partition_under_replicated_partition{topic!~"__.+", {{matchers}} }) > 0'
 keys = ["topic"]
 description = "Недореплицированные партиции (показываются только ненулевые)."
+description_en = "Under-replicated partitions (only non-zero values are shown)."
 
 [[queries]]
 label = "Kafka: brokers"
@@ -76,3 +93,4 @@ unit = "count"
 query = 'label_replace(max(kafka_brokers{ {{matchers}} }), "series", "cluster", "", "")'
 keys = ["series"]
 description = "Брокеры в кластере."
+description_en = "Brokers in the cluster."

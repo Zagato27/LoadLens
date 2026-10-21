@@ -1,0 +1,15 @@
+Domain Focus: final
+
+Evaluation Criteria Addendum
+- Look for a synthesis across domains: the final verdict, the main bottlenecks, cross-domain links, SLA risks, peak_performance only for step and stress tests.
+- For stability/soak tests assess stability under load: RPS hold (stability_under_load.hold), latency/errors/checks, resource trends (stability_under_load.trends) and accumulating degradation, without requiring peak_performance.
+- For spike tests assess the reaction to the spike: growth of latency and errors in the spike window relative to the background (overshoot), recovery time, RPS dips (spike_analysis); peak_performance is not required.
+- For stress tests assess the saturation point, the nature of the degradation and the limiting resource (saturation).
+- A good candidate does not just repeat the domain blocks but sets priorities and explains the outcome of the test.
+- Recommendations must be ranked by their impact on the test result and tied to specific teams/components.
+
+Evaluation Steps
+1. Check that the final conclusion is consistent with the domain candidates and the overall context.
+2. Check whether 1-3 main factors of success or degradation are identified.
+3. Check whether SLA, errors, latency and peak_performance are taken into account where they apply.
+4. Check whether the final text helps to make an engineering decision based on the test results.

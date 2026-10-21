@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Run pure front-end functions under Node without a browser or a build step.
 
 ``run_js(files, expression)`` loads repository JS files into one ``vm`` context with small browser
@@ -12,17 +13,27 @@ stubs and returns the JSON-decoded value of ``expression``:
   parentheses. A returned promise is awaited. Map and Set values are converted to an object and an
   array; ``undefined`` comes back as ``None``.
 - ``getComputedStyle`` reads the CSS variables of ``static/css/app.css`` for the theme in
-  ``document.documentElement[data-theme]`` (``theme`` sets the initial value); ``css_vars``
-  overrides them: ``{"dark": {"--series-1": "#000000"}}``.
+  ``document.documentElement[data-theme]`` (``theme`` sets the initial value, and the
+  ``prefers-color-scheme: light`` query matches when it is ``light``); ``css_vars`` overrides them:
+  ``{"dark": {"--series-1": "#000000"}}``. ``var(--name)`` aliases come resolved.
 - ``local_storage`` seeds ``localStorage``; ``storage_throws=True`` makes every storage call throw.
 - ``dom_ready=True`` fires the ``DOMContentLoaded`` listeners after loading.
 - ``window.__harness`` offers ``setCssVar(theme, name, value)``, ``fireWindow(type, props)`` (for
-  example a cross-tab ``storage`` event), ``storage`` (the backing Map) and ``registered`` (plugins
-  passed to ``Chart.register``).
+  example a cross-tab ``storage`` event), ``storage`` (the backing Map), ``registered`` (plugins
+  passed to ``Chart.register``), ``cookieWrites`` (every string assigned to ``document.cookie``),
+  ``cookies`` (name -> value, what ``document.cookie`` returns) and ``reloads()`` (calls of
+  ``location.reload``). ``cookies`` seeds ``document.cookie``.
 - ``Chart`` is a fake with ``defaults`` (color, borderColor, font, plugins.tooltip, plugins.legend),
   ``instances`` and ``register``; pass ``with_chart=False`` to leave it undefined.
 
-The test is skipped when ``node`` is not on PATH. The time zone defaults to UTC (``tz``).
+- Localization: ``static/js/i18n.js`` is always loaded first (also for ``run_js([])``) with
+  ``LoadLens.i18n = {locale, intl, messages, strict}`` holding every namespace of ``locales/<locale>/``
+  (``locale="ru"`` by default; en values fall back to ru per key, like the server). ``messages`` adds or
+  replaces keys; strict mode is on, so ``LL.t`` of a missing key throws (``i18n_strict=False`` warns instead).
+  ``document.documentElement`` carries ``lang``.
+
+The test is skipped when ``node`` is not on PATH, and fails instead with ``LOADLENS_REQUIRE_NODE=1`` (CI).
+The time zone defaults to UTC (``tz``).
 """
 
 from __future__ import annotations
@@ -40,6 +51,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 APP_CSS = REPO_ROOT / "static" / "css" / "app.css"
+I18N_JS = "static/js/i18n.js"
 RESULT_MARK = "__LL_RESULT__"
 
 
@@ -56,13 +68,49 @@ def _declarations(block: str) -> dict[str, str]:
     return {name: value.strip() for name, value in re.findall(r"(--[\w-]+)\s*:\s*([^;]+);", block)}
 
 
+def i18n_payload(locale: str = "ru", messages: Mapping[str, str] | None = None, *, strict: bool = True) -> dict[str, Any]:
+    """``LoadLens.i18n`` as the inline script of base.html sets it, with every namespace of ``locales/<locale>/``.
+
+    en values fall back to ru key by key, like the server; ``messages`` adds or replaces keys.
+    """
+    from AI import i18n as engine
+
+    code = engine.normalize_lang(locale)
+    if code is None:
+        raise JsHarnessError(f"unsupported locale: {locale!r}")
+    data = engine.client_messages(code, None)
+    data.update(messages or {})
+    return {"locale": code, "intl": engine.INTL[code], "messages": data, "strict": bool(strict)}
+
+
+_VAR_REF = re.compile(r"var\(\s*(--[\w-]+)\s*(?:,\s*([^()]*))?\)")
+
+
+def _resolve(values: dict[str, str]) -> dict[str, str]:
+    """Substitutes ``var(--name)`` references (the aliases of app.css) the way the browser computes them."""
+    out = dict(values)
+    for _ in range(8):  # aliases are at most a few levels deep
+        changed = False
+        for name, value in out.items():
+            resolved = _VAR_REF.sub(lambda m: out.get(m.group(1), (m.group(2) or "").strip()), value)
+            if resolved != value:
+                out[name] = resolved
+                changed = True
+        if not changed:
+            break
+    return out
+
+
 @lru_cache(maxsize=1)
 def theme_css_vars() -> dict[str, dict[str, str]]:
-    """CSS custom properties of both themes from app.css (light inherits what it does not override)."""
+    """CSS custom properties of both themes from app.css (light inherits what it does not override).
+
+    ``var(--name)`` aliases are resolved per theme, as ``getComputedStyle`` reports them in a browser.
+    """
     css = APP_CSS.read_text(encoding="utf-8")
     dark = _declarations(_block(css, r':root,\s*:root\[data-theme="dark"\]'))
     light = {**dark, **_declarations(_block(css, r':root\[data-theme="light"\]'))}
-    return {"dark": dark, "light": light}
+    return {"dark": _resolve(dark), "light": _resolve(light)}
 
 
 _RUNNER = r"""
@@ -157,6 +205,25 @@ const document = Object.assign(emitter(), {
   createElement: makeElement,
   createTextNode: (text) => ({ nodeType: 3, textContent: String(text) }),
 });
+// document.cookie: reading returns "name=value; ..."; writing records the whole string and keeps the pair
+// (Max-Age=0 or a past Expires removes it). Attributes are not interpreted otherwise.
+const cookieJar = new Map(Object.entries(P.cookies || {}).map(([k, v]) => [String(k), String(v)]));
+const cookieWrites = [];
+Object.defineProperty(document, 'cookie', {
+  configurable: true,
+  get() { return Array.from(cookieJar.entries()).map(([k, v]) => `${k}=${v}`).join('; '); },
+  set(raw) {
+    const text = String(raw);
+    cookieWrites.push(text);
+    const [pair, ...attrs] = text.split(';');
+    const eq = pair.indexOf('=');
+    if (eq <= 0) return;
+    const name = pair.slice(0, eq).trim();
+    const removed = attrs.some((a) => /^\s*max-age\s*=\s*0\s*$/i.test(a));
+    if (removed) cookieJar.delete(name); else cookieJar.set(name, pair.slice(eq + 1).trim());
+  },
+});
+let reloadCount = 0;
 const local = storageFor(P.localStorage, P.storageThrows);
 const session = storageFor({}, P.storageThrows);
 
@@ -180,11 +247,12 @@ const sandbox = {
   navigator: { userAgent: 'node-harness', language: 'ru-RU', clipboard: { writeText: async () => {} } },
   location: {
     href: 'http://127.0.0.1/', origin: 'http://127.0.0.1', protocol: 'http:', host: '127.0.0.1',
-    pathname: '/', search: '', hash: '', assign() {}, replace() {}, reload() {},
+    pathname: '/', search: '', hash: '', assign() {}, replace() {}, reload() { reloadCount += 1; },
   },
   history: { replaceState() {}, pushState() {} },
   getComputedStyle,
-  matchMedia: (query) => ({ matches: false, media: String(query), addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} }),
+  // The OS color scheme matches the initial theme: a page rendered light without a stored choice has a light OS.
+  matchMedia: (query) => ({ matches: /prefers-color-scheme:\s*light/.test(String(query)) ? P.theme === 'light' : false, media: String(query), addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} }),
   requestAnimationFrame: (cb) => setTimeout(() => cb(Date.now()), 0),
   cancelAnimationFrame: (id) => clearTimeout(id),
   fetch: async () => ({ ok: true, status: 200, headers: new Headers(), json: async () => ({}), text: async () => '', clone() { return this; } }),
@@ -204,6 +272,9 @@ sandbox.__harness = {
   fireWindow(type, props) { winEvents.dispatchEvent(Object.assign({ type }, props || {})); },
   storage: local.map,
   registered,
+  cookieWrites,
+  cookies: cookieJar,
+  reloads: () => reloadCount,
 };
 
 function toPlain(key, value) {
@@ -216,6 +287,12 @@ function finish(result) {
   let text;
   try { text = JSON.stringify(result, toPlain); } catch (e) { text = JSON.stringify({ ok: false, error: 'result is not JSON-serializable: ' + e.message }); }
   process.stdout.write('\n' + P.mark + text + '\n', () => process.exit(0));
+}
+
+// What the inline dictionary script of base.html does, plus the server-rendered <html lang>.
+if (P.i18n) {
+  sandbox.LoadLens = { i18n: P.i18n };
+  documentElement.setAttribute('lang', P.i18n.locale);
 }
 
 (async () => {
@@ -252,17 +329,25 @@ def run_js(
     with_chart: bool = True,
     tz: str = "UTC",
     timeout: float = 60,
+    locale: str = "ru",
+    messages: Mapping[str, str] | None = None,
+    i18n_strict: bool = True,
+    cookies: Mapping[str, str] | None = None,
 ) -> Any:
     """Load ``files`` (paths relative to the repository root) and return the value of ``expression``."""
     node = shutil.which("node")
     if not node:
+        if os.getenv("LOADLENS_REQUIRE_NODE", "").strip() == "1":
+            pytest.fail("node is not installed (LOADLENS_REQUIRE_NODE=1)")
         pytest.skip("node is not installed")
-    paths = []
+    i18n = i18n_payload(locale, messages, strict=i18n_strict)
+    paths = [str((REPO_ROOT / I18N_JS).resolve())]
     for name in files:
         path = (REPO_ROOT / name).resolve()
         if not path.is_file():
             raise JsHarnessError(f"no such file: {name}")
-        paths.append(str(path))
+        if str(path) not in paths:  # i18n.js is always loaded first, once
+            paths.append(str(path))
     base = theme_css_vars()
     merged = {theme_name: dict(base[theme_name]) for theme_name in ("dark", "light")}
     for theme_name, overrides in (css_vars or {}).items():
@@ -276,6 +361,8 @@ def run_js(
         "storageThrows": storage_throws,
         "domReady": dom_ready,
         "withChart": with_chart,
+        "i18n": i18n,
+        "cookies": dict(cookies or {}),
         "mark": RESULT_MARK,
     }
     script = _RUNNER.replace("__PAYLOAD__", json.dumps(payload, ensure_ascii=False))

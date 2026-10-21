@@ -1,178 +1,195 @@
 {% extends "base.html" %}
 {% set active_nav = 'new' %}
-{% block title %}Создание отчёта{% endblock %}
-{% block container_class %}container-narrow{% endblock %}
+{% set i18n_ns = ['new', 'picker'] %}
+{% block title %}{{ t('new.title') }}{% endblock %}
+{% block container_class %}form-page{% endblock %}
 {% block head %}
 <style>
-  .form-hint { color: var(--text-muted); font-size: 14px; line-height: 1.5; margin: 0 0 16px; }
-  .tz-label { font-weight: 400; font-size: 12px; color: var(--text-dim); margin-left: 8px; }
-  .presets { margin-bottom: 12px; }
-  .type-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
-  .type-card { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev2); cursor: pointer; margin: 0; color: var(--text); font-size: 14px; }
-  .type-card:hover { border-color: var(--accent-hover); }
+  /* Form sections, hints and test window chips: stage 4 section of app.css. */
+  .presets { margin-bottom: 14px; }
+  /* Test types: radio rows (a square, the name, the description) between hairlines. */
+  .type-cards { display: flex; flex-direction: column; }
+  .type-card { position: relative; display: grid; grid-template-columns: 9px minmax(150px, 210px) minmax(0, 1fr); align-items: baseline; gap: 2px 14px; margin: 0 -8px; padding: 8px; border-bottom: 1px solid var(--line); color: var(--text); font-size: 13px; font-weight: 400; cursor: pointer; }
+  .type-card::before { content: ''; width: 9px; height: 9px; box-sizing: border-box; margin-top: 5px; border: 1px solid var(--line-2); align-self: start; }
+  .type-card:hover { background: var(--bg-2); }
   .type-card input { position: absolute; opacity: 0; width: 0; height: 0; }
-  .type-card:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
-  .type-card:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 1px; }
-  .type-title { font-weight: 600; }
-  .type-desc { font-size: 12px; color: var(--text-muted); line-height: 1.45; }
-  .progress-card { border: 1px solid var(--border); border-radius: 12px; background: var(--bg-elev); padding: 16px; margin-top: 18px; }
+  .type-card:has(input:checked)::before { background: var(--text); border-color: var(--text); }
+  .type-card:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: -2px; }
+  .type-title { font-weight: 500; }
+  .type-desc { color: var(--muted); font-size: 12px; line-height: 1.45; }
+  .type-card:not(:has(input:checked)) .type-title { color: var(--muted); }
+  #testTypeGroup:not(:has(input:checked)) .type-title { color: var(--text); }
+  @media (max-width: 720px) {
+    .type-card { grid-template-columns: 9px minmax(0, 1fr); }
+    .type-desc { grid-column: 2; }
+  }
+  /* Report jobs going on now: a bar on the left in the running tone, no box. */
+  .jobs-panel { margin: 0 0 18px; padding: 2px 0 2px 14px; border: 0; border-left: 2px solid var(--run); border-radius: 0; background: none; }
+  .jobs-panel .job-row { border-top-color: var(--line); }
+  .jobs-panel .job-row .name { font-family: var(--mono); font-weight: 500; }
+  /* Progress of the report job: a hairline section, a 3px bar, the phases as squares. */
+  .progress-card { margin-top: 26px; padding: 18px 0 0; border-top: 1px solid var(--line); }
   .progress-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
-  .progress-head .title { font-weight: 600; }
-  .progress-head .pct { font-variant-numeric: tabular-nums; color: var(--text-muted); }
-  .progressBarWrap { width: 100%; height: 8px; background: var(--bg-input); border-radius: 4px; overflow: hidden; margin-top: 8px; }
-  .progressBarFill { width: 0%; height: 100%; background: var(--accent); transition: width 0.3s ease; }
-  .progressBarFill.error { background: var(--danger); }
-  .progress-message { margin-top: 10px; font-size: 14px; min-height: 20px; }
-  .phase-list { list-style: none; margin: 12px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 6px; }
-  .phase-list li { font-size: 12px; color: var(--text-dim); padding: 6px 8px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--bg-elev2); }
-  .phase-list li::before { content: '○ '; }
-  .phase-list li.current { color: var(--text); border-color: var(--accent); }
-  .phase-list li.current::before { content: '● '; color: var(--accent); }
-  .phase-list li.done { color: var(--ok-fg); }
-  .phase-list li.done::before { content: '✓ '; color: var(--accent); }
-  .phase-list li.failed { color: var(--fail-fg); border-color: var(--fail-border); }
-  .phase-list li.failed::before { content: '✗ '; }
-  .progress-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
-  .reportLink { display: none; text-decoration: none; background: var(--accent); color: #fff; padding: 10px 18px; border-radius: 6px; font-weight: 600; }
-  .reportLink:hover { background: var(--accent-hover); text-decoration: none; }
+  .progress-head .title { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+  .progress-head .pct { color: var(--muted); font: 500 13px var(--mono); font-variant-numeric: tabular-nums; }
+  .progressBarWrap { width: 100%; height: 3px; margin-top: 10px; overflow: hidden; background: var(--line-2); }
+  .progressBarFill { width: 0%; height: 100%; background: var(--run); transition: width 0.3s ease; }
+  .progressBarFill.error { background: var(--fail); }
+  .progress-message { min-height: 20px; margin-top: 10px; font-size: 13px; }
+  .phase-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 2px 18px; margin: 12px 0 0; padding: 0; list-style: none; }
+  .phase-list li { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; color: var(--dim); font-size: 12px; }
+  .phase-list li::before { content: ''; position: relative; top: -1px; width: 7px; height: 7px; flex: 0 0 auto; box-sizing: border-box; border: 1px solid var(--line-2); }
+  .phase-list li.current { color: var(--text); }
+  .phase-list li.current::before { border-color: var(--run); background: var(--run); }
+  .phase-list li.done { color: var(--muted); }
+  .phase-list li.done::before { border-color: var(--ok); background: var(--ok); }
+  .phase-list li.failed { color: var(--fail); }
+  .phase-list li.failed::before { border-color: var(--fail); background: var(--fail); }
+  .progress-actions { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-top: 16px; }
+  .reportLink { display: none; }
   .job-link { font-size: 13px; }
   details.tech { margin-top: 12px; }
-  details.tech summary { cursor: pointer; color: var(--text-muted); font-size: 13px; }
-  details.tech pre { white-space: pre-wrap; word-break: break-word; background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-size: 12px; }
+  details.tech summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  details.tech pre { margin: 8px 0 0; padding: 0; white-space: pre-wrap; word-break: break-word; color: var(--text); font: 12px/1.5 var(--mono); }
 </style>
 {% endblock %}
 {% block content %}
-  <h2>Создание отчёта</h2>
-  <p class="form-hint">Укажите окно теста, сервис и тип нагрузки. Сбор метрик и анализ ИИ занимают несколько минут: прогресс виден здесь и в архиве, вкладку можно закрыть.</p>
+  <h1>{{ t('new.title') }}</h1>
+  <p class="form-intro">{{ t('new.intro') }}</p>
 
   <section id="activeJobs" class="jobs-panel" style="display:none" aria-live="polite">
-    <div class="jobs-title"><span>Активные и недавние задачи</span><span class="jobs-actions"><small id="activeJobsNote"></small><button type="button" class="btn btn-sm btn-ghost" id="activeJobsClear" data-min-role="engineer" hidden>Очистить завершённые</button></span></div>
+    <div class="jobs-title"><span>{{ t('new.jobs.title') }}</span><span class="jobs-actions"><small id="activeJobsNote"></small><button type="button" class="btn btn-sm btn-ghost" id="activeJobsClear" data-min-role="engineer" hidden>{{ t('new.jobs.clear') }}</button></span></div>
     <div id="activeJobsList"></div>
   </section>
 
   <form id="reportForm" novalidate>
     <fieldset class="form-section">
-      <legend>Сервис</legend>
+      <legend>{{ t('new.service.legend') }}</legend>
       <div id="serviceCombo" class="service-combo"></div>
       <input type="hidden" id="service" name="service" />
-      <div class="field-hint" id="serviceHint">Список сервисов задаётся в настройках (раздел «Сервисы»).</div>
+      <div class="field-hint" id="serviceHint">{{ t('new.service.hint') }}</div>
     </fieldset>
 
     <fieldset class="form-section">
-      <legend>Период теста <span class="tz-label" id="tzLabel"></span></legend>
-      <div class="presets seg-group" id="rangePresets" aria-label="Быстрый выбор периода">
-        <button type="button" class="seg-btn" data-minutes="30" aria-pressed="false">Последние 30 мин</button>
-        <button type="button" class="seg-btn" data-minutes="60" aria-pressed="false">Последний час</button>
-        <button type="button" class="seg-btn" data-minutes="120" aria-pressed="false">2 часа</button>
-        <button type="button" class="seg-btn" data-minutes="240" aria-pressed="false">4 часа</button>
+      <legend>{{ t('new.period.legend') }} <span class="tz-label" id="tzLabel"></span></legend>
+      <div class="presets seg-group" id="rangePresets" aria-label="{{ t('new.period.presets_label') }}">
+        <button type="button" class="seg-btn" data-minutes="30" aria-pressed="false">{{ t('new.period.last_30') }}</button>
+        <button type="button" class="seg-btn" data-minutes="60" aria-pressed="false">{{ t('new.period.last_hour') }}</button>
+        <button type="button" class="seg-btn" data-minutes="120" aria-pressed="false">{{ t('new.period.hours_2') }}</button>
+        <button type="button" class="seg-btn" data-minutes="240" aria-pressed="false">{{ t('new.period.hours_4') }}</button>
       </div>
       <div class="form-grid two">
         <div>
-          <label for="start">Начало</label>
+          <label for="start">{{ t('new.period.start') }}</label>
           <input type="datetime-local" id="start" name="start" required />
         </div>
         <div>
-          <label for="end">Окончание</label>
+          <label for="end">{{ t('new.period.end') }}</label>
           <input type="datetime-local" id="end" name="end" required />
         </div>
       </div>
       <div class="field-hint" id="rangeHint"></div>
       <div class="lt-windows" id="ltWindows" hidden>
-        <span class="lt-windows-label" id="ltWindowsLabel">Найденные прогоны:</span>
+        <span class="lt-windows-label" id="ltWindowsLabel">{{ t('new.windows.label') }}</span>
         <div class="lt-windows-chips" id="ltWindowsChips" role="group" aria-labelledby="ltWindowsLabel"></div>
       </div>
       <div class="field-hint" id="ltWindowsHint" aria-live="polite"></div>
     </fieldset>
 
     <fieldset class="form-section">
-      <legend>Тип теста</legend>
+      <legend>{{ t('new.test_type.legend') }}</legend>
       <div class="type-cards" id="testTypeGroup" role="radiogroup" aria-describedby="testTypeHint">
         <label class="type-card">
           <input type="radio" name="test_type" value="step" />
-          <span class="type-title">Ступенчатый (max perf)</span>
-          <span class="type-desc">Поиск последней стабильной ступени нагрузки и точки деградации; max RPS считается по ступени, а не по пику.</span>
+          <span class="type-title">{{ t('common.test_type.step') }}</span>
+          <span class="type-desc">{{ t('new.test_type.step_desc') }}</span>
         </label>
         <label class="type-card">
           <input type="radio" name="test_type" value="soak" />
-          <span class="type-title">Долговременный (soak)</span>
-          <span class="type-desc">Стабильность под длительной нагрузкой: дрейф метрик, утечки памяти, накопление очередей.</span>
+          <span class="type-title">{{ t('common.test_type.soak') }}</span>
+          <span class="type-desc">{{ t('new.test_type.soak_desc') }}</span>
         </label>
         <label class="type-card">
           <input type="radio" name="test_type" value="spike" />
-          <span class="type-title">Всплески (spike)</span>
-          <span class="type-desc">Реакция на резкий рост нагрузки: overshoot задержек и время восстановления.</span>
+          <span class="type-title">{{ t('common.test_type.spike') }}</span>
+          <span class="type-desc">{{ t('new.test_type.spike_desc') }}</span>
         </label>
         <label class="type-card">
           <input type="radio" name="test_type" value="stress" />
-          <span class="type-title">Стресс</span>
-          <span class="type-desc">Поведение за пределами проектной мощности: точка отказа и лимитирующий ресурс.</span>
+          <span class="type-title">{{ t('common.test_type.stress') }}</span>
+          <span class="type-desc">{{ t('new.test_type.stress_desc') }}</span>
         </label>
       </div>
-      <div class="field-hint" id="testTypeHint">Тип теста определяет программный анализ и инструкции для ИИ: поиск максимума, удержание нагрузки, реакцию на всплески или точку насыщения.</div>
+      <div class="field-hint" id="testTypeHint">{{ t('new.test_type.hint') }}</div>
     </fieldset>
 
     <fieldset class="form-section">
-      <legend>Публикация</legend>
-      <div class="seg-group" id="targetGroup" role="group" aria-label="Куда публиковать отчёт">
-        <button type="button" class="seg-btn active" data-target="web" aria-pressed="true">Веб-отчёт</button>
-        <button type="button" class="seg-btn" data-target="confluence" aria-pressed="false">Веб-отчёт + Confluence (по шаблону)</button>
+      <legend>{{ t('new.target.legend') }}</legend>
+      <div class="seg-group" id="targetGroup" role="group" aria-label="{{ t('new.target.label') }}">
+        <button type="button" class="seg-btn active" data-target="web" aria-pressed="true">{{ t('new.target.web') }}</button>
+        <button type="button" class="seg-btn" data-target="confluence" aria-pressed="false">{{ t('new.target.confluence') }}</button>
       </div>
-      <div class="field-hint" id="targetHint">Веб-отчёт доступен всегда. Вариант с Confluence дополнительно копирует страницу-шаблон из настроек сервиса и показывает те же этапы сбора и анализа. Графики Grafana и логи Loki для неё скачивает сама задача отчёта.</div>
+      <div class="field-hint" id="targetHint">{{ t('new.target.hint') }}</div>
     </fieldset>
 
     <fieldset class="form-section">
-      <legend>Параметры</legend>
+      <legend>{{ t('new.params.legend') }}</legend>
       <div class="form-grid two">
         <div>
-          <label for="run_name">Название запуска <span class="optional">(необязательно)</span></label>
-          <input type="text" id="run_name" name="run_name" maxlength="200" placeholder="Напр.: release-2.5-step; иначе run-ГГГГММДД-ЧЧММСС" />
+          <label for="run_name">{{ t('new.params.run_name') }} <span class="optional">{{ t('new.params.optional') }}</span></label>
+          <input type="text" id="run_name" name="run_name" maxlength="200" placeholder="{{ t('new.params.run_name_placeholder') }}" />
           <div class="field-hint" id="runNameHint"></div>
         </div>
         <div>
-          <label id="llmLabel">Анализ ИИ</label>
+          <label id="llmLabel">{{ t('new.params.llm') }}</label>
           <div class="seg-group" id="llmGroup" role="group" aria-labelledby="llmLabel">
-            <button type="button" class="seg-btn active" id="use_llm_btn_yes" data-value="yes" aria-pressed="true">Включить</button>
-            <button type="button" class="seg-btn" id="use_llm_btn_no" data-value="no" aria-pressed="false">Только собрать метрики</button>
+            <button type="button" class="seg-btn active" id="use_llm_btn_yes" data-value="yes" aria-pressed="true">{{ t('new.params.llm_on') }}</button>
+            <button type="button" class="seg-btn" id="use_llm_btn_no" data-value="no" aria-pressed="false">{{ t('new.params.llm_off') }}</button>
           </div>
-          <div class="field-hint">Без анализа ИИ отчёт будет содержать только графики метрик.</div>
+          <div class="field-hint">{{ t('new.params.llm_hint') }}</div>
         </div>
       </div>
+      {# The report is built in the installation's report language; said only when it differs from the interface. #}
+      {% if report_language != locale %}
+      {% set report_language_name = t('common.lang_name.en') if report_language == 'en' else t('common.lang_name.ru') %}
+      <div class="field-hint" id="reportLanguageHint">{{ t('new.params.report_language_hint', language=report_language_name) }}</div>
+      {% endif %}
     </fieldset>
 
     <div class="form-actions">
-      <button id="createBtn" type="submit" class="btn btn-primary btn-lg">Создать отчёт</button>
+      <button id="createBtn" type="submit" class="btn btn-primary">{{ t('new.form.submit') }}</button>
       <span id="formError" class="form-error" role="alert"></span>
     </div>
   </form>
 
   <section id="progressContainer" class="progress-card" style="display:none" aria-live="polite">
     <div class="progress-head">
-      <div class="title" id="progressTitle">Формирование отчёта</div>
+      <div class="title" id="progressTitle">{{ t('new.progress.title') }}</div>
       <div class="pct" id="progressPct">0%</div>
     </div>
     <div class="progressBarWrap"><div id="progressBarFill" class="progressBarFill"></div></div>
     <div class="progress-timing"><span id="progressElapsed"></span><span id="progressTypical" hidden></span></div>
-    <div id="progressMessage" class="progress-message">Инициализация…</div>
+    <div id="progressMessage" class="progress-message">{{ t('new.progress.init') }}</div>
     <ol class="phase-list" id="phaseList">
-      <li data-phase="prepare">Подготовка</li>
-      <li data-phase="charts" data-confluence-only hidden>Графики и логи</li>
-      <li data-phase="attachments" data-confluence-only hidden>Вложения Confluence</li>
-      <li data-phase="collect">Сбор метрик</li>
-      <li data-phase="sla" data-llm-only="1">Проверка SLA</li>
-      <li data-phase="save_metrics">Сохранение метрик</li>
-      <li data-phase="llm" data-llm-only="1">Анализ ИИ по доменам</li>
-      <li data-phase="final" data-llm-only="1">Итоговый анализ</li>
-      <li data-phase="save" data-llm-only="1">Сохранение результатов</li>
-      <li data-phase="finish">Готово</li>
+      <li data-phase="prepare">{{ t('new.phase.prepare') }}</li>
+      <li data-phase="charts" data-confluence-only hidden>{{ t('new.phase.charts') }}</li>
+      <li data-phase="attachments" data-confluence-only hidden>{{ t('new.phase.attachments') }}</li>
+      <li data-phase="collect">{{ t('new.phase.collect') }}</li>
+      <li data-phase="sla" data-llm-only="1">{{ t('new.phase.sla') }}</li>
+      <li data-phase="save_metrics">{{ t('new.phase.save_metrics') }}</li>
+      <li data-phase="llm" data-llm-only="1">{{ t('new.phase.llm') }}</li>
+      <li data-phase="final" data-llm-only="1">{{ t('new.phase.final') }}</li>
+      <li data-phase="save" data-llm-only="1">{{ t('new.phase.save') }}</li>
+      <li data-phase="finish">{{ t('new.phase.finish') }}</li>
     </ol>
     <div class="progress-actions">
-      <a id="webLink" class="reportLink" href="#">Открыть отчёт</a>
-      <a id="confluenceLink" class="reportLink" href="#" target="_blank" rel="noopener">Открыть в Confluence</a>
-      <a id="jobLink" class="job-link" href="#" style="display:none">Ссылка на эту задачу (можно вернуться позже)</a>
-      <a id="newReportLink" class="job-link" href="/new" style="display:none">Создать ещё один отчёт</a>
+      <a id="webLink" class="reportLink btn btn-primary" href="#">{{ t('new.action.open_report') }}</a>
+      <a id="confluenceLink" class="reportLink btn" href="#" target="_blank" rel="noopener">{{ t('new.progress.open_confluence') }}</a>
+      <a id="jobLink" class="job-link" href="#" style="display:none">{{ t('new.progress.job_link') }}</a>
+      <a id="newReportLink" class="job-link" href="/new" style="display:none">{{ t('new.progress.new_report') }}</a>
     </div>
     <details class="tech" id="progressErrorDetails" style="display:none">
-      <summary>Технические детали ошибки</summary>
+      <summary>{{ t('new.progress.error_details') }}</summary>
       <pre id="progressErrorText"></pre>
     </details>
   </section>

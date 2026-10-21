@@ -1,7 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
 (function () {
   const LL = window.LoadLens;
   const escapeHtml = LL.ui.escapeHtml;
-  const LOCALE = 'ru-RU';
   const DEFAULT_HEADROOM_PCT = 20;
   const SLA_LINE_SPAN = 2.5;
   const AXIS_SPAN_CAP = 2;
@@ -14,30 +14,37 @@
     knee: '#14b8a6',
     limit: '#b91c1c',
     sla: '#ef4444',
-    zoneUnstable: 'rgba(239, 68, 68, 0.10)'
+    zoneUnstable: 'rgba(239, 68, 68, 0.10)',
+    // Beyond the tested load: a neutral shade that reads on both themes (the accent marks SLA zones only).
+    zoneUntested: 'rgba(128, 128, 128, 0.12)'
   };
-  function accentColor() {
-    return LL.ui.chartColors().accent || '#6c5ce7';
+  // The model curve is a neutral reference line over the colored measurements (the muted text color of the theme).
+  function modelColor() {
+    return LL.ui.chartColors().inkMuted || '#a3a19a';
   }
-  function accentZone() {
-    return LL.ui.chartColors().accentSoft || 'rgba(108, 92, 231, 0.16)';
-  }
+  // Labels of the server codes are getters: the tables are built at load, the text is read in the page locale.
   const CONFIDENCE = {
-    high: { text: 'высокая', pill: 'ok' },
-    medium: { text: 'средняя', pill: 'warn' },
-    low: { text: 'низкая', pill: 'fail' }
+    high: { get text() { return LL.t('forecast.confidence.high'); }, pill: 'ok' },
+    medium: { get text() { return LL.t('forecast.confidence.medium'); }, pill: 'warn' },
+    low: { get text() { return LL.t('forecast.confidence.low'); }, pill: 'fail' }
   };
+  // Line colors of the target follow the status tokens of the theme (LL.ui.chartColors), like the scale above.
+  const statusColor = (name, fallback) => (LL.ui.chartColors ? LL.ui.chartColors()[name] : '') || fallback;
   const ANSWER = {
-    holds: { text: 'выдержит', tone: 'success', color: '#22c55e' },
-    scale: { text: 'выдержит после масштабирования', tone: 'risk', color: '#eab308' },
-    tight: { text: 'на пределе', tone: 'risk', color: '#eab308' },
-    blocked: { text: 'не выдержит', tone: 'fail', color: '#ef4444' }
+    holds: { get text() { return LL.t('forecast.answer.holds'); }, tone: 'success', get color() { return statusColor('statusOk', '#52c483'); } },
+    scale: { get text() { return LL.t('forecast.answer.scale'); }, tone: 'risk', get color() { return statusColor('statusWarn', '#e4a93b'); } },
+    tight: { get text() { return LL.t('forecast.answer.tight'); }, tone: 'risk', get color() { return statusColor('statusWarn', '#e4a93b'); } },
+    blocked: { get text() { return LL.t('forecast.answer.blocked'); }, tone: 'fail', get color() { return statusColor('statusFail', '#e4574f'); } }
   };
-  const CEILING_SOURCES = { sla: 'из SLA', default: 'по умолчанию, в SLA не задан', request: 'задан вручную' };
+  const CEILING_SOURCES = {
+    get sla() { return LL.t('forecast.ceiling_source.sla'); },
+    get default() { return LL.t('forecast.ceiling_source.default'); },
+    get request() { return LL.t('forecast.ceiling_source.request'); }
+  };
   const SCALING = {
-    helps: { text: 'Добавление подов поможет', tone: 'success' },
-    partly: { text: 'Добавление подов поможет частично', tone: 'risk' },
-    no: { text: 'Добавление подов не снимет причину', tone: 'fail' }
+    helps: { get text() { return LL.t('forecast.scaling.helps'); }, tone: 'success' },
+    partly: { get text() { return LL.t('forecast.scaling.partly'); }, tone: 'risk' },
+    no: { get text() { return LL.t('forecast.scaling.no'); }, tone: 'fail' }
   };
   const EXPLAIN_ITEMS = 3;
   const SCALE_TARGET_TONES = { holds: 'ok', scale: 'warn', tight: 'warn', blocked: 'fail' };
@@ -48,40 +55,57 @@
   const PUBLISH_POLLS = 180;
   const PUBLISH_POLL_MS = 1500;
   const RESOURCE_ROWS = 5;
+  // Words for the parts of the test the model is built on: detected load steps or plain time intervals.
+  // title: legend heading, one/many: name before numbers, at: "at step N", by(n): "over n steps".
   const STEP_WORDS = {
-    step_detector: { title: 'Ступени', many: 'ступени', one: 'ступень', at: 'ступени', by: ['ступени', 'ступеням', 'ступеням'] },
-    time_buckets: { title: 'Интервалы', many: 'интервалы', one: 'интервал', at: 'интервале', by: ['интервалу', 'интервалам', 'интервалам'] }
+    step_detector: {
+      get title() { return LL.t('forecast.unit.step.title'); },
+      get many() { return LL.t('forecast.unit.step.names'); },
+      get one() { return LL.t('forecast.unit.step.name'); },
+      get at() { return LL.t('forecast.unit.step.at'); },
+      by: (count) => LL.tn('forecast.unit.step.by', count)
+    },
+    time_buckets: {
+      get title() { return LL.t('forecast.unit.interval.title'); },
+      get many() { return LL.t('forecast.unit.interval.names'); },
+      get one() { return LL.t('forecast.unit.interval.name'); },
+      get at() { return LL.t('forecast.unit.interval.at'); },
+      by: (count) => LL.tn('forecast.unit.interval.by', count)
+    }
   };
   const ROLE_TITLES = {
-    fit: 'в модели',
-    stall: 'провал',
-    edge: 'разгон или спад нагрузки',
-    after_cutoff: 'после окна модели'
+    get fit() { return LL.t('forecast.role.fit'); },
+    get stall() { return LL.t('forecast.role.stall'); },
+    get edge() { return LL.t('forecast.role.edge'); },
+    get after_cutoff() { return LL.t('forecast.role.after_cutoff'); }
   };
   const REASONS = {
     low_r2: {
-      reason: (data) => `Модель объясняет ${formatPct(Math.max(0, data.fit.r2) * 100)} разброса данных (R² = ${formatNumber(data.fit.r2, 2)}).`,
-      action: (data) => (data.instability ? '' : 'Повторить тест с более длинными ступенями: точки сильно разбросаны.')
+      reason: (data) => LL.t('forecast.reason.low_r2', { share: formatPct(Math.max(0, data.fit.r2) * 100), r2: formatNumber(data.fit.r2, 2) }),
+      action: (data) => (data.instability ? '' : LL.t('forecast.reason.low_r2_action'))
     },
     instability: {
-      reason: (data) => `Провалы не укладываются в плавную модель: выше ${formatApproxRps(data.instability.onset_rps)} прогноз неприменим.`,
-      action: (data) => `Разобраться с провалами${periodText(data.instability, ' (повторяются примерно каждые ', ' мин)')} и повторить ступени около ${formatRps(threeSignificant(data.instability.onset_rps))}.`
+      reason: (data) => LL.t('forecast.reason.instability', { rps: formatApproxRps(data.instability.onset_rps) }),
+      action: (data) => instabilityAction(data.instability)
     },
     extrapolation: {
-      reason: () => 'Цель за пределами проверенного диапазона: прогноз — экстраполяция.',
-      action: (data) => `Проверить ${formatRps(data.target.rps)} отдельным тестом.`
+      reason: () => LL.t('forecast.reason.extrapolation'),
+      action: (data) => LL.t('forecast.reason.verify_rps', { rps: formatRps(data.target.rps) })
     },
     cpu_fit: {
-      reason: (data) => `CPU ${decidingServices(data.resources).filter((item) => !item.reliable).map((item) => item.name).join(', ')} плохо ложится на прямую: число подов приблизительное.`,
-      action: () => 'Проверить число подов тестом.'
+      reason: (data) => LL.t('forecast.reason.cpu_fit', { services: decidingServices(data.resources).filter((item) => !item.reliable).map((item) => item.name).join(', ') }),
+      action: () => LL.t('forecast.reason.cpu_fit_action')
     },
     cpu_extrapolation: {
-      reason: (data) => `Цель в ${formatNumber(data.resources.target_rps / data.tested_rps, 1)} раза выше проверенной нагрузки: CPU посчитан продолжением прямой.`,
-      action: (data) => `Проверить ${formatRps(data.resources.target_rps)} отдельным тестом.`
+      reason: (data) => LL.t('forecast.reason.cpu_extrapolation', { ratio: formatNumber(data.resources.target_rps / data.tested_rps, 1) }),
+      action: (data) => LL.t('forecast.reason.verify_rps', { rps: formatRps(data.resources.target_rps) })
     },
     scaling_untested: {
-      reason: () => 'Конфигурацию с новым числом подов тест не проверял.',
-      action: (data) => `Проверить тестом: ${scaledServices(data.resources).map((item) => `${item.name} — ${podsText(item.instances_needed)}`).join(', ')} на ${formatRps(data.resources.target_rps)}.`
+      reason: () => LL.t('forecast.reason.scaling_untested'),
+      action: (data) => LL.t('forecast.reason.scaling_untested_action', {
+        services: scaledServices(data.resources).map((item) => `${item.name} — ${podsText(item.instances_needed)}`).join(', '),
+        rps: formatRps(data.resources.target_rps)
+      })
     }
   };
   let runId = '';
@@ -113,7 +137,7 @@
       chart.data.datasets.forEach((dataset, index) => {
         if (!dataset.stepNumbers || !chart.isDatasetVisible(index)) return;
         ctx.save();
-        ctx.font = "700 11px 'Inter', 'Segoe UI', Arial, sans-serif";
+        ctx.font = "600 11px 'JetBrains Mono', Consolas, 'Courier New', monospace";
         ctx.fillStyle = '#1a1f24';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
@@ -125,13 +149,14 @@
     }
   };
 
-  const numberFormats = {};
   function formatNumber(value, digits) {
     const n = Number(value);
     if (value === null || value === undefined || value === '' || !Number.isFinite(n)) return '—';
-    const key = digits || 0;
-    if (!numberFormats[key]) numberFormats[key] = new Intl.NumberFormat(LOCALE, { maximumFractionDigits: key });
-    return numberFormats[key].format(n);
+    return LL.fmt.number(n, { maximumFractionDigits: digits || 0 });
+  }
+  // Decimal separator of the UI locale, for numbers Intl does not format (κ in exponent notation).
+  function decimalSeparator() {
+    return LL.fmt.number(1.5, { minimumFractionDigits: 1 }).charAt(1);
   }
   function threeSignificant(value) {
     const n = Number(value);
@@ -148,8 +173,8 @@
   function formatMs(value) {
     const n = Number(value);
     if (value === null || value === undefined || !Number.isFinite(n)) return '—';
-    if (n >= 1000) return `${formatNumber(n / 1000, 1)} с`;
-    return `${formatNumber(n, n < 10 ? 1 : 0)} мс`;
+    if (n >= 1000) return LL.t('forecast.format.seconds', { value: formatNumber(n / 1000, 1) });
+    return LL.t('forecast.format.ms', { value: formatNumber(n, n < 10 ? 1 : 0) });
   }
   function formatMsRange(values) {
     const low = Math.min.apply(null, values);
@@ -160,19 +185,16 @@
   }
   function formatPct(value) {
     const n = Number(value);
-    return `${formatNumber(n, Math.abs(n) < 10 ? 1 : 0)} %`;
+    return LL.t('forecast.format.pct', { value: formatNumber(n, Math.abs(n) < 10 ? 1 : 0) });
   }
   function cpuPct(share) {
     return formatPct(Number(share) * 100);
   }
   function podsText(count) {
-    return `${count} ${plural(count, 'под', 'пода', 'подов')}`;
+    return LL.tn('forecast.pods', count);
   }
-  function plural(count, one, few, many) {
-    const tail = count % 100;
-    if (tail % 10 === 1 && tail !== 11) return one;
-    if (tail % 10 >= 2 && tail % 10 <= 4 && (tail < 10 || tail >= 20)) return few;
-    return many;
+  function minutesText(value) {
+    return LL.t('forecast.format.minutes', { value: formatNumber(value, 1) });
   }
   function hhmm(value) {
     const match = String(value || '').match(/T(\d{2}:\d{2})/);
@@ -193,8 +215,10 @@
     });
     return parts.join(', ');
   }
-  function periodText(instability, before, after) {
-    return instability.period_min == null ? '' : `${before}${formatNumber(instability.period_min)}${after}`;
+  function instabilityAction(info) {
+    const rps = formatRps(threeSignificant(info.onset_rps));
+    if (info.period_min == null) return LL.t('forecast.reason.instability_action', { rps: rps });
+    return LL.t('forecast.reason.instability_action_period', { rps: rps, minutes: formatNumber(info.period_min) });
   }
   function stepWords(data) {
     const steps = data.steps || [];
@@ -225,15 +249,15 @@
     if (ceiling !== null && ceiling !== undefined) url.searchParams.set('cpu_ceiling_pct', String(ceiling));
     const resp = await fetch(url);
     const body = await resp.json().catch(() => ({}));
-    if (!resp.ok) return { error: body.error || `Не удалось построить прогноз (HTTP ${resp.status})`, code: body.code || '' };
+    if (!resp.ok) return { error: body.error || LL.t('forecast.error.build', { status: resp.status }), code: body.code || '' };
     return { data: body };
   }
 
   function limitText(data) {
     const limit = data.limit;
-    if (limit.kind === 'instability') return `Предел ${formatApproxRps(limit.rps)}: с этой нагрузки в тесте начались провалы.`;
-    if (limit.kind === 'model') return `Предел ${formatApproxRps(limit.rps)}: потолок пропускной способности по модели.`;
-    return 'Предел по данным не виден: в проверенном диапазоне RPS растёт почти линейно.';
+    if (limit.kind === 'instability') return LL.t('forecast.limit.instability', { rps: formatApproxRps(limit.rps) });
+    if (limit.kind === 'model') return LL.t('forecast.limit.model', { rps: formatApproxRps(limit.rps) });
+    return LL.t('forecast.limit.none');
   }
   function scaledServices(plan) {
     return (plan.services || []).filter((item) => item.instances_needed == null || item.instances_needed > item.instances);
@@ -246,25 +270,32 @@
     return item ? item.cpu_ceiling : data.resources.ceiling_pct / 100;
   }
   function stuckText(item) {
-    return `${item.name}: CPU пода без роста нагрузки ≈ ${cpuPct(item.cpu_base)} — выше потолка ${cpuPct(item.cpu_ceiling)}, подами не решается: нужен больший лимит CPU.`;
+    return LL.t('forecast.plan.stuck', { name: item.name, base: cpuPct(item.cpu_base), ceiling: cpuPct(item.cpu_ceiling) });
   }
   function scaleLines(data) {
     const plan = data.resources;
     const lines = scaledServices(plan).map((item) => (item.instances_needed == null
       ? stuckText(item)
-      : `Добавить: ${item.name} ${item.instances} → ${podsText(item.instances_needed)}, CPU пода при цели ≈ ${cpuPct(item.cpu_after)} вместо ${cpuPct(item.cpu_at_target)}.`));
+      : LL.t('forecast.plan.add', {
+        name: item.name,
+        from: item.instances,
+        to: podsText(item.instances_needed),
+        after: cpuPct(item.cpu_after),
+        current: cpuPct(item.cpu_at_target)
+      })));
     if (plan.scaled_capacity_rps != null) {
-      lines.push(`После этого CPU хватит до ${formatApproxRps(plan.scaled_capacity_rps)} — дальше первым упрётся ${plan.next_bottleneck}.`);
+      lines.push(LL.t('forecast.plan.after_scaling', { rps: formatApproxRps(plan.scaled_capacity_rps), service: plan.next_bottleneck }));
     }
     if (data.limit_applies && data.limit.rps != null) {
-      lines.push(`Выше ${formatApproxRps(data.limit.rps)} упрётся в предел, не связанный с CPU сервисов.`);
+      lines.push(LL.t('forecast.plan.non_cpu_limit', { rps: formatApproxRps(data.limit.rps) }));
     }
     return lines;
   }
   function blockedText(data) {
     const plan = data.resources;
-    const busiest = plan.limit_service ? ` При этой нагрузке самый загруженный сервис — ${plan.limit_service}, CPU пода ≈ ${cpuPct(plan.limit_cpu)}.` : '';
-    return `Предел ${formatApproxRps(data.limit.rps)} не связан с CPU сервисов.${busiest} Добавление подов не поможет: ищите блокировки, пулы соединений, GC, внешние вызовы.`;
+    const rps = formatApproxRps(data.limit.rps);
+    if (!plan.limit_service) return LL.t('forecast.plan.blocked', { rps: rps });
+    return LL.t('forecast.plan.blocked_busiest', { rps: rps, service: plan.limit_service, cpu: cpuPct(plan.limit_cpu) });
   }
   function blockedLines(data) {
     const plan = data.resources;
@@ -273,7 +304,7 @@
     if (plan.status !== 'ok' || !data.limit_applies) return stuck;
     const short = scaled
       .filter((item) => item.instances_needed != null)
-      .map((item) => `CPU тоже не хватит: ${item.name} при цели ≈ ${cpuPct(item.cpu_at_target)} — нужно ${podsText(item.instances_needed)}, но предел это не снимет.`);
+      .map((item) => LL.t('forecast.plan.cpu_short', { name: item.name, cpu: cpuPct(item.cpu_at_target), pods: podsText(item.instances_needed) }));
     return [blockedText(data), ...stuck, ...short];
   }
   function holdsLines(data) {
@@ -281,22 +312,20 @@
     const lines = [];
     if (plan.status === 'ok' && plan.services.length) {
       const top = plan.services[0];
-      lines.push(`Самый загруженный — ${top.name}: CPU пода при цели ≈ ${cpuPct(top.cpu_at_target)}, потолок ${cpuPct(top.cpu_ceiling)}.`);
+      lines.push(LL.t('forecast.plan.busiest', { name: top.name, cpu: cpuPct(top.cpu_at_target), ceiling: cpuPct(top.cpu_ceiling) }));
     }
-    if (data.limit_applies && data.target.headroom_pct != null) lines.push(`Запас до предела ${formatPct(data.target.headroom_pct)}.`);
+    if (data.limit_applies && data.target.headroom_pct != null) lines.push(LL.t('forecast.plan.headroom', { pct: formatPct(data.target.headroom_pct) }));
     return lines;
   }
   function tightText(data, headroom) {
-    const cause = data.resources.status === 'ok' ? ': предел не связан с CPU сервисов' : '';
-    return `Запас до предела ${formatPct(data.target.headroom_pct)} при требуемых ${formatPct(headroom)}${cause}.`;
+    const params = { pct: formatPct(data.target.headroom_pct), required: formatPct(headroom) };
+    return data.resources.status === 'ok' ? LL.t('forecast.plan.tight_not_cpu', params) : LL.t('forecast.plan.tight', params);
   }
   function limitLine(data) {
     const plan = data.resources;
     if (!data.limit_applies && plan.limit_cause) {
-      const subject = data.limit.kind === 'instability'
-        ? `Провалы с ${formatApproxRps(data.limit.rps)} объясняются`
-        : `Потолок модели ${formatApproxRps(data.limit.rps)} объясняется`;
-      return `${subject} CPU: ${plan.limit_cause} при этой нагрузке ≈ ${cpuPct(plan.limit_cpu)} пода.`;
+      const params = { rps: formatApproxRps(data.limit.rps), service: plan.limit_cause, cpu: cpuPct(plan.limit_cpu) };
+      return data.limit.kind === 'instability' ? LL.t('forecast.plan.cause_instability', params) : LL.t('forecast.plan.cause_model', params);
     }
     const verdict = data.answer ? data.answer.verdict : '';
     if (data.limit_applies && plan.status === 'ok' && (verdict === 'blocked' || verdict === 'scale')) return '';
@@ -306,14 +335,15 @@
     const safe = data.safe;
     if (!safe || safe.rps == null) return '';
     const value = formatRps(Math.floor(safe.rps));
-    if (safe.source === 'cpu') return `Безопасный максимум текущей конфигурации: ${value} — дальше ${safe.service} выше ${cpuPct(serviceCeiling(data, safe.service))} CPU.`;
-    return `Безопасный максимум с запасом ${formatPct(headroom)} до предела: ${value}.`;
+    if (safe.source === 'cpu') return LL.t('forecast.safe.cpu', { rps: value, service: safe.service, cpu: cpuPct(serviceCeiling(data, safe.service)) });
+    return LL.t('forecast.safe.headroom', { pct: formatPct(headroom), rps: value });
   }
   function latencyLine(data) {
     const target = data.target;
     if (!target || target.response_ms == null || ['scale', 'blocked'].includes(data.answer.verdict)) return '';
-    const p95 = target.p95_ms != null ? `, p95 ≈ ${formatMs(target.p95_ms)}` : '';
-    return `Время отклика при цели по модели: среднее ≈ ${formatMs(target.response_ms)}${p95}.`;
+    const mean = formatMs(target.response_ms);
+    if (target.p95_ms == null) return LL.t('forecast.latency.mean', { mean: mean });
+    return LL.t('forecast.latency.mean_p95', { mean: mean, p95: formatMs(target.p95_ms) });
   }
   function answerLines(data, headroom) {
     const verdict = data.answer.verdict;
@@ -336,8 +366,8 @@
     return [
       `<div class="forecast-verdict is-${view.tone}">`,
       '<div class="forecast-verdict-head">',
-      `<span class="forecast-verdict-title">Цель ${escapeHtml(formatRps(data.target.rps))}: ${view.text}</span>`,
-      `<span class="pill ${confidence.pill}">Достоверность: ${confidence.text}</span>`,
+      `<span class="forecast-verdict-title">${LL.tHtml('forecast.answer.title', { rps: formatRps(data.target.rps), answer: view.text })}</span>`,
+      `<span class="pill ${confidence.pill}">${LL.tHtml('forecast.confidence.label', { level: confidence.text })}</span>`,
       '</div>',
       paragraphs(answerLines(data, headroom)),
       '</div>'
@@ -352,15 +382,15 @@
   function resourceNotes(item, plan) {
     const notes = [];
     const changed = scaledServices(plan).includes(item);
-    if (item.name === plan.bottleneck) notes.push('упрётся первым');
-    if (item.name === plan.limit_cause && item.cpu_ceiling < plan.ceiling_pct / 100) notes.push(`потолок ${cpuPct(item.cpu_ceiling)}: на этой загрузке тест упёрся в предел`);
-    if (!item.reliable && (changed || item.name === plan.bottleneck)) notes.push('CPU плохо ложится на прямую');
+    if (item.name === plan.bottleneck) notes.push(LL.t('forecast.resources.note_bottleneck'));
+    if (item.name === plan.limit_cause && item.cpu_ceiling < plan.ceiling_pct / 100) notes.push(LL.t('forecast.resources.note_limit', { ceiling: cpuPct(item.cpu_ceiling) }));
+    if (!item.reliable && (changed || item.name === plan.bottleneck)) notes.push(LL.t('forecast.resources.note_poor_fit'));
     return notes;
   }
   function resourceRow(item, plan) {
     const changed = scaledServices(plan).includes(item);
     const notes = resourceNotes(item, plan);
-    const needed = item.instances_needed == null ? 'подами не решается' : String(item.instances_needed);
+    const needed = item.instances_needed == null ? LL.t('forecast.resources.not_by_pods') : String(item.instances_needed);
     const after = changed && item.cpu_after != null ? ` <span class="dim">(≈ ${escapeHtml(cpuPct(item.cpu_after))})</span>` : '';
     return [
       `<tr class="${changed ? 'is-scale' : ''}">`,
@@ -375,31 +405,41 @@
   function nodesText(plan) {
     if (plan.nodes_message) return plan.nodes_message;
     const nodes = plan.nodes || [];
-    if (!nodes.length) return 'Узлы: на стабильных ступенях нет данных CPU.';
+    if (!nodes.length) return LL.t('forecast.nodes.no_data');
     const over = nodes.filter((node) => node.cpu_at_target >= plan.ceiling_pct / 100);
     if (over.length) {
       const list = over.slice(0, 4).map((node) => `${node.name} ≈ ${cpuPct(node.cpu_at_target)}`).join(', ');
-      return `Узлы выше потолка при цели: ${list} — добавленным подам нужно место на других узлах.`;
+      return LL.t('forecast.nodes.over', { nodes: list });
     }
-    return `Узлы: самый загруженный при цели — ${nodes[0].name} ≈ ${cpuPct(nodes[0].cpu_at_target)}, ниже потолка.`;
+    return LL.t('forecast.nodes.busiest', { name: nodes[0].name, cpu: cpuPct(nodes[0].cpu_at_target) });
   }
   function resourcesHtml(data) {
     const plan = data.resources;
-    const title = `<h4>Поды при ${escapeHtml(formatRps(plan.target_rps))}</h4>`;
+    const title = `<h4>${LL.tHtml('forecast.resources.title', { rps: formatRps(plan.target_rps) })}</h4>`;
     if (plan.status !== 'ok') return `${title}<p>${escapeHtml(plan.message)}</p>`;
     const words = stepWords(data);
     const rows = resourceRows(plan);
     const rest = plan.services.length - rows.length;
-    const basis = `${plan.steps_used} ${plural(plan.steps_used, words.by[0], words.by[1], words.by[2])}`;
-    const note = `Потолок CPU пода ${formatPct(plan.ceiling_pct)} (${CEILING_SOURCES[plan.ceiling_source]}); CPU пода — прямая по ${basis} без провалов.`;
+    const note = LL.t('forecast.resources.note', {
+      ceiling: formatPct(plan.ceiling_pct),
+      source: CEILING_SOURCES[plan.ceiling_source],
+      basis: words.by(plan.steps_used)
+    });
     const restText = rest > 0
-      ? `<p class="dim">Ещё ${rest} ${plural(rest, 'сервис', 'сервиса', 'сервисов')} при цели не выше ${escapeHtml(cpuPct(rows[rows.length - 1].cpu_at_target))} CPU пода.</p>`
+      ? `<p class="dim">${escapeHtml(LL.tn('forecast.resources.rest', rest, { cpu: cpuPct(rows[rows.length - 1].cpu_at_target) }))}</p>`
       : '';
+    const head = [
+      `<th>${LL.tHtml('forecast.resources.col_service')}</th>`,
+      `<th class="num">${LL.tHtml('forecast.resources.col_pods')}</th>`,
+      `<th class="num">${LL.tHtml('forecast.resources.col_cpu_step', { unit: words.one, number: plan.last_step })}</th>`,
+      `<th class="num">${LL.tHtml('forecast.resources.col_cpu_target')}</th>`,
+      `<th class="num">${LL.tHtml('forecast.resources.col_needed')}</th>`
+    ].join('');
     return [
       title,
       `<p class="dim">${escapeHtml(note)}</p>`,
       '<div class="step-table-wrap"><table class="step-table forecast-table">',
-      `<thead><tr><th>Сервис</th><th class="num">Подов</th><th class="num">CPU пода, ${escapeHtml(words.one)} ${plan.last_step}</th><th class="num">CPU пода при цели</th><th class="num">Нужно подов</th></tr></thead>`,
+      `<thead><tr>${head}</tr></thead>`,
       `<tbody>${rows.map((item) => resourceRow(item, plan)).join('')}</tbody>`,
       '</table></div>',
       restText,
@@ -418,26 +458,51 @@
       ? `${formatNumber(Math.min.apply(null, rps))} → ${formatRps(Math.max.apply(null, rps))}`
       : formatRps(rps[0]);
     const name = stable.length > 1 ? words.many : words.one;
-    return `Без провалов: ${name} ${numberRange(stable.map((step) => step.number))}, ${load}, среднее ${formatMsRange(stable.map((step) => step.response_ms))}.`;
+    return LL.t('forecast.facts.stable', {
+      unit: name,
+      numbers: numberRange(stable.map((step) => step.number)),
+      load: load,
+      mean: formatMsRange(stable.map((step) => step.response_ms))
+    });
   }
   function instabilityText(data) {
     const info = data.instability;
-    const p95 = info.worst_p95_ms != null ? `, p95 до ${formatMs(info.worst_p95_ms)}` : '';
-    const points = `${info.stalls} из ${info.samples} ${plural(info.samples, 'точки', 'точек', 'точек')} по ${formatNumber(data.bin_minutes, 1)} мин`;
-    return `С ${hhmm(info.onset_iso)} (${info.onset_label}, ${formatApproxRps(info.onset_rps)}) начались провалы: ${points}, среднее до ${formatMs(info.worst_response_ms)}${p95}.${periodText(info, ' Повторяются примерно каждые ', ' мин.')}`;
+    const params = {
+      time: hhmm(info.onset_iso),
+      label: info.onset_label,
+      rps: formatApproxRps(info.onset_rps),
+      points: LL.tn('forecast.facts.stall_points', info.samples, { stalls: info.stalls, minutes: formatNumber(data.bin_minutes, 1) }),
+      mean: formatMs(info.worst_response_ms),
+      p95: formatMs(info.worst_p95_ms)
+    };
+    const text = info.worst_p95_ms != null ? LL.t('forecast.facts.instability_p95', params) : LL.t('forecast.facts.instability', params);
+    if (info.period_min == null) return text;
+    return `${text} ${LL.t('forecast.facts.instability_period', { minutes: formatNumber(info.period_min) })}`;
   }
   function bestText(data) {
     const steps = (data.steps || []).filter((step) => !step.after_drop);
-    const bin = `${formatNumber(data.bin_minutes, 1)} мин`;
-    if (!steps.length) return `Максимум RPS за ${bin}: ${formatNumber(data.peak_rps)}.`;
+    const bin = minutesText(data.bin_minutes);
+    if (!steps.length) return LL.t('forecast.facts.peak', { bin: bin, peak: formatNumber(data.peak_rps) });
     const best = steps.reduce((top, step) => (step.rps > top.rps ? step : top));
-    return `Максимум RPS: в среднем за ${stepWords(data).one} — ${formatNumber(best.rps)} (${best.label}), за ${bin} — ${formatNumber(data.peak_rps)}.`;
+    return LL.t('forecast.facts.best', {
+      unit: stepWords(data).one,
+      best: formatNumber(best.rps),
+      label: best.label,
+      bin: bin,
+      peak: formatNumber(data.peak_rps)
+    });
   }
   function cpuFact(data) {
     const plan = data.resources;
     if (plan.status !== 'ok' || !plan.services.length) return '';
     const top = plan.services.reduce((best, item) => (item.cpu_measured > best.cpu_measured ? item : best));
-    return `Больше всего CPU: ${top.name} — ${cpuPct(top.cpu_measured)} пода на ${stepWords(data).at} ${plan.last_step}, ${podsText(top.instances)}.`;
+    return LL.t('forecast.facts.cpu', {
+      name: top.name,
+      cpu: cpuPct(top.cpu_measured),
+      unit: stepWords(data).at,
+      number: plan.last_step,
+      pods: podsText(top.instances)
+    });
   }
   function factItems(data) {
     const items = [];
@@ -446,66 +511,72 @@
     const cpu = cpuFact(data);
     if (cpu) items.push(cpu);
     if (data.instability) items.push(instabilityText(data));
-    else if (data.excluded_stalls) items.push(`Отдельные всплески времени отклика: ${data.excluded_stalls} — в модель не вошли.`);
+    else if (data.excluded_stalls) items.push(LL.t('forecast.facts.spikes', { count: data.excluded_stalls }));
     items.push(bestText(data));
-    if (data.cutoff_kind === 'rps_drop') items.push(`В ${hhmm(data.cutoff_iso)} RPS упал — точки после этого в модель не вошли.`);
+    if (data.cutoff_kind === 'rps_drop') items.push(LL.t('forecast.facts.rps_drop', { time: hhmm(data.cutoff_iso) }));
     return items;
   }
   function uslItems(data) {
     const fit = data.fit || {};
     const ceiling = fit.x_max != null
-      ? `Потолок пропускной способности по модели USL ${formatApproxRps(fit.x_max)}.`
-      : 'Потолок по модели USL не виден: в проверенном диапазоне RPS растёт почти линейно.';
+      ? LL.t('forecast.method.usl_ceiling', { rps: formatApproxRps(fit.x_max) })
+      : LL.t('forecast.method.usl_no_ceiling');
     const knee = data.knee
-      ? `Колено ${formatApproxRps(data.knee.rps)}: дальше время отклика растёт быстрее нагрузки.`
-      : 'Колена до предела нет: время отклика растёт не быстрее нагрузки.';
+      ? LL.t('forecast.method.knee', { rps: formatApproxRps(data.knee.rps) })
+      : LL.t('forecast.method.no_knee');
     return [ceiling, knee];
   }
   function confidentBasis(data) {
     const r2 = `R² = ${formatNumber(data.fit.r2, 2)}`;
-    if (data.resources.status === 'ok' && !data.limit_applies) return 'Расчёт опирается на измеренные ступени: CPU сервисов хорошо ложится на прямую.';
-    if (data.answer.verdict === 'blocked') return `Модель хорошо описывает данные (${r2}): предел ${formatApproxRps(data.limit.rps)} виден уверенно.`;
-    return `Цель внутри проверенного диапазона, модель хорошо описывает данные (${r2}).`;
+    if (data.resources.status === 'ok' && !data.limit_applies) return LL.t('forecast.confidence.basis_cpu');
+    if (data.answer.verdict === 'blocked') return LL.t('forecast.confidence.basis_limit', { r2: r2, rps: formatApproxRps(data.limit.rps) });
+    return LL.t('forecast.confidence.basis_range', { r2: r2 });
   }
   function confidenceHtml(data) {
     const answer = data.answer;
     if (!answer) return '';
-    const title = `<h4>Достоверность: ${CONFIDENCE[answer.confidence].text}</h4>`;
+    const title = `<h4>${LL.tHtml('forecast.confidence.label', { level: CONFIDENCE[answer.confidence].text })}</h4>`;
     const codes = answer.confidence_reasons || [];
     if (!codes.length) return `${title}<p>${escapeHtml(confidentBasis(data))}</p>`;
     const actions = codes.map((code) => REASONS[code].action(data)).filter(Boolean);
-    const actionsHtml = actions.length ? `<h5>Что делать</h5>${listHtml(actions)}` : '';
+    const actionsHtml = actions.length ? `<h5>${LL.tHtml('forecast.confidence.actions')}</h5>${listHtml(actions)}` : '';
     return `${title}${listHtml(codes.map((code) => REASONS[code].reason(data)))}${actionsHtml}`;
   }
   function exclusionText(data) {
     const parts = [];
-    if (data.excluded_edges) parts.push(`разгон и спад нагрузки — ${data.excluded_edges}`);
-    if (data.excluded_stalls) parts.push(`провалы — ${data.excluded_stalls}`);
+    if (data.excluded_edges) parts.push(LL.t('forecast.method.excluded_edges', { count: data.excluded_edges }));
+    if (data.excluded_stalls) parts.push(LL.t('forecast.method.excluded_stalls', { count: data.excluded_stalls }));
     const after = (data.points || []).filter((point) => point.role === 'after_cutoff').length;
-    if (data.cutoff_kind === 'rps_drop' && after) parts.push(`после падения RPS — ${after}`);
-    return parts.length ? `Не вошли в модель: ${parts.join(', ')}.` : 'В модель вошли все точки окна.';
+    if (data.cutoff_kind === 'rps_drop' && after) parts.push(LL.t('forecast.method.excluded_after_drop', { count: after }));
+    return parts.length ? LL.t('forecast.method.excluded', { parts: parts.join(', ') }) : LL.t('forecast.method.all_included');
   }
   function kappaText(fit) {
     const kappa = Number(fit.kappa) || 0;
-    if (kappa <= 0) return 'κ = 0 — спада RPS после пика модель не видит.';
-    const peak = fit.n_peak != null ? ` Пик — при параллелизме ≈ ${formatNumber(threeSignificant(fit.n_peak))}.` : '';
-    return `κ = ${kappa.toExponential(2).replace('.', ',')} — потери на согласование параллельных запросов: из-за κ после пика RPS падает.${peak}`;
+    if (kappa <= 0) return LL.t('forecast.method.kappa_zero');
+    const text = LL.t('forecast.method.kappa', { kappa: kappa.toExponential(2).replace('.', decimalSeparator()) });
+    if (fit.n_peak == null) return text;
+    return `${text} ${LL.t('forecast.method.kappa_peak', { concurrency: formatNumber(threeSignificant(fit.n_peak)) })}`;
   }
   function methodItems(data) {
     const fit = data.fit || {};
-    const end = data.cutoff_kind === 'rps_drop' ? 'первое падение RPS' : 'конец теста';
-    const count = `${data.samples_used} ${plural(data.samples_used, 'точке', 'точкам', 'точкам')}`;
+    const end = data.cutoff_kind === 'rps_drop' ? LL.t('forecast.method.end_rps_drop') : LL.t('forecast.method.end_test');
     return [
-      'Поды: CPU пода = база + стоимость × RPS на под — прямая по стабильным ступеням для каждого сервиса. Нужно подов = стоимость × цель / (потолок − база). Нагрузка делится между подами поровну, смесь запросов — как в тесте.',
+      LL.t('forecast.method.pods'),
       ...uslItems(data),
-      `Модель USL (универсальный закон масштабируемости) по ${count} по ${formatNumber(data.bin_minutes, 1)} мин: с ${hhmm(data.window_start_iso)} до ${hhmm(data.cutoff_iso)} (${end}).`,
+      LL.t('forecast.method.window', {
+        points: LL.tn('forecast.method.points', data.samples_used),
+        minutes: formatNumber(data.bin_minutes, 1),
+        start: hhmm(data.window_start_iso),
+        end: hhmm(data.cutoff_iso),
+        reason: end
+      }),
       exclusionText(data),
       data.load_model === 'closed'
-        ? `Модель нагрузки закрытая: параллелизм — число VU, паузы в сценарии ≈ ${formatNumber(data.think_time_s, 2)} с.`
-        : 'Модель нагрузки открытая: параллелизм — RPS × среднее время отклика.',
-      `σ = ${formatPct((Number(fit.sigma) || 0) * 100)} — потери на конкуренцию за общий ресурс: чем больше σ, тем раньше замедляется рост RPS.`,
+        ? LL.t('forecast.method.closed', { seconds: formatNumber(data.think_time_s, 2) })
+        : LL.t('forecast.method.open'),
+      LL.t('forecast.method.sigma', { sigma: formatPct((Number(fit.sigma) || 0) * 100) }),
       kappaText(fit),
-      `R² = ${formatNumber(fit.r2, 2)} — доля разброса RPS, которую объясняет модель.`
+      LL.t('forecast.method.r2', { r2: formatNumber(fit.r2, 2) })
     ].concat(data.notes || []);
   }
 
@@ -545,13 +616,13 @@
     return datasets.reduce((sum, dataset) => sum + dataset.data.filter((point) => point.clipped).length, 0);
   }
   function limitTitle(limit) {
-    return limit.kind === 'instability' ? 'Предел: провалы' : 'Предел: потолок модели';
+    return limit.kind === 'instability' ? LL.t('forecast.chart.limit_instability') : LL.t('forecast.chart.limit_model');
   }
 
   function sampleTip(point) {
-    const lines = [`${hhmm(point.time_iso)} · ${ROLE_TITLES[point.role]}`, formatRps(point.rps), `среднее ${formatMs(point.response_ms)}`];
+    const lines = [`${hhmm(point.time_iso)} · ${ROLE_TITLES[point.role]}`, formatRps(point.rps), LL.t('forecast.point.mean', { value: formatMs(point.response_ms) })];
     if (point.p95_ms != null) lines.push(`p95 ${formatMs(point.p95_ms)}`);
-    lines.push(`параллелизм ${formatNumber(point.concurrency, 1)}`);
+    lines.push(LL.t('forecast.point.concurrency', { value: formatNumber(point.concurrency, 1) }));
     if (point.vus != null) lines.push(`VU ${formatNumber(point.vus)}`);
     return lines;
   }
@@ -559,15 +630,15 @@
     return { x: x, y: y, tip: sampleTip(point) };
   }
   function stepPoint(x, y, step) {
-    const lines = [step.label, `${formatRps(step.rps)} в среднем`, `среднее ${formatMs(step.response_ms)}`];
-    if (step.p95_ms != null) lines.push(`p95 худшей точки ${formatMs(step.p95_ms)}`);
-    lines.push(step.stalls ? `провалы: ${step.stalls} из ${step.samples}` : 'без провалов');
+    const lines = [step.label, LL.t('forecast.point.rps_mean', { rps: formatRps(step.rps) }), LL.t('forecast.point.mean', { value: formatMs(step.response_ms) })];
+    if (step.p95_ms != null) lines.push(LL.t('forecast.point.worst_p95', { value: formatMs(step.p95_ms) }));
+    lines.push(step.stalls ? LL.t('forecast.point.stalls', { stalls: step.stalls, samples: step.samples }) : LL.t('forecast.point.no_stalls'));
     return { x: x, y: y, number: step.number, tip: lines };
   }
   function modelPoint(x, y, point) {
-    const lines = [`Модель: ${formatRps(point.rps)}`, `среднее ${formatMs(point.response_ms)}`];
+    const lines = [LL.t('forecast.point.model', { rps: formatRps(point.rps) }), LL.t('forecast.point.mean', { value: formatMs(point.response_ms) })];
     if (point.p95_ms != null) lines.push(`p95 ${formatMs(point.p95_ms)}`);
-    lines.push(`параллелизм ${formatNumber(point.concurrency, 1)}`);
+    lines.push(LL.t('forecast.point.concurrency', { value: formatNumber(point.concurrency, 1) }));
     return { x: x, y: y, tip: lines };
   }
   function verticalLine(x, height, tip) {
@@ -616,11 +687,11 @@
     return Object.assign(pointSet(label, data, 'transparent', 6, 2), { borderColor: COLORS.step, borderWidth: 2, pointStyle: clippedStyle('rectRot') });
   }
   function edgeSet(data) {
-    return Object.assign(pointSet('Разгон и спад нагрузки', data, 'transparent', 3.5, 5), { borderColor: COLORS.edge, borderWidth: 1.5 });
+    return Object.assign(pointSet(LL.t('forecast.chart.edges'), data, 'transparent', 3.5, 5), { borderColor: COLORS.edge, borderWidth: 1.5 });
   }
   function kneeSet(knee) {
-    const tip = [`Колено: ${formatRps(knee.rps)}`, `среднее ${formatMs(knee.response_ms)}`];
-    return Object.assign(pointSet('Колено', [{ x: knee.rps, y: knee.response_ms, tip: tip }], COLORS.knee, 7, 0), { pointStyle: 'rectRot' });
+    const tip = [LL.t('forecast.point.knee', { rps: formatRps(knee.rps) }), LL.t('forecast.point.mean', { value: formatMs(knee.response_ms) })];
+    return Object.assign(pointSet(LL.t('forecast.chart.knee'), [{ x: knee.rps, y: knee.response_ms, tip: tip }], COLORS.knee, 7, 0), { pointStyle: 'rectRot' });
   }
 
   function latencyBounds(data, points, steps, curve) {
@@ -649,15 +720,15 @@
   }
   function slaNote(sla, hasP95) {
     if (sla == null) return '';
-    if (!hasP95) return `Порог SLA p95 (${formatMs(sla)}) не показан: в данных прогноза нет p95.`;
-    return `Порог SLA p95 (${formatMs(sla)}) выше графика.`;
+    if (!hasP95) return LL.t('forecast.chart.sla_no_p95', { value: formatMs(sla) });
+    return LL.t('forecast.chart.sla_above', { value: formatMs(sla) });
   }
   function latencyReferences(data, bounds) {
     const sets = [];
     if (bounds.sla != null) sets.push(lineSet('SLA p95', horizontalLine(bounds.sla, bounds.xMax, [`SLA p95: ${formatMs(bounds.sla)}`]), COLORS.sla, true, 3));
     if (data.target) {
-      const tip = [`Цель: ${formatRps(data.target.rps)}`];
-      sets.push(lineSet('Цель', verticalLine(data.target.rps, bounds.yMax, tip), ANSWER[data.answer.verdict].color, true, 3));
+      const tip = [LL.t('forecast.point.target', { rps: formatRps(data.target.rps) })];
+      sets.push(lineSet(LL.t('forecast.chart.target'), verticalLine(data.target.rps, bounds.yMax, tip), ANSWER[data.answer.verdict].color, true, 3));
     }
     if (data.limit.rps != null) {
       const tip = [`${limitTitle(data.limit)}: ${formatApproxRps(data.limit.rps)}`];
@@ -668,16 +739,16 @@
   }
   function latencyZones(data, xMax) {
     if (data.instability) return [{ from: data.instability.onset_rps, to: xMax, color: COLORS.zoneUnstable }];
-    return data.tested_rps ? [{ from: data.tested_rps, to: xMax, color: accentZone() }] : [];
+    return data.tested_rps ? [{ from: data.tested_rps, to: xMax, color: COLORS.zoneUntested }] : [];
   }
   function latencyCaption(data, datasets, bounds) {
     const parts = [data.instability
-      ? 'Красная заливка — нагрузка, с которой в тесте начались провалы: модель там не строится.'
-      : 'Заливка — нагрузка выше проверенной: там только прогноз.'];
+      ? LL.t('forecast.chart.zone_unstable')
+      : LL.t('forecast.chart.zone_untested')];
     const hidden = clippedCount(datasets);
-    if (hidden) parts.push(`Значения выше графика (${hidden}) — треугольники у верхнего края, точные числа в подсказке.`);
+    if (hidden) parts.push(LL.t('forecast.chart.clipped_top', { count: hidden }));
     if (bounds.slaNote) parts.push(bounds.slaNote);
-    if (data.target && data.target.rps > bounds.xMax) parts.push(`Цель ${formatRps(data.target.rps)} правее графика.`);
+    if (data.target && data.target.rps > bounds.xMax) parts.push(LL.t('forecast.chart.target_right', { rps: formatRps(data.target.rps) }));
     return parts.join(' ');
   }
   function latencyView(data) {
@@ -689,12 +760,12 @@
     const clip = (point) => clipped(point, bounds.xMax, bounds.yMax);
     const words = stepWords(data);
     const datasets = [
-      pointSet(`Точки по ${formatNumber(data.bin_minutes, 1)} мин`, byRole(points, 'fit').map((p) => clip(samplePoint(p.rps, p.response_ms, p))), COLORS.sample, 2.5, 6),
-      pointSet('Провалы', byRole(points, 'stall').map((p) => clip(samplePoint(p.rps, p.response_ms, p))), COLORS.stall, 3.5, 5),
-      stepSet(`${words.title}: среднее`, steps.map((step) => clip(stepPoint(step.rps, step.response_ms, step)))),
+      pointSet(LL.t('forecast.chart.points', { minutes: formatNumber(data.bin_minutes, 1) }), byRole(points, 'fit').map((p) => clip(samplePoint(p.rps, p.response_ms, p))), COLORS.sample, 2.5, 6),
+      pointSet(LL.t('forecast.chart.stalls'), byRole(points, 'stall').map((p) => clip(samplePoint(p.rps, p.response_ms, p))), COLORS.stall, 3.5, 5),
+      stepSet(LL.t('forecast.chart.unit_mean', { unit: words.title }), steps.map((step) => clip(stepPoint(step.rps, step.response_ms, step)))),
       stepP95Set(`${words.title}: p95`, steps.filter((step) => step.p95_ms != null).map((step) => clip(stepPoint(step.rps, step.p95_ms, step)))),
-      lineSet('Модель: среднее', curve.map((point) => modelPoint(point.rps, point.response_ms, point)), accentColor(), false, 4),
-      lineSet('Модель: p95', curve.filter((point) => point.p95_ms != null).map((point) => modelPoint(point.rps, point.p95_ms, point)), COLORS.p95, true, 4)
+      lineSet(LL.t('forecast.chart.model_mean'), curve.map((point) => modelPoint(point.rps, point.response_ms, point)), modelColor(), false, 4),
+      lineSet(LL.t('forecast.chart.model_p95'), curve.filter((point) => point.p95_ms != null).map((point) => modelPoint(point.rps, point.p95_ms, point)), COLORS.p95, true, 4)
     ].concat(latencyReferences(data, bounds));
     return {
       datasets: datasets,
@@ -714,19 +785,22 @@
     const yMax = cappedMax(dataY, [target ? target.rps : null, data.limit.rps]);
     const sample = (p) => clipped(samplePoint(p.concurrency, p.rps, p), xMax, yMax);
     const datasets = [
-      pointSet('Точки модели', byRole(points, 'fit').map(sample), COLORS.sample, 2.5, 6),
-      pointSet('Провалы', byRole(points, 'stall').map(sample), COLORS.stall, 3.5, 5),
+      pointSet(LL.t('forecast.chart.model_points'), byRole(points, 'fit').map(sample), COLORS.sample, 2.5, 6),
+      pointSet(LL.t('forecast.chart.stalls'), byRole(points, 'stall').map(sample), COLORS.stall, 3.5, 5),
       edgeSet(byRole(points, 'edge').map(sample)),
-      lineSet('Модель', curve.map((point) => modelPoint(point.concurrency, point.rps, point)), accentColor(), false, 4)
+      lineSet(LL.t('forecast.chart.model'), curve.map((point) => modelPoint(point.concurrency, point.rps, point)), modelColor(), false, 4)
     ];
-    if (target) datasets.push(lineSet('Цель', horizontalLine(target.rps, xMax, [`Цель: ${formatRps(target.rps)}`]), ANSWER[data.answer.verdict].color, true, 3));
+    if (target) {
+      const tip = [LL.t('forecast.point.target', { rps: formatRps(target.rps) })];
+      datasets.push(lineSet(LL.t('forecast.chart.target'), horizontalLine(target.rps, xMax, tip), ANSWER[data.answer.verdict].color, true, 3));
+    }
     if (data.limit.rps != null) {
       const tip = [`${limitTitle(data.limit)}: ${formatApproxRps(data.limit.rps)}`];
       datasets.push(lineSet(limitTitle(data.limit), horizontalLine(data.limit.rps, xMax, tip), COLORS.limit, false, 3));
     }
     const hidden = clippedCount(datasets);
     const caption = hidden
-      ? `Точки за краем графика (${hidden}) — треугольники у края: в провалах и на разгоне параллелизм по закону Литтла резко растёт.`
+      ? LL.t('forecast.chart.clipped_edge', { count: hidden })
       : '';
     return { datasets: datasets, xMin: 0, xMax: xMax, yMax: yMax, zones: [], caption: caption };
   }
@@ -751,7 +825,7 @@
         responsive: true,
         maintainAspectRatio: false,
         animation: false,
-        locale: LOCALE,
+        locale: LL.intl,
         plugins: {
           legend: {
             labels: {
@@ -777,17 +851,17 @@
     clearCharts();
     if (!window.Chart) return;
     const latency = latencyView(data);
-    charts.push(createChart('forecastLatency', latency, 'RPS', 'Время отклика, мс'));
+    charts.push(createChart('forecastLatency', latency, 'RPS', LL.t('forecast.chart.axis_latency')));
     setText('forecastLatencyCaption', latency.caption);
     const throughput = throughputView(data);
-    charts.push(createChart('forecastThroughput', throughput, data.load_model === 'closed' ? 'VU' : 'Параллелизм, запросов в системе', 'RPS'));
+    charts.push(createChart('forecastThroughput', throughput, data.load_model === 'closed' ? 'VU' : LL.t('forecast.chart.axis_concurrency'), 'RPS'));
     setText('forecastThroughputCaption', throughput.caption);
   }
 
   function presetBase(data) {
     const sla = Number(data.sla_target_rps);
-    if (Number.isFinite(sla) && sla > 0) return { rps: sla, suffix: 'к SLA' };
-    return { rps: Number(data.tested_rps) || 0, suffix: 'к проверенному' };
+    if (Number.isFinite(sla) && sla > 0) return { rps: sla, base: 'sla' };
+    return { rps: Number(data.tested_rps) || 0, base: 'tested' };
   }
   function presetValue(name) {
     if (!current) return null;
@@ -799,20 +873,21 @@
     return null;
   }
   function controlsHtml(data, target) {
-    const base = presetBase(data);
+    const overSla = presetBase(data).base === 'sla';
+    const plus = (pct) => (overSla ? LL.tHtml('forecast.preset.plus_sla', { pct: pct }) : LL.tHtml('forecast.preset.plus_tested', { pct: pct }));
     const presets = [
-      data.sla_target_rps ? '<button type="button" class="btn" data-preset="sla">Цель SLA</button>' : '',
-      `<button type="button" class="btn" data-preset="plus25">+25 % ${base.suffix}</button>`,
-      `<button type="button" class="btn" data-preset="plus50">+50 % ${base.suffix}</button>`,
-      '<button type="button" class="btn" data-preset="safe" id="forecastPresetSafe">Безопасный максимум</button>'
+      data.sla_target_rps ? `<button type="button" class="btn" data-preset="sla">${LL.tHtml('forecast.preset.sla')}</button>` : '',
+      `<button type="button" class="btn" data-preset="plus25">${plus(25)}</button>`,
+      `<button type="button" class="btn" data-preset="plus50">${plus(50)}</button>`,
+      `<button type="button" class="btn" data-preset="safe" id="forecastPresetSafe">${LL.tHtml('forecast.preset.safe')}</button>`
     ].join('');
     return [
       '<div class="forecast-controls">',
-      `<label>Целевая нагрузка, RPS<input id="forecastTarget" type="number" min="1" step="1" value="${target == null ? '' : escapeHtml(target)}" /></label>`,
-      `<label title="Загрузка CPU одного пода, выше которой нужен ещё под">Потолок CPU пода, %<input id="forecastCpuCeiling" type="number" min="10" max="100" step="1" value="${escapeHtml(Math.round(data.resources.ceiling_pct))}" /></label>`,
-      `<label title="Какую долю предела оставить в резерве">Запас до предела, %<input id="forecastHeadroom" type="number" min="0" max="90" step="1" value="${DEFAULT_HEADROOM_PCT}" /></label>`,
+      `<label>${LL.tHtml('forecast.controls.target')}<input id="forecastTarget" type="number" min="1" step="1" value="${target == null ? '' : escapeHtml(target)}" /></label>`,
+      `<label title="${LL.tHtml('forecast.controls.ceiling_hint')}">${LL.tHtml('forecast.controls.ceiling')}<input id="forecastCpuCeiling" type="number" min="10" max="100" step="1" value="${escapeHtml(Math.round(data.resources.ceiling_pct))}" /></label>`,
+      `<label title="${LL.tHtml('forecast.controls.headroom_hint')}">${LL.tHtml('forecast.controls.headroom')}<input id="forecastHeadroom" type="number" min="0" max="90" step="1" value="${DEFAULT_HEADROOM_PCT}" /></label>`,
       '<div class="forecast-presets" role="group" aria-labelledby="forecastPresetsCaption">',
-      '<span class="forecast-presets-caption" id="forecastPresetsCaption">Быстрый выбор цели</span>',
+      `<span class="forecast-presets-caption" id="forecastPresetsCaption">${LL.tHtml('forecast.controls.presets')}</span>`,
       `<div class="forecast-presets-row">${presets}</div>`,
       '</div>',
       '</div>'
@@ -824,34 +899,34 @@
       '<div id="forecastVerdict"></div>',
       controlsHtml(data, target),
       '<section class="forecast-block forecast-overview">',
-      '<h4>Где цель на шкале нагрузки</h4>',
+      `<h4>${LL.tHtml('forecast.section.scale')}</h4>`,
       '<div id="forecastScale"></div>',
       '<p class="dim" id="forecastScaleCaption"></p>',
-      '<h4 class="forecast-overview-steps">Как прошли ступени теста</h4>',
+      `<h4 class="forecast-overview-steps">${LL.tHtml('forecast.section.steps')}</h4>`,
       '<div id="forecastSteps"></div>',
       '</section>',
       '<section class="forecast-block forecast-resources" id="forecastResources"></section>',
       '<section class="forecast-block forecast-explain" id="forecastExplain" hidden></section>',
       '<div class="forecast-blocks">',
-      '<section class="forecast-block"><h4>Что было в тесте</h4><div id="forecastFacts"></div></section>',
+      `<section class="forecast-block"><h4>${LL.tHtml('forecast.section.facts')}</h4><div id="forecastFacts"></div></section>`,
       '<section class="forecast-block" id="forecastConfidence"></section>',
       '</div>',
       '<details class="report-collapsible forecast-details">',
-      '<summary>Подробный график — для инженеров</summary>',
+      `<summary>${LL.tHtml('forecast.section.details')}</summary>`,
       '<div class="report-collapsible-body">',
       '<figure class="forecast-figure">',
-      '<figcaption class="forecast-chart-title">Время отклика от нагрузки</figcaption>',
+      `<figcaption class="forecast-chart-title">${LL.tHtml('forecast.section.latency_chart')}</figcaption>`,
       '<div class="forecast-chart forecast-chart-main"><canvas id="forecastLatency"></canvas></div>',
       '<p class="dim" id="forecastLatencyCaption"></p>',
       '</figure>',
       '</div>',
       '</details>',
       '<details class="report-collapsible forecast-details">',
-      '<summary>Как считается</summary>',
+      `<summary>${LL.tHtml('forecast.section.method')}</summary>`,
       '<div class="report-collapsible-body">',
       '<div id="forecastMethod"></div>',
       '<figure class="forecast-figure">',
-      '<figcaption class="forecast-chart-title">Пропускная способность от параллелизма</figcaption>',
+      `<figcaption class="forecast-chart-title">${LL.tHtml('forecast.section.throughput_chart')}</figcaption>`,
       '<div class="forecast-chart forecast-chart-secondary"><canvas id="forecastThroughput"></canvas></div>',
       '<p class="dim" id="forecastThroughputCaption"></p>',
       '</figure>',
@@ -861,7 +936,7 @@
     ].join('');
   }
   function unavailable(message) {
-    return `<div class="report-note"><div class="report-note-title">Прогноз недоступен</div><div class="report-note-body"><p>${escapeHtml(message)}</p></div></div>`;
+    return `<div class="report-note"><div class="report-note-title">${LL.tHtml('forecast.unavailable')}</div><div class="report-note-body"><p>${escapeHtml(message)}</p></div></div>`;
   }
 
   function findingTitle(finding) {
@@ -876,24 +951,24 @@
   }
   function evidenceItem(link, byRef) {
     const finding = byRef[link.finding_id];
-    const title = finding ? findingTitle(finding) : `${link.finding_id} — нет в отчёте`;
+    const title = finding ? findingTitle(finding) : LL.t('forecast.explain.finding_missing', { id: link.finding_id });
     return `<li><span class="forecast-finding-meta">${escapeHtml(title)}</span>${escapeHtml(link.role)}</li>`;
   }
   function checkText(check) {
     const parts = [];
-    if (check.status === 'verified') parts.push(`числа сверены с данными: ${check.claims_matched} из ${check.claims_total}`);
-    else if (check.status === 'unverified') parts.push(`есть числа, которых нет в данных: ${check.unmatched.join(', ')}`);
-    else parts.push('чисел в ответе нет');
-    if (check.unknown_findings.length) parts.push(`ссылки на несуществующие находки: ${check.unknown_findings.join(', ')}`);
+    if (check.status === 'verified') parts.push(LL.t('forecast.explain.check_verified', { matched: check.claims_matched, total: check.claims_total }));
+    else if (check.status === 'unverified') parts.push(LL.t('forecast.explain.check_unverified', { numbers: check.unmatched.join(', ') }));
+    else parts.push(LL.t('forecast.explain.check_none'));
+    if (check.unknown_findings.length) parts.push(LL.t('forecast.explain.check_unknown', { findings: check.unknown_findings.join(', ') }));
     return parts.join('; ');
   }
   function cappedList(items, tag) {
     const shown = items.slice(0, EXPLAIN_ITEMS).map((item) => `<li>${escapeHtml(item)}</li>`).join('');
     const rest = items.slice(EXPLAIN_ITEMS);
     const more = rest.length
-      ? `<details class="forecast-more"><summary>Ещё ${rest.length}</summary><${tag} start="${EXPLAIN_ITEMS + 1}">${rest.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</${tag}></details>`
+      ? `<details class="forecast-more"><summary>${LL.tHtml('forecast.explain.more', { count: rest.length })}</summary><${tag} start="${EXPLAIN_ITEMS + 1}">${rest.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</${tag}></details>`
       : '';
-    return items.length ? `<${tag}>${shown}</${tag}>${more}` : '<p class="dim">Нет.</p>';
+    return items.length ? `<${tag}>${shown}</${tag}>${more}` : `<p class="dim">${LL.tHtml('forecast.explain.none')}</p>`;
   }
   function keyFactsHtml(facts) {
     if (!facts.length) return '';
@@ -908,20 +983,20 @@
   function explanationBody(view) {
     const result = view.explanation;
     const byRef = Object.fromEntries(view.findings.map((finding) => [finding.ref, finding]));
-    const generated = view.generated_at ? new Date(view.generated_at).toLocaleString(LOCALE, { dateStyle: 'short', timeStyle: 'short' }) : '';
+    const generated = view.generated_at ? LL.fmt.dateTime(view.generated_at, { dateStyle: 'short', timeStyle: 'short' }) : '';
     const meta = [view.model, generated, checkText(view.check)].filter(Boolean).join(' · ');
     const scaling = SCALING[result.scaling.verdict];
     const evidence = result.evidence.length
-      ? `<details class="forecast-findings"><summary>На чём основано (${result.evidence.length})</summary><ul>${result.evidence.map((link) => evidenceItem(link, byRef)).join('')}</ul></details>`
+      ? `<details class="forecast-findings"><summary>${LL.tHtml('forecast.explain.evidence', { count: result.evidence.length })}</summary><ul>${result.evidence.map((link) => evidenceItem(link, byRef)).join('')}</ul></details>`
       : '';
     return [
       `<p class="forecast-explain-headline">${escapeHtml(result.headline)}</p>`,
       `<p class="forecast-explain-cause">${escapeHtml(result.cause)}</p>`,
       keyFactsHtml(result.key_facts),
-      `<div class="forecast-explain-scaling is-${scaling.tone}"><strong>${scaling.text}.</strong> ${escapeHtml(result.scaling.reason)}</div>`,
+      `<div class="forecast-explain-scaling is-${scaling.tone}"><strong>${escapeHtml(scaling.text)}.</strong> ${escapeHtml(result.scaling.reason)}</div>`,
       '<div class="forecast-explain-columns">',
-      `<section><h5>Риски</h5>${cappedList(result.scaling_risks, 'ul')}</section>`,
-      `<section><h5>Что сделать</h5>${cappedList(result.next_checks, 'ol')}</section>`,
+      `<section><h5>${LL.tHtml('forecast.explain.risks')}</h5>${cappedList(result.scaling_risks, 'ul')}</section>`,
+      `<section><h5>${LL.tHtml('forecast.explain.next_checks')}</h5>${cappedList(result.next_checks, 'ol')}</section>`,
       '</div>',
       evidence,
       `<p class="dim forecast-explain-meta">${escapeHtml(meta)}</p>`
@@ -931,16 +1006,16 @@
     const done = view.explanation != null;
     const button = view.llm_problem
       ? `<span class="dim">${escapeHtml(view.llm_problem)}</span>`
-      : `<button type="button" class="btn btn-sm" id="forecastExplainRun">${done ? 'Обновить разбор' : 'Разобрать с ИИ'}</button>`;
+      : `<button type="button" class="btn btn-sm" id="forecastExplainRun">${done ? LL.tHtml('forecast.explain.refresh') : LL.tHtml('forecast.explain.run')}</button>`;
     const confidence = done ? CONFIDENCE[view.explanation.confidence] : null;
-    const pill = confidence ? `<span class="pill ${confidence.pill}">Уверенность модели: ${confidence.text}</span>` : '';
+    const pill = confidence ? `<span class="pill ${confidence.pill}">${LL.tHtml('forecast.explain.confidence', { level: confidence.text })}</span>` : '';
     const action = `<span class="forecast-explain-tools">${pill}${button}</span>`;
-    const intro = '<p class="dim">ИИ свяжет предел с находками отчёта ниже и оценит риски масштабирования. Числа ответа сверяются с данными.</p>';
+    const intro = `<p class="dim">${LL.tHtml('forecast.explain.intro')}</p>`;
     const findings = view.findings.length
-      ? `<details class="forecast-findings"${done ? '' : ' open'}><summary>Связанные находки отчёта (${view.findings.length})</summary><ul>${view.findings.map(findingItem).join('')}</ul></details>`
-      : '<p class="dim">Находок отчёта рядом с пределом нет.</p>';
+      ? `<details class="forecast-findings"${done ? '' : ' open'}><summary>${LL.tHtml('forecast.explain.findings', { count: view.findings.length })}</summary><ul>${view.findings.map(findingItem).join('')}</ul></details>`
+      : `<p class="dim">${LL.tHtml('forecast.explain.no_findings')}</p>`;
     return [
-      `<div class="forecast-explain-head"><h4>Почему упёрлось</h4>${action}</div>`,
+      `<div class="forecast-explain-head"><h4>${LL.tHtml('forecast.explain.title')}</h4>${action}</div>`,
       view.status === 'stale' ? `<p class="dim">${escapeHtml(view.message)}</p>` : '',
       done ? explanationBody(view) : intro,
       '<div id="forecastExplainError"></div>',
@@ -959,7 +1034,7 @@
     const options = method === 'POST' ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' } : {};
     const resp = await fetch('/forecast/' + encodeURIComponent(runId) + '/explanation', options);
     const body = await resp.json().catch(() => ({}));
-    if (!resp.ok) return { error: body.error || `Разбор недоступен (HTTP ${resp.status})` };
+    if (!resp.ok) return { error: body.error || LL.t('forecast.explain.error', { status: resp.status }) };
     return { view: body };
   }
   async function loadExplanation() {
@@ -970,12 +1045,12 @@
     }
     const block = document.getElementById('forecastExplain');
     block.hidden = false;
-    block.innerHTML = `<div class="forecast-explain-head"><h4>Почему упёрлось</h4></div><p class="forecast-explain-error">${escapeHtml(result.error)}</p>`;
+    block.innerHTML = `<div class="forecast-explain-head"><h4>${LL.tHtml('forecast.explain.title')}</h4></div><p class="forecast-explain-error">${escapeHtml(result.error)}</p>`;
   }
   async function runExplanation() {
     const button = document.getElementById('forecastExplainRun');
     button.disabled = true;
-    button.textContent = 'Разбираю… до минуты';
+    button.textContent = LL.t('forecast.explain.running');
     setHtml('forecastExplainError', '');
     const result = await explanationRequest('POST');
     if (!result.error) {
@@ -983,7 +1058,7 @@
       return;
     }
     button.disabled = false;
-    button.textContent = 'Повторить разбор';
+    button.textContent = LL.t('forecast.explain.retry');
     setHtml('forecastExplainError', `<p class="forecast-explain-error">${escapeHtml(result.error)}</p>`);
   }
 
@@ -991,14 +1066,17 @@
     return Math.max(0, Math.min(100, (Number(value) / end) * 100));
   }
   function zoneText(data, zone) {
-    if (!data.limit || data.limit.rps == null) return 'без провалов';
-    if (zone.tone === 'fail') return data.limit.kind === 'instability' ? 'провалы в тесте' : 'выше потолка модели';
-    return zone.tone === 'warn' ? 'без запаса' : 'с запасом';
+    if (!data.limit || data.limit.rps == null) return LL.t('forecast.scale.zone_no_stalls');
+    if (zone.tone === 'fail') return data.limit.kind === 'instability' ? LL.t('forecast.scale.zone_stalls') : LL.t('forecast.scale.zone_over_ceiling');
+    return zone.tone === 'warn' ? LL.t('forecast.scale.zone_tight') : LL.t('forecast.scale.zone_safe');
   }
   function markText(data, mark) {
-    if (mark.kind === 'safe') return { value: formatRps(Math.floor(mark.rps)), label: 'безопасный максимум' };
-    if (mark.kind === 'limit') return { value: formatApproxRps(mark.rps), label: data.limit.kind === 'instability' ? 'начались провалы' : 'потолок модели' };
-    return { value: formatRps(Math.round(mark.rps)), label: 'проверено в тесте' };
+    if (mark.kind === 'safe') return { value: formatRps(Math.floor(mark.rps)), label: LL.t('forecast.scale.mark_safe') };
+    if (mark.kind === 'limit') {
+      const label = data.limit.kind === 'instability' ? LL.t('forecast.scale.mark_stalls') : LL.t('forecast.scale.mark_ceiling');
+      return { value: formatApproxRps(mark.rps), label: label };
+    }
+    return { value: formatRps(Math.round(mark.rps)), label: LL.t('forecast.scale.mark_tested') };
   }
   function placedMarks(data, end) {
     const lastByRow = [];
@@ -1019,7 +1097,7 @@
     const pct = percentOf(data.target.rps, end);
     const beyond = data.target.rps > end ? ' →' : '';
     const tone = SCALE_TARGET_TONES[data.answer.verdict];
-    return `<div class="forecast-scale-target is-${tone}${edgeClass(pct)}" style="left:${pct}%"><span>Цель ${escapeHtml(formatRps(data.target.rps))}${beyond}</span></div>`;
+    return `<div class="forecast-scale-target is-${tone}${edgeClass(pct)}" style="left:${pct}%"><span>${LL.tHtml('forecast.scale.target', { rps: formatRps(data.target.rps) })}${beyond}</span></div>`;
   }
   function scaleHtml(data) {
     const end = data.scale.end_rps;
@@ -1032,7 +1110,7 @@
       return `<div class="forecast-scale-zone is-${zone.tone}" style="left:${left}%;width:${width}%" title="${escapeHtml(label)}">${text}</div>`;
     }).join('');
     const tested = percentOf(data.scale.tested_rps, end);
-    const untested = tested < 100 ? `<div class="forecast-scale-untested" style="left:${tested}%;width:${100 - tested}%" title="Выше проверенной нагрузки — только расчёт"></div>` : '';
+    const untested = tested < 100 ? `<div class="forecast-scale-untested" style="left:${tested}%;width:${100 - tested}%" title="${LL.tHtml('forecast.scale.untested')}"></div>` : '';
     const marks = placedMarks(data, end);
     const rows = Math.max.apply(null, marks.map((mark) => mark.row)) + 1;
     const marksHtml = marks.map((mark) => (
@@ -1047,22 +1125,26 @@
     ].join('');
   }
   function scaleCaption(data) {
-    if (data.limit.rps == null) return 'Зелёная полоса — нагрузка, которую тест прошёл без провалов; штриховка — выше проверенной нагрузки, там только расчёт.';
-    const over = data.limit.kind === 'instability' ? 'красная — с этой нагрузки в тесте начались провалы' : 'красная — выше потолка модели';
-    return `Зелёная зона — нагрузка с запасом, жёлтая — без запаса, ${over}. Штриховка — выше проверенной нагрузки: там только расчёт.`;
+    if (data.limit.rps == null) return LL.t('forecast.scale.caption_no_limit');
+    return data.limit.kind === 'instability' ? LL.t('forecast.scale.caption_instability') : LL.t('forecast.scale.caption_model');
+  }
+  function stepState(step, tone) {
+    if (tone === 'muted') return LL.t('forecast.steps.state_after_drop');
+    if (tone === 'fail') return LL.t('forecast.steps.state_stalls', { stalls: step.stalls, samples: step.samples });
+    return LL.t('forecast.steps.state_ok');
   }
   function stepsHtml(data) {
     const steps = data.steps || [];
-    if (!steps.length) return '<p class="dim">Ступеней в данных нет.</p>';
+    if (!steps.length) return `<p class="dim">${LL.tHtml('forecast.steps.none')}</p>`;
     const words = stepWords(data);
     const cards = steps.map((step) => {
       const tone = step.after_drop ? 'muted' : (step.stalls ? 'fail' : 'ok');
-      const state = { muted: '· после падения RPS', fail: `✗ провалы: ${step.stalls} из ${step.samples}`, ok: '✓ без провалов' }[tone];
+      const state = stepState(step, tone);
       return [
         `<div class="forecast-step is-${tone}" title="${escapeHtml(step.label)}">`,
         `<span class="forecast-step-name">${escapeHtml(words.one)} ${step.number}</span>`,
         `<span class="forecast-step-rps">${escapeHtml(formatRps(Math.round(step.rps)))}</span>`,
-        `<span class="forecast-step-time">среднее ${escapeHtml(formatMs(step.response_ms))}</span>`,
+        `<span class="forecast-step-time">${LL.tHtml('forecast.point.mean', { value: formatMs(step.response_ms) })}</span>`,
         `<span class="forecast-step-state">${escapeHtml(state)}</span>`,
         '</div>'
       ].join('');
@@ -1070,10 +1152,35 @@
     return `<div class="forecast-steps">${cards}</div>`;
   }
 
+  // Labels of the load scale stay inside it: a centered mark (or the target label) that would cross an edge of a
+  // narrow scale is anchored to that edge (fit-start / fit-end), as the marks near the ends are (is-start / is-end).
+  // Runs after the scale is drawn, on resize and when the web fonts are in.
+  function fitScaleLabels(root) {
+    const scale = root && typeof root.querySelector === 'function' ? root.querySelector('.forecast-scale') : null;
+    if (!scale || typeof scale.getBoundingClientRect !== 'function') return;
+    const box = scale.getBoundingClientRect();
+    if (!box || !box.width) return;
+    Array.from(scale.querySelectorAll('.forecast-scale-mark, .forecast-scale-target')).forEach((el) => {
+      el.classList.remove('fit-start', 'fit-end');
+      if (el.classList.contains('is-start') || el.classList.contains('is-end')) return;
+      const label = el.classList.contains('forecast-scale-target') ? el.querySelector('span') : el;
+      if (!label || typeof label.getBoundingClientRect !== 'function') return;
+      const rect = label.getBoundingClientRect();
+      if (rect.right > box.right + 0.5) el.classList.add('fit-end');
+      else if (rect.left < box.left - 0.5) el.classList.add('fit-start');
+    });
+  }
+  let fitTimer = 0;
+  function refitScaleLabels() {
+    clearTimeout(fitTimer);
+    fitTimer = setTimeout(() => fitScaleLabels(document.getElementById('forecastScale')), 100);
+  }
+
   function paintForecast(data, headroom) {
     current = data;
     setHtml('forecastVerdict', answerHtml(data, headroom));
     setHtml('forecastScale', scaleHtml(data));
+    fitScaleLabels(document.getElementById('forecastScale'));
     setText('forecastScaleCaption', scaleCaption(data));
     setHtml('forecastSteps', stepsHtml(data));
     setHtml('forecastResources', resourcesHtml(data));
@@ -1085,7 +1192,7 @@
     document.getElementById('forecastPresetSafe').disabled = data.safe.rps == null;
     const headroomInput = document.getElementById('forecastHeadroom');
     headroomInput.disabled = !data.limit_applies;
-    headroomInput.title = data.limit_applies ? '' : 'Предел объясняется CPU сервиса: запас задаёт потолок CPU пода';
+    headroomInput.title = data.limit_applies ? '' : LL.t('forecast.controls.headroom_disabled');
     paintCharts(data);
   }
   function numberInput(id, fallback) {
@@ -1127,19 +1234,19 @@
     const link = document.getElementById('forecastConfluenceLink');
     link.hidden = !url;
     if (url) link.href = url;
-    document.getElementById('forecastConfluence').textContent = url ? 'Обновить отчёт в Confluence' : 'Добавить отчёт в Confluence';
+    document.getElementById('forecastConfluence').textContent = url ? LL.t('forecast.confluence.update') : LL.t('forecast.confluence.add');
   }
   async function loadPublication() {
     const resp = await fetch('/forecast/' + encodeURIComponent(runId) + '/confluence');
     const body = await resp.json().catch(() => ({}));
     if (!resp.ok) {
-      setText('forecastConfluenceStatus', body.error || `Не удалось узнать публикацию в Confluence (HTTP ${resp.status})`);
+      setText('forecastConfluenceStatus', body.error || LL.t('forecast.confluence.status_error', { status: resp.status }));
       return;
     }
     setPublication(body.page_url || '');
   }
   function jobFailure(job) {
-    const headline = job.message || 'Ошибка публикации';
+    const headline = job.message || LL.t('forecast.confluence.failed');
     return job.error ? `${headline}: ${job.error}` : headline;
   }
   async function pollPublication(jobId) {
@@ -1148,8 +1255,8 @@
       const job = await resp.json().catch(() => ({}));
       if (job.status === 'done') {
         setPublication(job.page_url || '');
-        setText('forecastConfluenceStatus', 'Опубликовано');
-        LL.ui.toast('Прогноз опубликован в Confluence', { tone: 'ok' });
+        setText('forecastConfluenceStatus', LL.t('forecast.confluence.published'));
+        LL.ui.toast(LL.t('forecast.confluence.published_toast'), { tone: 'ok' });
         return;
       }
       if (!resp.ok || job.status === 'error' || job.status === 'not_found') {
@@ -1158,10 +1265,10 @@
         return;
       }
       const pct = Number(job.progress || 0);
-      setText('forecastConfluenceStatus', `${job.message || 'Публикация…'}${pct ? ` (${pct}%)` : ''}`);
+      setText('forecastConfluenceStatus', `${job.message || LL.t('forecast.confluence.publishing')}${pct ? ` (${pct}%)` : ''}`);
       await new Promise((resolve) => setTimeout(resolve, PUBLISH_POLL_MS));
     }
-    setText('forecastConfluenceStatus', 'Публикация занимает слишком долго, проверьте статус позже');
+    setText('forecastConfluenceStatus', LL.t('forecast.confluence.timeout'));
   }
   async function publishForecast() {
     const button = document.getElementById('forecastConfluence');
@@ -1173,7 +1280,7 @@
       cpu_ceiling_pct: ceiling === configuredCeiling ? null : ceiling
     };
     button.disabled = true;
-    setText('forecastConfluenceStatus', 'Публикация…');
+    setText('forecastConfluenceStatus', LL.t('forecast.confluence.publishing'));
     try {
       const resp = await fetch('/forecast/' + encodeURIComponent(runId) + '/confluence', {
         method: 'POST',
@@ -1182,7 +1289,7 @@
       });
       const body = await resp.json().catch(() => ({}));
       if (!resp.ok || !body.job_id) {
-        setText('forecastConfluenceStatus', body.error || `Не удалось начать публикацию (HTTP ${resp.status})`);
+        setText('forecastConfluenceStatus', body.error || LL.t('forecast.confluence.start_error', { status: resp.status }));
         return;
       }
       await pollPublication(body.job_id);
@@ -1208,16 +1315,16 @@
     if (!runId || !box) return;
     const refResp = await fetch('/report_ref/' + encodeURIComponent(runId));
     if (!refResp.ok) {
-      document.getElementById('forecastTitle').textContent = 'Отчёт не найден';
-      box.innerHTML = unavailable('Отчёт не найден');
+      document.getElementById('forecastTitle').textContent = LL.t('forecast.page.not_found');
+      box.innerHTML = unavailable(LL.t('forecast.page.not_found'));
       return;
     }
     const ref = await refResp.json();
-    const name = ref.run_name || 'Отчёт';
+    const name = ref.run_name || LL.t('forecast.page.report');
     document.getElementById('forecastTitle').textContent = name;
-    document.title = `Прогноз: ${name}`;
+    document.title = LL.t('forecast.page.document_title', { name: name });
     const crumbs = document.getElementById('forecastBreadcrumbs');
-    crumbs.innerHTML = `<a href="/forecasting">Прогнозирование</a><span class="sep">›</span><span class="current">${escapeHtml(name)}</span>`;
+    crumbs.innerHTML = `<a href="/forecasting">${LL.tHtml('forecast.list.title')}</a><span class="sep">›</span><span class="current">${escapeHtml(name)}</span>`;
     const link = document.getElementById('forecastReportLink');
     link.href = '/reports/' + encodeURIComponent(runId);
     link.hidden = false;
@@ -1237,8 +1344,18 @@
     box.innerHTML = shellHtml(result.data, target);
     bindControls();
     paintForecast(result.data, DEFAULT_HEADROOM_PCT);
+    window.addEventListener('resize', refitScaleLabels);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(refitScaleLabels, () => {});
     loadExplanation();
     enablePublishing();
   }
+  // Pure builders of the page for tests (tests/test_i18n_forecast.py).
+  LL.forecastReport = {
+    _internals: {
+      formatNumber, formatMs, formatPct, podsText, kappaText, answerHtml, resourcesHtml, factItems, confidenceHtml,
+      methodItems, scaleHtml, scaleCaption, stepsHtml, latencyView, throughputView, controlsHtml, shellHtml,
+      unavailable, explanationHtml, fitScaleLabels
+    }
+  };
   document.addEventListener('DOMContentLoaded', start);
 })();

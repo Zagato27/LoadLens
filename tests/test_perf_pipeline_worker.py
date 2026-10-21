@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Report pipeline safe inside a Celery worker: no nested sub-tasks, no web-process state.
 
 Downloads of charts and logs and attachment uploads of the template report run on a local pool of
@@ -559,7 +560,9 @@ def test_files_of_the_report_do_not_depend_on_the_working_directory():
     # A worker may start in another directory; temporary files (the volume shared with the app in
     # docker), runtime config and prompts are all located from the module files.
     assert temp_files.TEMP_DIR.is_absolute() and temp_files.TEMP_DIR == ROOT_DIR / "data_collectors" / "temporary_files"
-    for path in (update_page._SETTINGS_RUNTIME_PATH, update_page._METRICS_RUNTIME_PATH, update_page._PROMPTS_DIR):
+    from AI import prompt_store
+
+    for path in (update_page._SETTINGS_RUNTIME_PATH, update_page._METRICS_RUNTIME_PATH, str(prompt_store.PROMPTS_ROOT)):
         assert os.path.isabs(path) and Path(path).parent.resolve() in {ROOT_DIR.resolve(), (ROOT_DIR / "AI").resolve()}
 
 

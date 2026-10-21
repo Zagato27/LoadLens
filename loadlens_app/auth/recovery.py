@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Recovery sign-in while the storage database is down.
 
 Users, sessions and the audit log live in the storage database, so an outage would otherwise lock

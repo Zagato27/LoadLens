@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Load-step aware context for the LLM.
 
 Turns raw time series into compact, step-aligned facts the model can reason
@@ -5,6 +6,9 @@ about: load steps (from the step detector or equal time buckets), per-step
 statistics for every metric, step-relative anomalies and a cross-domain
 timeline. All timestamps are exposed both as ISO strings (with the configured
 display offset) and as minutes from the test start.
+
+Labels («ступень 3 · ≈150 RPS» / «step 3 · ≈150 RPS»), notes and anomaly explanations are written in the
+language of the report being built (the ``with_locale`` scope of the run): the model quotes them back.
 """
 
 from __future__ import annotations
@@ -15,6 +19,8 @@ from datetime import timedelta
 from typing import Any, Dict, List, Optional, Sequence
 
 import pandas as pd
+
+from AI.i18n import t
 
 MIN_TIME_BUCKETS = 4
 MAX_TIME_BUCKETS = 8
@@ -132,7 +138,7 @@ def equal_time_buckets(start_ts: float, end_ts: float, shift_hours: int) -> List
         en = end if i == count - 1 else start + width * (i + 1)
         steps.append(LoadStep(
             index=i + 1,
-            label=f"интервал {i + 1} · {_hhmm(st, shift_hours)}–{_hhmm(en, shift_hours)}",
+            label=t("report.step_label.interval", index=i + 1, start=_hhmm(st, shift_hours), end=_hhmm(en, shift_hours)),
             start=st, end=en,
             minute_from=minutes_from(st, start_ts), minute_to=minutes_from(en, start_ts),
             rps_level=None, stable=None, source="time_buckets", shift_hours=shift_hours,
@@ -214,11 +220,14 @@ def _detector_step(
 ) -> LoadStep:
     st, en = span
     level = seg["level"]
-    level_text = f" · ≈{level:.0f} RPS" if level is not None else ""
+    label = (
+        t("report.step_label.step_level", index=index, level=f"{level:.0f}")
+        if level is not None else t("report.step_label.step", index=index)
+    )
     plateau_end = min(seg["end"], en) if seg["end"] is not None else None
     return LoadStep(
         index=index,
-        label=f"ступень {index}{level_text}",
+        label=label,
         start=st, end=en,
         minute_from=minutes_from(st, start_ts), minute_to=minutes_from(en, start_ts),
         rps_level=level, stable=seg["stable"], source="step_detector", shift_hours=shift_hours,
@@ -339,7 +348,7 @@ def _aggregate_instances(df: pd.DataFrame) -> pd.DataFrame:
         if len(cols) == 1:
             out[cols[0]] = df[cols[0]]
         else:
-            out[f"{key}|instances={len(cols)} (среднее)"] = df[cols].mean(axis=1)
+            out[t("report.analysis.instances_mean", series=key, count=len(cols))] = df[cols].mean(axis=1)
     return pd.DataFrame(out, index=df.index)
 
 
@@ -427,13 +436,14 @@ def detect_step_anomalies(col_series: pd.Series, steps: Sequence[LoadStep], cfg:
                 if load_growth > MIN_LOAD_GROWTH_PCT and metric_growth > MIN_METRIC_GROWTH_PCT and metric_growth / load_growth > elasticity_threshold:
                     anomalies.append(_anomaly(
                         "elasticity", step, current["mean"], base["mean"], metric_growth,
-                        f"На {step.label}: метрика выросла на {metric_growth:.0f} % при росте нагрузки на {load_growth:.0f} % (в {metric_growth / load_growth:.1f}× быстрее нагрузки) относительно {base_step.label}.",
+                        t("report.analysis.elasticity", step=step.label, growth=f"{metric_growth:.0f}", load=f"{load_growth:.0f}",
+                          ratio=f"{metric_growth / load_growth:.1f}", base=base_step.label),
                         load_change_pct=load_growth,
                     ))
             elif not has_levels and abs(metric_growth) > shift_pct:
                 anomalies.append(_anomaly(
                     "shift", step, current["mean"], base["mean"], metric_growth,
-                    f"На {step.label}: среднее значение отличается от первого интервала на {metric_growth:+.0f} %.",
+                    t("report.analysis.shift", step=step.label, change=f"{metric_growth:+.0f}"),
                 ))
 
     for i, step in enumerate(steps):
@@ -449,7 +459,7 @@ def detect_step_anomalies(col_series: pd.Series, steps: Sequence[LoadStep], cfg:
         if abs(drift) > drift_pct:
             anomalies.append(_anomaly(
                 "drift", step, last, first, drift,
-                f"Внутри {step.label}: значение изменилось на {drift:+.0f} % от начала к концу ступени при неизменной нагрузке.",
+                t("report.analysis.drift", step=step.label, change=f"{drift:+.0f}"),
             ))
 
     anomalies.sort(key=lambda a: abs(a["change_pct"]), reverse=True)
@@ -486,11 +496,7 @@ def build_timeline(domain_packs: Dict[str, Dict[str, Any]], steps: Sequence[Load
     return {
         "steps": [{"index": s.index, "label": s.label, "rps_level": round(s.rps_level, 1) if s.rps_level is not None else None} for s in steps],
         "rows": rows,
-        "note": (
-            "Значения — средние по плато ступени, без просадки и спада нагрузки после него "
-            "(они в step_table.per_step.after_plateau). Уровень нагрузки ступени — steps[].rps_level. "
-            "Порядок строк: метрики нагрузочного инструмента, затем метрики с наибольшим относительным изменением."
-        ),
+        "note": t("report.analysis.timeline_note"),
     }
 
 
@@ -498,11 +504,17 @@ def build_timeline(domain_packs: Dict[str, Dict[str, Any]], steps: Sequence[Load
 
 _LABEL_RE = re.compile(r"label='([^']*)'")
 _SERIES_EN_RE = re.compile(r"series='([^']*)'")
-_QUERY_RE = re.compile(r"запрос «([^»]*)»")
-_SERIES_RU_RE = re.compile(r"серия «([^»]*)»")
+# SLA check messages name the query and the series in the report language: «запрос «…»» / «query «…»»
+# (reports saved before the explicit ``query_label``/``series`` fields are parsed with them).
+_QUERY_RE = re.compile(r"(?:запрос|query) «([^»]*)»")
+_SERIES_RU_RE = re.compile(r"(?:серия|series) «([^»]*)»")
+# Words of query labels (user data, any language) that name the RPS and the latency queries.
 _RPS_HINTS = ("rps", "throughput", "нагруз")
 _LATENCY_HINTS = ("p95", "latency", "response", "отклик")
-_STEP_NOTE = "RPS — уровень ступени. Время отклика — p95 на плато, без хвоста после просадки."
+
+
+def _step_note() -> str:
+    return t("report.analysis.step_table_note")
 
 
 def _round_num(value: Any, digits: int) -> Optional[float]:
@@ -607,7 +619,7 @@ def _empty_step_report() -> Dict[str, Any]:
         "rps_series": None,
         "latency_query": None,
         "latency_series": None,
-        "note": _STEP_NOTE,
+        "note": _step_note(),
         "steps": [],
     }
 
@@ -664,7 +676,7 @@ def load_step_report_from_frames(
         "rps_series": rps_name or None,
         "latency_query": lat_label or None,
         "latency_series": lat_name or None,
-        "note": _STEP_NOTE,
+        "note": _step_note(),
         "steps": rows,
     }
 
@@ -699,6 +711,7 @@ def _step_sections(pack: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _is_aggregate_label(label: str) -> bool:
+    # Words of aggregate query labels (user data, any language).
     text = str(label or "").lower()
     return any(word in text for word in ("sum", "all groups", "total", "общ", "итого"))
 
@@ -808,7 +821,7 @@ def load_step_report_from_context(
             latency_p95 = _round_num(max(present), 2) if present else None
         rows.append({
             "index": index,
-            "label": str(step.get("label") or f"ступень {index}"),
+            "label": str(step.get("label") or t("report.step_label.step", index=index)),
             "start_iso": step.get("start_iso"),
             "end_iso": step.get("end_iso"),
             "plateau_start_iso": step.get("plateau_start_iso"),
@@ -830,7 +843,7 @@ def load_step_report_from_context(
         "rps_series": str((rps_row or {}).get("series") or "") or None,
         "latency_query": latency_label or None,
         "latency_series": named_series if named_row is not None else None,
-        "note": _STEP_NOTE,
+        "note": _step_note(),
         "steps": rows,
     }
 

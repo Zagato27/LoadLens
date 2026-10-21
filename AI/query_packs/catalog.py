@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Loads and validates the packs shipped in ``packs/*.toml`` and the bundles in ``bundles.toml``.
 
 TOML keeps queries readable: literal strings ('...' and '''...''') need no escaping of the quotes

@@ -1,9 +1,10 @@
+{% macro code(text) %}<code>{{ text }}</code>{% endmacro -%}
 <div class="auth-info recovery-setup">
-  <strong>Аварийный администратор не настроен.</strong>
-  Без него подключение к хранилищу исправляется только на сервере. Задайте одно из двух и перезапустите приложение:
+  <strong>{{ t('recovery.setup.title') }}</strong>
+  {{ t('recovery.setup.intro') }}
   <ol>
-    <li>В <code>settings.py</code>, раздел <code>auth</code>: ключи <code>recovery_user</code> и <code>recovery_password_hash</code>. Хэш пароля выдаёт команда <code>python -m loadlens_app.auth hash-password</code>.</li>
-    <li>Переменные окружения <code>LOADLENS_RECOVERY_USER</code> и <code>LOADLENS_RECOVERY_PASSWORD_HASH</code>, либо <code>LOADLENS_ADMIN_USER</code> и <code>LOADLENS_ADMIN_PASSWORD</code>.</li>
+    <li>{{ t('recovery.setup.option_settings', file=code('settings.py'), section=code('auth'), user_key=code('recovery_user'), hash_key=code('recovery_password_hash'), command=code('python -m loadlens_app.auth hash-password')) }}</li>
+    <li>{{ t('recovery.setup.option_env', recovery_user=code('LOADLENS_RECOVERY_USER'), recovery_hash=code('LOADLENS_RECOVERY_PASSWORD_HASH'), admin_user=code('LOADLENS_ADMIN_USER'), admin_password=code('LOADLENS_ADMIN_PASSWORD')) }}</li>
   </ol>
-  Либо исправьте раздел <code>storage.timescale</code> в <code>settings.py</code> или <code>settings_runtime.json</code> и перезапустите приложение.
+  {{ t('recovery.setup.fix_settings', section=code('storage.timescale'), file=code('settings.py'), runtime_file=code('settings_runtime.json')) }}
 </div>

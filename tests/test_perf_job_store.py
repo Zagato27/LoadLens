@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The report_jobs table as the source of truth: Celery jobs, the sweeper, the job limits across processes.
 
 ``JobsTable`` stands in for PostgreSQL. It interprets the statements JobStore sends (the SQL objects are
@@ -25,8 +26,8 @@ from loadlens_app import core  # noqa: E402,F401  (before anything that imports 
 from loadlens_app import jobs, response_cache  # noqa: E402
 from AI.storage_state import StorageUnavailableError  # noqa: E402
 
-ALL_COLUMNS = jobs._JOB_COLUMNS + ("dismissed_at",)
-OLD_COLUMNS = jobs._BASE_COLUMNS  # a table from before dismissed_at, owner, runner and started_at
+ALL_COLUMNS = jobs._JOB_COLUMNS + ("dismissed_at", "message_ref")
+OLD_COLUMNS = jobs._BASE_COLUMNS  # a table from before dismissed_at, owner, runner, started_at and message_ref
 DEFAULTS = {"progress": 0, "owner": "", "runner": "thread"}
 JSON_KEYS = {
     "job_id", "kind", "run_name", "service", "status", "progress", "message", "error", "report_url", "page_url",
@@ -49,6 +50,8 @@ def render(query) -> str:
         return ".".join(query.strings)
     if isinstance(query, sql.Placeholder):
         return "%s"
+    if isinstance(query, sql.Literal):
+        return "'" + str(query.wrapped).replace("'", "''") + "'"
     raise AssertionError(f"unexpected SQL part: {query!r}")
 
 
@@ -208,6 +211,9 @@ class JobsTable:
             assignments = re.findall(r"(\w+) = (GREATEST\(\w+, %s\)|%s)", match.group(1))
             assert match.group(1).count("%s") == len(assignments), match.group(1)
             self.require(column for column, _ in assignments)
+            # Constant JSON written as a literal (the message_ref of a swept row).
+            literals = [(column, text.replace("''", "'")) for column, text in re.findall(r"(\w+) = '((?:[^']|'')*)'::jsonb", match.group(1))]
+            self.require(column for column, _ in literals)
             new_values = [params.pop(0) for _ in assignments]
             predicate = self.where(match.group(2), params)
             assert not params, f"unused parameters: {params}"
@@ -217,6 +223,8 @@ class JobsTable:
             for row in changed:
                 for (column, expression), value in zip(assignments, new_values):
                     row[column] = max(row[column], value) if expression.startswith("GREATEST") else value
+                for column, value in literals:
+                    row[column] = value
             return [tuple(row[c] for c in returning) for row in changed]
         if text.startswith("SELECT"):
             match = re.match(r"SELECT (.*?) FROM \S+ WHERE (.*?)(?: ORDER BY (\w+) DESC)?( LIMIT %s)?$", text)
@@ -623,14 +631,14 @@ def test_an_older_table_gets_the_new_columns(monkeypatch):
     listed = {r.job_id: r for r in store.list(statuses=["running", "done", "error"])}
 
     assert set(ALL_COLUMNS) <= set(old.columns)
-    assert len(old.texts("ALTER TABLE")) == 2
+    assert len(old.texts("ALTER TABLE")) == 3
     assert {row["runner"] for row in old.rows.values()} == {"thread"} and {row["owner"] for row in old.rows.values()} == {""}
     assert old.rows["finished"]["started_at"] is None
     assert listed["orphan"].status == "error" and listed["finished"].runner == "thread"
 
     again = jobs.JobStore()
     again.list(statuses=["running"])
-    assert len(old.texts("ALTER TABLE")) == 2  # columns found: nothing to alter
+    assert len(old.texts("ALTER TABLE")) == 3  # columns found: nothing to alter
 
 
 def test_without_alter_rights_the_store_works_as_before(monkeypatch, caplog):

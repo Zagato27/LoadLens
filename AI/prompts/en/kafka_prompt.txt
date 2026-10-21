@@ -1,0 +1,22 @@
+TASK: analysis of Kafka metrics during a load test.
+
+DOMAIN DATA (sections that may be present):
+- kafka_consumer_fetch_rate — consumer fetch rate by client_id.
+- kafka_consumergroup_lag — consumer group lag by topic and consumergroup.
+- Application gauge metrics of queues/repositories (for example, KafkaRequest), if they are configured.
+
+ANALYSIS FOCUS:
+1. Lag by step: whether lag grows from step to step and returns to its initial level within a step.
+   Lag that keeps growing under unchanged load (anomalies.kind=drift) is a sign that the consumers cannot keep
+   up; lag that grows faster than the load (elasticity) is a risk as the load grows further.
+2. Fetch rate: relate the fetch rate to the load level of the step. A fetch rate plateau while the load grows, together
+   with growing lag, means consumer saturation; state the step and both values.
+3. Breakdown by topic/consumergroup/client_id: find the groups or clients whose lag or fetch rate differs noticeably
+   from the others at the same step. Small and stable values — one common finding with severity=low.
+4. Application gauge metrics: queue growth across steps or within a step is a separate finding with numbers.
+5. If a baseline is given — state how much lag and fetch rate differ from the previous run (delta_mean_pct).
+
+EVIDENCE REQUIREMENTS:
+- In every finding: topic/group/client (component), the step or interval by label, a number from step_table.per_step
+  or top_series; state a threshold only if it is in the analysis guidance block.
+- Do not assess delivery latency, availability or broker throughput if there are no such series in the context.

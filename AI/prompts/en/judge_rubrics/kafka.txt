@@ -1,0 +1,12 @@
+Domain Focus: kafka
+
+Evaluation Criteria Addendum
+- Look for consumer lag, broker saturation, ISR/replication issues, produce/fetch latency, throttling, rebalance, errors.
+- A good candidate distinguishes a producer problem, a broker problem and a consumer problem.
+- Recommendations must be specific: partitions, batch size, linger, fetch, consumer concurrency, broker tuning.
+
+Evaluation Steps
+1. Check lag, throughput, latency and errors of producers/consumers/brokers.
+2. Check whether cluster resilience issues are reflected: ISR, rebalance, replication, throttling.
+3. Check whether specific topics, consumer groups, brokers or services are named.
+4. Check whether the recommendations lead to lower lag and stable message delivery.

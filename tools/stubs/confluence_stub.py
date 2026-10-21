@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Confluence stub for a LoadLens sandbox on 127.0.0.1:5091: reads, publishes pages, keeps them in memory.
 
 How to run (own console, or in the background; Ctrl+C stops it):

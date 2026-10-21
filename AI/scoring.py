@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+import contextvars
 import os
 import json
 import re
@@ -16,11 +18,12 @@ from AI.providers import (
     usage_domain,
 )
 from settings import CONFIG
+from AI.i18n import with_locale
+from AI.prompt_store import PromptMissing, load_prompt, resolve_lang, script_share
+from AI.prompt_store import text as prompt_text
+from AI.verdicts import NO_DATA, PASS, label as verdict_label, to_code
 
 
-PROMPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
-_PROMPT_CACHE: Dict[str, str] = {}
-ALLOWED_VERDICTS = {"Успешно", "Есть риски", "Провал", "Недостаточно данных"}
 ALLOWED_LEVELS = {"critical", "high", "medium", "low"}
 logger = logging.getLogger(__name__)
 
@@ -48,69 +51,13 @@ JUDGE_COMMON_RUBRIC_FILE = os.path.join(JUDGE_RUBRIC_DIR, "common.txt")
 JUDGE_WARN_PROMPT_CHARS = max(8000, _read_int_env("LOADLENS_JUDGE_WARN_PROMPT_CHARS", 60000))
 
 
-def read_prompt_from_file(filename: str) -> str:
-    """Читает промпт из файла в UTF-8.
-
-    Параметры:
-        filename (str): Путь к файлу.
-
-    Возвращает:
-        str: Текст промпта.
-    """
-    with open(filename, 'r', encoding='utf-8') as f:
-        return f.read()
+def judge_system_prompt(lang: Optional[str] = None) -> str:
+    """System prompt of the judge in ``lang`` (the current locale by default)."""
+    return prompt_text("judge.system", lang)
 
 
-CRITIC_PROMPT_FALLBACK = (
-    "Вы выступаете как строгий валидатор отчёта. Отвечайте на русском языке. "
-    "Перефразируйте все ТЕКСТОВЫЕ поля на русский язык (verdict, verdict_rationale, findings.summary, findings.evidence_summary, findings.evidence_items.note, recommended_actions, affected_components). "
-    "Ключи JSON и значения поля severity оставьте на английском согласно схеме. "
-    "Ниже дан проект ответа. Исправьте/нормализуйте его до СТРОГОГО JSON со схемой: "
-    "{verdict, verdict_rationale?, confidence, findings[], recommended_actions[]}. "
-    "Каждый элемент findings обязан содержать id, severity (critical|high|medium|low) и component. "
-    "Каждый элемент recommended_actions должен быть объектом {summary, details, priority (critical|high|medium|low), affected_components[], for_finding_ids[]}. "
-    "id у findings должен быть коротким ASCII-идентификатором вроде f1, f2. "
-    "Поле for_finding_ids обязано ссылаться на один или несколько id из findings и указывать, к каким проблемам относится рекомендация. "
-    "Если verdict_rationale присутствует, сохраните его как короткое обоснование вердикта: сначала 1 краткий вывод, затем 2-4 ключевых фактора списком, без дублирования всего findings. "
-    "Для findings используйте фиксированные поля: start_time, end_time, peak_time, evidence_summary, evidence_items[]. "
-    "Каждый элемент evidence_items должен быть объектом {metric, observed_value, threshold, note}. "
-    "Если component не указан — извлеките его из evidence_summary/evidence по лейблам application|service|job|pod|instance, иначе 'unknown'. "
-    "Если severity отсутствует — используйте 'low'. Поле peak_performance допускается только для lt_framework/overall; "
-    "в остальных доменах удаляйте его. Если test_profile.mode не 'capacity' и не 'stress' (soak, spike) или peak_performance.not_applicable=true, "
-    "не требуйте max_rps и не добавляйте его. "
-    "Поле verdict ДОЛЖНО быть одним из: 'Успешно' | 'Есть риски' | 'Провал' | 'Недостаточно данных'. Синонимы нормализуйте к ближайшему значению. "
-    "Никакого текста вне JSON. Если данных недостаточно — верните verdict='Недостаточно данных'.\n\nПроект ответа:\n{{CANDIDATE}}"
-)
-
-
-JUDGE_PROMPT_FALLBACK = (
-    "Вы выступаете как независимый арбитр отчётов по нагрузочному тестированию. "
-    "У вас есть агрегированные данные теста и несколько кандидатов ответов модели (каждый в JSON). "
-    "Для каждого кандидата оцените три аспекта (0..1) и общий балл: factual, completeness, specificity. "
-    "Рассчитайте overall = 0.5*factual + 0.3*completeness + 0.2*specificity. "
-    "Ответьте СТРОГО JSON формата {\"scores\": [{\"index\": int, \"factual\": float, \"completeness\": float, \"specificity\": float, \"overall\": float}, ...]}. "
-    "Если данных недостаточно для оценки, укажите 0. Контекст приведён ниже.\n\nКонтекст:\n{{DATA_CONTEXT}}\n\nКандидаты:\n{{CANDIDATES_JSON}}"
-)
-
-
-JUDGE_SYSTEM_PROMPT = (
-    "Вы опытный инженер по нагрузочному тестированию и выступаете независимым судьёй. "
-    "Используйте предоставленный контекст метрик, чтобы беспристрастно оценить кандидатов. "
-    "Верните только JSON согласно запросу."
-)
-
-
-def _get_prompt_template(filename: str, fallback: str) -> str:
-    cache_key = filename
-    if cache_key in _PROMPT_CACHE:
-        return _PROMPT_CACHE[cache_key]
-    path = os.path.join(PROMPTS_DIR, filename)
-    try:
-        text = read_prompt_from_file(path)
-    except Exception:
-        text = fallback
-    _PROMPT_CACHE[cache_key] = text
-    return text
+# The ru judge system prompt (tools/stubs/llm_stub.py and its tests recognise judge calls by it).
+JUDGE_SYSTEM_PROMPT = judge_system_prompt("ru")
 
 
 def _json_loads_lenient(text: str) -> Optional[Any]:
@@ -181,23 +128,6 @@ def _normalize_level(value: Any, default: str = "low") -> str:
     if any(token in raw for token in ("low", "низ")):
         return "low"
     return default
-
-
-def _normalize_verdict(value: Any) -> str:
-    raw = _clean_text(value).lower()
-    if not raw:
-        return "Недостаточно данных"
-    if raw in {v.lower() for v in ALLOWED_VERDICTS}:
-        for verdict in ALLOWED_VERDICTS:
-            if raw == verdict.lower():
-                return verdict
-    if any(token in raw for token in ("ok", "success", "passed", "green", "усп", "норма", "стаб")):
-        return "Успешно"
-    if any(token in raw for token in ("warn", "risk", "рис", "degrad", "предуп")):
-        return "Есть риски"
-    if any(token in raw for token in ("fail", "error", "red", "провал", "крит")):
-        return "Провал"
-    return "Недостаточно данных"
 
 
 def _normalize_string_list(value: Any) -> List[str]:
@@ -512,9 +442,9 @@ class RecommendedActionItem(BaseModel):
         if details:
             details_parts.append(details)
         if steps:
-            details_parts.append("Шаги:\n- " + "\n- ".join(steps))
+            details_parts.append(prompt_text("action.steps") + "\n- " + "\n- ".join(steps))
         if verification:
-            details_parts.append("Проверка:\n- " + verification)
+            details_parts.append(prompt_text("action.verification") + "\n- " + verification)
         values["summary"] = summary
         values["details"] = "\n\n".join(part for part in details_parts if part).strip() or None
         values["priority"] = _normalize_level(values.get("priority"), default="medium")
@@ -560,8 +490,11 @@ class PeakPerformance(BaseModel):
         return values
 
 
-def _derive_verdict_rationale(verdict: str, findings: List[Dict[str, object]]) -> Optional[str]:
-    verdict_text = _clean_text(verdict) or "Недостаточно данных"
+def _derive_verdict_rationale(verdict: str, findings: List[Dict[str, object]], lang: Optional[str] = None) -> Optional[str]:
+    """Fallback rationale of a model answer without one, in the language of the report (current locale)."""
+    lang = resolve_lang(lang)
+    code = to_code(verdict)
+    verdict_text = verdict_label(code, lang)
     summaries: List[str] = []
     for item in findings or []:
         if not isinstance(item, dict):
@@ -576,26 +509,22 @@ def _derive_verdict_rationale(verdict: str, findings: List[Dict[str, object]]) -
             break
     if summaries:
         bullets = "\n".join(f"- {summary}" for summary in summaries)
-        return f"Вердикт «{verdict_text}» сформирован по ключевым наблюдениям отчёта.\n{bullets}"
-    if verdict_text == "Успешно":
-        return "Вердикт «Успешно» сформирован потому, что существенных отклонений в доступных данных не обнаружено."
-    if verdict_text == "Недостаточно данных":
-        return "Вердикт «Недостаточно данных» сформирован потому, что доступных метрик недостаточно для уверенной оценки."
-    return f"Вердикт «{verdict_text}» сформирован по доступным метрикам и выявленным рискам."
+        return prompt_text("rationale.derived_findings", lang, label=verdict_text, bullets=bullets)
+    if code == PASS:
+        return prompt_text("rationale.derived_pass", lang, label=verdict_text)
+    if code == NO_DATA:
+        return prompt_text("rationale.derived_no_data", lang, label=verdict_text)
+    return prompt_text("rationale.derived_other", lang, label=verdict_text)
 
 
-_VERDICT_RATIONALE_HEAD = {
-    "Успешно": "Статус «Успешно»: по подтверждённым метрикам существенных отклонений не видно.",
-    "Есть риски": "Статус «Есть риски»: есть подтверждённые отклонения, но без провала целевого результата.",
-    "Провал": "Статус «Провал»: по подтверждённым данным целевой результат теста не достигнут.",
-    "Недостаточно данных": "Статус «Недостаточно данных»: в ответе нет достаточных подтверждённых фактов.",
-}
+def rationale_from_analysis(parsed: "LLMAnalysis", lang: Optional[str] = None) -> str:
+    """Builds a short verdict rationale from confirmed findings when the model omitted one.
 
-
-def rationale_from_analysis(parsed: "LLMAnalysis") -> str:
-    """Builds a short verdict rationale from confirmed findings when the model omitted one."""
-    label = _normalize_verdict(getattr(parsed, "verdict", None))
-    head = _VERDICT_RATIONALE_HEAD.get(label, _VERDICT_RATIONALE_HEAD["Недостаточно данных"])
+    The head is ``rationale.head_<code>`` of AI/prompts/<lang>/_strings.json (``{label}`` is the verdict label).
+    """
+    lang = resolve_lang(lang)
+    code = to_code(getattr(parsed, "verdict", None))
+    head = prompt_text(f"rationale.head_{code}", lang, label=verdict_label(code, lang))
     bullets: List[str] = []
     for finding in getattr(parsed, "findings", None) or []:
         verification = getattr(finding, "verification", None)
@@ -641,7 +570,9 @@ class LLMAnalysisError(BaseModel):
 
 
 class LLMAnalysis(BaseModel):
-    verdict: str = Field(default="нет данных")
+    # A verdict code (AI.verdicts); the model may answer with a label or a synonym, the validator maps it.
+    # The description reaches the function-calling schema of GigaChat structured output.
+    verdict: str = Field(default=NO_DATA, description="pass | risk | fail | no_data")
     verdict_rationale: Optional[str] = Field(default=None)
     analysis_error: Optional[LLMAnalysisError] = Field(default=None)
     confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
@@ -660,7 +591,7 @@ class LLMAnalysis(BaseModel):
             values = {}
         raw_error = values.get("analysis_error")
         values["analysis_error"] = raw_error if isinstance(raw_error, dict) else None
-        values["verdict"] = _normalize_verdict(values.get("verdict"))
+        values["verdict"] = to_code(_clean_text(values.get("verdict")))
         verdict_rationale = _clean_text(
             values.get("verdict_rationale")
             or values.get("verdict_reason")
@@ -797,7 +728,7 @@ def _failure_payload(error: Any, raw_text: str) -> Dict[str, Any]:
     elif isinstance(error, dict):
         return {
             "reason": str(error.get("reason") or "invalid_json"),
-            "message": str(error.get("message") or "Ответ модели не удалось разобрать как JSON."),
+            "message": str(error.get("message") or prompt_text("analysis_error.invalid_json")),
             "provider": error.get("provider"),
             "max_tokens": error.get("max_tokens"),
             "output_tokens": error.get("output_tokens"),
@@ -807,7 +738,7 @@ def _failure_payload(error: Any, raw_text: str) -> Dict[str, Any]:
         reason = "invalid_json"
     message = str(error).strip() if error is not None else ""
     if not message:
-        message = "Ответ модели не удалось разобрать как JSON."
+        message = prompt_text("analysis_error.invalid_json")
     return {
         "reason": reason,
         "message": message,
@@ -823,7 +754,7 @@ def make_failed_llm_analysis(error: Any, raw_text: str = "") -> LLMAnalysis:
     payload = _failure_payload(error, raw_text)
     return LLMAnalysis.parse_obj(
         {
-            "verdict": "Недостаточно данных",
+            "verdict": NO_DATA,
             "verdict_rationale": payload["message"],
             "confidence": 0.0,
             "findings": [],
@@ -954,18 +885,16 @@ def _normalize_judge_domain_key(domain_key: Optional[str]) -> str:
     return raw
 
 
-def _load_optional_prompt(filename: str) -> Optional[str]:
-    path = os.path.join(PROMPTS_DIR, filename)
-    if not os.path.exists(path):
-        return None
+def _load_optional_prompt(filename: str, lang: Optional[str] = None) -> Optional[str]:
+    """A prompt file of the language (ru when it has none), or None when the file exists nowhere."""
     try:
-        text = _get_prompt_template(filename, "")
-    except Exception:
+        text = load_prompt(filename, lang)
+    except PromptMissing:
         return None
     return text if text else None
 
 
-def _load_judge_rubric(domain_key: Optional[str]) -> Tuple[Optional[str], Dict[str, Any]]:
+def _load_judge_rubric(domain_key: Optional[str], lang: Optional[str] = None) -> Tuple[Optional[str], Dict[str, Any]]:
     normalized = _normalize_judge_domain_key(domain_key)
     meta: Dict[str, Any] = {
         "domain_key": normalized or None,
@@ -974,9 +903,9 @@ def _load_judge_rubric(domain_key: Optional[str]) -> Tuple[Optional[str], Dict[s
         "used_safe_path": False,
         "fallback_reason": None,
     }
-    common_text = _load_optional_prompt(JUDGE_COMMON_RUBRIC_FILE)
+    common_text = _load_optional_prompt(JUDGE_COMMON_RUBRIC_FILE, lang)
     domain_file = JUDGE_RUBRIC_FILES.get(normalized or "")
-    domain_text = _load_optional_prompt(domain_file) if domain_file else None
+    domain_text = _load_optional_prompt(domain_file, lang) if domain_file else None
     if common_text and domain_text:
         meta["used_rubric"] = True
         return common_text.rstrip() + "\n\n" + domain_text.strip(), meta
@@ -1007,7 +936,7 @@ def _compact_jsonish_text(text: str) -> str:
         return raw
 
 
-def _compact_judge_data_context(data_context: str) -> Tuple[str, Dict[str, Any]]:
+def _compact_judge_data_context(data_context: str, lang: Optional[str] = None) -> Tuple[str, Dict[str, Any]]:
     raw = str(data_context or "")
     meta: Dict[str, Any] = {
         "context_chars_raw": len(raw),
@@ -1016,7 +945,7 @@ def _compact_judge_data_context(data_context: str) -> Tuple[str, Dict[str, Any]]
         "dropped_context_keys": [],
     }
     if not raw:
-        return "нет данных", meta
+        return prompt_text("judge.no_data", lang), meta
     return raw, meta
 
 
@@ -1024,30 +953,33 @@ def _build_judge_prompt(
     candidates_texts: List[str],
     data_context: str,
     domain_key: Optional[str],
+    lang: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any]]:
-    template = _get_prompt_template("judge_prompt.txt", JUDGE_PROMPT_FALLBACK)
-    rubric_text, rubric_meta = _load_judge_rubric(domain_key)
+    lang = resolve_lang(lang)
+    template = load_prompt("judge_prompt.txt", lang)
+    rubric_text, rubric_meta = _load_judge_rubric(domain_key, lang)
     if "{{JUDGE_RUBRIC}}" in template:
         if rubric_text:
             template = template.replace("{{JUDGE_RUBRIC}}", rubric_text)
         else:
-            template = JUDGE_PROMPT_FALLBACK
+            # No rubric for the domain: the plain factual/completeness/specificity form.
+            template = load_prompt("judge_safe_prompt.txt", lang).rstrip("\n")
     normalized_domain = _normalize_judge_domain_key(domain_key) or "final"
-    compact_context, context_meta = _compact_judge_data_context(data_context)
+    compact_context, context_meta = _compact_judge_data_context(data_context, lang)
     candidates_payload = []
     for idx, text in enumerate(candidates_texts):
         candidates_payload.append({"index": idx, "text": _compact_jsonish_text(text)})
-    prompt_text = template.replace("{{DOMAIN_KEY}}", normalized_domain)
-    prompt_text = prompt_text.replace("{{CANDIDATES_JSON}}", json.dumps(candidates_payload, ensure_ascii=False))
-    prompt_text = prompt_text.replace("{{DATA_CONTEXT}}", compact_context or "нет данных")
+    prompt = template.replace("{{DOMAIN_KEY}}", normalized_domain)
+    prompt = prompt.replace("{{CANDIDATES_JSON}}", json.dumps(candidates_payload, ensure_ascii=False))
+    prompt = prompt.replace("{{DATA_CONTEXT}}", compact_context or prompt_text("judge.no_data", lang))
     meta = {
         **rubric_meta,
         **context_meta,
         "domain_key": normalized_domain,
         "candidate_count": len(candidates_payload),
-        "prompt_chars": len(prompt_text),
+        "prompt_chars": len(prompt),
     }
-    return prompt_text, meta
+    return prompt, meta
 
 
 # Keys under which models put the list of per-candidate scores besides the requested "scores".
@@ -1129,107 +1061,16 @@ def _align_judge_indexes(scores: Dict[Any, Dict[str, Any]], count: int) -> Dict[
     return aligned
 
 
-def _build_critic_prompt(candidate_text: str) -> str:
-    template = _get_prompt_template("critic_prompt.txt", CRITIC_PROMPT_FALLBACK)
+def _build_critic_prompt(candidate_text: str, lang: Optional[str] = None) -> str:
+    template = load_prompt("critic_prompt.txt", lang)
     return template.replace("{{CANDIDATE}}", candidate_text)
-
-
-def _choose_best_candidate(candidates: list) -> tuple[str, Optional[LLMAnalysis]]:
-    if not candidates:
-        return "", None
-    from collections import Counter
-    parsed_list = [p for (_, p) in candidates if p is not None]
-    if not parsed_list:
-        return candidates[0]
-    verdicts = [p.verdict for p in parsed_list if p.verdict]
-    majority_verdict = Counter(verdicts).most_common(1)[0][0] if verdicts else None
-
-    def conf_val(p: Optional[LLMAnalysis]) -> float:
-        if p is None or p.confidence is None:
-            return 0.0
-        try:
-            return float(p.confidence)
-        except Exception:
-            return 0.0
-
-    filtered = [(t, p) for (t, p) in candidates if p is not None and p.verdict == majority_verdict] if majority_verdict else []
-    pool = filtered if filtered else candidates
-
-    def _extract_text_for_lang_score(p: Optional[LLMAnalysis]) -> str:
-        if p is None:
-            return ""
-        parts: list[str] = []
-        try:
-            if getattr(p, "verdict", None):
-                parts.append(str(p.verdict))
-            if getattr(p, "verdict_rationale", None):
-                parts.append(str(p.verdict_rationale))
-            for f in (p.findings or []):
-                if isinstance(f, FindingItem):
-                    for attr in ("summary", "component", "start_time", "end_time", "peak_time", "evidence_summary"):
-                        val = getattr(f, attr, "")
-                        if isinstance(val, str) and val.strip():
-                            parts.append(val)
-                    parts.extend(_finding_evidence_strings(f))
-                elif isinstance(f, dict):
-                    for key in ("summary", "evidence", "evidence_summary", "component", "start_time", "end_time", "peak_time"):
-                        val = f.get(key)
-                        if isinstance(val, str) and val.strip():
-                            parts.append(val)
-                    parts.extend(_finding_evidence_strings(f))
-                else:
-                    s = str(f).strip()
-                    if s:
-                        parts.append(s)
-            for a in (p.recommended_actions or []):
-                if isinstance(a, RecommendedActionItem):
-                    if a.summary:
-                        parts.append(str(a.summary))
-                    if getattr(a, "details", None):
-                        parts.append(str(a.details))
-                    if getattr(a, "affected_components", None):
-                        parts.extend([str(x) for x in a.affected_components if str(x).strip()])
-                elif isinstance(a, dict):
-                    summary = a.get("summary")
-                    if isinstance(summary, str) and summary.strip():
-                        parts.append(summary)
-                    details = a.get("details")
-                    if isinstance(details, str) and details.strip():
-                        parts.append(details)
-                else:
-                    s = str(a).strip()
-                    if s:
-                        parts.append(s)
-            if getattr(p, "affected_components", None):
-                parts.extend([str(x) for x in p.affected_components if str(x).strip()])
-        except Exception:
-            pass
-        return " \n".join(parts)
-
-    def _russian_ratio(text: str) -> float:
-        if not isinstance(text, str) or not text:
-            return 0.0
-        letters = re.findall(r"[A-Za-zА-Яа-яЁё]", text)
-        if not letters:
-            return 0.0
-        cyr = re.findall(r"[А-Яа-яЁё]", text)
-        return float(len(cyr)) / float(len(letters))
-
-    def lang_score(p: Optional[LLMAnalysis]) -> float:
-        try:
-            blob = _extract_text_for_lang_score(p)
-            return _russian_ratio(blob)
-        except Exception:
-            return 0.0
-
-    best = max(pool, key=lambda tp: (lang_score(tp[1]), conf_val(tp[1])))
-    return best
 
 
 def judge_candidates_with_llm(
     candidates_texts: List[str],
     data_context: str,
     domain_key: Optional[str] = None,
+    lang: Optional[str] = None,
 ) -> Tuple[Dict[int, Dict[str, Any]], Dict[str, Any]]:
     """Запрашивает у LLM-судьи оценки нескольких кандидатских ответов.
 
@@ -1237,13 +1078,15 @@ def judge_candidates_with_llm(
         candidates_texts (list[str]): JSON-тексты кандидатов.
         data_context (str): Контекст метрик в JSON.
         domain_key (str | None): Ключ домена для выбора judge-рубрики.
+        lang (str | None): Язык промпта и рубрик (по умолчанию текущая локаль — язык отчёта).
 
     Возвращает:
         tuple: `(scores_by_index, judge_meta)`.
     """
+    lang = resolve_lang(lang)
     if not candidates_texts:
         return {}, {"domain_key": _normalize_judge_domain_key(domain_key) or None, "empty_candidates": True}
-    prompt_text, meta = _build_judge_prompt(candidates_texts, data_context, domain_key)
+    judge_prompt, meta = _build_judge_prompt(candidates_texts, data_context, domain_key, lang)
     if meta.get("used_safe_path"):
         logger.warning(
             "Judge rubric fallback activated for domain '%s': %s",
@@ -1264,10 +1107,10 @@ def judge_candidates_with_llm(
         )
     started_at = time.perf_counter()
     raw = ask_llm_with_text_data(
-        user_prompt=prompt_text,
+        user_prompt=judge_prompt,
         data_context="",
         llm_config={"force_json": True},
-        system_prompt=JUDGE_SYSTEM_PROMPT
+        system_prompt=judge_system_prompt(lang),
     )
     elapsed_ms = int((time.perf_counter() - started_at) * 1000)
     result = _parse_judge_scores(raw)
@@ -1478,6 +1321,21 @@ def _context_packs(ctx_obj: Dict[str, Any]) -> List[Dict[str, Any]]:
     return packs
 
 
+# Words a model writes next to a number it quotes, Russian and English stems in one table (no branching by
+# the language of the answer): a claim is checked against the references whose stems it mentions.
+_REF_STEMS: Dict[str, Tuple[str, ...]] = {
+    "load_step": ("rps", "ступен", "интервал", "нагрузк", "step", "interval", "load"),
+    "baseline": ("baseline", "предыдущ", "прошл", "previous", "prior"),
+    "peak": ("rps", "max_rps", "stable_max", "производительност", "нагрузк", "throughput", "performance", "load"),
+    "sla": ("sla", "порог", "threshold", "целев", "target"),
+    "sla_step": ("rps", "ступен", "интервал", "нагрузк", "sla", "step", "interval", "load"),
+    "hold": ("rps", "удерж", "окно", "интервал", "hold", "нагрузк", "window", "interval", "load"),
+    "spike": ("всплеск", "spike", "фон", "восстанов", "overshoot", "p95", "ошиб", "rps", "background", "recover", "error"),
+    "saturation": ("насыщ", "saturation", "ступен", "rps", "ресурс", "cpu", "памят", "memory", "saturat", "step", "resource"),
+    "trend": ("тренд", "дрейф", "рост", "trend", "drift", "growth"),
+}
+
+
 def _extra_numeric_references(ctx_obj: Any) -> List[Dict[str, Any]]:
     """Numbers the model may cite besides ``top_series`` statistics.
 
@@ -1535,18 +1393,18 @@ def _extra_numeric_references(ctx_obj: Any) -> List[Dict[str, Any]]:
                             _add(section.get("label"), anomaly.get("series"), f"window_{field}", window.get(field))
         for step in pack.get("load_steps") or []:
             if isinstance(step, dict):
-                _add("load_steps", step.get("label"), "rps_level", step.get("rps_level"), ("rps", "ступен", "интервал", "нагрузк"))
+                _add("load_steps", step.get("label"), "rps_level", step.get("rps_level"), _REF_STEMS["load_step"])
         baseline = pack.get("baseline")
         if isinstance(baseline, dict):
             for label, rows in (baseline.get("sections") or {}).items():
                 for series, row in (rows or {}).items():
                     if isinstance(row, dict):
                         for field in ("baseline_mean", "baseline_p95", "baseline_max", "delta_mean_pct", "delta_max_pct"):
-                            _add(label, series, field, row.get(field), ("baseline", "предыдущ", "прошл"))
+                            _add(label, series, field, row.get(field), _REF_STEMS["baseline"])
             for delta in baseline.get("key_deltas") or []:
                 if isinstance(delta, dict):
                     for field in ("baseline_mean", "baseline_p95", "baseline_max", "delta_mean_pct", "delta_max_pct"):
-                        _add(delta.get("label"), delta.get("series"), field, delta.get(field), ("baseline", "предыдущ", "прошл"))
+                        _add(delta.get("label"), delta.get("series"), field, delta.get(field), _REF_STEMS["baseline"])
 
     timeline = ctx_obj.get("timeline")
     if isinstance(timeline, dict):
@@ -1557,33 +1415,33 @@ def _extra_numeric_references(ctx_obj: Any) -> List[Dict[str, Any]]:
                 _add(row.get("label"), row.get("series"), f"timeline_step{index + 1}", value)
     peak = ctx_obj.get("designated_peak_performance")
     if isinstance(peak, dict):
-        _add("designated_peak_performance", peak.get("series") or peak.get("source_label"), "stable_max", peak.get("stable_max"), ("rps", "max_rps", "stable_max", "производительност", "нагрузк"))
+        _add("designated_peak_performance", peak.get("series") or peak.get("source_label"), "stable_max", peak.get("stable_max"), _REF_STEMS["peak"])
     sla = ctx_obj.get("deterministic_sla")
     if isinstance(sla, dict):
         for check in sla.get("checks") or []:
             if not isinstance(check, dict):
                 continue
             name = _clean_text(check.get("name")).lower()
-            keys = (name, "sla", "порог", "threshold", "целев")
+            keys = (name, *_REF_STEMS["sla"])
             _add("deterministic_sla", name, "actual", check.get("actual"), keys)
             _add("deterministic_sla", name, "threshold", check.get("threshold"), keys)
     sla_step = ctx_obj.get("sla_step")
     if isinstance(sla_step, dict):
-        _add("sla_step", sla_step.get("step_label"), "rps", sla_step.get("rps"), ("rps", "ступен", "интервал", "нагрузк", "sla"))
+        _add("sla_step", sla_step.get("step_label"), "rps", sla_step.get("rps"), _REF_STEMS["sla_step"])
         for check in sla_step.get("checks") or []:
             if not isinstance(check, dict):
                 continue
             name = _clean_text(check.get("name")).lower()
-            keys = (name, "sla", "порог", "threshold", "целев")
+            keys = (name, *_REF_STEMS["sla"])
             _add("sla_step", name, "actual", check.get("actual"), keys)
             _add("sla_step", name, "threshold", check.get("threshold"), keys)
     _add_test_type_numeric_references(ctx_obj, _add)
     return refs
 
 
-_HOLD_KEYS = ("rps", "удерж", "окно", "интервал", "hold", "нагрузк")
-_SPIKE_KEYS = ("всплеск", "spike", "фон", "восстанов", "overshoot", "p95", "ошиб", "rps")
-_SATURATION_KEYS = ("насыщ", "saturation", "ступен", "rps", "ресурс", "cpu", "памят", "memory")
+_HOLD_KEYS = _REF_STEMS["hold"]
+_SPIKE_KEYS = _REF_STEMS["spike"]
+_SATURATION_KEYS = _REF_STEMS["saturation"]
 
 
 def _add_test_type_numeric_references(ctx_obj: Dict[str, Any], add: Any) -> None:
@@ -1600,7 +1458,7 @@ def _add_test_type_numeric_references(ctx_obj: Dict[str, Any], add: Any) -> None
         holds.append(stability.get("hold"))
         for trend in stability.get("trends") or []:
             if isinstance(trend, dict):
-                keys = (str(trend.get("metric_kind") or ""), str(trend.get("title") or "").lower(), "тренд", "дрейф", "рост")
+                keys = (str(trend.get("metric_kind") or ""), str(trend.get("title") or "").lower(), *_REF_STEMS["trend"])
                 for field in ("first", "last", "change_pct", "slope_per_hour"):
                     add("stability_under_load", trend.get("series") or trend.get("label"), f"trend_{field}", trend.get(field), keys)
     for hold in holds:
@@ -1834,6 +1692,43 @@ def score_candidate_by_data(parsed: Optional[LLMAnalysis], context_obj: Dict[str
 
 
 # Weights of the candidate score; without usable judge scores the other two are renormalized.
+LANGUAGE_MATCH_MIN = 0.5
+
+
+def _free_text_values(parsed: Any) -> List[str]:
+    """Free text of an answer: rationale, findings and actions, without component and metric names."""
+    if parsed is None:
+        return []
+    data = parsed.dict() if hasattr(parsed, "dict") and not isinstance(parsed, dict) else parsed
+    if not isinstance(data, dict):
+        return []
+    values: List[str] = [str(data.get("verdict_rationale") or "")]
+    for finding in data.get("findings") or []:
+        if not isinstance(finding, dict):
+            values.append(str(finding or ""))
+            continue
+        values.extend(str(finding.get(key) or "") for key in ("summary", "evidence_summary", "evidence"))
+        for item in finding.get("evidence_items") or []:
+            if isinstance(item, dict):
+                values.extend(str(item.get(key) or "") for key in ("note", "observed_value"))
+    for action in data.get("recommended_actions") or []:
+        if isinstance(action, dict):
+            values.extend(str(action.get(key) or "") for key in ("summary", "details"))
+        else:
+            values.append(str(action or ""))
+    return [value for value in values if value.strip()]
+
+
+def language_match(parsed: Any, lang: Optional[str] = None) -> float:
+    """Share of the words of the answer's free text written in the script of ``lang`` (0..1).
+
+    Identifiers, numbers, units and ALL-CAPS abbreviations do not count; component and metric names are left
+    out. An answer without natural words matches (1.0): there is nothing in the wrong language.
+    """
+    share = script_share(_free_text_values(parsed), lang)
+    return 1.0 if share is None else float(share)
+
+
 JUDGE_WEIGHT = 0.6
 DATA_WEIGHT = 0.35
 CONFIDENCE_WEIGHT = 0.05
@@ -1853,9 +1748,12 @@ def _select_best_candidate(
     candidates: List[Tuple[str, Optional[LLMAnalysis]]],
     data_context: str,
     domain_key: Optional[str] = None,
+    lang: Optional[str] = None,
 ) -> Tuple[str, Optional[LLMAnalysis], Dict[str, Any]]:
+    """Best candidate: an answer in the report language first (language_match >= 0.5), then by final_score."""
     if not candidates:
         return "", None, {}
+    lang = resolve_lang(lang)
     try:
         context_obj = json.loads(data_context) if data_context else {}
     except Exception:
@@ -1871,12 +1769,14 @@ def _select_best_candidate(
             "data_score": float(details.get("overall", 0.0) or 0.0),
             "data_score_details": dict(details),
             "confidence": _candidate_confidence(parsed),
+            "language_match": language_match(parsed, lang),
         }
     try:
         judge_scores, judge_meta = judge_candidates_with_llm(
             [text for (text, _) in candidates],
             data_context,
             domain_key=domain_key,
+            lang=lang,
         )
     except Exception as exc:
         logger.warning("Judge failed for domain '%s': %s", domain_key, exc)
@@ -1890,8 +1790,9 @@ def _select_best_candidate(
         reason = "error" if (judge_meta or {}).get("error") else ("partial_scores" if judged else "no_scores")
         judge_meta = {**(judge_meta or {}), "unavailable": True, "reason": reason, "scored_candidates": len(judged)}
         logger.warning("Judge gave no usable scores for domain '%s' (%s): candidates ranked by the data check", domain_key, reason)
-    scored: List[Tuple[float, int]] = []
+    scored: List[Tuple[bool, float, int]] = []
     data_score_details_map: Dict[int, Dict[str, Any]] = {}
+    language_map: Dict[int, float] = {}
     for idx, (text, parsed) in enumerate(candidates):
         judge_entry = judge_scores.get(idx) or {}
         judge_overall = float(judge_entry.get("overall", 0.0) or 0.0)
@@ -1903,10 +1804,12 @@ def _select_best_candidate(
             final_score = JUDGE_WEIGHT * judge_overall + DATA_WEIGHT * data_score + CONFIDENCE_WEIGHT * conf
         else:
             final_score = (DATA_WEIGHT * data_score + CONFIDENCE_WEIGHT * conf) / (DATA_WEIGHT + CONFIDENCE_WEIGHT)
-        scored.append((final_score, idx))
+        language_map[idx] = language_match(parsed, lang)
+        scored.append((language_map[idx] >= LANGUAGE_MATCH_MIN, final_score, idx))
     if scored:
-        scored.sort(key=lambda x: x[0], reverse=True)
-        best_idx = scored[0][1]
+        # An answer in the wrong language loses to any answer in the report language.
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        best_idx = scored[0][2]
         best_text, best_parsed = candidates[best_idx]
         judge_entry = judge_scores.get(best_idx) or {}
         data_score_details_best = data_score_details_map.get(best_idx) or score_candidate_by_data_details(best_parsed, context_obj)
@@ -1917,7 +1820,7 @@ def _select_best_candidate(
                 conf_best = float(best_parsed.confidence)
             except Exception:
                 conf_best = 0.0
-        final_score_best = [s for s in scored if s[1] == best_idx][0][0]
+        final_score_best = [s for s in scored if s[2] == best_idx][0][1]
         score_info = {
             "selected_index": best_idx,
             "judge_meta": dict(judge_meta or {}),
@@ -1925,6 +1828,7 @@ def _select_best_candidate(
             "data_score_details": dict(data_score_details_best or {}),
             "confidence": float(max(0.0, min(conf_best, 1.0))),
             "final_score": float(final_score_best),
+            "language_match": float(language_map.get(best_idx, 1.0)),
         }
         if use_judge:
             score_info["judge"] = {
@@ -1935,7 +1839,8 @@ def _select_best_candidate(
                 "rubric": dict(judge_entry.get("rubric") or {}),
             }
         return best_text, best_parsed, score_info
-    best_text, best_parsed = _choose_best_candidate(candidates)
+    # Unreachable with two or more candidates (every one is scored above); kept as a safe default.
+    best_text, best_parsed = candidates[0]
     return best_text, best_parsed, {}
 
 
@@ -1998,7 +1903,11 @@ def _run_llm_calls(
     if parallel and len(prompts) > 1:
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=min(len(prompts), max(1, workers))) as executor:
-            futures = [executor.submit(_run_one_llm_call, domain_key, prompt, data_context) for prompt in prompts]
+            # The report language (a ContextVar) does not cross into pool threads by itself.
+            futures = [
+                executor.submit(contextvars.copy_context().run, _run_one_llm_call, domain_key, prompt, data_context)
+                for prompt in prompts
+            ]
             return [f.result() for f in futures]
     results: List[object] = []
     for idx, prompt in enumerate(prompts):
@@ -2008,12 +1917,13 @@ def _run_llm_calls(
     return results
 
 
-def llm_two_pass_self_consistency(
+def _two_pass_self_consistency(
     user_prompt: str,
     data_context: str,
     k: int = 3,
     return_scores: bool = False,
     domain_key: Optional[str] = None,
+    lang: Optional[str] = None,
 ) -> tuple:
     """Двухпроходный алгоритм self-consistency: генерация k кандидатов + критик.
 
@@ -2023,6 +1933,8 @@ def llm_two_pass_self_consistency(
         k (int): Количество кандидатов (ограничивается ``llm.self_consistency.max_candidates``).
         return_scores (bool): Возвращать ли метрики выбора.
         domain_key (str | None): Домен для выбора judge-рубрики.
+        lang (str | None): Язык прогона: промпты критика и судьи, выбор кандидата на нужном языке.
+            По умолчанию текущая локаль (пайплайн выполняется в ``with_locale(report_language)``).
 
     Возвращает:
         tuple: `(best_text, best_parsed)` или `(best_text, best_parsed, scores)`.
@@ -2078,7 +1990,7 @@ def llm_two_pass_self_consistency(
         else:
             parsed_or_raw.append((p, text))
     if need_critics:
-        critic_prompts = [_build_critic_prompt(r) for r in need_critics]
+        critic_prompts = [_build_critic_prompt(r, lang) for r in need_critics]
         critic_results = _run_llm_calls(
             critic_prompts,
             data_context,
@@ -2117,7 +2029,7 @@ def llm_two_pass_self_consistency(
         except Exception:
             pass
     if best_parsed is None:
-        failure = call_errors[0] if call_errors else {"reason": "invalid_json", "message": "Ответ модели не удалось разобрать как JSON."}
+        failure = call_errors[0] if call_errors else {"reason": "invalid_json", "message": prompt_text("analysis_error.invalid_json", lang)}
         best_parsed = make_failed_llm_analysis(failure, best_text or "")
     if best_parsed is not None:
         best_parsed = fill_missing_verdict_rationale(best_parsed)
@@ -2127,3 +2039,19 @@ def llm_two_pass_self_consistency(
     return best_text, best_parsed
 
 
+def llm_two_pass_self_consistency(
+    user_prompt: str,
+    data_context: str,
+    k: int = 3,
+    return_scores: bool = False,
+    domain_key: Optional[str] = None,
+    lang: Optional[str] = None,
+) -> tuple:
+    """k candidates + critic + judge (see :func:`_two_pass_self_consistency`) in the language ``lang``.
+
+    ``lang`` defaults to the current locale: the pipeline runs in ``with_locale(report_language)``. The whole call,
+    pool threads included, runs in that locale, so every prompt and the default system prompt use one language.
+    """
+    code = resolve_lang(lang)
+    with with_locale(code):
+        return _two_pass_self_consistency(user_prompt, data_context, k, return_scores, domain_key, code)

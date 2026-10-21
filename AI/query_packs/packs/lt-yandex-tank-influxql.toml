@@ -12,28 +12,44 @@ overall_quantiles (поля q50…q100 в мс), тег label (__OVERALL__ — �
 labeled: true), тег uuid — идентификатор теста. Среднего времени ответа загрузчик не пишет, поэтому \
 ссылка SLA для прогноза мощностей не заполняется. Сверьте имена полей кнопкой «Проверить».
 """
+description_en = """
+The Yandex.Tank InfluxUploader plugin: measurement overall_meta (fields RPS, active_threads) and \
+overall_quantiles (fields q50…q100 in ms), the label tag (__OVERALL__ is the summary, the others are request \
+labels with labeled: true), the uuid tag is the test id. The uploader does not write the average response \
+time, so the SLA reference for the capacity forecast stays empty. Verify the field names with the "Check" \
+button.
+"""
 requires_metrics = ["overall_meta", "overall_quantiles"]
 prompt_addendum = """
 Метрики Yandex.Tank: RPS — ответы в секунду, active_threads — активные инстансы генератора, q95/q99 — \
 перцентили времени ответа за секунду в мс, label — метка запроса (__OVERALL__ — сводка по всем).
 """
+prompt_addendum_en = """
+Yandex.Tank metrics: RPS is responses per second, active_threads are active generator instances, q95/q99 are \
+response time percentiles per second in ms, label is the request label (__OVERALL__ is the summary of all).
+"""
 
 [variables.prefix]
 title = "Префикс measurement"
+title_en = "Measurement prefix"
 default = ""
 pattern = '^[A-Za-z0-9_.-]*$'
 help = "Параметр prefix_measurement плагина InfluxUploader; по умолчанию пустой."
+help_en = "The prefix_measurement parameter of the InfluxUploader plugin; empty by default."
 
 [variables.uuid]
 title = "UUID теста (регулярное выражение)"
+title_en = "Test UUID (regular expression)"
 default = ".*"
 pattern = '^[^/\n\r]*$'
 
 [variables.load_model]
 title = "Модель нагрузки сценария"
+title_en = "Load model of the scenario"
 default = "open"
 choices = ["open", "closed"]
 help = "Расписание rps (line, const, step) — open; instances в pandora — closed."
+help_en = "An rps schedule (line, const, step) is open; instances in pandora are closed."
 
 [sla]
 max_performance_query = "@lt.rps_total"
@@ -50,6 +66,7 @@ unit = "per_second"
 required = true
 query = '''SELECT sum("RPS") FROM "{{prefix}}overall_meta" WHERE "label" = '__OVERALL__' AND "uuid" =~ /^{{uuid}}$/ AND $timeFilter GROUP BY time(1s) fill(null)'''
 description = "Ответы в секунду по всему тесту."
+description_en = "Responses per second over the whole test."
 
 [[queries]]
 label = "LT (Yandex.Tank): RPS by label"
@@ -58,6 +75,7 @@ unit = "per_second"
 query = '''SELECT sum("RPS") FROM "{{prefix}}overall_meta" WHERE "label" <> '__OVERALL__' AND "uuid" =~ /^{{uuid}}$/ AND $timeFilter GROUP BY time(1s), "label" fill(null)'''
 keys = ["label"]
 description = "RPS по меткам запросов (нужен labeled: true)."
+description_en = "RPS by request label (needs labeled: true)."
 
 [[queries]]
 label = "LT (Yandex.Tank): p95(ms) total"
@@ -65,6 +83,7 @@ role = "lt.p95_total"
 unit = "ms"
 query = '''SELECT mean("q95") FROM "{{prefix}}overall_quantiles" WHERE "label" = '__OVERALL__' AND "uuid" =~ /^{{uuid}}$/ AND $timeFilter GROUP BY time($__interval) fill(null)'''
 description = "p95 времени ответа, мс (среднее посекундных значений)."
+description_en = "p95 of the response time, ms (average of the per-second values)."
 
 [[queries]]
 label = "LT (Yandex.Tank): p99(ms) total"
@@ -72,6 +91,7 @@ role = "lt.p99_total"
 unit = "ms"
 query = '''SELECT mean("q99") FROM "{{prefix}}overall_quantiles" WHERE "label" = '__OVERALL__' AND "uuid" =~ /^{{uuid}}$/ AND $timeFilter GROUP BY time($__interval) fill(null)'''
 description = "p99 времени ответа, мс."
+description_en = "p99 of the response time, ms."
 
 [[queries]]
 label = "LT (Yandex.Tank): p95(ms) by label"
@@ -80,6 +100,7 @@ unit = "ms"
 query = '''SELECT mean("q95") FROM "{{prefix}}overall_quantiles" WHERE "label" <> '__OVERALL__' AND "uuid" =~ /^{{uuid}}$/ AND $timeFilter GROUP BY time($__interval), "label" fill(null)'''
 keys = ["label"]
 description = "p95 по меткам запросов, мс."
+description_en = "p95 by request label, ms."
 
 [[queries]]
 label = "LT (Yandex.Tank): active threads"
@@ -87,3 +108,4 @@ role = "lt.vus"
 unit = "count"
 query = '''SELECT max("active_threads") FROM "{{prefix}}overall_meta" WHERE "label" = '__OVERALL__' AND "uuid" =~ /^{{uuid}}$/ AND $timeFilter GROUP BY time(1s) fill(null)'''
 description = "Активные инстансы генератора нагрузки."
+description_en = "Active load generator instances."

@@ -1,6 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
 """Manual verdicts of reports: the report_verdicts table, the verdict in force in every reader (dashboard, /runs,
 /llm_reports, baseline lookup, forecast list, projects, Confluence) and the /runs/<run>/verdict API.
-Offline: a fake database keeps the final row and the manual changes of one run."""
+Offline: a fake database keeps the final row and the manual changes of one run.
+
+Verdicts are codes (AI/verdicts.py). The fake database keeps the Russian labels where a database written before
+the codes holds them (the final row, older history rows), so every reader is checked on legacy rows as well."""
 
 import sys
 from datetime import datetime, timedelta, timezone
@@ -14,6 +18,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from loadlens_app import core  # noqa: E402  (before anything that imports update_page)
 from AI import db_store  # noqa: E402
+from AI.verdicts import code_sql  # noqa: E402
 
 T0 = datetime(2026, 10, 17, 12, 0, tzinfo=timezone.utc)
 
@@ -121,8 +126,10 @@ def test_cte_reads_the_newest_change_and_is_empty_without_the_table():
     assert "DISTINCT ON (run_name)" in ready and "WHERE verdict IS NOT NULL" in ready  # a reset row hides the manual one
     missing = flat(db_store.manual_verdicts_cte("perf", False))
     assert missing.startswith("manual_verdicts AS (SELECT NULL::text AS run_name") and "WHERE FALSE" in missing
-    assert db_store.effective_verdict_sql("f") == "COALESCE(mv.verdict, f.sla_verdict, f.verdict, 'Недостаточно данных')"
-    assert db_store.effective_verdict_sql("r", fallback=False) == "COALESCE(mv.verdict, r.sla_verdict, r.verdict)"
+    # Codes: old labels in any column map to their code and a run without any verdict is no_data.
+    assert db_store.effective_verdict_sql("f") == code_sql("COALESCE(mv.verdict, f.sla_verdict, f.verdict)")
+    assert db_store.effective_verdict_sql("r", fallback=False) == code_sql("COALESCE(mv.verdict, r.sla_verdict, r.verdict)")
+    assert "WHEN 'Провал' THEN 'fail'" in db_store.effective_verdict_sql("f") and "ELSE 'no_data' END" in db_store.effective_verdict_sql("f")
 
 
 def test_ensure_creates_the_table_and_marks_it_ready(monkeypatch):
@@ -164,33 +171,56 @@ def test_deployment_schema_and_app_role_know_the_table():
 
 
 def test_set_change_and_reset_keep_the_history():
-    db = VerdictDb(auto="Провал")
+    db = VerdictDb(auto="Провал")  # a final row saved before the codes
     state = db_store.load_verdict_state(db, "public", "llm_reports", "nightly-7")
-    assert state == {"run_name": "nightly-7", "run_id": "rid-7", "automatic": "Провал", "verdict": "Провал", "manual": None, "history": []}
+    assert state == {"run_name": "nightly-7", "run_id": "rid-7", "automatic": "fail", "verdict": "fail", "manual": None, "history": []}
 
+    # A legacy label is accepted on input; all three columns store codes.
     state = db_store.save_manual_verdict(db, "public", "llm_reports", "nightly-7", "Успешно", "  сбой генератора  ", "ivanov")
-    assert state["verdict"] == "Успешно" and state["automatic"] == "Провал"
-    assert state["manual"] == {"verdict": "Успешно", "previous_verdict": "Провал", "auto_verdict": "Провал",
+    assert state["verdict"] == "pass" and state["automatic"] == "fail"
+    assert state["manual"] == {"verdict": "pass", "previous_verdict": "fail", "auto_verdict": "fail",
                                "reason": "сбой генератора", "author": "ivanov", "changed_at": T0.isoformat()}
+    assert (db.changes[0]["verdict"], db.changes[0]["previous_verdict"], db.changes[0]["auto_verdict"]) == ("pass", "fail", "fail")
 
-    state = db_store.save_manual_verdict(db, "public", "llm_reports", "nightly-7", "Есть риски", "уточнили", "petrov")
-    assert state["verdict"] == "Есть риски" and state["manual"]["previous_verdict"] == "Успешно"
+    state = db_store.save_manual_verdict(db, "public", "llm_reports", "nightly-7", "risk", "уточнили", "petrov")
+    assert state["verdict"] == "risk" and state["manual"]["previous_verdict"] == "pass"
 
     state = db_store.save_manual_verdict(db, "public", "llm_reports", "nightly-7", None, "", "ivanov")
-    assert state["verdict"] == "Провал" and state["manual"] is None
+    assert state["verdict"] == "fail" and state["manual"] is None
     assert [(h["verdict"], h["previous_verdict"]) for h in state["history"]] == [
-        (None, "Есть риски"), ("Есть риски", "Успешно"), ("Успешно", "Провал"),
+        (None, "risk"), ("risk", "pass"), ("pass", "fail"),
     ]
     assert db.changes[0]["run_id"] == "rid-7"
+
+
+def test_history_rows_saved_with_labels_are_read_as_codes():
+    db = VerdictDb(auto="Провал")
+    db.changes = [
+        {"run_name": "nightly-7", "run_id": "rid-7", "verdict": "Есть риски", "previous_verdict": "Провал",
+         "auto_verdict": "Провал", "reason": "старая запись", "author": "ivanov", "created_at": T0},
+        {"run_name": "nightly-7", "run_id": "rid-7", "verdict": None, "previous_verdict": "Успешно",
+         "auto_verdict": "", "reason": "", "author": "petrov", "created_at": T0 - timedelta(days=1)},
+    ]
+    state = db_store.load_verdict_state(db, "public", "llm_reports", "nightly-7")
+    assert state["verdict"] == "risk" and state["manual"]["verdict"] == "risk"
+    assert [(h["verdict"], h["previous_verdict"], h["auto_verdict"]) for h in state["history"]] == [
+        ("risk", "fail", "fail"), (None, "pass", ""),
+    ]
+    # The same verdict given as a code or a label changes nothing.
+    for same in ("risk", "Есть риски", " есть  РИСКИ "):
+        with pytest.raises(ValueError):
+            db_store.save_manual_verdict(db, "public", "llm_reports", "nightly-7", same, "x", "ivanov")
 
 
 @pytest.mark.parametrize(
     ("verdict", "reason", "error"),
     [
         ("Отлично", "x", ValueError),
+        ("passed", "x", ValueError),  # only codes and the old labels, no heuristic on input
         ("Успешно", "   ", ValueError),
-        ("Успешно", "x" * (db_store.MANUAL_VERDICT_REASON_MAX + 1), ValueError),
-        ("Провал", "уже провал", ValueError),  # the verdict in force already
+        ("pass", "x" * (db_store.MANUAL_VERDICT_REASON_MAX + 1), ValueError),
+        ("Провал", "уже провал", ValueError),  # the verdict in force already (automatic «Провал»)
+        ("fail", "уже провал", ValueError),  # the same as a code
         (None, "", ValueError),  # nothing to return: the verdict is automatic
     ],
 )
@@ -212,7 +242,7 @@ def test_without_the_table_the_state_has_no_history(monkeypatch):
     monkeypatch.setattr(db_store, "_MANUAL_VERDICTS_READY", set())
     db = VerdictDb(auto="Есть риски", table_exists=False)
     state = db_store.load_verdict_state(db, "public", "llm_reports", "nightly-7")
-    assert state["verdict"] == "Есть риски" and state["history"] == []
+    assert state["verdict"] == "risk" and state["history"] == []
     assert not any("report_verdicts WHERE run_name" in text for text, _ in db.log)
 
 
@@ -262,13 +292,14 @@ class Scripted:
 
 
 def test_the_baseline_lookup_counts_the_manual_verdict():
-    conn = Scripted(one=[("release-2.4", "demo", "Успешно", T0)])
+    conn = Scripted(one=[("release-2.4", "demo", "Успешно", T0)])  # a legacy row
     previous = db_store.find_previous_run(conn, "public", "llm_reports", exclude_run_name="nightly-8", service="demo", before=T0)
-    assert previous.verdict == "Успешно"
+    assert previous.verdict == "pass"
     text = conn.log[0][0]
     assert text.startswith("WITH manual_verdicts AS (") and 'FROM "public".report_verdicts' in text
     assert "LEFT JOIN manual_verdicts mv ON mv.run_name = r.run_name" in text
-    assert "AND COALESCE(mv.verdict, r.sla_verdict, r.verdict) = 'Успешно'" in text
+    # previous_success: the code of the verdict in force, so «Успешно» rows and «pass» rows both qualify.
+    assert "AND " + flat(code_sql("COALESCE(mv.verdict, r.sla_verdict, r.verdict)")) + " = 'pass'" in text
 
     conn = Scripted(one=[None])
     db_store.find_previous_run(conn, "public", "llm_reports", exclude_run_name="nightly-8")
@@ -279,9 +310,9 @@ def test_the_baseline_lookup_counts_the_manual_verdict():
 def test_the_forecast_list_shows_the_verdict_in_force():
     conn = Scripted(many=[[("rid", "nightly-7", "demo", "step", "", T0, "Успешно", None)]])
     rows = db_store.list_final_reports(conn, "public", "llm_reports", ["demo"])
-    assert rows[0].verdict == "Успешно"
+    assert rows[0].verdict == "pass"
     text = conn.log[0][0]
-    assert "COALESCE(mv.verdict, latest.sla_verdict, latest.verdict, 'Недостаточно данных') AS verdict" in text
+    assert flat(code_sql("COALESCE(mv.verdict, latest.sla_verdict, latest.verdict)")) + " AS verdict" in text
     assert "LEFT JOIN manual_verdicts mv ON mv.run_name = latest.run_name WHERE latest.rn = 1" in text
 
 
@@ -291,9 +322,9 @@ def test_projects_read_the_verdict_in_force(monkeypatch):
     conn = Scripted(many=[[("demo", T0, "Успешно")]])
     monkeypatch.setattr(projects, "_ts_conn", lambda: conn)
     stats = projects._report_stats(["demo"])
-    assert stats["demo"].last_verdict == "Успешно"
+    assert stats["demo"].last_verdict == "pass"
     text = conn.log[0][0]
-    assert text.startswith("WITH manual_verdicts AS (") and "COALESCE(mv.verdict, latest.sla_verdict, latest.verdict" in text
+    assert text.startswith("WITH manual_verdicts AS (") and flat(code_sql("COALESCE(mv.verdict, latest.sla_verdict, latest.verdict)")) in text
 
 
 def test_confluence_page_names_who_changed_the_verdict_and_why():
@@ -310,6 +341,11 @@ def test_confluence_page_names_who_changed_the_verdict_and_why():
     plain = confluence_export.render_llm_domain_body({**row, "manual_verdict": None})
     assert "<th>Вердикт</th><td>Провал</td>" in plain and "Вердикт LLM" not in plain  # the same verdict twice says nothing
     assert "«Недостаточно данных»" in confluence_export.sla_criteria_block({"sla_details": {}})
+    # A report saved with codes renders the same page.
+    coded = {"domain": "final", "verdict": "fail", "llm_verdict": "fail", "sla_verdict": "fail",
+             "parsed": {"verdict": "fail", "verdict_rationale": "p95 выше порога"},
+             "manual_verdict": {**row["manual_verdict"], "verdict": "risk"}}
+    assert confluence_export.render_llm_domain_body(coded) == body
 
 
 # ---- HTTP -----------------------------------------------------------------------------------------------
@@ -340,24 +376,29 @@ def api(monkeypatch, tmp_path):
 def test_verdict_api_sets_reads_and_resets(api):
     client, db, invalidated = api
     state = client.get("/runs/nightly-7/verdict").get_json()
-    assert state["verdict"] == "Провал" and state["choices"] == list(db_store.MANUAL_VERDICTS) and state["reason_max"] == 1000
+    assert state["verdict"] == "fail" and state["automatic"] == "fail" and state["reason_max"] == 1000
+    assert state["choices"] == list(db_store.MANUAL_VERDICTS) == ["pass", "risk", "fail", "no_data"]
 
+    # The old label of the README example still works; the answer and the stored row carry codes.
     resp = client.put("/runs/nightly-7/verdict", json={"verdict": "Успешно", "reason": "сбой генератора"})
-    assert resp.status_code == 200 and resp.get_json()["manual"]["verdict"] == "Успешно"
+    assert resp.status_code == 200 and resp.get_json()["manual"]["verdict"] == "pass" and resp.get_json()["verdict"] == "pass"
+    assert db.changes[-1]["verdict"] == "pass" and db.changes[-1]["previous_verdict"] == "fail"
     assert db.commits >= 1 and invalidated  # the dashboard cache is dropped
     assert db.changes[-1]["author"] == ""  # sign-in is off in tests
 
+    assert client.put("/runs/nightly-7/verdict", json={"verdict": "pass", "reason": "ещё раз"}).status_code == 400
     assert client.put("/runs/nightly-7/verdict", json={"verdict": "Успешно", "reason": "ещё раз"}).status_code == 400
-    assert client.put("/runs/nightly-7/verdict", json={"verdict": "Провал", "reason": ""}).status_code == 400
+    assert client.put("/runs/nightly-7/verdict", json={"verdict": "fail", "reason": ""}).status_code == 400
+    assert client.put("/runs/nightly-7/verdict", json={"verdict": "maybe", "reason": "x"}).status_code == 400
     assert client.put("/runs/nightly-7/verdict", json={"verdict": 1, "reason": "x"}).status_code == 400
     assert client.put("/runs/nightly-7/verdict", data="x", content_type="text/plain").status_code == 400
     assert client.put("/runs/other/verdict", json={"verdict": "Провал", "reason": "x"}).status_code == 404
     assert client.get("/runs/other/verdict").status_code == 404
 
     resp = client.delete("/runs/nightly-7/verdict", json={})  # the report page sends an empty object
-    assert resp.status_code == 200 and resp.get_json()["verdict"] == "Провал" and resp.get_json()["manual"] is None
+    assert resp.status_code == 200 and resp.get_json()["verdict"] == "fail" and resp.get_json()["manual"] is None
     assert client.delete("/runs/nightly-7/verdict").status_code == 400  # already automatic
-    assert client.put("/runs/nightly-7/verdict", json={"verdict": "Есть риски", "reason": "x"}).status_code == 200
+    assert client.put("/runs/nightly-7/verdict", json={"verdict": "risk", "reason": "x"}).status_code == 200
     assert client.delete("/runs/nightly-7/verdict", json={"reason": 5}).status_code == 400
     assert client.delete("/runs/nightly-7/verdict", json={"reason": "проверили"}).status_code == 200
     assert db.changes[-1]["reason"] == "проверили" and db.changes[-1]["verdict"] is None
@@ -384,10 +425,12 @@ def test_report_rows_carry_the_manual_verdict(api, monkeypatch):
     monkeypatch.setattr(dashboard, "load_verdict_state", lambda c, s, t, run: db_store.load_verdict_state(db, s, t, run))
     data = client.get("/llm_reports", query_string={"run_name": "nightly-7"}).get_json()
     final = next(item for item in data if item["domain"] == "final")
-    assert final["verdict"] == "Есть риски" and final["auto_verdict"] == "Провал"
+    assert final["verdict"] == "risk" and final["auto_verdict"] == "fail"
+    assert final["llm_verdict"] == "fail" and final["sla_verdict"] == "fail" and final["parsed"]["verdict"] == "fail"
     assert final["manual_verdict"]["reason"] == "деградация стенда" and final["manual_verdict"]["author"] == "ivanov"
+    assert final["manual_verdict"]["verdict"] == "risk"
     jvm = next(item for item in data if item["domain"] == "jvm")
-    assert jvm["verdict"] == "Провал" and "manual_verdict" not in jvm
+    assert jvm["verdict"] == "fail" and jvm["sla_verdict"] is None and "manual_verdict" not in jvm
 
 
 def test_runs_items_and_dashboard_rows_carry_the_manual_verdict():
@@ -396,7 +439,7 @@ def test_runs_items_and_dashboard_rows_carry_the_manual_verdict():
     row = ("nightly-7", T0, T0, "demo", "Есть риски", "Провал", "Провал", T0, "step", "rid", "", 120, 1,
            "Есть риски", "деградация стенда", "ivanov", T0)
     item = dashboard._runs_item(row)
-    assert item["verdict"] == "Есть риски" and item["sla_verdict"] == "Провал"
-    assert item["manual_verdict"] == {"verdict": "Есть риски", "reason": "деградация стенда", "author": "ivanov", "changed_at": T0.isoformat()}
+    assert item["verdict"] == "risk" and item["sla_verdict"] == "fail" and item["llm_verdict"] == "fail"
+    assert item["manual_verdict"] == {"verdict": "risk", "reason": "деградация стенда", "author": "ivanov", "changed_at": T0.isoformat()}
     assert dashboard._runs_item(row[:13])["manual_verdict"] is None  # an automatic verdict
     assert dashboard._manual_verdict_view([None, None, None, None]) is None

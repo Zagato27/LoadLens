@@ -2,6 +2,7 @@ schema_version = 1
 id = "windows-exporter"
 version = 1
 title = "Узлы Windows: windows_exporter"
+title_en = "Windows nodes: windows_exporter"
 category = "infrastructure"
 stack = ["windows"]
 domain = "hard_resources"
@@ -12,19 +13,32 @@ logical_disk, net, system): CPU и память в процентах (исто�
 ядро, загрузка и заполнение дисков, сеть. Подходят имена до и после 0.30 (память из cs/os или memory). \
 Узел называется по адресу instance без порта.
 """
+description_en = """
+Windows server resources from prometheus-community/windows_exporter (collectors cpu, cs, os, memory, \
+logical_disk, net, system): CPU and memory in percent (the source of the CPU and memory SLA), processor queue \
+per core, disk utilization and fill, network. Works with the names before and after 0.30 (memory from cs/os or \
+memory). A node is named by the instance address without the port.
+"""
 requires_metrics = ["windows_cpu_time_total", "windows_logical_disk_free_bytes"]
 prompt_addendum = """
 Метрики Windows: CPU % — доля не-idle времени всех ядер, очередь процессора на ядро выше 2 — потоки ждут \
 CPU, загрузка диска — доля времени, когда том не простаивает.
 """
+prompt_addendum_en = """
+Windows metrics: CPU % is the non-idle share of all cores, a processor queue per core above 2 means threads \
+wait for CPU, disk utilization is the share of time the volume is not idle.
+"""
 
 [variables.matchers]
 title = "Дополнительные матчеры"
+title_en = "Extra matchers"
 default = ""
 help = 'Например job="windows".'
+help_en = 'For example job="windows".'
 
 [variables.window]
 title = "Окно rate()"
+title_en = "rate() window"
 default = "2m"
 pattern = '^[1-9][0-9]*[smh]$'
 
@@ -40,6 +54,7 @@ required = true
 query = 'label_replace(100 * (1 - avg by (instance) (rate(windows_cpu_time_total{mode="idle", {{matchers}} }[{{window}}]))), "node", "$1", "instance", "([^:]+).*")'
 keys = ["node"]
 description = "CPU узла, %."
+description_en = "Node CPU, %."
 
 [[queries]]
 label = "Windows nodes: Memory usage (%) by node"
@@ -49,6 +64,7 @@ required = true
 query = 'label_replace(100 * (1 - max by (instance) (windows_os_physical_memory_free_bytes{ {{matchers}} } or windows_memory_physical_free_bytes{ {{matchers}} }) / max by (instance) (windows_cs_physical_memory_bytes{ {{matchers}} } or windows_memory_physical_total_bytes{ {{matchers}} })), "node", "$1", "instance", "([^:]+).*")'
 keys = ["node"]
 description = "Занятая физическая память, %."
+description_en = "Used physical memory, %."
 
 [[queries]]
 label = "Windows nodes: processor queue per core by node"
@@ -57,6 +73,7 @@ unit = "ratio"
 query = 'label_replace(max by (instance) (windows_system_processor_queue_length{ {{matchers}} }) / count by (instance) (windows_cpu_time_total{mode="idle", {{matchers}} }), "node", "$1", "instance", "([^:]+).*")'
 keys = ["node"]
 description = "Потоки в очереди к процессору на одно ядро."
+description_en = "Threads queued for the processor per core."
 
 [[queries]]
 label = "Windows nodes: Disk utilization of the busiest volume (%) by node"
@@ -65,6 +82,7 @@ unit = "percent"
 query = 'label_replace(100 * (1 - min by (instance) (rate(windows_logical_disk_idle_seconds_total{volume!~"HarddiskVolume.*", {{matchers}} }[{{window}}]))), "node", "$1", "instance", "([^:]+).*")'
 keys = ["node"]
 description = "Доля времени, когда самый занятый том не простаивает, %."
+description_en = "Share of time the busiest volume is not idle, %."
 
 [[queries]]
 label = "Windows nodes: Network receive (bytes/s) by node"
@@ -73,6 +91,7 @@ unit = "bytes_per_second"
 query = 'label_replace(sum by (instance) (rate(windows_net_bytes_received_total{nic!~".*(Loopback|isatap).*", {{matchers}} }[{{window}}])), "node", "$1", "instance", "([^:]+).*")'
 keys = ["node"]
 description = "Входящий трафик."
+description_en = "Incoming traffic."
 
 [[queries]]
 label = "Windows nodes: Network transmit (bytes/s) by node"
@@ -81,6 +100,7 @@ unit = "bytes_per_second"
 query = 'label_replace(sum by (instance) (rate(windows_net_bytes_sent_total{nic!~".*(Loopback|isatap).*", {{matchers}} }[{{window}}])), "node", "$1", "instance", "([^:]+).*")'
 keys = ["node"]
 description = "Исходящий трафик."
+description_en = "Outgoing traffic."
 
 [[queries]]
 label = "Windows nodes: Disk used (%) by node"
@@ -89,3 +109,4 @@ unit = "percent"
 query = 'label_replace(100 * max by (instance) (1 - windows_logical_disk_free_bytes{volume!~"HarddiskVolume.*", {{matchers}} } / windows_logical_disk_size_bytes{volume!~"HarddiskVolume.*", {{matchers}} }), "node", "$1", "instance", "([^:]+).*")'
 keys = ["node"]
 description = "Заполнение самого занятого тома, %."
+description_en = "Fill of the fullest volume, %."

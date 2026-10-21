@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Pluggable authentication providers.
 
 A provider verifies credentials and answers with either a stored ``User`` (the local provider,
@@ -28,6 +29,8 @@ import enum
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Callable, Mapping, Optional
+
+from AI.i18n import t
 
 from . import passwords
 from .config import AuthSettings
@@ -65,7 +68,10 @@ class LocalProvider(AuthProvider):
     """Passwords stored in ``app_users``, with per-account lockout."""
 
     name = LOCAL_PROVIDER
-    label = "Локальная учётная запись"
+
+    @property
+    def label(self) -> str:  # shown on the login page, in the locale of the request
+        return t("auth.server.provider.local")
 
     def __init__(
         self, repository: UserRepository, settings: AuthSettings, clock: Callable[[], datetime] = utcnow
@@ -114,7 +120,7 @@ def build_providers(names: tuple[str, ...], context: ProviderContext) -> list[Au
     for name in names:
         factory = _REGISTRY.get(name)
         if factory is None:
-            raise ValueError(f"Неизвестный провайдер авторизации: {name!r} (доступны: {', '.join(sorted(_REGISTRY))})")
+            raise ValueError(t("auth.server.provider.unknown", name=repr(name), available=", ".join(sorted(_REGISTRY))))
         providers.append(factory(context))
     return providers
 

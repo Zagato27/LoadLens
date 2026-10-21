@@ -1,0 +1,6 @@
+{
+  "llm.error.empty_answer": "{provider}: модель вернула пустой текст",
+  "llm.error.gigachat_no_structured_output": "GigaChat client does not support with_structured_output: обновите langchain-gigachat или отключите llm.gigachat.structured_output",
+  "llm.error.output_truncated": "{provider}: ответ обрезан на {max_tokens} токенах",
+  "llm.error.output_truncated_with_count": "{provider}: ответ обрезан на {max_tokens} токенах, выдано {output_tokens}"
+}

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Contract tests for the auth repositories.
 
 The in-memory implementation always runs. Set LOADLENS_TEST_PG_DSN to a PostgreSQL DSN (for example

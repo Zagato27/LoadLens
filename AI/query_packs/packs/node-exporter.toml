@@ -2,6 +2,7 @@ schema_version = 1
 id = "node-exporter"
 version = 1
 title = "Узлы: node_exporter (VM и Kubernetes)"
+title_en = "Nodes: node_exporter (VM and Kubernetes)"
 category = "infrastructure"
 stack = ["linux", "kubernetes", "vm"]
 domain = "hard_resources"
@@ -12,20 +13,33 @@ description = """
 ресурсов), load на ядро, загрузка диска, сеть, заполнение файловых систем. Узел называется по hostname \
 из node_uname_info — в Kubernetes это имя ноды, на VM — имя хоста.
 """
+description_en = """
+Node resources from node_exporter: CPU and memory in percent (the source of the CPU and memory SLA and of the \
+resource plan), load per core, disk utilization, network, file system fill. A node is named by the hostname \
+from node_uname_info: the node name in Kubernetes, the host name on a VM.
+"""
 requires_metrics = ["node_cpu_seconds_total", "node_memory_MemAvailable_bytes", "node_uname_info"]
 prompt_addendum = """
 Метрики узлов node_exporter: CPU % — доля не-idle времени всех ядер, память % — 1 − MemAvailable/MemTotal \
 (кэш страниц не считается занятым), load1 на ядро выше 1 — очередь на CPU, загрузка диска — доля времени \
 с активным I/O самого занятого устройства (близко к 100 % — диск насыщен).
 """
+prompt_addendum_en = """
+node_exporter node metrics: CPU % is the non-idle share of all cores, memory % is 1 − MemAvailable/MemTotal \
+(the page cache does not count as used), load1 per core above 1 means a CPU queue, disk utilization is the \
+share of time with active I/O of the busiest device (close to 100 % means the disk is saturated).
+"""
 
 [variables.matchers]
 title = "Матчеры node_exporter"
+title_en = "node_exporter matchers"
 default = 'job=~".*node.*"'
 help = "Ограничьте узлами стенда, например job=\"node-exporter\", instance=~\"10.0.1.*\"."
+help_en = 'Limit it to the nodes of the test environment, for example job="node-exporter", instance=~"10.0.1.*".'
 
 [variables.window]
 title = "Окно rate()"
+title_en = "rate() window"
 default = "2m"
 pattern = '^[1-9][0-9]*[smh]$'
 
@@ -41,6 +55,7 @@ required = true
 query = 'label_replace(100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle", {{matchers}} }[{{window}}]))) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
 keys = ["node"]
 description = "CPU узла, %. Источник SLA «CPU» и плана ресурсов."
+description_en = 'Node CPU, %. The source of the "CPU" SLA and of the resource plan.'
 
 [[queries]]
 label = "Nodes: Memory usage (%) by node"
@@ -50,6 +65,7 @@ required = true
 query = 'label_replace(100 * (1 - max by (instance) (node_memory_MemAvailable_bytes{ {{matchers}} }) / max by (instance) (node_memory_MemTotal_bytes{ {{matchers}} })) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
 keys = ["node"]
 description = "Память узла без учёта кэша страниц, %. Источник SLA «память»."
+description_en = 'Node memory without the page cache, %. The source of the "memory" SLA.'
 
 [[queries]]
 label = "Nodes: load1 per core by node"
@@ -58,6 +74,7 @@ unit = "ratio"
 query = 'label_replace(max by (instance) (node_load1{ {{matchers}} }) / count by (instance) (node_cpu_seconds_total{mode="idle", {{matchers}} }) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
 keys = ["node"]
 description = "Средняя длина очереди на CPU за минуту, на одно ядро."
+description_en = "Average CPU queue length over a minute, per core."
 
 [[queries]]
 label = "Nodes: Disk utilization of the busiest device (%) by node"
@@ -66,6 +83,7 @@ unit = "percent"
 query = 'label_replace(100 * max by (instance) (rate(node_disk_io_time_seconds_total{device!~"(loop|ram|fd|sr|dm-).*", {{matchers}} }[{{window}}])) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
 keys = ["node"]
 description = "Доля времени с активным I/O самого занятого диска узла, %."
+description_en = "Share of time with active I/O of the busiest disk of the node, %."
 
 [[queries]]
 label = "Nodes: Network receive (bytes/s) by node"
@@ -74,6 +92,7 @@ unit = "bytes_per_second"
 query = 'label_replace(sum by (instance) (rate(node_network_receive_bytes_total{device!~"lo|veth.*|docker.*|cali.*|flannel.*|cni.*|virbr.*|br-.*|vxlan.*|tunl.*", {{matchers}} }[{{window}}])) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
 keys = ["node"]
 description = "Входящий трафик физических интерфейсов."
+description_en = "Incoming traffic of physical interfaces."
 
 [[queries]]
 label = "Nodes: Network transmit (bytes/s) by node"
@@ -82,6 +101,7 @@ unit = "bytes_per_second"
 query = 'label_replace(sum by (instance) (rate(node_network_transmit_bytes_total{device!~"lo|veth.*|docker.*|cali.*|flannel.*|cni.*|virbr.*|br-.*|vxlan.*|tunl.*", {{matchers}} }[{{window}}])) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
 keys = ["node"]
 description = "Исходящий трафик физических интерфейсов."
+description_en = "Outgoing traffic of physical interfaces."
 
 [[queries]]
 label = "Nodes: Filesystem used (%) by node"
@@ -90,3 +110,4 @@ unit = "percent"
 query = 'label_replace(100 * max by (instance) (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|ramfs|fuse.*", {{matchers}} } / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|ramfs|fuse.*", {{matchers}} }) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
 keys = ["node"]
 description = "Заполнение самой занятой файловой системы узла, %."
+description_en = "Fill of the fullest file system of the node, %."

@@ -1,0 +1,44 @@
+Task Introduction
+- Assess the candidates only against the data in `DATA_CONTEXT`.
+- Ignore style and length as such; what matters is accuracy, coverage and applicability.
+- If a claim cannot be checked against the data, do not speculate and lower the score.
+
+Evaluation Criteria
+- evidence_grounding: conclusions rely on specific metrics, events, components and intervals from the context.
+- issue_coverage: the main deviations, risks, degradations and successes of the current domain are covered.
+- specificity: there are numbers, percentiles, times, thresholds, component names and observed symptoms.
+- sla_alignment: conclusions are consistent with the signs of degradation, stability, errors and SLA-like constraints.
+- actionability: recommendations are feasible, prioritized and tied to components.
+
+Evaluation Steps
+1. Check for contradictions between the candidate and `DATA_CONTEXT`.
+2. Check whether the key signals of the domain and the main risks are reflected.
+3. Check for specific metrics, values, times and components.
+4. Check whether the conclusions and recommendations agree with the degradation, risks and SLA.
+5. Fill in the form for each candidate.
+
+Evaluation Form
+Respond with strict JSON only:
+{
+  "scores": [
+    {
+      "index": 0,
+      "rubric": {
+        "evidence_grounding": 0.0,
+        "issue_coverage": 0.0,
+        "specificity": 0.0,
+        "sla_alignment": 0.0,
+        "actionability": 0.0
+      },
+      "factual": 0.0,
+      "completeness": 0.0,
+      "specificity": 0.0,
+      "overall": 0.0
+    }
+  ]
+}
+
+Rules
+- All scores are in the range `0..1`.
+- `overall = 0.5 * factual + 0.3 * completeness + 0.2 * specificity`.
+- No text outside JSON.

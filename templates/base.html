@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ru" data-theme="dark">
+<html lang="{{ locale }}" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
@@ -7,18 +7,20 @@
   <meta name="loadlens-role" content="{{ role_key }}" />
   <title>{% block title %}LoadLens{% endblock %}</title>
   <script nonce="{{ csp_nonce }}">
-    // Apply the saved theme before first paint to avoid a flash. "system" follows the OS
-    // setting; ui.js keeps following it afterwards. Same logic in login, recovery and storage_unavailable.
+    // Apply the theme before first paint to avoid a flash. A stored "light" or "dark" wins; "system", no stored
+    // choice or an unknown value follow the OS setting, and ui.js keeps following it afterwards.
+    // Same logic in login, recovery and storage_unavailable.
     (function () {
+      var root = document.documentElement;
+      var saved = null;
+      try { saved = localStorage.getItem('loadlens.theme'); } catch (e) {}
+      if (saved === 'light' || saved === 'dark') {
+        root.setAttribute('data-theme', saved);
+        return;
+      }
       try {
-        var root = document.documentElement;
-        var saved = localStorage.getItem('loadlens.theme');
-        if (saved === 'system') {
-          var light = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches);
-          root.setAttribute('data-theme', light ? 'light' : 'dark');
-        } else if (saved === 'light' || saved === 'dark') {
-          root.setAttribute('data-theme', saved);
-        }
+        var light = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches);
+        root.setAttribute('data-theme', light ? 'light' : 'dark');
       } catch (e) {}
     })();
   </script>
@@ -28,7 +30,7 @@
   {% block head %}{% endblock %}
 </head>
 <body data-role="{{ role_key }}">
-  <a class="skip-link" href="#main">К содержимому</a>
+  <a class="skip-link" href="#main">{{ t('nav.skip_link') }}</a>
   {# Inline icon sprite: same-document <use> references need no extra request and no CSP exception. #}
   <svg class="icon-sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
     <symbol id="i-dashboard" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></symbol>
@@ -43,78 +45,100 @@
     <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
     <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></symbol>
     <symbol id="i-chevron-up" viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></symbol>
+    <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
     <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></symbol>
     <symbol id="i-contrast" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></symbol>
     <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></symbol>
   </svg>
   <div class="app-shell">
-    <aside class="app-sidebar" id="appSidebar">
-      <div class="sidebar-head">
-        <a class="brand-link" href="/" aria-label="LoadLens — на дэшборд">
+    {# Top bar (plans/instrument-ui-plan.md 2.3): wordmark and version, text navigation, then the project area,
+       search, the view menu and the user menu. Below 1024px #appSidebar (navigation and controls) becomes the
+       drawer opened by #navToggle (ui.js); #navBackdrop dims the page behind it. #}
+    <header class="topbar" id="appTopbar">
+      <button type="button" class="icon-btn nav-toggle" id="navToggle" aria-expanded="false" aria-controls="appSidebar" aria-label="{{ t('ui.nav_menu.open') }}"><svg class="icon" aria-hidden="true"><use href="#i-menu"/></svg></button>
+      <div class="topbar-brand">
+        <a class="brand-link" href="/" aria-label="{{ t('nav.brand_home') }}">
           <img class="logo" src="/assets/logo.png?c={{ appearance.key }}" alt="" />
           <span class="brand">LoadLens</span>
         </a>
-        <button type="button" class="icon-btn sidebar-close" id="navClose" aria-label="Закрыть меню"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+        {# Version of this installation (loadlens_app/version.py); the About section lives on the admin-only settings page. #}
+        {% if role_rank >= 3 %}<a class="app-version" id="appVersion" href="/settings#about" title="{{ t('about.footer_title') }}">{{ app_version }}</a>{% else %}<span class="app-version" id="appVersion" title="{{ t('about.footer_title') }}">{{ app_version }}</span>{% endif %}
       </div>
-      <nav class="app-nav" id="appNav" aria-label="Основная навигация">
-        <select id="projectAreaSelect" class="pa-select" aria-label="Проектная область">
-          <option value="">Все области</option>
-        </select>
-        {# The last item is the minimum role rank: 1 viewer, 2 engineer, 3 admin. While a password change is enforced every page but the account is refused, so no links are shown. #}
-        {% set forced_change = current_user and current_user.must_change_password %}
-        {% set nav_items = [('dashboard', '/', 'Дэшборд', 'dashboard', 1), ('new', '/new', 'Новый отчёт', 'file-plus', 2), ('launch', '/launch', 'Запуск теста', 'play', 2), ('archive', '/reports', 'Архив', 'archive', 1), ('compare', '/compare', 'Сравнение тестов', 'columns', 1), ('forecasting', '/forecasting', 'Прогнозирование', 'trending', 1), ('settings', '/settings', 'Настройки', 'sliders', 3)] %}
-        {% for key, href, label, icon, min_rank in nav_items %}
-          {% if role_rank >= min_rank and not forced_change %}
-          <a class="nav-btn{% if active_nav == key %} active{% endif %}" href="{{ href }}"{% if active_nav == key %} aria-current="page"{% endif %}><svg class="icon" aria-hidden="true"><use href="#i-{{ icon }}"/></svg><span class="nav-label">{{ label }}</span>{% if key == 'launch' %}<span class="nav-badge" id="navLaunchBadge" hidden></span>{% endif %}</a>
-          {% endif %}
-        {% endfor %}
-      </nav>
-      <div class="sidebar-foot">
-        <button type="button" class="theme-toggle palette-trigger" id="paletteOpen" aria-keyshortcuts="Control+K"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><span class="nav-label">Поиск</span><kbd class="kbd-hint" aria-hidden="true">Ctrl K</kbd></button>
-        {# Theme menu: system / light / dark; ui.js keeps aria-checked in sync and handles the keyboard. #}
-        <details class="menu view-menu" id="viewMenu">
-          <summary class="theme-toggle view-menu-trigger" aria-haspopup="menu" title="Тема интерфейса"><svg class="icon" aria-hidden="true"><use href="#i-contrast"/></svg><span class="nav-label">Тема</span><span class="view-menu-value" id="viewMenuValue"></span><svg class="icon icon-chevron" aria-hidden="true"><use href="#i-chevron-up"/></svg></summary>
-          <div class="menu-items view-menu-items" role="menu" aria-label="Тема интерфейса">
-            <button type="button" role="menuitemradio" aria-checked="false" data-view-pref="theme" data-value="system"><svg class="icon" aria-hidden="true"><use href="#i-monitor"/></svg><span>Как в системе</span><svg class="icon icon-check" aria-hidden="true"><use href="#i-check"/></svg></button>
-            <button type="button" role="menuitemradio" aria-checked="false" data-view-pref="theme" data-value="light"><svg class="icon" aria-hidden="true"><use href="#i-sun"/></svg><span>Светлая</span><svg class="icon icon-check" aria-hidden="true"><use href="#i-check"/></svg></button>
-            <button type="button" role="menuitemradio" aria-checked="false" data-view-pref="theme" data-value="dark"><svg class="icon" aria-hidden="true"><use href="#i-moon"/></svg><span>Тёмная</span><svg class="icon icon-check" aria-hidden="true"><use href="#i-check"/></svg></button>
-          </div>
-        </details>
-        {% if auth_enabled and current_user %}
-        <details class="menu user-menu">
-          <summary class="user-chip" aria-label="Меню пользователя"><span class="avatar" aria-hidden="true">{{ (current_user.title or current_user.username or '?')[:1] | upper }}</span><span class="user-text"><span class="user-name">{{ current_user.title }}</span><span class="user-role">{{ current_user.role.label }}</span></span><svg class="icon icon-chevron" aria-hidden="true"><use href="#i-chevron-up"/></svg></summary>
-          <div class="menu-items">
-            <div class="menu-note">{{ current_user.username }} · {{ current_user.role.label }}</div>
-            <a class="menu-link{% if active_nav == 'account' %} active{% endif %}" href="/account">Профиль и API-токены</a>
-            <form method="post" action="/logout"><button type="submit">Выйти</button></form>
-          </div>
-        </details>
-        {% endif %}
-      </div>
-    </aside>
-    <div class="sidebar-backdrop" id="navBackdrop"></div>
-    <div class="app-main">
-      <header class="app-topbar">
-        <button type="button" class="icon-btn nav-toggle" id="navToggle" aria-expanded="false" aria-controls="appSidebar" aria-label="Открыть меню"><svg class="icon" aria-hidden="true"><use href="#i-menu"/></svg></button>
-        <a class="brand-link" href="/" aria-label="LoadLens — на дэшборд">
-          <img class="logo" src="/assets/logo.png?c={{ appearance.key }}" alt="" />
-          <span class="brand">LoadLens</span>
-        </a>
-      </header>
-      <main id="main" class="container {% block container_class %}{% endblock %}">
-        {% if storage_down and role_rank >= 3 %}
-        <div class="banner banner-fail" id="storageDownBanner" role="status">
-          <div>
-            <div class="banner-title">Хранилище недоступно</div>
-            Отчёты и архив сейчас не загружаются. <a href="/recovery">Проверить и исправить подключение</a>
-          </div>
+      <div class="sidebar-backdrop" id="navBackdrop"></div>
+      <div class="topbar-drawer" id="appSidebar">
+        <div class="drawer-head">
+          <button type="button" class="icon-btn sidebar-close" id="navClose" aria-label="{{ t('ui.nav_menu.close') }}"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
         </div>
-        {% endif %}
-        {% block content %}{% endblock %}
-      </main>
-    </div>
+        <nav class="app-nav" id="appNav" aria-label="{{ t('nav.main') }}">
+          {# The last item is the minimum role rank: 1 viewer, 2 engineer, 3 admin. While a password change is enforced every page but the account is refused, so no links are shown. #}
+          {% set forced_change = current_user and current_user.must_change_password %}
+          {% set nav_items = [('dashboard', '/', t('nav.item.dashboard'), 'dashboard', 1), ('new', '/new', t('nav.item.new'), 'file-plus', 2), ('launch', '/launch', t('nav.item.launch'), 'play', 2), ('archive', '/reports', t('nav.item.archive'), 'archive', 1), ('compare', '/compare', t('nav.item.compare'), 'columns', 1), ('forecasting', '/forecasting', t('nav.item.forecasting'), 'trending', 1), ('settings', '/settings', t('nav.item.settings'), 'sliders', 3)] %}
+          {% for key, href, label, icon, min_rank in nav_items %}
+            {% if role_rank >= min_rank and not forced_change %}
+            <a class="nav-btn{% if active_nav == key %} active{% endif %}" href="{{ href }}"{% if active_nav == key %} aria-current="page"{% endif %}><svg class="icon" aria-hidden="true"><use href="#i-{{ icon }}"/></svg><span class="nav-label">{{ label }}</span>{% if key == 'launch' %}<span class="nav-badge" id="navLaunchBadge" hidden></span>{% endif %}</a>
+            {% endif %}
+          {% endfor %}
+        </nav>
+        <div class="topbar-tools">
+          <div class="area-pick">
+            <span class="area-pick-label" aria-hidden="true">{{ t('nav.area_prefix') }}</span>
+            <select id="projectAreaSelect" class="pa-select" aria-label="{{ t('nav.project_area') }}">
+              <option value="">{{ t('ui.project_area.all') }}</option>
+            </select>
+          </div>
+          <button type="button" class="topbar-btn palette-trigger" id="paletteOpen" aria-keyshortcuts="Control+K"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><span class="nav-label">{{ t('nav.search') }}</span><kbd class="kbd-hint" aria-hidden="true">Ctrl K</kbd></button>
+          {# View menu: theme (system / light / dark) and interface language; ui.js keeps aria-checked in sync and handles
+             the keyboard. The language group is hidden when appearance.language_switch is false (the cookie is ignored then). #}
+          <details class="menu view-menu" id="viewMenu">
+            <summary class="topbar-btn view-menu-trigger" aria-haspopup="menu" title="{{ t('nav.view.title') }}"><svg class="icon" aria-hidden="true"><use href="#i-contrast"/></svg><span class="nav-label">{{ t('nav.view.label') }}</span><span class="view-menu-value" id="viewMenuValue"></span><svg class="icon icon-chevron" aria-hidden="true"><use href="#i-chevron-down"/></svg></summary>
+            <div class="menu-items view-menu-items" role="menu" aria-label="{{ t('nav.view.title') }}">
+              <div class="menu-group" role="group" aria-label="{{ t('nav.theme.title') }}">
+                <div class="menu-group-label" aria-hidden="true">{{ t('nav.theme.label') }}</div>
+                <button type="button" role="menuitemradio" aria-checked="false" data-view-pref="theme" data-value="system"><svg class="icon" aria-hidden="true"><use href="#i-monitor"/></svg><span>{{ t('ui.theme.system') }}</span><svg class="icon icon-check" aria-hidden="true"><use href="#i-check"/></svg></button>
+                <button type="button" role="menuitemradio" aria-checked="false" data-view-pref="theme" data-value="light"><svg class="icon" aria-hidden="true"><use href="#i-sun"/></svg><span>{{ t('ui.theme.light') }}</span><svg class="icon icon-check" aria-hidden="true"><use href="#i-check"/></svg></button>
+                <button type="button" role="menuitemradio" aria-checked="false" data-view-pref="theme" data-value="dark"><svg class="icon" aria-hidden="true"><use href="#i-moon"/></svg><span>{{ t('ui.theme.dark') }}</span><svg class="icon icon-check" aria-hidden="true"><use href="#i-check"/></svg></button>
+              </div>
+              {% if appearance.language_switch %}
+              {# Language names are shown in their own language. #}
+              <div class="menu-group" role="group" aria-label="{{ t('common.lang_switch.aria') }}">
+                <div class="menu-group-label" aria-hidden="true">{{ t('nav.lang.label') }}</div>
+                {% for code in ('ru', 'en') %}
+                <button type="button" role="menuitemradio" aria-checked="{{ 'true' if locale == code else 'false' }}" data-view-pref="lang" data-value="{{ code }}" lang="{{ code }}"><span class="menu-lang-code" aria-hidden="true">{{ code | upper }}</span><span>{{ t('common.lang.' ~ code) }}</span><svg class="icon icon-check" aria-hidden="true"><use href="#i-check"/></svg></button>
+                {% endfor %}
+              </div>
+              {% endif %}
+            </div>
+          </details>
+          {% if auth_enabled and current_user %}
+          <details class="menu user-menu">
+            <summary class="user-chip" aria-label="{{ t('nav.user_menu') }}"><span class="avatar" aria-hidden="true">{{ (current_user.title or current_user.username or '?')[:1] | upper }}</span><span class="user-text"><span class="user-name">{{ current_user.title }}</span><span class="user-role">{{ t('common.role.' ~ current_user.role.key) }}</span></span><svg class="icon icon-chevron" aria-hidden="true"><use href="#i-chevron-down"/></svg></summary>
+            <div class="menu-items">
+              <div class="menu-note">{{ current_user.username }} · {{ t('common.role.' ~ current_user.role.key) }}</div>
+              <a class="menu-link{% if active_nav == 'account' %} active{% endif %}" href="/account">{{ t('nav.account') }}</a>
+              <form method="post" action="/logout"><button type="submit">{{ t('nav.logout') }}</button></form>
+            </div>
+          </details>
+          {% endif %}
+        </div>
+      </div>
+    </header>
+    <main id="main" class="container {% block container_class %}{% endblock %}">
+      {% if storage_down and role_rank >= 3 %}
+      <div class="banner banner-fail" id="storageDownBanner" role="status">
+        <div>
+          <div class="banner-title">{{ t('ui.storage_down.title') }}</div>
+          {% set fix_link %}<a href="/recovery">{{ t('ui.storage_down.fix_link') }}</a>{% endset %}{{ t('ui.storage_down.text', action=fix_link) }}
+        </div>
+      </div>
+      {% endif %}
+      {% block content %}{% endblock %}
+    </main>
   </div>
+  {{ i18n_script(i18n_ns|default([])) }}
+  <script defer src="{{ url_for('static', filename='js/i18n.js') }}"></script>
+  <script defer src="{{ url_for('static', filename='js/locale.js') }}"></script>
   <script defer src="{{ url_for('static', filename='js/common.js') }}"></script>
   <script defer src="{{ url_for('static', filename='js/ui.js') }}"></script>
   <script defer src="{{ url_for('static', filename='js/palette.js') }}"></script>

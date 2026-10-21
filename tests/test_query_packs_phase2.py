@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Query packs, phase 2: updates, domain titles, SLA references from roles, detection by source metrics."""
 
 import copy

@@ -1,183 +1,210 @@
 {% extends "base.html" %}
 {% set active_nav = 'settings' %}
-{% block title %}Настройки{% endblock %}
+{% set i18n_ns = ['settings', 'users', 'projects', 'about'] %}
+{% block title %}{{ t('settings.title') }}{% endblock %}
 {% block head %}
 <script src="{{ url_for('static', filename='vendor/ace/ace.js') }}"></script>
 <style>
-  .settings-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
-  .help { color: var(--text-muted); font-size: 13px; line-height: 1.5; margin: 6px 0 12px; }
-  .help code { background: var(--bg-code); padding: 1px 5px; border-radius: 4px; }
-  .card-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
-  .card-actions .status { color: var(--text-muted); font-size: 13px; }
-  .field-warnings { color: var(--warn-fg); font-size: 12px; margin-top: 6px; }
-  .services-table td input[type="text"] { height: 34px; }
-  .project-list { display: grid; gap: 12px; }
+  /* Section menu, cards, lists, editors and the wizard stepper: stage 4 section of app.css. */
+  .settings-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .help { max-width: 860px; margin: 6px 0 12px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+  .help code { padding: 1px 5px; border-radius: var(--radius-sm); background: var(--bg-2); }
+  .card-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+  .card-actions .status { color: var(--muted); font-size: 13px; }
+  .field-warnings { margin-top: 6px; color: var(--warn); font-size: 12px; }
+  .services-table td:first-child { font-family: var(--mono); }
+  /* Projects: sections under a hairline, the title 15px, the id in mono. */
+  .project-list { display: grid; gap: 0; }
+  .project-card { padding: 18px 0 20px; }
   .project-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; flex-wrap: wrap; }
-  .project-title { font-weight: 600; font-size: 15px; }
+  .project-title { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; font-size: 15px; font-weight: 600; }
+  .project-title .st, .project-title .pill { font-size: 12px; font-weight: 400; }
+  .project-id { font-family: var(--mono); }
   .project-actions { display: flex; gap: 6px; flex-wrap: wrap; }
-  .project-card .report-collapsible { margin-top: 10px; }
-  .domain-toggle-list { display: flex; flex-wrap: wrap; gap: 6px; }
-  .domain-toggle-list label { display: inline-flex; align-items: center; gap: 6px; background: var(--bg-elev2); border: 1px solid var(--border); border-radius: 20px; padding: 4px 10px; font-size: 12px; color: var(--text); cursor: pointer; margin: 0; }
+  .project-card .report-collapsible { margin-top: 12px; }
+  .project-card .data-table { margin-top: 8px; }
+  /* Domains of a service: checkboxes with plain labels. */
+  .domain-toggle-list { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+  .domain-toggle-list label { display: inline-flex; align-items: center; gap: 6px; margin: 0; color: var(--text); font-size: 12px; font-weight: 400; cursor: pointer; }
   .domain-toggle-list input { width: auto; height: auto; }
-  .prompt-toolbar { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 8px; }
-  .prompt-toolbar label { margin: 0; display: flex; flex-direction: column; gap: 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); }
-  .prompt-toolbar select { height: 36px; min-width: 200px; }
-  .area-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 14px; margin-bottom: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev); }
+  .prompt-toolbar { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 10px; }
+  .prompt-toolbar label { display: flex; flex-direction: column; gap: 4px; margin: 0; color: var(--dim); font: 500 11px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; }
+  .prompt-toolbar select { min-width: 200px; font-family: var(--sans); letter-spacing: 0; text-transform: none; }
+  /* Area of the page: a bar on the left, no box; an area the settings do not know is a warning. */
+  .area-bar { display: flex; align-items: baseline; gap: 4px 12px; flex-wrap: wrap; margin-bottom: 18px; padding: 2px 0 2px 14px; border-left: 2px solid var(--line-2); }
   .area-bar .scope { font-weight: 600; }
-  .area-bar .scope-note { color: var(--text-muted); font-size: 13px; }
+  .area-bar .scope-note { color: var(--muted); font-size: 13px; }
+  .area-bar.is-unknown { border-left-color: var(--warn); }
+  .area-bar.is-unknown .scope-note { color: var(--warn); }
   body:not(.wizard) .wizard-only { display: none !important; }
   body.wizard .settings-menu, body.wizard .not-in-wizard { display: none !important; }
   body.wizard .settings-layout { grid-template-columns: 1fr; }
-  .wizard-nav { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
-  .wizard-final { text-align: center; padding: 30px 16px; }
-  .wizard-final h3 { font-style: normal; }
+  .wizard-nav { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .wizard-final { padding: 30px 0; text-align: left; }
+  .wizard-final .wizard-nav { justify-content: flex-start; border-top: 0; }
+  /* About: facts as a definition list with mono values, notices on hairlines. */
+  .about-facts { display: grid; grid-template-columns: max-content 1fr; gap: 8px 24px; margin: 0 0 18px; }
+  .about-facts dt { color: var(--muted); }
+  .about-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+  .about-facts #aboutVersion { font-family: var(--mono); font-weight: 500; }
+  .about-notices { padding: 4px 0 14px; font-size: 13px; line-height: 1.5; }
+  .about-notices table { margin: 8px 0; border-collapse: collapse; }
+  .about-notices th, .about-notices td { padding: 6px 14px 6px 0; border: 0; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+  .about-notices th { border-bottom-color: var(--line-2); color: var(--dim); font: 500 11px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; }
 </style>
 {% endblock %}
 {% block content %}
   <div class="settings-head">
-    <h2 style="margin:0">Настройки</h2>
+    <h1 style="margin:0">{{ t('settings.title') }}</h1>
     <div class="page-actions">
-      <a class="btn btn-sm not-in-wizard" href="/settings?wizard=1">Мастер первичной настройки</a>
-      <a class="btn btn-sm wizard-only" href="/settings">Выйти из мастера</a>
+      <a class="btn btn-sm not-in-wizard" href="/settings?wizard=1">{{ t('settings.head.wizard_start') }}</a>
+      <a class="btn btn-sm wizard-only" href="/settings">{{ t('settings.head.wizard_exit') }}</a>
     </div>
   </div>
 
   <div class="area-bar" id="areaBar">
-    <span class="scope" id="areaScopeLabel">Глобальные настройки</span>
-    <span class="scope-note" id="areaScopeNote">Выберите область в боковом меню, чтобы задать переопределения для неё; без области редактируются значения по умолчанию.</span>
+    <span class="scope" id="areaScopeLabel">{{ t('settings.area.global') }}</span>
+    <span class="scope-note" id="areaScopeNote">{{ t('settings.area.global_note_initial') }}</span>
   </div>
 
-  <div id="wizardStepper" class="stepper wizard-only" aria-label="Шаги мастера"></div>
+  <div id="wizardStepper" class="stepper wizard-only" aria-label="{{ t('settings.wizard.steps_aria') }}"></div>
 
   <div class="settings-layout">
-    <nav class="settings-menu" id="settingsMenu" aria-label="Разделы настроек">
-      <button type="button" data-section="projects" class="active">Проекты</button>
-      <button type="button" data-section="connections">Подключения</button>
-      <button type="button" data-section="sla">SLA-критерии</button>
-      <button type="button" data-section="context">Контекст системы</button>
-      <button type="button" data-section="queries">Запросы</button>
-      <button type="button" data-section="prompts">Промпты</button>
-      <button type="button" data-section="services">Сервисы</button>
-      <button type="button" data-section="metrics">Визуализации</button>
-      <button type="button" data-section="appearance">Оформление</button>
-      <button type="button" data-section="users">Пользователи</button>
+    <nav class="settings-menu" id="settingsMenu" aria-label="{{ t('settings.menu.aria') }}">
+      <button type="button" data-section="projects" class="active">{{ t('settings.menu.projects') }}</button>
+      <button type="button" data-section="connections">{{ t('settings.menu.connections') }}</button>
+      <button type="button" data-section="sla">{{ t('settings.menu.sla') }}</button>
+      <button type="button" data-section="context">{{ t('settings.menu.context') }}</button>
+      <button type="button" data-section="queries">{{ t('settings.menu.queries') }}</button>
+      <button type="button" data-section="prompts">{{ t('settings.menu.prompts') }}</button>
+      <button type="button" data-section="services">{{ t('settings.menu.services') }}</button>
+      <button type="button" data-section="metrics">{{ t('settings.menu.metrics') }}</button>
+      <button type="button" data-section="appearance">{{ t('settings.menu.appearance') }}</button>
+      <button type="button" data-section="about">{{ t('about.title') }}</button>
+      <button type="button" data-section="users">{{ t('settings.menu.users') }}</button>
     </nav>
 
     <div class="settings-content">
       <section id="sec-projects" class="settings-section active" aria-labelledby="h-projects">
-        <h3 id="h-projects">Проекты</h3>
-        <p class="help">Проект — это проектная область со своими подключениями, SLA, запросами, промптами и сервисами. В блоке «Что переопределено» видно, откуда берутся настройки: «общие» — из глобальных; «копия общих» — в проекте лежит копия, она не обновится при изменении глобальных; «свои» — значения проекта отличаются от глобальных.</p>
+        <h3 id="h-projects">{{ t('settings.menu.projects') }}</h3>
+        <p class="help">{{ t('settings.projects.help') }}</p>
         <div class="card-actions" style="margin:0 0 12px">
-          <button type="button" class="btn btn-primary" id="projectCreateBtn">Создать проект</button>
+          <button type="button" class="btn btn-primary" id="projectCreateBtn">{{ t('settings.projects.create') }}</button>
         </div>
         <div id="projectsList" class="project-list"></div>
       </section>
 
       <section id="sec-connections" class="settings-section" aria-labelledby="h-connections">
-        <h3 id="h-connections" class="not-in-wizard">Подключения</h3>
-        <p class="help not-in-wizard">Заполните ключевые поля и нажмите «Проверить соединение» — проверка идёт по данным формы ещё до сохранения. Редкие параметры доступны в блоке «Расширенные параметры (JSON)». Пароли и токены показываются как <code>***</code> и хранятся только на сервере. Каталог источников общий для всех областей; привязка доменов и LLM переопределяются для выбранной области. Хранилище и Confluence общие.</p>
+        <h3 id="h-connections" class="not-in-wizard">{{ t('settings.menu.connections') }}</h3>
+        {% set secret_mask %}<code>***</code>{% endset %}<p class="help not-in-wizard">{{ t('settings.connections.help', mask=secret_mask) }}</p>
         <div id="connectionCards"></div>
       </section>
 
       <section id="sec-sla" class="settings-section" aria-labelledby="h-sla">
-        <h3 id="h-sla">SLA-критерии</h3>
-        <p class="help">Отметьте критерии, которые нужно проверять, и задайте пороги. Главный критерий — целевой RPS: если он достигнут на стабильной ступени, тест считается успешным, а нарушения остальных порогов дают вердикт «Есть риски». Неотмеченные критерии не проверяются.</p>
+        <h3 id="h-sla">{{ t('settings.menu.sla') }}</h3>
+        <p class="help">{{ t('settings.sla.help', risk=t('common.verdict.risk')) }}</p>
         <div class="toolbar" style="margin-bottom:10px">
-          <label>Сервис
-            <select id="slaServiceSelect"><option value="">Область (по умолчанию)</option></select>
+          <label>{{ t('settings.scope.service') }}
+            <select id="slaServiceSelect"><option value="">{{ t('settings.scope.area_default') }}</option></select>
           </label>
         </div>
         <div class="card">
           <div id="slaRows"></div>
           <div class="sla-unit-row" id="slaUnitRow"></div>
-          <h4 class="sla-subhead">Определение максимальной производительности</h4>
-          <p class="help sla-subhelp">Запрос RPS выбирается в строке «Целевой RPS». Здесь — как находить стабильные ступени нагрузки.</p>
+          <h4 class="sla-subhead">{{ t('settings.sla.peak_heading') }}</h4>
+          <p class="help sla-subhelp">{{ t('settings.sla.peak_help') }}</p>
           <div id="slaPeakFields"></div>
-          <h4 class="sla-subhead">Прогноз мощностей</h4>
-          <p class="help sla-subhelp">Запросы и модель нагрузки для страницы «Прогнозирование».</p>
+          <h4 class="sla-subhead">{{ t('settings.sla.forecast_heading') }}</h4>
+          <p class="help sla-subhelp">{{ t('settings.sla.forecast_help') }}</p>
           <div id="slaForecastFields"></div>
           <details class="report-collapsible" style="margin-top:14px">
-            <summary><span>Расширенные параметры (JSON)</span></summary>
+            <summary><span>{{ t('settings.json.advanced_params') }}</span></summary>
             <div class="report-collapsible-body">
               <div class="editor-wrap"><div class="editor-header"><span class="editor-title">sla</span><span class="dim" id="slaJsonStatus"></span></div><div id="ed_sla" class="ace-host"></div></div>
             </div>
           </details>
           <div class="card-actions">
-            <button type="button" class="btn btn-primary" id="slaSaveBtn" disabled>Сохранить</button>
+            <button type="button" class="btn btn-primary" id="slaSaveBtn" disabled>{{ t('settings.action.save') }}</button>
             <span class="status" id="slaStatus"></span>
           </div>
         </div>
       </section>
 
       <section id="sec-context" class="settings-section" aria-labelledby="h-context">
-        <h3 id="h-context">Контекст тестируемой системы</h3>
-        <p class="help">Описание системы, компонентов, критичных потоков и рисков. Используется как справочный контекст для анализа ИИ и сохраняется снимком вместе с каждым отчётом. Заполняйте то, что знаете: пустые блоки не мешают. Сервис может иметь свой контекст: он заменяет контекст области целиком.</p>
+        <h3 id="h-context">{{ t('settings.context.heading') }}</h3>
+        <p class="help">{{ t('settings.context.help') }}</p>
         <div class="toolbar context-toolbar" style="margin-bottom:10px">
-          <label>Сервис
-            <select id="contextServiceSelect"><option value="">Область (по умолчанию)</option></select>
+          <label>{{ t('settings.scope.service') }}
+            <select id="contextServiceSelect"><option value="">{{ t('settings.scope.area_default') }}</option></select>
           </label>
           <span class="dim" id="contextOverrideNote"></span>
-          <button type="button" class="btn" id="contextImportBtn" data-min-role="admin">Заполнить из документа</button>
+          <button type="button" class="btn" id="contextImportBtn" data-min-role="admin">{{ t('settings.context.import_button') }}</button>
         </div>
         <div class="card">
           <div id="contextImportBanner" class="ctx-import-banner" role="status" hidden></div>
           <div id="contextForm"></div>
           <details class="report-collapsible" style="margin-top:12px">
-            <summary><span>Расширенный режим (JSON)</span></summary>
+            <summary><span>{{ t('settings.json.advanced_mode') }}</span></summary>
             <div class="report-collapsible-body">
               <div class="editor-wrap"><div class="editor-header"><span class="editor-title">system_context</span><span class="dim" id="contextJsonStatus"></span></div><div id="ed_system_context" class="ace-host tall"></div></div>
             </div>
           </details>
           <div class="card-actions">
-            <button type="button" class="btn btn-primary" id="contextSaveBtn" disabled>Сохранить</button>
+            <button type="button" class="btn btn-primary" id="contextSaveBtn" disabled>{{ t('settings.action.save') }}</button>
             <span class="status" id="contextStatus"></span>
           </div>
         </div>
       </section>
 
       <section id="sec-queries" class="settings-section" aria-labelledby="h-queries">
-        <h3 id="h-queries">Запросы метрик</h3>
-        <p class="help">Запросы метрик по доменам. Нажмите на запрос, чтобы изменить его. Название запроса используется в SLA и при сравнении прогонов, поэтому переименовывайте осторожно. Настройки сервиса переопределяют настройки области.</p>
+        <h3 id="h-queries">{{ t('settings.queries.heading') }}</h3>
+        <p class="help">{{ t('settings.queries.help') }}</p>
         <div class="toolbar" style="margin-bottom:10px">
-          <label>Сервис
-            <select id="queriesServiceSelect"><option value="">Область (по умолчанию)</option></select>
+          <label>{{ t('settings.scope.service') }}
+            <select id="queriesServiceSelect"><option value="">{{ t('settings.scope.area_default') }}</option></select>
           </label>
         </div>
         <div class="card">
           <div id="queriesForm"></div>
           <details class="report-collapsible" style="margin-top:12px">
-            <summary><span>Расширенный режим (JSON)</span></summary>
+            <summary><span>{{ t('settings.json.advanced_mode') }}</span></summary>
             <div class="report-collapsible-body">
               <div class="editor-wrap"><div class="editor-header"><span class="editor-title">queries</span><span class="dim" id="queriesJsonStatus"></span></div><div id="ed_queries" class="ace-host tall"></div></div>
             </div>
           </details>
           <div class="card-actions">
-            <button type="button" class="btn btn-primary" id="queriesSaveBtn" disabled>Сохранить</button>
+            <button type="button" class="btn btn-primary" id="queriesSaveBtn" disabled>{{ t('settings.action.save') }}</button>
             <span class="status" id="queriesStatus"></span>
           </div>
         </div>
       </section>
 
       <section id="sec-prompts" class="settings-section" aria-labelledby="h-prompts">
-        <h3 id="h-prompts">Промпты для анализа ИИ</h3>
-        <p class="help">Инструкции модели по доменам. Плейсхолдеры вида <code>{answer_jvm}</code> подставляются автоматически и подсвечены в редакторе — не удаляйте их из итогового промпта. Каждое сохранение попадает в историю, откуда можно восстановить прежнюю версию. Для редактирования нужна выбранная область.</p>
+        <h3 id="h-prompts">{{ t('settings.prompts.heading') }}</h3>
+        {% set placeholder_example %}<code>{answer_jvm}</code>{% endset %}<p class="help">{{ t('settings.prompts.help', example=placeholder_example) }}</p>
         <div class="prompt-toolbar">
-          <label>Сервис
-            <select id="promptServiceSelect"><option value="">Область (по умолчанию)</option></select>
+          <label>{{ t('settings.scope.service') }}
+            <select id="promptServiceSelect"><option value="">{{ t('settings.scope.area_default') }}</option></select>
           </label>
-          <label>Домен
+          <label>{{ t('settings.prompts.domain') }}
             <select id="promptDomainSelect"></select>
           </label>
           <span class="dim" id="promptOverrideNote"></span>
+        </div>
+        {# Shown when the override is written in another language than the reports (plans/i18n-plan.md, 3.4). #}
+        <div class="field-hint warn prompt-language-note" id="promptLanguageNote" role="status" hidden>
+          <span id="promptLanguageText"></span>
+          <button type="button" class="btn btn-sm" id="promptShowDefaultBtn"></button>
+          <button type="button" class="btn btn-sm" id="promptLanguageResetBtn">{{ t('settings.action.reset') }}</button>
         </div>
         <div class="card">
           <div class="editor-wrap"><div class="editor-header"><span class="editor-title" id="promptEditorTitle">prompt</span><span class="dim" id="promptStatusInline"></span></div><div id="ed_prompt" class="ace-host tall"></div></div>
           <div class="field-warnings" id="promptWarnings"></div>
           <div class="card-actions">
-            <button type="button" class="btn btn-primary" id="promptSaveBtn" disabled>Сохранить</button>
-            <button type="button" class="btn" id="promptDiffBtn">Отличия от базового</button>
-            <button type="button" class="btn" id="promptHistoryBtn">История</button>
-            <button type="button" class="btn btn-danger" id="promptResetBtn">Сбросить к базовому</button>
+            <button type="button" class="btn btn-primary" id="promptSaveBtn" disabled>{{ t('settings.action.save') }}</button>
+            <button type="button" class="btn" id="promptDiffBtn">{{ t('settings.prompts.diff_button') }}</button>
+            <button type="button" class="btn" id="promptHistoryBtn">{{ t('settings.prompts.history_button') }}</button>
+            <button type="button" class="btn btn-danger" id="promptResetBtn">{{ t('settings.prompts.reset_button') }}</button>
             <span class="status" id="promptStatus"></span>
           </div>
           <div id="promptDiff" class="diff-view" style="display:none; margin-top:12px"></div>
@@ -185,98 +212,134 @@
       </section>
 
       <section id="sec-services" class="settings-section" aria-labelledby="h-services">
-        <h3 id="h-services">Сервисы</h3>
-        <p class="help">Сервис — идентификатор тестируемой системы внутри области, для которого создаются отчёты. Здесь можно задать отображаемое имя и выбрать домены анализа; запросы, SLA, промпты и визуализации сервиса настраиваются в соответствующих разделах через выбор сервиса.</p>
+        <h3 id="h-services">{{ t('settings.menu.services') }}</h3>
+        <p class="help">{{ t('settings.services.help') }}</p>
         <div class="card">
           <div class="table-wrap">
             <table class="data-table services-table">
-              <thead><tr><th>Идентификатор</th><th>Отображаемое имя</th><th>Домены анализа</th><th><span class="visually-hidden">Действия</span></th></tr></thead>
+              <thead><tr><th>{{ t('settings.services.col_id') }}</th><th>{{ t('settings.services.col_title') }}</th><th>{{ t('settings.services.col_domains') }}</th><th><span class="visually-hidden">{{ t('settings.table.actions') }}</span></th></tr></thead>
               <tbody id="servicesBody"></tbody>
             </table>
           </div>
           <div class="card-actions">
-            <button type="button" class="btn" id="addServiceBtn">Добавить сервис</button>
+            <button type="button" class="btn" id="addServiceBtn">{{ t('settings.services.add') }}</button>
             <span class="status" id="servicesStatus"></span>
           </div>
         </div>
       </section>
 
       <section id="sec-metrics" class="settings-section" aria-labelledby="h-metrics">
-        <h3 id="h-metrics">Визуализации (metrics_config)</h3>
-        <p class="help">Панели Grafana и логи Loki для отчёта по шаблону Confluence: <code>page_sample_id</code>, <code>page_parent_id</code>, список <code>metrics</code> с <code>grafana_url</code> и <code>logs</code> с фильтрами. Без выбора сервиса редактируется конфигурация всей области (ключ <code>services</code>).</p>
+        <h3 id="h-metrics">{{ t('settings.metrics.heading') }}</h3>
+        {% macro code(name) %}<code>{{ name }}</code>{% endmacro %}<p class="help">{{ t('settings.metrics.help', sample_id=code('page_sample_id'), parent_id=code('page_parent_id'), metrics=code('metrics'), grafana_url=code('grafana_url'), logs=code('logs'), services=code('services')) }}</p>
         <div class="toolbar" style="margin-bottom:10px">
-          <label>Сервис
-            <select id="metricsServiceSelect"><option value="">Область целиком</option></select>
+          <label>{{ t('settings.scope.service') }}
+            <select id="metricsServiceSelect"><option value="">{{ t('settings.scope.area_whole') }}</option></select>
           </label>
         </div>
         <div class="card">
           <div class="editor-wrap"><div class="editor-header"><span class="editor-title">metrics_config</span><span class="dim" id="metricsJsonStatus"></span></div><div id="ed_metrics_config" class="ace-host tall"></div></div>
           <div class="card-actions">
-            <button type="button" class="btn btn-primary" id="metricsSaveBtn" disabled>Сохранить</button>
+            <button type="button" class="btn btn-primary" id="metricsSaveBtn" disabled>{{ t('settings.action.save') }}</button>
             <span class="status" id="metricsStatus"></span>
           </div>
         </div>
       </section>
 
       <section id="sec-appearance" class="settings-section" aria-labelledby="h-appearance">
-        <h3 id="h-appearance">Оформление</h3>
-        <p class="help">Акцентный цвет всей установки: кнопки, логотип и иконка вкладки. Один для всех областей. Светлая и тёмная тема остаются отдельным переключателем внизу бокового меню.</p>
+        <h3 id="h-appearance">{{ t('settings.menu.appearance') }}</h3>
+        <p class="help">{{ t('settings.appearance.help') }}</p>
+        <div class="appearance-language">
+          <label for="reportLanguage">{{ t('settings.appearance.language_label') }}</label>
+          <select id="reportLanguage">
+            {% for code in ('ru', 'en') %}<option value="{{ code }}" lang="{{ code }}"{% if report_language == code %} selected{% endif %}>{{ t('common.lang.' ~ code) }}</option>{% endfor %}
+          </select>
+          <div class="field-hint">{{ t('settings.appearance.language_hint') }}</div>
+        </div>
+        {# The wizard step of this section is the language only. #}
+        <div class="appearance-accent not-in-wizard">
+        <h4 class="appearance-subhead">{{ t('settings.appearance.accent_heading') }}</h4>
         <p id="appearanceError" class="field-hint error" hidden></p>
-        <div id="accentPresets" class="accent-presets" role="group" aria-label="Готовые цвета"></div>
+        <div id="accentPresets" class="accent-presets" role="group" aria-label="{{ t('settings.appearance.presets_aria') }}"></div>
         <div id="accentCustom" class="accent-wheel-wrap" hidden>
-          <div id="accentWheel" class="accent-wheel" role="application" aria-label="Цветовое колесо">
+          <div id="accentWheel" class="accent-wheel" role="application" aria-label="{{ t('settings.appearance.wheel_aria') }}">
             <span id="accentMarker" class="accent-marker"></span>
           </div>
           <div class="accent-controls">
-            <label for="accentValue">Яркость <input id="accentValue" type="range" min="8" max="96" value="70" /></label>
-            <label for="accentHex">Цвет <input id="accentHex" type="text" maxlength="7" spellcheck="false" autocomplete="off" /></label>
+            <label for="accentValue">{{ t('settings.appearance.brightness') }} <input id="accentValue" type="range" min="8" max="96" value="70" /></label>
+            <label for="accentHex">{{ t('settings.appearance.color') }} <input id="accentHex" type="text" maxlength="7" spellcheck="false" autocomplete="off" /></label>
           </div>
         </div>
-        <p><button type="button" class="btn btn-primary accent-sample" id="accentSample">Так выглядит кнопка</button></p>
+        <p><button type="button" class="btn btn-primary accent-sample" id="accentSample">{{ t('settings.appearance.sample') }}</button></p>
         <p id="appearanceWarnings" class="field-hint warn"></p>
+        </div>
         <div class="card-actions">
-          <button type="button" class="btn btn-primary" id="appearanceSave" disabled>Сохранить</button>
-          <button type="button" class="btn" id="appearanceReset">Сбросить к фиолетовому</button>
+          <button type="button" class="btn btn-primary" id="appearanceSave" disabled>{{ t('settings.action.save') }}</button>
+          <button type="button" class="btn not-in-wizard" id="appearanceReset">{{ t('settings.appearance.reset') }}</button>
           <span class="status" id="appearanceStatus"></span>
         </div>
       </section>
 
+      {# Read-only: version and links come from loadlens_app/version.py (about_info), nothing from the configuration. #}
+      <section id="sec-about" class="settings-section not-in-wizard" aria-labelledby="h-about">
+        <h3 id="h-about">{{ t('about.title') }}</h3>
+        <p class="help">{{ t('about.help') }}</p>
+        <dl class="about-facts">
+          <dt>{{ t('about.version') }}</dt>
+          <dd><strong id="aboutVersion">{{ about_info.name }} {{ about_info.version }}</strong> <span class="dim" id="aboutBuild">{% if about_info.build %}{{ t('about.build', build=about_info.build) }}{% else %}{{ t('about.build_unknown') }}{% endif %}</span></dd>
+          <dt>{{ t('about.license') }}</dt>
+          <dd>{% set license_link %}<a href="{{ about_info.source_url }}/blob/main/LICENSE" target="_blank" rel="noopener">{{ t('about.license_name') }}</a>{% endset %}{% set notice_link %}<a href="{{ about_info.source_url }}/blob/main/NOTICE" target="_blank" rel="noopener">NOTICE</a>{% endset %}{{ t('about.license_text', license=license_link, notice=notice_link) }}</dd>
+          <dt>{{ t('about.source') }}</dt>
+          <dd><a href="{{ about_info.source_url }}" target="_blank" rel="noopener">{{ about_info.source_url }}</a></dd>
+          <dt>{{ t('about.docs') }}</dt>
+          <dd><a href="{{ about_info.docs_url }}" target="_blank" rel="noopener">{{ t('about.docs_link') }}</a></dd>
+          <dt>{{ t('about.feedback') }}</dt>
+          <dd>{% set issues_link %}<a href="{{ about_info.source_url }}/issues" target="_blank" rel="noopener">{{ t('about.issues_link') }}</a>{% endset %}{% set discussions_link %}<a href="{{ about_info.source_url }}/discussions" target="_blank" rel="noopener">{{ t('about.discussions_link') }}</a>{% endset %}{{ t('about.feedback_text', issues=issues_link, discussions=discussions_link) }}</dd>
+        </dl>
+        <details class="report-collapsible" id="aboutThirdParty">
+          <summary>{{ t('about.third_party.heading') }}</summary>
+          <div class="about-notices">
+            <p class="help">{{ t('about.third_party.help') }}</p>
+            <div id="aboutThirdPartyBody" data-url="/about/third-party"><p class="dim">{{ t('about.third_party.loading') }}</p></div>
+          </div>
+        </details>
+      </section>
+
       <section id="sec-users" class="settings-section not-in-wizard" aria-labelledby="h-users">
-        <h3 id="h-users">Пользователи</h3>
-        <p class="help"><strong>Наблюдатель</strong> смотрит отчёты, архив, сравнение и прогнозы. <strong>Инженер</strong> дополнительно запускает анализ, публикует в Confluence, пишет заметки и ставит оценки. <strong>Администратор</strong> дополнительно меняет настройки и подключения, удаляет данные и управляет пользователями. Блокировка после неудачных входов снимается кнопкой «Разблокировать».</p>
+        <h3 id="h-users">{{ t('settings.menu.users') }}</h3>
+        {% set role_viewer %}<strong>{{ t('settings.users.help_viewer') }}</strong>{% endset %}{% set role_engineer %}<strong>{{ t('settings.users.help_engineer') }}</strong>{% endset %}{% set role_admin %}<strong>{{ t('settings.users.help_admin') }}</strong>{% endset %}<p class="help">{{ t('settings.users.help', viewer=role_viewer, engineer=role_engineer, admin=role_admin) }}</p>
         <div class="card">
           <div class="card-actions" style="margin:0 0 12px">
-            <button type="button" class="btn btn-primary" id="userCreateBtn">Добавить пользователя</button>
+            <button type="button" class="btn btn-primary" id="userCreateBtn">{{ t('settings.users.add') }}</button>
             <span class="status" id="usersStatus"></span>
           </div>
           <div class="table-wrap">
             <table class="data-table">
-              <thead><tr><th>Логин</th><th>Имя</th><th>Роль</th><th>Источник</th><th>Статус</th><th>Последний вход</th><th><span class="visually-hidden">Действия</span></th></tr></thead>
-              <tbody id="usersBody"><tr class="empty-row"><td colspan="7">Загрузка…</td></tr></tbody>
+              <thead><tr><th>{{ t('settings.users.col_login') }}</th><th>{{ t('settings.users.col_name') }}</th><th>{{ t('settings.users.col_role') }}</th><th>{{ t('settings.users.col_source') }}</th><th>{{ t('settings.users.col_status') }}</th><th>{{ t('settings.users.col_last_login') }}</th><th><span class="visually-hidden">{{ t('settings.table.actions') }}</span></th></tr></thead>
+              <tbody id="usersBody"><tr class="empty-row"><td colspan="7">{{ t('settings.status.loading') }}</td></tr></tbody>
             </table>
           </div>
         </div>
         <details class="report-collapsible" id="tokensBox" style="margin-top:14px">
-          <summary><span>API-токены всех пользователей</span></summary>
+          <summary><span>{{ t('settings.users.tokens_heading') }}</span></summary>
           <div class="report-collapsible-body">
             <div class="table-wrap">
               <table class="data-table">
-                <thead><tr><th>Название</th><th>Владелец</th><th>Начало токена</th><th>Роль</th><th>Истекает</th><th>Использован</th><th>Статус</th><th><span class="visually-hidden">Действия</span></th></tr></thead>
+                <thead><tr><th>{{ t('settings.users.col_token_name') }}</th><th>{{ t('settings.users.col_owner') }}</th><th>{{ t('settings.users.col_token_prefix') }}</th><th>{{ t('settings.users.col_role') }}</th><th>{{ t('settings.users.col_expires') }}</th><th>{{ t('settings.users.col_used') }}</th><th>{{ t('settings.users.col_status') }}</th><th><span class="visually-hidden">{{ t('settings.table.actions') }}</span></th></tr></thead>
                 <tbody id="allTokensBody"></tbody>
               </table>
             </div>
           </div>
         </details>
         <details class="report-collapsible" id="auditBox" style="margin-top:14px">
-          <summary><span>Журнал действий</span></summary>
+          <summary><span>{{ t('settings.users.audit_heading') }}</span></summary>
           <div class="report-collapsible-body">
             <div class="card-actions" style="margin:0 0 8px">
-              <button type="button" class="btn btn-sm" id="auditRefreshBtn">Обновить</button>
+              <button type="button" class="btn btn-sm" id="auditRefreshBtn">{{ t('settings.users.audit_refresh') }}</button>
               <span class="status" id="auditStatus"></span>
             </div>
             <div class="table-wrap">
               <table class="data-table">
-                <thead><tr><th>Время</th><th>Кто</th><th>Действие</th><th>Объект</th><th>Подробности</th><th>Адрес</th></tr></thead>
+                <thead><tr><th>{{ t('settings.users.col_time') }}</th><th>{{ t('settings.users.col_actor') }}</th><th>{{ t('settings.users.col_action') }}</th><th>{{ t('settings.users.col_target') }}</th><th>{{ t('settings.users.col_details') }}</th><th>{{ t('settings.users.col_address') }}</th></tr></thead>
                 <tbody id="auditBody"></tbody>
               </table>
             </div>
@@ -286,32 +349,35 @@
 
       <section id="sec-wizard-done" class="settings-section wizard-only" aria-labelledby="h-wizard-done">
         <div class="card wizard-final">
-          <h3 id="h-wizard-done">Настройка завершена</h3>
-          <p class="help">Подключения проверены. Можно загрузить демонстрационный прогон, чтобы посмотреть отчёт без реальных данных, или сразу создать первый отчёт.</p>
-          <div class="wizard-nav" style="justify-content:center">
-            <button type="button" class="btn" id="wizardDemoBtn">Загрузить демо-данные</button>
-            <a class="btn btn-primary" href="/new">Создать первый отчёт</a>
-            <a class="btn" href="/">На дэшборд</a>
+          <h3 id="h-wizard-done">{{ t('settings.wizard.done_heading') }}</h3>
+          <p class="help">{{ t('settings.wizard.done_help') }}</p>
+          <div class="wizard-nav">
+            <button type="button" class="btn" id="wizardDemoBtn">{{ t('settings.wizard.demo_button') }}</button>
+            <a class="btn btn-primary" href="/new">{{ t('settings.wizard.first_report') }}</a>
+            <a class="btn" href="/">{{ t('settings.wizard.to_dashboard') }}</a>
           </div>
           <div class="status" id="wizardDemoStatus" style="margin-top:10px"></div>
         </div>
       </section>
 
       <div class="wizard-nav wizard-only" id="wizardNav">
-        <button type="button" class="btn" id="wizardPrevBtn">Назад</button>
-        <button type="button" class="btn" id="wizardSkipBtn">Пропустить шаг</button>
-        <button type="button" class="btn btn-primary" id="wizardNextBtn" disabled>Далее</button>
-        <span class="dim" id="wizardHint">Проверьте соединение, чтобы перейти дальше.</span>
+        <button type="button" class="btn" id="wizardPrevBtn">{{ t('settings.wizard.back') }}</button>
+        <button type="button" class="btn" id="wizardSkipBtn">{{ t('settings.wizard.skip') }}</button>
+        <button type="button" class="btn btn-primary" id="wizardNextBtn" disabled>{{ t('settings.wizard.next') }}</button>
+        <span class="dim" id="wizardHint">{{ t('settings.wizard.hint_initial') }}</span>
       </div>
     </div>
   </div>
 
   <div class="dirty-bar" id="dirtyBar" role="status">
-    <span>Несохранённые изменения: <strong id="dirtyList"></strong></span>
-    <button type="button" class="btn btn-primary btn-sm" id="dirtySaveAll">Сохранить всё</button>
+    {% set dirty_list %}<strong id="dirtyList"></strong>{% endset %}<span>{{ t('settings.dirty.bar', list=dirty_list) }}</span>
+    <button type="button" class="btn btn-primary btn-sm" id="dirtySaveAll">{{ t('settings.dirty.save_all') }}</button>
   </div>
 {% endblock %}
 {% block scripts %}
+{# Third-party notices of the About section: markdown rendered with the same vendored libraries as the report page. #}
+<script defer src="{{ url_for('static', filename='vendor/purify.min.js') }}"></script>
+<script defer src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script>
 <script defer src="{{ url_for('static', filename='js/settings.js') }}"></script>
 <script defer src="{{ url_for('static', filename='js/projects.js') }}"></script>
 <script defer src="{{ url_for('static', filename='js/users.js') }}"></script>

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Blueprint for settings UI and runtime overrides."""
 
 from __future__ import annotations
@@ -7,13 +8,14 @@ from datetime import datetime, timezone
 
 from flask import Blueprint, jsonify, render_template, request
 
+from AI.i18n import t as translate
 from loadlens_app.errors import internal_error
 
 from loadlens_app.core import (
     LOCKED_PROMPT_DOMAINS,
     METRICS_RUNTIME_PATH,
     PROMPT_DOMAIN_FILES,
-    _active_area_prompts,
+    _active_area_prompt_scope,
     _available_domain_keys,
     _delete_service_data,
     _find_area_for_service,
@@ -85,7 +87,7 @@ def delete_service():
     area = (data.get("area") or "").strip()
     service = (data.get("service") or "").strip()
     if not area or not service:
-        return jsonify({"error": "area и service обязательны"}), 400
+        return jsonify({"error": translate("api.required.area_service")}), 400
     _delete_service_data(area, service)
     return jsonify({"status": "ok"})
 
@@ -115,15 +117,19 @@ def get_prompts():
             services_payload.append({"id": sid, "title": title})
         if service and service not in services_map:
             service = ""
-        prompts = _active_area_prompts(active_area or None, service or None)
-        filtered_prompts = {k: v for k, v in prompts.items() if k not in LOCKED_PROMPT_DOMAINS}
+        # Defaults are shown in the language of reports; an override keeps its own text (and language).
+        scope = _active_area_prompt_scope(active_area or None, service or None)
+        editable = [k for k in scope["texts"] if k not in LOCKED_PROMPT_DOMAINS]
         return jsonify(
             {
                 "areas": area_ids,
                 "active_area": active_area,
                 "services": services_payload,
                 "active_service": service if service else "",
-                "domains": filtered_prompts,
+                "domains": {k: scope["texts"][k] for k in editable},
+                "language": scope["language"],
+                "sources": {k: scope["sources"][k] for k in editable},
+                "override_language": {k: v for k, v in scope["override_language"].items() if k in editable},
             }
         )
     except Exception as e:  # pragma: no cover
@@ -142,13 +148,13 @@ def post_prompts():
         if not area and service:
             area = _find_area_for_service(service) or ""
         if not area:
-            return jsonify({"error": "area обязательна"}), 400
+            return jsonify({"error": translate("api.required.area")}), 400
         if domain not in PROMPT_DOMAIN_FILES:
-            return jsonify({"error": "неверный domain"}), 400
+            return jsonify({"error": translate("api.settings.bad_domain")}), 400
         if domain in LOCKED_PROMPT_DOMAINS:
-            return jsonify({"error": "Редактирование домена запрещено"}), 400
+            return jsonify({"error": translate("server.prompts.locked_domain")}), 400
         if not isinstance(text, str):
-            return jsonify({"error": "text должен быть строкой"}), 400
+            return jsonify({"error": translate("server.prompts.text_string")}), 400
         existing = _load_settings_runtime_data()
         previous = _current_prompt_override(existing, area, service, domain)
         if previous != text:
@@ -185,9 +191,15 @@ def post_prompts():
 
 @settings_bp.route("/prompts/defaults", methods=["GET"])
 def get_prompt_defaults():
-    """Базовые тексты промптов из AI/prompts/*.txt (без runtime-переопределений)."""
-    base = _load_base_prompts()
-    return jsonify({"domains": {k: v for k, v in base.items() if k not in LOCKED_PROMPT_DOMAINS}})
+    """Базовые тексты промптов из AI/prompts/<lang>/*.txt (без runtime-переопределений).
+
+    ``?lang=ru|en`` выбирает язык; по умолчанию — язык отчётов (``appearance.language``).
+    """
+    from loadlens_app.i18n import normalize_lang, report_language
+
+    lang = normalize_lang(request.args.get("lang")) or report_language()
+    base = _load_base_prompts(lang)
+    return jsonify({"language": lang, "domains": {k: v for k, v in base.items() if k not in LOCKED_PROMPT_DOMAINS}})
 
 
 @settings_bp.route("/prompts/history", methods=["GET"])
@@ -197,11 +209,11 @@ def get_prompt_history():
     area = (request.args.get("area") or "").strip()
     service = (request.args.get("service") or "").strip()
     if domain not in PROMPT_DOMAIN_FILES or domain in LOCKED_PROMPT_DOMAINS:
-        return jsonify({"error": "неверный domain"}), 400
+        return jsonify({"error": translate("api.settings.bad_domain")}), 400
     if not area and service:
         area = _find_area_for_service(service) or ""
     if not area:
-        return jsonify({"error": "area обязательна"}), 400
+        return jsonify({"error": translate("api.required.area")}), 400
     runtime = _load_settings_runtime_data()
     history = runtime.get("prompt_history") if isinstance(runtime.get("prompt_history"), dict) else {}
     scope_bucket = history.get(_history_scope(area, service))
@@ -221,7 +233,7 @@ def update_service_meta():
         if service and not area:
             area = _find_area_for_service(service) or ""
         if not area or not service:
-            return jsonify({"error": "area и service обязательны"}), 400
+            return jsonify({"error": translate("api.required.area_service")}), 400
         runtime = _load_settings_runtime_data()
         if "per_area" not in runtime or not isinstance(runtime.get("per_area"), dict):
             runtime["per_area"] = {}
@@ -255,7 +267,7 @@ def delete_service_meta():
         if service and not area:
             area = _find_area_for_service(service) or ""
         if not area or not service:
-            return jsonify({"error": "area и service обязательны"}), 400
+            return jsonify({"error": translate("api.required.area_service")}), 400
 
         runtime = _load_settings_runtime_data()
         changed = False

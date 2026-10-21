@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Celery tasks of the background jobs: building a report, publishing it to Confluence, publishing a forecast.
 
 :func:`loadlens_app.job_runner.submit` publishes them to the ``reports`` queue, or runs them in a thread of
@@ -21,6 +22,11 @@ Order of calls in a task delivered by Celery:
 
 In a thread of the web process only step 4 runs: the job was created there as a running thread job, its
 settings are current, and thread jobs are not swept.
+
+Step 4 runs in the language of the job (``with_locale``): ``report_language`` of a report job, the installation
+setting for a publication (the page itself is written in the language of the stored report). Messages are
+:class:`AI.i18n.Msg`: the row keeps the text and its ref, and the job list renders the ref in each reader's
+language (``loadlens_app.jobs``).
 """
 
 from __future__ import annotations
@@ -31,6 +37,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
+from AI.i18n import LocalizedError, Msg, msg, t, with_locale
 from loadlens_app import jobs
 from loadlens_app.celery_app import celery_app, report_task_time_limits
 from loadlens_app.jobs import JOB_STATUS_DONE, JOB_STATUS_ERROR, JOB_STATUS_RUNNING
@@ -51,7 +58,8 @@ HEARTBEAT_INTERVAL_SEC = 30.0
 #: a thread job keeps its state in memory, a worker job would otherwise end as "the worker does not answer").
 FINAL_UPDATE_RETRY_DELAYS_SEC = (1.0, 3.0)
 
-TIME_LIMIT_MESSAGE = "Задача прервана: превышено время задачи"
+# Message key of a job ended by the time limit; TIME_LIMIT_MESSAGE gives its text (quoted by docs/jobs-runner.md).
+TIME_LIMIT_KEY = "job.time_limit"
 TIME_LIMIT_ERROR = "The task exceeded its time limit of {seconds} s (LOADLENS_REPORT_TASK_LIMIT_SEC)"
 
 SOFT_TIME_LIMIT_SEC, HARD_TIME_LIMIT_SEC = report_task_time_limits()
@@ -87,8 +95,13 @@ def report_task(
     test_type: str,
     run_tag: Optional[str] = None,
     run_filter_packs: Optional[List[str]] = None,
+    report_language: str = "ru",
 ) -> None:
-    """Builds a report (``update_page.update_report``) for the job started by ``dashboard.start_report_job``."""
+    """Builds a report (``update_page.update_report``) for the job started by ``dashboard.start_report_job``.
+
+    ``report_language`` is fixed when the job is queued (the worker has its own settings snapshot); messages queued
+    by an older web process have no such argument and build a Russian report, as before.
+    """
     dashboard = _dashboard()
 
     def work(progress: Progress) -> Dict[str, Any]:
@@ -103,20 +116,21 @@ def report_task(
             progress_callback=progress,
             run_tag=run_tag,
             run_filter_packs=run_filter_packs,
+            report_language=report_language,
         )
         result = res if isinstance(res, dict) else {}
         run_id = str(result.get("run_id") or "")
         return dict(
             status=JOB_STATUS_DONE,
             progress=100,
-            message="Готово",
+            message=msg("job.done"),
             report_url=result.get("page_url"),
             page_url=f"/reports/{run_id}" if run_id else None,
             page_id=str(result["page_id"]) if result.get("page_id") is not None else None,
             run_name=str(result.get("run_name") or run_name),
         )
 
-    _run_job(self, job_id, work, dashboard._job_failure_message)
+    _run_job(self, job_id, work, dashboard._job_failure_message, locale=report_language)
 
 
 @celery_app.task(name="loadlens.publish_confluence", **_TASK_OPTIONS)
@@ -129,7 +143,7 @@ def publish_confluence_task(self, job_id: str, *, run_name: str, service: str, s
         return dict(
             status=JOB_STATUS_DONE,
             progress=100,
-            message="Готово",
+            message=msg("job.done"),
             page_url=result.get("page_url"),
             page_id=str(result["page_id"]) if result.get("page_id") is not None else None,
         )
@@ -153,7 +167,7 @@ def publish_forecast_task(
 
     def work(progress: Progress) -> Dict[str, Any]:
         result = forecast.publish_forecast(run_id, target_rps, headroom_pct, cpu_ceiling_pct, source_url, progress)
-        return dict(status=JOB_STATUS_DONE, progress=100, message="Готово", page_url=result["page_url"], page_id=result["page_id"])
+        return dict(status=JOB_STATUS_DONE, progress=100, message=msg("job.done"), page_url=result["page_url"], page_id=result["page_id"])
 
     _run_job(self, job_id, work, forecast._failure_message)
 
@@ -165,9 +179,15 @@ def _run_job(
     task: Any,
     job_id: str,
     work: Callable[[Progress], Dict[str, Any]],
-    failure_message: Callable[[str], str],
+    failure_message: Callable[[str], Any],
+    *,
+    locale: Optional[str] = None,
 ) -> None:
-    """Runs ``work`` for the job and records its outcome; see the module docstring for the order of calls."""
+    """Runs ``work`` for the job and records its outcome; see the module docstring for the order of calls.
+
+    ``locale`` is the language of the job (``None``: the installation setting, read after the settings refresh);
+    the work, its messages and the outcome are rendered in it.
+    """
     store = jobs.job_store
     request = task.request
     via_celery = not getattr(request, "called_directly", True)
@@ -178,23 +198,29 @@ def _run_job(
             return
     stop_heartbeat = _start_heartbeat(store, job_id) if via_celery else None
 
-    def progress(message: str, pct: Optional[int] = None) -> None:
-        store.update(job_id, message=str(message), progress=pct if isinstance(pct, int) else None)
+    def progress(message: Any, pct: Optional[int] = None) -> None:
+        # A Msg (the stages of the pipeline) keeps its ref next to the text; plain text clears the previous ref.
+        if isinstance(message, (Msg, LocalizedError)):
+            fields = jobs.message_fields(message)
+        else:
+            fields = {"message": str(message)}
+        store.update(job_id, **fields, progress=pct if isinstance(pct, int) else None)
 
     try:
-        try:
-            outcome = work(progress)
-        except SoftTimeLimitExceeded:
-            logger.warning("Job %s (%s) exceeded its time limit of %s s", job_id, getattr(task, "name", ""), SOFT_TIME_LIMIT_SEC)
-            outcome = dict(
-                status=JOB_STATUS_ERROR,
-                message=TIME_LIMIT_MESSAGE,
-                error=TIME_LIMIT_ERROR.format(seconds=SOFT_TIME_LIMIT_SEC),
-            )
-        except Exception as exc:
-            logger.warning("Job %s (%s) failed: %s", job_id, getattr(task, "name", ""), exc, exc_info=True)
-            outcome = dict(status=JOB_STATUS_ERROR, message=failure_message(job_id), error=str(exc))
-        _finish(store, job_id, outcome, retry=via_celery)
+        with with_locale(locale if locale is not None else jobs.stored_locale()):
+            try:
+                outcome = work(progress)
+            except SoftTimeLimitExceeded:
+                logger.warning("Job %s (%s) exceeded its time limit of %s s", job_id, getattr(task, "name", ""), SOFT_TIME_LIMIT_SEC)
+                outcome = dict(
+                    status=JOB_STATUS_ERROR,
+                    **jobs.message_fields(msg(TIME_LIMIT_KEY)),
+                    error=TIME_LIMIT_ERROR.format(seconds=SOFT_TIME_LIMIT_SEC),
+                )
+            except Exception as exc:
+                logger.warning("Job %s (%s) failed: %s", job_id, getattr(task, "name", ""), exc, exc_info=True)
+                outcome = dict(status=JOB_STATUS_ERROR, **jobs.message_fields(failure_message(job_id)), error=str(exc))
+            _finish(store, job_id, outcome, retry=via_celery)
     finally:
         if stop_heartbeat is not None:
             stop_heartbeat.set()
@@ -263,6 +289,13 @@ def _finish(store: Any, job_id: str, outcome: Dict[str, Any], *, retry: bool) ->
         if store.update(job_id, **outcome) is not None or delay is None:
             return
         time.sleep(delay)
+
+
+def __getattr__(name: str) -> str:
+    """``TIME_LIMIT_MESSAGE``: the text of :data:`TIME_LIMIT_KEY` in the installation language (docs quote it)."""
+    if name == "TIME_LIMIT_MESSAGE":
+        return t(TIME_LIMIT_KEY, locale=jobs.stored_locale())
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [

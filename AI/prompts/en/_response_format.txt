@@ -1,0 +1,39 @@
+RESPONSE FORMAT (all text fields in English; reply STRICTLY with a single JSON object, no text around it):
+{
+  "verdict": "pass" | "risk" | "fail" | "no_data",
+  "verdict_rationale": "1–2 sentences with the conclusion, then 2–4 key factors as a list separated by \n- ",
+  "confidence": 0.0–1.0,
+  "findings": [
+    {
+      "id": "f1",
+      "summary": "a short statement with a number and the step/interval",
+      "severity": "critical" | "high" | "medium" | "low",
+      "component": "component/pod/service/node from the data or 'unknown'",
+      "start_time": "ISO start time of the window from the context or null",
+      "end_time": "ISO end time of the window or null",
+      "peak_time": "ISO time of the peak or null",
+      "evidence_summary": "which series and steps support the conclusion",
+      "evidence_items": [
+        {"metric": "series name from the context", "observed_value": "number from step_table/top_series/anomalies", "threshold": "SLA threshold with its unit, or null", "note": "step/interval, baseline, related metrics"}
+      ]
+    }
+  ],
+  "recommended_actions": [
+    {"summary": "what to do", "details": "2–4 sentences: the concrete change, the expected effect, how to verify the result", "priority": "critical" | "high" | "medium" | "low", "affected_components": ["component"], "for_finding_ids": ["f1"]}
+  ],
+  "affected_components": ["component"]
+}
+RULES:
+- As many findings as the data confirms: do not add items for the sake of quantity and do not repeat one observation
+  in different words. If the system behaved stably, one or two findings with severity=low is a normal result.
+- Every finding must refer to a step/interval (label from load_steps) and to a number from the context.
+  Numbers outside the context are not allowed; without numeric support do not write a number at all.
+- Do not state threshold if the SLA sets no threshold (write null).
+- Finding ids are short ASCII identifiers f1, f2, ...; for_finding_ids refers to them.
+- verdict is a code: "pass" — passed, "risk" — risks found, "fail" — failed, "no_data" — insufficient data.
+- If the data is insufficient — verdict="no_data" and one finding explaining what is missing.
+- verdict_rationale is mandatory: start with Status "<label>": why exactly this status was chosen, where <label> is the
+  label of the chosen code (pass — Passed, risk — Risks found, fail — Failed, no_data — Insufficient data), for example
+  Status "Risks found": ...; then list 2–4 key facts separated by \n- . An empty rationale is not allowed.
+- The peak_performance field {max_rps, max_time, drop_time, method} is allowed ONLY in the lt_framework domain and in
+  the final report; do not add it in other domains.

@@ -1,0 +1,12 @@
+Domain Focus: hard_resources
+
+Evaluation Criteria Addendum
+- Look for CPU saturation, memory pressure, disk IO, filesystem bottlenecks, network saturation, host-level contention.
+- A good candidate links the resource constraint to a specific node, pod, instance or service.
+- Recommendations must distinguish a compute bottleneck, a memory bottleneck and a storage/network bottleneck.
+
+Evaluation Steps
+1. Check CPU, memory, disk, filesystem and network metrics.
+2. Check whether the hosts/instances with the worst degradation are identified.
+3. Check whether the candidate distinguishes a short peak from sustained saturation.
+4. Check whether the recommendations give concrete steps on capacity, limits/requests, storage or network tuning.

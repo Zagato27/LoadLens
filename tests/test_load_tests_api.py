@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """HTTP API of the launch page, generator settings and the run filter of the load tool packs."""
 
 import copy

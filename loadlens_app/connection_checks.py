@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
 """Connectivity checks for external systems, run from the settings UI.
 
 Each check receives the configuration section as edited in the form (secrets
 already restored), talks to the target with a short timeout and returns a
-:class:`CheckResult` with a human-readable Russian message. Checks never raise:
-failures are reported in the result so the UI can show them inline.
+:class:`CheckResult` with a human-readable message in the locale of the request
+(``server.connection.*`` keys). Checks never raise: failures are reported in the result so the UI can
+show them inline.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import psycopg2
 import requests
 
 from AI.data_sources import ResolvedSource
+from AI.i18n import t
 from AI.pipeline import _resolve_grafana_influx_ds_id, _resolve_grafana_prom_ds_id
 from AI.providers import SUPPORTED_PROVIDERS, _get_gigachat_client, _normalize_llm_base_url, ask_llm_with_text_data
 from loadlens_app.confluence_export import ConfluenceClient
@@ -45,28 +48,28 @@ def _cfg(value: Any) -> dict:
 
 
 def _explain(exc: Exception) -> str:
-    """Maps common transport/auth failures to actionable Russian messages."""
+    """Maps common transport/auth failures to actionable messages."""
     if isinstance(exc, requests.exceptions.Timeout):
-        return f"Превышено время ожидания ответа ({CHECK_TIMEOUT_SEC} с): сервер не отвечает или адрес неверный"
+        return t("server.connection.timeout", seconds=CHECK_TIMEOUT_SEC)
     if isinstance(exc, requests.exceptions.SSLError):
-        return f"Ошибка TLS-сертификата: включите доверенный сертификат или отключите проверку (verify_ssl). {exc}"
+        return t("server.connection.tls", error=str(exc))
     if isinstance(exc, requests.exceptions.ConnectionError):
-        return f"Не удалось подключиться: сервер недоступен или адрес неверный. {exc}"
+        return t("server.connection.connect_failed", error=str(exc))
     if isinstance(exc, requests.exceptions.HTTPError):
         status = exc.response.status_code if exc.response is not None else None
         if status in (401, 403):
-            return f"Отказано в доступе (HTTP {status}): проверьте логин/пароль или токен"
+            return t("server.connection.access_denied", status=status)
         if status == 404:
-            return "Ресурс не найден (HTTP 404): проверьте URL, датасорс или идентификатор"
-        return f"Сервер вернул ошибку HTTP {status}: {exc}"
+            return t("server.connection.not_found")
+        return t("server.connection.http_error", status=status, error=str(exc))
     if isinstance(exc, psycopg2.OperationalError):
         text = str(exc)
         if "password authentication failed" in text:
-            return "Неверный логин или пароль базы данных"
+            return t("server.connection.db_auth")
         if "does not exist" in text:
-            return f"База данных или пользователь не существует: {text.strip()}"
+            return t("server.connection.db_missing", error=text.strip())
         if "could not connect" in text or "Connection refused" in text or "timeout expired" in text:
-            return f"Сервер базы данных недоступен: {text.strip()}"
+            return t("server.connection.db_unreachable", error=text.strip())
         return text.strip()
     return str(exc) or exc.__class__.__name__
 
@@ -110,10 +113,14 @@ def check_timescale(cfg: dict) -> CheckResult:
                 present = sorted(str(r[0]) for r in cur.fetchall())
         finally:
             conn.close()
-        missing = [t for t in expected if t not in present]
-        timescale = f"TimescaleDB {ext_row[0]}" if ext_row else "расширение timescaledb не установлено"
-        note = f"; таблицы будут созданы при первом отчёте: {', '.join(missing)}" if missing else "; все таблицы на месте"
-        return CheckResult(ok=True, message=f"Подключение успешно: {version}, {timescale}{note}", details={"version": version, "timescaledb": ext_row[0] if ext_row else None, "tables_present": present, "tables_missing": missing})
+        missing = [table for table in expected if table not in present]
+        timescale = f"TimescaleDB {ext_row[0]}" if ext_row else t("server.connection.no_timescale")
+        message = (
+            t("server.connection.storage_ok_missing", version=version, timescale=timescale, tables=", ".join(missing))
+            if missing
+            else t("server.connection.storage_ok", version=version, timescale=timescale)
+        )
+        return CheckResult(ok=True, message=message, details={"version": version, "timescaledb": ext_row[0] if ext_row else None, "tables_present": present, "tables_missing": missing})
     return _timed(run)
 
 
@@ -133,7 +140,7 @@ def _grafana_login(g_cfg: dict) -> CheckResult | tuple[str, dict]:
     """Health and ``/api/user``. A ``CheckResult`` means the login itself failed."""
     base_url = str(g_cfg.get("base_url") or "").rstrip("/")
     if not base_url:
-        return CheckResult(ok=False, message="Не указан base_url Grafana")
+        return CheckResult(ok=False, message=t("server.connection.grafana_url_missing"))
     verify = bool(g_cfg.get("verify_ssl", True))
     health = requests.get(f"{base_url}/api/health", timeout=CHECK_TIMEOUT_SEC, verify=verify)
     health.raise_for_status()
@@ -151,7 +158,7 @@ def check_grafana_auth(g_cfg: dict) -> CheckResult:
         if isinstance(logged, CheckResult):
             return logged
         version, details = logged
-        return CheckResult(ok=True, message=f"Grafana {version}: авторизация прошла", details=details)
+        return CheckResult(ok=True, message=t("server.connection.grafana_auth_ok", version=version), details=details)
     return _timed(run)
 
 
@@ -168,7 +175,7 @@ def check_grafana(g_cfg: dict, datasource_kind: str) -> CheckResult:
         id_note = f" (id={ds_id})" if ds_id is not None else ""
         return CheckResult(
             ok=True,
-            message=f"Grafana {version}: авторизация прошла, датасорс «{ds_name}» найден{id_note}",
+            message=t("server.connection.grafana_datasource_ok", version=version, datasource=ds_name, id_note=id_note),
             details={**details, "datasource_id": ds_id},
         )
     return _timed(run)
@@ -225,19 +232,19 @@ def list_grafana_datasources(g_cfg: dict) -> DatasourceListResult:
     started = time.perf_counter()
     base_url = str(g_cfg.get("base_url") or "").rstrip("/")
     if not base_url:
-        return DatasourceListResult(ok=False, message="Не указан base_url Grafana")
+        return DatasourceListResult(ok=False, message=t("server.connection.grafana_url_missing"))
     headers, auth = _grafana_auth(g_cfg)
     try:
         resp = requests.get(f"{base_url}/api/datasources", headers=headers, auth=auth, timeout=CHECK_TIMEOUT_SEC, verify=bool(g_cfg.get("verify_ssl", True)))
         if resp.status_code == 403:
-            result = DatasourceListResult(ok=False, message="Grafana не отдаёт список датасорсов (HTTP 403): у пользователя нет права на чтение датасорсов")
+            result = DatasourceListResult(ok=False, message=t("server.connection.grafana_datasources_forbidden"))
         else:
             resp.raise_for_status()
             payload = resp.json()
             raw_items = payload if isinstance(payload, list) else []
             items = [_datasource_item(item) for item in raw_items if isinstance(item, dict) and item.get("type") in _LISTED_DATASOURCE_TYPES]
             items.sort(key=lambda item: (item.type, item.name.lower()))
-            result = DatasourceListResult(ok=True, message=f"Датасорсов Prometheus и InfluxDB: {len(items)}", datasources=items)
+            result = DatasourceListResult(ok=True, message=t("server.connection.grafana_datasources", count=len(items)), datasources=items)
     except Exception as exc:
         result = DatasourceListResult(ok=False, message=_explain(exc))
     result.elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -248,11 +255,11 @@ def check_prometheus(url: str) -> CheckResult:
     def run() -> CheckResult:
         base = str(url or "").rstrip("/")
         if not base:
-            return CheckResult(ok=False, message="Не указан URL Prometheus")
+            return CheckResult(ok=False, message=t("server.connection.prometheus_url_missing"))
         resp = requests.get(f"{base}/api/v1/status/buildinfo", timeout=CHECK_TIMEOUT_SEC)
         resp.raise_for_status()
         data = (resp.json() or {}).get("data") or {}
-        return CheckResult(ok=True, message=f"Prometheus {data.get('version', '?')} доступен", details={"version": data.get("version")})
+        return CheckResult(ok=True, message=t("server.connection.prometheus_ok", version=data.get("version", "?")), details={"version": data.get("version")})
     return _timed(run)
 
 
@@ -260,14 +267,14 @@ def check_influxdb(influx_cfg: dict) -> CheckResult:
     def run() -> CheckResult:
         base = str(influx_cfg.get("url") or "").rstrip("/")
         if not base:
-            return CheckResult(ok=False, message="Не указан URL InfluxDB")
+            return CheckResult(ok=False, message=t("server.connection.influxdb_url_missing"))
         headers = {"Authorization": f"Token {influx_cfg.get('token')}"} if influx_cfg.get("token") else {}
         resp = requests.get(f"{base}/health", headers=headers, timeout=CHECK_TIMEOUT_SEC)
         resp.raise_for_status()
         data = resp.json() or {}
         status = str(data.get("status") or "unknown")
         ok = status == "pass"
-        return CheckResult(ok=ok, message=f"InfluxDB {data.get('version', '?')}: статус {status}", details={"version": data.get("version"), "status": status})
+        return CheckResult(ok=ok, message=t("server.connection.influxdb_status", version=data.get("version", "?"), status=status), details={"version": data.get("version"), "status": status})
     return _timed(run)
 
 
@@ -280,20 +287,20 @@ def check_data_source(entry: dict) -> CheckResult:
         return check_prometheus(str(_cfg(entry.get("prometheus")).get("url") or ""))
     if source_type == "influxdb":
         return check_influxdb(_cfg(entry.get("influxdb")))
-    return CheckResult(ok=False, message=f"Неизвестный тип источника: {source_type or 'не задан'}. Допустимо: prometheus, grafana_proxy, influxdb")
+    return CheckResult(ok=False, message=t("server.connection.unknown_source_type", type=source_type or t("server.common.unset")))
 
 
 def check_resolved_source(resolved: ResolvedSource, language: str | None) -> CheckResult:
     """Binding check. Grafana also resolves the datasource the domain reads."""
     if not isinstance(resolved, ResolvedSource):
-        return CheckResult(ok=False, message="Не удалось определить источник домена")
+        return CheckResult(ok=False, message=t("server.connection.domain_source_unknown"))
     if resolved.source_type == "prometheus":
         return check_prometheus(resolved.prometheus_url)
     if resolved.source_type == "influxdb":
         return check_influxdb(_cfg(resolved.config.get("influxdb")))
     if resolved.source_type == "grafana_proxy":
         return check_grafana(_cfg(resolved.config.get("grafana")), _grafana_binding_kind(resolved.config, language))
-    return CheckResult(ok=False, message=f"Неизвестный тип источника: {resolved.source_type}")
+    return CheckResult(ok=False, message=t("server.connection.unknown_type", type=resolved.source_type))
 
 
 def _grafana_binding_kind(config: dict, language: str | None) -> str:
@@ -313,7 +320,7 @@ def check_opensearch(logs_cfg: dict) -> CheckResult:
         base = str(os_cfg.get("base_url") or "").rstrip("/")
         index = str(os_cfg.get("index_pattern") or "").strip()
         if not base or not index:
-            return CheckResult(ok=False, message="Укажите base_url и index_pattern OpenSearch")
+            return CheckResult(ok=False, message=t("server.connection.opensearch_missing"))
         username = str(os_cfg.get("username_env") or "").strip()
         password = str(os_cfg.get("password_env") or "").strip()
         resp = requests.post(
@@ -327,28 +334,28 @@ def check_opensearch(logs_cfg: dict) -> CheckResult:
         )
         resp.raise_for_status()
         count = (resp.json() or {}).get("count")
-        return CheckResult(ok=True, message=f"OpenSearch доступен: индекс «{index}», документов: {count}", details={"count": count})
+        return CheckResult(ok=True, message=t("server.connection.opensearch_ok", index=index, count=count), details={"count": count})
     return _timed(run)
 
 
 def check_confluence(cfg: dict) -> CheckResult:
     def run() -> CheckResult:
         if not str(cfg.get("base_url") or "").strip():
-            return CheckResult(ok=False, message="Не указан base_url Confluence")
+            return CheckResult(ok=False, message=t("server.connection.confluence_url_missing"))
         client = ConfluenceClient({**cfg, "request_timeout_sec": CHECK_TIMEOUT_SEC})
         parent_id = str(cfg.get("parent_page_id") or "").strip()
         if parent_id:
             page = client.get_page(parent_id)
             if page is None:
-                return CheckResult(ok=False, message=f"Родительская страница {parent_id} не найдена: проверьте parent_page_id и права доступа")
-            return CheckResult(ok=True, message=f"Confluence доступен: родительская страница «{page.get('title')}» найдена", details={"page_title": page.get("title")})
+                return CheckResult(ok=False, message=t("server.connection.confluence_parent_missing", page_id=parent_id))
+            return CheckResult(ok=True, message=t("server.connection.confluence_parent_ok", title=page.get("title")), details={"page_title": page.get("title")})
         space_key = str(cfg.get("space_key") or "").strip()
         if not space_key:
-            return CheckResult(ok=False, message="Укажите space_key или parent_page_id")
+            return CheckResult(ok=False, message=t("server.connection.confluence_space_required"))
         resp = client.session.get(client._url(f"/rest/api/space/{space_key}"), verify=client.verify_ssl, timeout=CHECK_TIMEOUT_SEC)
         resp.raise_for_status()
         space = resp.json() or {}
-        return CheckResult(ok=True, message=f"Confluence доступен: пространство «{space.get('name') or space_key}» найдено", details={"space_name": space.get("name")})
+        return CheckResult(ok=True, message=t("server.connection.confluence_space_ok", space=space.get("name") or space_key), details={"space_name": space.get("name")})
     return _timed(run)
 
 
@@ -358,19 +365,19 @@ def check_confluence_template(cfg: dict) -> CheckResult:
         url_basic = str(cfg.get("url_basic") or "").rstrip("/")
         space = str(cfg.get("space_conf") or "").strip()
         if not url_basic or not space:
-            return CheckResult(ok=False, message="Укажите url_basic и space_conf Confluence")
+            return CheckResult(ok=False, message=t("server.connection.template_missing"))
         auth = (str(cfg.get("user") or ""), str(cfg.get("password") or ""))
         resp = requests.get(f"{url_basic}/rest/api/space/{space}", auth=auth, timeout=CHECK_TIMEOUT_SEC, verify=bool(cfg.get("verify_ssl", False)))
         resp.raise_for_status()
         space_name = str((resp.json() or {}).get("name") or space)
         details: Dict[str, Any] = {"space_name": space_name}
-        notes = [f"Confluence: пространство «{space_name}» доступно"]
+        notes = [t("server.connection.template_space_ok", space=space_name)]
         grafana_url = str(cfg.get("grafana_base_url") or "").rstrip("/")
         if grafana_url:
             health = requests.get(f"{grafana_url}/api/health", timeout=CHECK_TIMEOUT_SEC, verify=False)
             health.raise_for_status()
             details["grafana_version"] = str((health.json() or {}).get("version") or "?")
-            notes.append(f"Grafana {details['grafana_version']} доступна")
+            notes.append(t("server.connection.template_grafana_ok", version=details["grafana_version"]))
         return CheckResult(ok=True, message="; ".join(notes), details=details)
     return _timed(run)
 
@@ -386,7 +393,8 @@ class ModelListResult:
         return asdict(self)
 
 
-_UNSUPPORTED_MODELS = "Провайдер не отдаёт список моделей"
+def _unsupported_models() -> str:
+    return t("server.connection.models_unsupported")
 
 
 def _model_names(payload: Any) -> list[str]:
@@ -415,19 +423,19 @@ def _models_from_http(url: str, headers: dict, auth=None, verify: bool = True) -
     except Exception as exc:
         return ModelListResult(ok=False, message=_explain(exc), models=[])
     if resp.status_code in (404, 405, 501):
-        return ModelListResult(ok=False, message=_UNSUPPORTED_MODELS)
+        return ModelListResult(ok=False, message=_unsupported_models())
     if resp.status_code in (401, 403):
-        return ModelListResult(ok=False, message=f"Отказано в доступе (HTTP {resp.status_code}): проверьте ключ")
+        return ModelListResult(ok=False, message=t("server.connection.models_access_denied", status=resp.status_code))
     if not resp.ok:
-        return ModelListResult(ok=False, message=f"Сервер вернул ошибку HTTP {resp.status_code}")
+        return ModelListResult(ok=False, message=t("server.connection.models_http_error", status=resp.status_code))
     try:
         payload = resp.json()
     except ValueError:
-        return ModelListResult(ok=False, message=_UNSUPPORTED_MODELS)
+        return ModelListResult(ok=False, message=_unsupported_models())
     names = _model_names(payload)
     if not names:
-        return ModelListResult(ok=False, message=_UNSUPPORTED_MODELS)
-    return ModelListResult(ok=True, message=f"Доступно моделей: {len(names)}", models=names)
+        return ModelListResult(ok=False, message=_unsupported_models())
+    return ModelListResult(ok=True, message=t("server.connection.models_count", count=len(names)), models=names)
 
 
 def _anthropic_compatible_models(pcfg: dict) -> ModelListResult:
@@ -452,7 +460,7 @@ def _anthropic_compatible_models(pcfg: dict) -> ModelListResult:
         {"Authorization": f"Bearer {key}", "Accept": "application/json"},
         verify=verify,
     )
-    if catalog.ok or primary.message == _UNSUPPORTED_MODELS:
+    if catalog.ok or primary.message == _unsupported_models():
         return catalog
     return primary
 
@@ -462,7 +470,9 @@ def list_llm_models(llm_cfg: dict) -> ModelListResult:
     started = time.perf_counter()
     provider = str((llm_cfg or {}).get("provider") or "").strip().lower()
     if provider not in SUPPORTED_PROVIDERS:
-        result = ModelListResult(ok=False, message=f"Неизвестный провайдер «{provider}». Допустимо: {', '.join(SUPPORTED_PROVIDERS)}")
+        result = ModelListResult(
+            ok=False, message=t("server.connection.unknown_provider", provider=provider, allowed=", ".join(SUPPORTED_PROVIDERS))
+        )
     else:
         pcfg = _cfg((llm_cfg or {}).get(provider))
         if provider == "gigachat":
@@ -470,7 +480,8 @@ def list_llm_models(llm_cfg: dict) -> ModelListResult:
                 client = _get_gigachat_client(pcfg)
                 getter = getattr(client, "get_models", None)
                 names = _model_names(getter()) if getter is not None else []
-                result = ModelListResult(ok=bool(names), message=f"Доступно моделей: {len(names)}" if names else _UNSUPPORTED_MODELS, models=names)
+                message = t("server.connection.models_count", count=len(names)) if names else _unsupported_models()
+                result = ModelListResult(ok=bool(names), message=message, models=names)
             except Exception as exc:
                 result = ModelListResult(ok=False, message=_explain(exc))
         elif provider == "anthropic":
@@ -478,7 +489,7 @@ def list_llm_models(llm_cfg: dict) -> ModelListResult:
         else:
             raw_base = str(pcfg.get("api_base_url") or pcfg.get("base_url") or "").strip()
             if not raw_base:
-                result = ModelListResult(ok=False, message="Не указан API URL")
+                result = ModelListResult(ok=False, message=t("server.connection.api_url_missing"))
             else:
                 base = _normalize_llm_base_url(raw_base) if provider == "openai" else raw_base.rstrip("/")
                 if base.endswith("/chat/completions"):
@@ -494,24 +505,31 @@ def check_llm(llm_cfg: dict) -> CheckResult:
     def run() -> CheckResult:
         provider = str(llm_cfg.get("provider") or "").strip().lower()
         if provider not in SUPPORTED_PROVIDERS:
-            return CheckResult(ok=False, message=f"Неизвестный провайдер «{provider}». Допустимо: {', '.join(SUPPORTED_PROVIDERS)}")
+            return CheckResult(
+                ok=False, message=t("server.connection.unknown_provider", provider=provider, allowed=", ".join(SUPPORTED_PROVIDERS))
+            )
         pcfg = dict(_cfg(llm_cfg.get(provider)))
         if not pcfg:
-            return CheckResult(ok=False, message=f"Раздел llm.{provider} не заполнен")
+            return CheckResult(ok=False, message=t("server.connection.llm_section_empty", provider=provider))
         pcfg["request_timeout_sec"] = min(int(pcfg.get("request_timeout_sec") or LLM_CHECK_TIMEOUT_SEC), LLM_CHECK_TIMEOUT_SEC)
         pcfg["connect_timeout_sec"] = min(int(pcfg.get("connect_timeout_sec") or CHECK_TIMEOUT_SEC), CHECK_TIMEOUT_SEC)
         pcfg["generation"] = {**_cfg(pcfg.get("generation")), "max_tokens": 16}
         pcfg["request_min_interval_sec"] = 0
         text = ask_llm_with_text_data(
-            "Ответь одним словом: OK.",
+            t("server.connection.llm_probe_prompt"),
             "",
             llm_config={"provider": provider, provider: pcfg, "force_json": False, "max_attempts": 1},
-            system_prompt="Отвечай одним словом.",
+            system_prompt=t("server.connection.llm_probe_system"),
         )
         reply = str(text or "").strip()
         return CheckResult(
             ok=True,
-            message=f"{provider} ({pcfg.get('model') or 'модель не указана'}) ответил: «{reply[:60]}»",
+            message=t(
+                "server.connection.llm_reply",
+                provider=provider,
+                model=pcfg.get("model") or t("server.connection.model_unset"),
+                reply=reply[:60],
+            ),
             details={"provider": provider, "model": pcfg.get("model"), "reply": reply[:200]},
         )
     return _timed(run)
@@ -526,9 +544,9 @@ def run_check(section: str, data: dict) -> CheckResult:
         timescale = _cfg(payload.get("timescale")) if section == "storage" else payload
         return check_timescale(timescale)
     if section == "data_sources":
-        return CheckResult(ok=False, message="Укажите источник для проверки")
+        return CheckResult(ok=False, message=t("server.connection.source_required"))
     if section == "domain_sources":
-        return CheckResult(ok=False, message="Укажите домен для проверки")
+        return CheckResult(ok=False, message=t("server.connection.domain_required"))
     if section == "logs_source":
         return check_opensearch(payload)
     if section == "confluence":
@@ -537,7 +555,7 @@ def run_check(section: str, data: dict) -> CheckResult:
         return check_confluence_template(payload)
     if section == "llm":
         return check_llm(payload)
-    raise ValueError(f"Проверка соединения недоступна для раздела «{section}». Допустимо: {', '.join(CHECKABLE_SECTIONS)}")
+    raise ValueError(t("server.connection.section_unavailable", section=section, allowed=", ".join(CHECKABLE_SECTIONS)))
 
 
 __all__ = [

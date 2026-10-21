@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Background loop that starts, watches and stops instances of active runs and then starts their reports.
 
 Every few seconds the watcher claims the active runs (its own, unowned ones and those whose watcher
@@ -21,13 +22,15 @@ import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
+from AI.i18n import is_ref
 from loadlens_app.limits import LimitError, check_job_slot, step_seconds
 
 from .executors import STORED_LOG_BYTES, Executor, GeneratorError, Probe, executor_for
 from .generators import Generator
 from .live import report_filter, rps_bounds
+from .messages import error_param, joined, msg, ref_of
 from .service import Catalog, instance_plan, load_catalog
 from .store import (
     INST_ACTIVE,
@@ -92,6 +95,15 @@ DEADLINE_SLACK_SEC = 120
 # After the last stop step the instance must end within this; otherwise LoadLens closes its window and says
 # the process may need a manual stop, so the run, its slots and its report do not hang forever.
 STOP_CONFIRM_SEC = 120
+# Messages of a stop just sent: (requested by a person, forced by the run duration limit).
+_STOP_KEYS = {
+    "unsupported": ("lt.watcher.stop.unsupported", "lt.watcher.stop.unsupported_limit"),
+    "soft": ("lt.watcher.stop.soft", "lt.watcher.stop.soft_limit"),
+    "signal": ("lt.watcher.stop.signal", "lt.watcher.stop.signal_limit"),
+    "pipeline": ("lt.watcher.stop.pipeline", "lt.watcher.stop.pipeline_limit"),
+    "build": ("lt.watcher.stop.build", "lt.watcher.stop.build_limit"),
+    "platform": ("lt.watcher.stop.platform", "lt.watcher.stop.platform_limit"),
+}
 
 
 class RunTakenOver(Exception):
@@ -151,8 +163,29 @@ def _wipe_env(inst: InstanceRecord) -> None:
     _wipe_ci_secrets(inst)
 
 
-def _capital(text: str) -> str:
-    return text[:1].upper() + text[1:]
+def _say(target: Any, message: Any, limit: Optional[int] = None) -> None:
+    """Stores the message of a run or an instance: the text now, and its ref for readers of other languages.
+
+    ``message`` is a dictionary message, a localized error or a ready text (no ref: shown as it is).
+    """
+    text = str(message)
+    target.message = text[:limit] if limit else text
+    target.message_ref = ref_of(message)
+
+
+def _stored(target: Any) -> Any:
+    """The stored message of a run or an instance as a message parameter (its ref when it has one)."""
+    return target.message_ref if is_ref(target.message_ref) else target.message
+
+
+def _with_detail(message: Any, detail: Any) -> Any:
+    return msg("lt.common.detail", message=message, detail=detail) if detail else message
+
+
+def _with_skew(message: Any, skew: float) -> Any:
+    if abs(skew) <= CLOCK_SKEW_NOTE_SEC:
+        return message
+    return msg("lt.watcher.with_skew", message=message, seconds=int(skew))
 
 
 def _past_deadline(inst: InstanceRecord, executor: Executor, max_seconds: int, now: datetime) -> bool:
@@ -165,18 +198,22 @@ def _past_deadline(inst: InstanceRecord, executor: Executor, max_seconds: int, n
 
 
 def summarize_status(output: str) -> str:
-    """Short text of a tool status answer: ``vus: "10"`` and ``vus-max: "20"`` of k6 become «VU 10 из 20»."""
+    """Short text of a tool status answer: ``vus: "10"`` and ``vus-max: "20"`` of k6 become "VU 10 of 20".
+
+    The k6 summary is a dictionary message (its ref goes to ``status_text_ref``); other output stays as it is.
+    """
     values: dict[str, str] = {}
     for line in (output or "").splitlines():
         key, sep, value = line.partition(":")
         if sep:
             values[key.strip().lower()] = value.strip().strip('"')
     if values.get("vus"):
-        text = f"VU {values['vus']}"
         if values.get("vus-max"):
-            text += f" из {values['vus-max']}"
+            text = msg("lt.watcher.status_vus_of", vus=values["vus"], max=values["vus-max"])
+        else:
+            text = msg("lt.watcher.status_vus", vus=values["vus"])
         if values.get("paused") == "true":
-            text += ", пауза"
+            text = msg("lt.watcher.status_paused", status=text)
         return text
     first = next((line.strip() for line in (output or "").splitlines() if line.strip()), "")
     return first[:120]
@@ -192,24 +229,27 @@ def _ran(inst: InstanceRecord) -> bool:
 
 
 def _exit_status(code: Optional[int], tool: Optional[ToolTemplate], stop_sent: bool, started: bool, timed_out: bool = False) -> tuple[str, str]:
+    """(instance status, message) for an exit code; the message is a dictionary message (a ``str``)."""
     if timed_out:
-        return INST_TIMED_OUT, "Остановлен по лимиту длительности прогона"
+        return INST_TIMED_OUT, msg("lt.watcher.exit.timed_out")
     if stop_sent:
-        return INST_STOPPED, "Остановлен по запросу" + (f" (код выхода {code})" if code is not None else "")
+        if code is not None:
+            return INST_STOPPED, msg("lt.watcher.exit.stopped_code", code=code)
+        return INST_STOPPED, msg("lt.watcher.exit.stopped")
     if code == TIMEOUT_EXIT_CODE:
-        return INST_TIMED_OUT, "Остановлен генератором по лимиту длительности прогона"
+        return INST_TIMED_OUT, msg("lt.watcher.exit.timed_out_generator")
     if code is None:
-        return INST_FAILED, "Код выхода не прочитан"
+        return INST_FAILED, msg("lt.watcher.exit.no_code")
     # Without a tool template (a CI pipeline) 0 is the only success.
     if code in (tool.success_exit_codes if tool is not None else (0,)):
-        return INST_FINISHED, "Завершён"
+        return INST_FINISHED, msg("lt.watcher.exit.finished")
     if tool is not None and code in tool.failed_checks_exit_codes:
-        return INST_CHECKS_FAILED, f"Завершён, инструмент сообщил о непройденных проверках (код {code})"
+        return INST_CHECKS_FAILED, msg("lt.watcher.exit.checks_failed", code=code)
     if code == 126 and not started:
-        return INST_FAILED, "Не найден рабочий каталог инструмента (код 126), см. журнал"
+        return INST_FAILED, msg("lt.watcher.exit.no_work_dir")
     if code == 127:
-        return INST_FAILED, "Команда инструмента не найдена на генераторе (код 127), см. журнал"
-    return INST_FAILED, f"Инструмент завершился с кодом {code}, см. журнал"
+        return INST_FAILED, msg("lt.watcher.exit.command_not_found")
+    return INST_FAILED, msg("lt.watcher.exit.code", code=code)
 
 
 class Watcher:
@@ -339,31 +379,33 @@ class Watcher:
         if inst.status == INST_PENDING:
             # Nothing has been started yet (launch errors are handled in _launch): the plan or settings are broken.
             logger.exception("Instance %s of load test run %s could not be started", inst.index, run.run_id)
-            inst.status, inst.message = INST_FAILED, f"Не запустился: {exc}"[:500]
+            inst.status = INST_FAILED
+            _say(inst, msg("lt.watcher.not_started", error=error_param(exc)), 500)
             _wipe_env(inst)
             return
-        text = f"Ошибка наблюдателя: {exc}"[:500]
-        if inst.message != text:
+        message = msg("lt.watcher.watcher_error", error=error_param(exc))
+        if inst.message != str(message)[:500]:
             logger.exception("Instance %s of load test run %s could not be advanced", inst.index, run.run_id)
-        inst.message = text
+        _say(inst, message, 500)
         max_seconds = int(run.options.get("max_seconds") or 0)
         since = inst.seen_at or inst.launched_at or now
         if _seconds(now - since) > max_seconds + UNREACHABLE_GRACE_SEC:
             inst.status = INST_LOST
             inst.finished_at = inst.finished_at or now
-            inst.message = f"Наблюдатель не может следить за инстансом дольше лимита прогона: {exc}"[:500]
+            _say(inst, msg("lt.watcher.watch_lost", error=error_param(exc)), 500)
             _wipe_env(inst)
 
     def _advance_manual(self, inst: InstanceRecord, stop: bool, max_seconds: int, now: datetime) -> None:
         if stop:
-            inst.status, inst.message = INST_FINISHED, "Остановлен вручную"
+            inst.status = INST_FINISHED
+            _say(inst, msg("lt.watcher.manual_stopped"))
             inst.finished_at = now
             _wipe_env(inst)
         elif max_seconds and inst.started_at and _seconds(now - inst.started_at) > max_seconds:
             # A forgotten manual run would hold its slots forever: the window closes at the run limit.
             inst.status, inst.timed_out = INST_TIMED_OUT, True
             inst.finished_at = inst.started_at + timedelta(seconds=max_seconds)
-            inst.message = "Окно закрыто по лимиту длительности прогона: остановите инструмент, если он ещё идёт"
+            _say(inst, msg("lt.watcher.manual_window_closed"))
             _wipe_env(inst)
 
     def _advance_instance(self, run: RunRecord, inst: InstanceRecord, catalog: Catalog, now: datetime,
@@ -373,21 +415,24 @@ class Watcher:
         max_seconds = int(run.options.get("max_seconds") or 0)
         if inst.status == INST_PENDING:
             if stop:
-                inst.status, inst.message = INST_CANCELLED, "Отменён до старта"
+                inst.status = INST_CANCELLED
+                _say(inst, msg("lt.watcher.cancelled_before_start"))
                 _wipe_env(inst)
                 return
             if generator is None:
-                inst.status, inst.message = INST_FAILED, f"Генератора «{inst.generator}» нет в настройках"
+                inst.status = INST_FAILED
+                _say(inst, msg("lt.watcher.generator_missing", generator=inst.generator))
                 _wipe_env(inst)
                 return
             if now < run.created_at + timedelta(seconds=inst.start_delay_sec):
                 left = int(_seconds(run.created_at + timedelta(seconds=inst.start_delay_sec) - now))
-                inst.message = f"Старт через {left} с"
+                _say(inst, msg("lt.watcher.start_in", seconds=left))
                 return
             self._launch(run, inst, generator, catalog, now, claim)
             return
         if generator is None:
-            inst.status, inst.message = INST_LOST, f"Генератора «{inst.generator}» больше нет в настройках"
+            inst.status = INST_LOST
+            _say(inst, msg("lt.watcher.generator_gone", generator=inst.generator))
             inst.finished_at = inst.finished_at or now
             _wipe_env(inst)
             return
@@ -404,13 +449,13 @@ class Watcher:
         try:
             probe = executor.probe(inst.ref)
         except GeneratorError as exc:
-            inst.message = f"Нет связи с генератором: {exc}"
+            _say(inst, msg("lt.watcher.no_connection", error=error_param(exc)))
             limit_sec = max_seconds + UNREACHABLE_GRACE_SEC
             since = inst.seen_at or inst.launched_at or now
             if _seconds(now - since) > limit_sec:
                 inst.status = INST_LOST
                 inst.finished_at = inst.finished_at or now
-                inst.message = f"Генератор не отвечает дольше лимита прогона: {exc}"
+                _say(inst, msg("lt.watcher.unreachable", error=error_param(exc)))
                 _wipe_env(inst)
             else:
                 self._give_up_stop(inst, executor, tool, now)
@@ -441,12 +486,13 @@ class Watcher:
         if generator.is_manual:
             inst.status = INST_RUNNING
             inst.launched_at = inst.started_at = now
-            inst.message = "Идёт: запустите инструмент сами и остановите прогон кнопкой, когда тест закончится"
+            _say(inst, msg("lt.watcher.manual_running"))
             _wipe_env(inst)  # LoadLens runs nothing here, the values have no use
             return
         tool = catalog.tools.get(inst.tool)
         if tool is None and not generator.is_ci:
-            inst.status, inst.message = INST_FAILED, f"Инструмента «{inst.tool}» нет в настройках"
+            inst.status = INST_FAILED
+            _say(inst, msg("lt.watcher.tool_missing", tool=inst.tool))
             _wipe_env(inst)
             return
         # The per-instance secret only matters when the pipeline can report events to LoadLens.
@@ -454,11 +500,13 @@ class Watcher:
         try:
             plan = self._plan(run, inst, generator, tool, token)
         except (ToolInputError, ToolConfigError) as exc:
-            inst.status, inst.message = INST_FAILED, str(exc)
+            inst.status = INST_FAILED
+            _say(inst, exc)
             _wipe_env(inst)
             return
         except GeneratorError as exc:
-            inst.status, inst.message = INST_FAILED, f"Параметры пайплайна не читаются: {exc}"
+            inst.status = INST_FAILED
+            _say(inst, msg("lt.ci.params_unreadable", error=error_param(exc)))
             _wipe_env(inst)
             return
         if token:
@@ -471,7 +519,8 @@ class Watcher:
         except Exception as exc:
             if not isinstance(exc, GeneratorError):
                 logger.warning("Launch of %s failed unexpectedly", plan.ref, exc_info=True)
-            inst.status, inst.message = INST_FAILED, f"Не запустился: {exc}"
+            inst.status = INST_FAILED
+            _say(inst, msg("lt.watcher.not_started", error=error_param(exc)))
             inst.ci_token_hash = ""
             _wipe_env(inst)
             return
@@ -483,13 +532,14 @@ class Watcher:
         if result.url:
             inst.external_url = result.url
         if result.already_running:
-            inst.message = "Уже был запущен, подключились к нему"
+            _say(inst, msg("lt.watcher.already_running"))
         elif generator.is_ci:
-            inst.message = ("Пайплайн запущен" if generator.ci and generator.ci.kind == "gitlab" else "Сборка поставлена в очередь") \
-                + (f": {result.message}" if result.message else "")
+            started = msg("lt.watcher.pipeline_started") if generator.ci and generator.ci.kind == "gitlab" \
+                else msg("lt.watcher.build_queued")
+            _say(inst, _with_detail(started, result.message))
             _wipe_ci_secrets(inst)
         else:
-            inst.message = "Запущен"
+            _say(inst, msg("lt.watcher.launched"))
 
     def _save_log(self, inst: InstanceRecord, executor: Executor) -> None:
         """Keeps the tail of the output in the run: containers and jobs disappear after they end."""
@@ -524,13 +574,13 @@ class Watcher:
                        tool: Optional[ToolTemplate], now: datetime) -> None:
         signal = tool.stop_signal if tool else "TERM"
         grace = tool.grace_seconds if tool else 30
-        reason = "лимит длительности прогона: " if inst.timed_out else ""
+        # The run limit, not a person, stopped it: the second message of each pair says so first.
+        variant = 1 if inst.timed_out else 0
         if not getattr(executor, "supports_stop", True):
             if inst.stop_sent_at is None:
                 self._save_log(inst, executor)
                 inst.stop_sent_at = now
-                inst.message = _capital(f"{reason}LoadLens не может остановить задачу на этом генераторе: "
-                                        f"остановите её вручную, ждём завершения до {grace} с")
+                _say(inst, msg(_STOP_KEYS["unsupported"][variant], grace=grace))
             return
         try:
             if inst.stop_sent_at is None:
@@ -540,27 +590,25 @@ class Watcher:
                     executor.signal(inst.ref, signal, grace)
                 inst.stop_sent_at = now
                 if soft:
-                    inst.message = f"{reason}инструменту отправлена команда остановки, ждём завершения до {grace} с"
+                    _say(inst, msg(_STOP_KEYS["soft"][variant], grace=grace))
                 elif executor.supports_signals:
-                    inst.message = f"{reason}отправлен SIG{signal}, ждём завершения до {grace} с"
+                    _say(inst, msg(_STOP_KEYS["signal"][variant], signal=signal, grace=grace))
                 elif generator.is_ci:
-                    what = "пайплайну отправлена отмена" if generator.ci and generator.ci.kind == "gitlab" else "сборке отправлена остановка"
-                    inst.message = f"{reason}{what}, ждём завершения до {grace} с"
+                    what = "pipeline" if generator.ci and generator.ci.kind == "gitlab" else "build"
+                    _say(inst, msg(_STOP_KEYS[what][variant], grace=grace))
                 else:
-                    inst.message = f"{reason}процесс получит SIGTERM, через {grace} с — SIGKILL"
-                inst.message = _capital(inst.message)
+                    _say(inst, msg(_STOP_KEYS["platform"][variant], grace=grace))
             else:
                 extra = 0 if executor.supports_signals else PLATFORM_KILL_EXTRA_SEC
                 if not inst.killed and _seconds(now - inst.stop_sent_at) > grace + extra:
                     executor.kill(inst.ref)
                     inst.killed = True
-                    inst.message = ("Не завершился сам: остановка отправлена ещё раз" if generator.is_ci
-                                    else "Процесс не завершился сам: отправлен SIGKILL")
+                    _say(inst, msg("lt.watcher.stop.again") if generator.is_ci else msg("lt.watcher.stop.killed"))
         except Exception as exc:
             if not isinstance(exc, GeneratorError):
                 logger.info("Stop of %s failed unexpectedly", inst.ref, exc_info=True)
             inst.stop_failed_at = inst.stop_failed_at or now
-            inst.message = f"Остановка не дошла до генератора: {exc}"
+            _say(inst, msg("lt.watcher.stop.failed", error=error_param(exc)))
 
     def _give_up_stop(self, inst: InstanceRecord, executor: Executor, tool: Optional[ToolTemplate], now: datetime) -> None:
         """Closes the window of an instance whose stop the generator does not confirm in time.
@@ -571,19 +619,19 @@ class Watcher:
         grace = tool.grace_seconds if tool else 30
         if not getattr(executor, "supports_stop", True):
             anchor, limit = inst.stop_sent_at, grace
-            text = "LoadLens не может остановить задачу на этом генераторе и закрыл окно инстанса: остановите её вручную"
+            text = msg("lt.watcher.give_up.unsupported")
         elif inst.stop_sent_at is not None:
             extra = 0 if executor.supports_signals else PLATFORM_KILL_EXTRA_SEC
             anchor, limit = inst.stop_sent_at, grace + extra + STOP_CONFIRM_SEC
-            text = "Генератор не подтвердил остановку, LoadLens закрыл окно инстанса: проверьте процесс на генераторе"
+            text = msg("lt.watcher.give_up.unconfirmed")
         else:
             anchor, limit = inst.stop_failed_at, grace + STOP_CONFIRM_SEC
-            text = "Остановка не дошла до генератора, LoadLens закрыл окно инстанса: остановите процесс вручную"
+            text = msg("lt.watcher.give_up.undelivered")
         if anchor is None or _seconds(now - anchor) <= limit:
             return
         inst.status, _ = _exit_status(None, tool, True, inst.started_at is not None, inst.timed_out)
         inst.finished_at = inst.finished_at or now
-        inst.message = text[:500]
+        _say(inst, text, 500)
         _wipe_env(inst)
 
     def _ask_status(self, run: RunRecord, inst: InstanceRecord, generator: Generator, executor: Executor,
@@ -599,12 +647,12 @@ class Watcher:
         except Exception:
             return
         if code == 0:
-            inst.status_text = summarize_status(output)
+            status = summarize_status(output)
+            inst.status_text, inst.status_text_ref = str(status), ref_of(status)
 
     def _apply_probe(self, run: RunRecord, inst: InstanceRecord, probe: Probe, tool: Optional[ToolTemplate],
                      executor: Executor, now: datetime) -> None:
         skew = (probe.remote_now - now.timestamp()) if probe.remote_now else 0.0
-        skew_note = f"; часы генератора расходятся с LoadLens на {int(skew)} с" if abs(skew) > CLOCK_SKEW_NOTE_SEC else ""
         if probe.state == "starting":
             inst.status = INST_STARTING
             waited = _seconds(now - inst.launched_at) if inst.launched_at else 0.0
@@ -612,7 +660,7 @@ class Watcher:
             if (probe.stuck and waited > STUCK_FAIL_SEC) or (max_seconds and waited > max_seconds):
                 inst.status = INST_FAILED
                 inst.finished_at = now
-                inst.message = f"Не стартовал: {probe.message or 'истёк лимит прогона'}"
+                _say(inst, msg("lt.watcher.never_started", reason=probe.message or msg("lt.watcher.run_limit_expired")))
                 self._save_log(inst, executor)
                 try:
                     executor.kill(inst.ref)
@@ -621,7 +669,10 @@ class Watcher:
                 _wipe_env(inst)
                 return
             if inst.stop_sent_at is None and inst.stop_failed_at is None:
-                inst.message = probe.message or ("Запускается дольше обычного" if waited > SLOW_START_SEC else inst.message)
+                if probe.message:
+                    _say(inst, probe.message)
+                elif waited > SLOW_START_SEC:
+                    _say(inst, msg("lt.watcher.slow_start"))
             return
         if probe.state == "running":
             inst.status = INST_RUNNING
@@ -629,19 +680,17 @@ class Watcher:
             inst.started_at = inst.started_at or _utc(probe.started_at) or now
             # A stop in progress (or one that did not get through) keeps its message.
             if inst.stop_sent_at is None and inst.stop_failed_at is None:
-                inst.message = "Идёт" + skew_note
+                _say(inst, _with_skew(msg("lt.watcher.running"), skew))
             return
         if probe.state == "exited":
             started = probe.started_at is not None or inst.started_at is not None
             inst.started_at = inst.started_at or _utc(probe.started_at)
             inst.finished_at = _utc(probe.finished_at) or now
             inst.exit_code = probe.exit_code
-            inst.status, inst.message = _exit_status(probe.exit_code, tool, inst.stop_sent_at is not None, started, inst.timed_out)
+            inst.status, message = _exit_status(probe.exit_code, tool, inst.stop_sent_at is not None, started, inst.timed_out)
             if inst.status == INST_FAILED and not started:
                 inst.started_at = None
-            if probe.message:
-                inst.message += f": {probe.message}"
-            inst.message += skew_note
+            _say(inst, _with_skew(_with_detail(message, probe.message), skew))
             _wipe_env(inst)
             return
         if probe.state == "dead":
@@ -650,16 +699,17 @@ class Watcher:
                 inst.status = INST_LOST
                 inst.started_at = inst.started_at or _utc(probe.started_at)
                 inst.finished_at = now
-                inst.message = "Процесс пропал без кода выхода: генератор перезагружался или процесс убит извне"
+                _say(inst, msg("lt.watcher.process_vanished"))
                 _wipe_env(inst)
             return
         # missing: nothing left on the generator. After a stop that is how a deleted pod or job looks.
         inst.finished_at = inst.finished_at or now
         if inst.stop_sent_at is not None:
-            inst.status, inst.message = _exit_status(None, tool, True, inst.started_at is not None, inst.timed_out)
+            inst.status, message = _exit_status(None, tool, True, inst.started_at is not None, inst.timed_out)
+            _say(inst, message)
         else:
             inst.status = INST_LOST
-            inst.message = "Инстанс на генераторе пропал: удалён каталог, контейнер или задача"
+            _say(inst, msg("lt.watcher.instance_vanished"))
         _wipe_env(inst)
 
     # ---- run --------------------------------------------------------------------------------
@@ -678,10 +728,10 @@ class Watcher:
                 run.status = RUN_STARTING
             running = sum(1 for inst in run.instances if inst.status == INST_RUNNING)
             pending = sum(1 for inst in run.instances if inst.status == INST_PENDING)
-            parts = [f"идёт {running} из {len(run.instances)}"]
             if pending:
-                parts.append(f"ждут старта {pending}")
-            run.message = "; ".join(parts).capitalize()
+                _say(run, msg("lt.watcher.run.progress_pending", running=running, total=len(run.instances), pending=pending))
+            else:
+                _say(run, msg("lt.watcher.run.progress", running=running, total=len(run.instances)))
             return
         if run.status in (RUN_DONE, RUN_FAILED, RUN_CANCELLED):
             return
@@ -689,15 +739,20 @@ class Watcher:
         if not ran:
             cancelled = run.stop_all_at is not None or all(inst.status == INST_CANCELLED for inst in run.instances)
             run.status = RUN_CANCELLED if cancelled else RUN_FAILED
-            first = next((inst.message for inst in run.instances if inst.status == INST_FAILED and inst.message), "")
-            run.message = "Прогон отменён до старта" if cancelled else f"Ни один инстанс не запустился{': ' + first if first else ''}"
+            first = next((_stored(inst) for inst in run.instances if inst.status == INST_FAILED and inst.message), "")
+            if cancelled:
+                _say(run, msg("lt.watcher.run.cancelled_before_start"))
+            elif first:
+                _say(run, msg("lt.watcher.run.none_started_reason", reason=first))
+            else:
+                _say(run, msg("lt.watcher.run.none_started"))
             run.finished_at = now
             return
         run.started_at = min(inst.started_at for inst in ran)
         run.finished_at = max((inst.finished_at or now) for inst in ran)
         if not run.options.get("auto_report", True):
             run.status = RUN_DONE
-            run.message = "Завершён, отчёт не заказывали"
+            _say(run, msg("lt.watcher.run.done_no_report"))
             return
         if run.status in (RUN_STARTING, RUN_RUNNING, RUN_STOPPING):
             run.status = RUN_DRAINING
@@ -705,7 +760,7 @@ class Watcher:
             drain = self._drain_seconds(run)
             ready_at = run.finished_at + timedelta(seconds=drain)
             if now < ready_at:
-                run.message = f"Тест завершён, ждём доставку метрик ещё {int(_seconds(ready_at - now)) + 1} с"
+                _say(run, msg("lt.watcher.run.draining", seconds=int(_seconds(ready_at - now)) + 1))
                 return
             self._start_report(run, catalog)
             return
@@ -723,29 +778,31 @@ class Watcher:
 
     def _start_report(self, run: RunRecord, catalog: Catalog) -> None:
         from loadlens_app.blueprints import dashboard
+        from loadlens_app.i18n import report_language
         from loadlens_app.jobs import job_store
 
         owner = run.owner or DEFAULT_OWNER
         try:
             check_job_slot(*job_store.running_counts(owner))
         except LimitError as exc:
-            run.message = f"Отчёт ждёт свободного слота: {exc}"
+            _say(run, msg("lt.watcher.report.waits_slot", error=error_param(exc)))
             return
         assert run.started_at is not None and run.finished_at is not None
         start_ts, end_ts = run.started_at.timestamp(), run.finished_at.timestamp()
         packs, note = report_filter(run, catalog.tools, start_ts, end_ts)
-        notes_before: list[str] = []
+        notes_before: list[Any] = []
         if any(inst.ci_kind and inst.started_at for inst in run.instances):
             # A pipeline's start and end include its preparation: the report window follows the load itself.
             bounds = rps_bounds(run, start_ts, end_ts, packs)
             if bounds is None:
-                notes_before.append("окно отчёта — время пайплайна: данных RPS в нём не найдено")
+                notes_before.append(msg("lt.watcher.report.note_pipeline_window"))
             elif bounds != (start_ts, end_ts):
                 start_ts, end_ts = bounds
-                notes_before.append(
-                    f"окно отчёта сужено по RPS: {datetime.fromtimestamp(start_ts).strftime('%H:%M:%S')}–"
-                    f"{datetime.fromtimestamp(end_ts).strftime('%H:%M:%S')}"
-                )
+                notes_before.append(msg(
+                    "lt.watcher.report.note_window_narrowed",
+                    start=datetime.fromtimestamp(start_ts).strftime("%H:%M:%S"),
+                    end=datetime.fromtimestamp(end_ts).strftime("%H:%M:%S"),
+                ))
         report_name = run.run_name
         try:
             if dashboard._run_name_taken(report_name, run.service):
@@ -763,6 +820,8 @@ class Watcher:
             owner=owner,
             run_tag=run.run_tag if packs else None,
             run_filter_packs=packs,
+            # The watcher has no reader: the report is in the language of the installation.
+            report_language=report_language(),
         )
         try:
             try:
@@ -770,21 +829,24 @@ class Watcher:
             except LimitError as exc:
                 if not use_llm or exc.code != "limit_exceeded":
                     raise
-                notes.append(f"анализ ИИ пропущен: {exc}")
+                notes.append(msg("lt.watcher.report.note_ai_skipped", error=error_param(exc)))
                 job = starter(int(start_ts * 1000), int(end_ts * 1000), run.service, run.project_area, use_llm=False, **kwargs)
         except LimitError as exc:
             run.status = RUN_DONE
-            run.message = f"Отчёт не запущен: {exc}"
+            _say(run, msg("lt.watcher.report.not_started", error=error_param(exc)))
             return
         except Exception as exc:
             logger.exception("Report of load test run %s did not start", run.run_id)
             run.status = RUN_DONE
-            run.message = f"Отчёт не запущен: {exc}"
+            _say(run, msg("lt.watcher.report.not_started", error=error_param(exc)))
             return
         run.report_job_id = getattr(job, "job_id", None)
         run.run_name = report_name
         run.status = RUN_REPORTING
-        run.message = "Строится отчёт" + (f" ({'; '.join(notes)})" if notes else "")
+        if notes:
+            _say(run, msg("lt.watcher.report.building_notes", notes=joined(notes)))
+        else:
+            _say(run, msg("lt.watcher.report.building"))
 
     def _follow_report(self, run: RunRecord) -> None:
         from loadlens_app.jobs import JOB_STATUS_DONE, JOB_STATUS_ERROR, job_store
@@ -792,17 +854,23 @@ class Watcher:
         job = job_store.get(run.report_job_id) if run.report_job_id else None
         if job is None:
             run.status = RUN_DONE
-            run.message = "Задача отчёта не найдена"
+            _say(run, msg("lt.watcher.report.job_missing"))
             return
         if job.status == JOB_STATUS_DONE:
             run.status = RUN_DONE
             run.report_url = job.page_url or job.report_url
-            run.message = "Отчёт готов"
+            _say(run, msg("lt.watcher.report.ready"))
         elif job.status == JOB_STATUS_ERROR:
             run.status = RUN_DONE
-            run.message = f"Отчёт не построен: {job.message}"
+            _say(run, msg("lt.watcher.report.failed", error=_job_message(job)))
         else:
-            run.message = f"Строится отчёт: {job.message} ({int(job.progress)}%)"
+            _say(run, msg("lt.watcher.report.progress", stage=_job_message(job), progress=int(job.progress)))
+
+
+def _job_message(job: Any) -> Any:
+    """The message of a report job as a parameter: its ref when the job store keeps one, else the text."""
+    ref = getattr(job, "message_ref", None)
+    return ref if is_ref(ref) else (job.message or "")
 
 
 def _is_storage_error(exc: BaseException) -> bool:

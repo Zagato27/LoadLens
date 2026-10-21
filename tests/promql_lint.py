@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Offline syntax check for the PromQL subset the query packs use.
 
 Covers vector selectors with matchers, range vectors, function calls, aggregations with

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Forms of ui-plan stage 4: the test window hint (GET /lt_windows) and its detection in live.py.
 
 Offline: the metric source is a stub of ``query_preview.fetch_points`` and runs live in a memory store.

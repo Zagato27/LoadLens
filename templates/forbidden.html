@@ -1,11 +1,12 @@
 {% extends "base.html" %}
-{% block title %}Нет доступа — LoadLens{% endblock %}
+{% block title %}{{ t('auth.forbidden.title') }} — LoadLens{% endblock %}
 {% block content %}
-  <div class="card" style="max-width:560px; margin:40px auto; text-align:center">
-    <h2 style="margin-top:0">Нет доступа</h2>
-    <p class="muted">{{ message }}</p>
+  {# No card: a heading, the reason and one action on the page (the sign-in form is the only card left). #}
+  <section class="forbidden-page">
+    <h1>{{ t('auth.forbidden.title') }}</h1>
+    <p class="forbidden-text">{{ message }}</p>
     <p>
-      <a class="btn btn-primary" href="/">На дэшборд</a>
+      <a class="btn btn-primary" href="/">{{ t('auth.forbidden.to_dashboard') }}</a>
     </p>
-  </div>
+  </section>
 {% endblock %}

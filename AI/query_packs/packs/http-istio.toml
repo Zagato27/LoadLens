@@ -11,31 +11,46 @@ description = """
 istio_request_duration_milliseconds. Подходят для сервисов на любом языке без инструментации кода. \
 reporter="destination" — метрики принимающей стороны, "source" — вызывающей. Время переводится в секунды.
 """
+description_en = """
+Standard Istio metrics (Envoy sidecars): istio_requests_total and the istio_request_duration_milliseconds \
+histogram. They fit services in any language without code instrumentation. reporter="destination" gives the \
+receiving side, "source" the calling side. Times are converted to seconds.
+"""
 requires_metrics = ["istio_requests_total", "istio_request_duration_milliseconds_bucket"]
 prompt_addendum = """
 Метрики Istio снимает Envoy-сайдкар: время включает работу сайдкара и сети между подами. \
 Ряды «source → destination» — вызовы между сервисами; рост p95 у вызываемого сервиса раньше, чем у \
 вызывающего, указывает на узкое место ниже по цепочке.
 """
+prompt_addendum_en = """
+Istio metrics are taken by the Envoy sidecar: the time includes the sidecar's work and the network between \
+pods. "source → destination" series are calls between services; when p95 of the called service grows earlier \
+than that of the caller, the bottleneck is further down the chain.
+"""
 
 [variables.service_label]
 title = "Лейбл с именем сервиса"
+title_en = "Label with the service name"
 default = "destination_workload"
 pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
 help = "destination_workload, destination_service_name или destination_app."
+help_en = "destination_workload, destination_service_name or destination_app."
 
 [variables.reporter]
 title = "Сторона измерения"
+title_en = "Measuring side"
 default = "destination"
 choices = ["destination", "source"]
 
 [variables.namespace]
 title = "Namespace (регулярное выражение)"
+title_en = "Namespace (regular expression)"
 default = ".+"
 pattern = '^[^"\n\r{}]*$'
 
 [variables.window]
 title = "Окно rate()"
+title_en = "rate() window"
 default = "1m"
 pattern = '^[1-9][0-9]*[smh]$'
 
@@ -47,6 +62,7 @@ required = true
 query = 'sum by ({{service_label}}) (rate(istio_requests_total{reporter="{{reporter}}", destination_workload_namespace=~"{{namespace}}", {{service_label}}!=""}[{{window}}]))'
 keys = ["{{service_label}}"]
 description = "Входящие запросы в секунду."
+description_en = "Incoming requests per second."
 
 [[queries]]
 label = "HTTP (Istio): average request time (sec) by workload"
@@ -55,6 +71,7 @@ unit = "seconds"
 query = 'sum by ({{service_label}}) (rate(istio_request_duration_milliseconds_sum{reporter="{{reporter}}", destination_workload_namespace=~"{{namespace}}", {{service_label}}!=""}[{{window}}])) / sum by ({{service_label}}) (rate(istio_request_duration_milliseconds_count{reporter="{{reporter}}", destination_workload_namespace=~"{{namespace}}", {{service_label}}!=""}[{{window}}])) / 1000'
 keys = ["{{service_label}}"]
 description = "Среднее время запроса, с."
+description_en = "Average request time, s."
 
 [[queries]]
 label = "HTTP (Istio): p95 request time (sec) by workload"
@@ -63,6 +80,7 @@ unit = "seconds"
 query = 'histogram_quantile(0.95, sum by (le, {{service_label}}) (rate(istio_request_duration_milliseconds_bucket{reporter="{{reporter}}", destination_workload_namespace=~"{{namespace}}", {{service_label}}!=""}[{{window}}]))) / 1000'
 keys = ["{{service_label}}"]
 description = "p95 времени запроса, с."
+description_en = "p95 of the request time, s."
 
 [[queries]]
 label = "HTTP (Istio): 5xx error rate (%) by workload"
@@ -71,6 +89,7 @@ unit = "percent"
 query = '100 * (sum by ({{service_label}}) (rate(istio_requests_total{response_code=~"5..", reporter="{{reporter}}", destination_workload_namespace=~"{{namespace}}", {{service_label}}!=""}[{{window}}])) or 0 * sum by ({{service_label}}) (rate(istio_requests_total{reporter="{{reporter}}", destination_workload_namespace=~"{{namespace}}", {{service_label}}!=""}[{{window}}]))) / sum by ({{service_label}}) (rate(istio_requests_total{reporter="{{reporter}}", destination_workload_namespace=~"{{namespace}}", {{service_label}}!=""}[{{window}}]))'
 keys = ["{{service_label}}"]
 description = "Доля ответов 5xx, %."
+description_en = "Share of 5xx responses, %."
 
 [[queries]]
 label = "HTTP (Istio): RPS by source & destination workload (top 20)"
@@ -79,6 +98,7 @@ unit = "per_second"
 query = 'topk(20, sum by (source_workload, destination_workload) (rate(istio_requests_total{reporter="{{reporter}}", destination_workload_namespace=~"{{namespace}}"}[{{window}}])))'
 keys = ["source_workload", "destination_workload"]
 description = "Вызовы между сервисами."
+description_en = "Calls between services."
 
 [[queries]]
 label = "HTTP (Istio): p95 request time (sec) by source & destination workload (top 20)"
@@ -87,3 +107,4 @@ unit = "seconds"
 query = 'topk(20, histogram_quantile(0.95, sum by (le, source_workload, destination_workload) (rate(istio_request_duration_milliseconds_bucket{reporter="{{reporter}}", destination_workload_namespace=~"{{namespace}}"}[{{window}}]))) / 1000)'
 keys = ["source_workload", "destination_workload"]
 description = "Самые медленные вызовы между сервисами по p95."
+description_en = "Slowest calls between services by p95."

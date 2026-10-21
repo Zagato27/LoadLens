@@ -1,0 +1,23 @@
+{
+  "about.build": "build {build}",
+  "about.build_unknown": "no build id: started from source",
+  "about.discussions_link": "GitHub Discussions",
+  "about.docs": "Documentation",
+  "about.docs_link": "README on GitHub",
+  "about.feedback": "Feedback",
+  "about.feedback_text": "Report a bug: {issues}. Questions and ideas: {discussions}.",
+  "about.footer_title": "About LoadLens: version, license, third-party notices",
+  "about.help": "Installed version, license and third-party components. Quote the version and build when you report a problem.",
+  "about.issues_link": "GitHub Issues",
+  "about.license": "License",
+  "about.license_name": "Apache License 2.0",
+  "about.license_text": "{license}. Copyright and attribution notices are in {notice}.",
+  "about.source": "Source code",
+  "about.third_party.failed": "Could not load the notices: {error}",
+  "about.third_party.heading": "Third-party notices",
+  "about.third_party.help": "Libraries and fonts shipped with LoadLens and their licenses: the THIRD_PARTY_NOTICES.md file of this installation.",
+  "about.third_party.loading": "Loading…",
+  "about.third_party.missing": "THIRD_PARTY_NOTICES.md is not part of this installation.",
+  "about.title": "About",
+  "about.version": "Version"
+}

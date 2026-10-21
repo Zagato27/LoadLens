@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Executors: starting, watching and stopping one instance on a load generator of any type."""
 
 from __future__ import annotations
@@ -6,6 +7,7 @@ import threading
 from typing import Callable, Mapping
 
 from ..generators import Generator
+from ..messages import t
 from ..tools import ToolTemplate
 from .base import (
     LOG_TAIL_BYTES,
@@ -74,7 +76,7 @@ def default_executor_for(generator: Generator) -> Executor:
         return KubernetesExecutor(generator, _cached_client(generator, identity, kubernetes_api))
     if generator.is_ci:
         return CiExecutor(generator)
-    raise GeneratorError(f"Генератор «{generator.title}»: тип {generator.type} не поддерживается")
+    raise GeneratorError("lt.executor.type_unsupported", generator=generator.title, type=generator.type)
 
 
 # Replaced in tests with a factory of fakes.
@@ -86,9 +88,9 @@ def executor_for(generator: Generator) -> Executor:
 
 
 def check_generator(generator: Generator, tools: Mapping[str, ToolTemplate]) -> CheckReport:
-    """Connection check of the settings page, by generator type."""
+    """Connection check of the settings page, by generator type (texts in the language of the request)."""
     if generator.is_manual:
-        return CheckReport(ok=True, message="Ручной генератор: LoadLens ничего не запускает, проверять нечего")
+        return CheckReport(ok=True, message=t("lt.check.manual"))
     if generator.type == "ssh":
         return check_ssh_generator(generator, tools)
     if generator.type == "docker":
@@ -97,7 +99,7 @@ def check_generator(generator: Generator, tools: Mapping[str, ToolTemplate]) -> 
         return check_kubernetes_generator(generator, tools)
     if generator.is_ci:
         return check_ci_generator(generator, tools)
-    return CheckReport(ok=False, message=f"Тип {generator.type} не поддерживается")
+    return CheckReport(ok=False, message=t("lt.check.type_unsupported", type=generator.type))
 
 
 __all__ = [

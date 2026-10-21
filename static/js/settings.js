@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Settings page: connection forms with checks, SLA form, JSON editors, prompts, services,
 // metrics_config, project areas and the first-run wizard.
 //
@@ -18,6 +19,10 @@
     config: null,
     prompts: { area: {}, byService: {} },
     promptDefaults: {},
+    // Language of the defaults (= the language of reports) and, per scope ('' = area), the /prompts fields
+    // language, sources and override_language.
+    promptLanguage: 'ru',
+    promptMeta: {},
     servicesMeta: {},
     domainList: [],
     metricsConfigIds: [],
@@ -94,7 +99,7 @@
   }
   function requireArea(action) {
     if (state.area) return true;
-    ui.toast(`${action}: сначала выберите область в боковом меню`, { tone: 'warn' });
+    ui.toast(LL.t('settings.area.required', { action }), { tone: 'warn' });
     return false;
   }
 
@@ -131,7 +136,7 @@
       const section = btn.dataset.section;
       const has = Array.from(state.dirty.keys()).some((k) => k.startsWith(section + ':'));
       let mark = btn.querySelector('.dirty-mark');
-      if (has && !mark) { mark = document.createElement('span'); mark.className = 'dirty-mark'; mark.textContent = '●'; mark.title = 'Есть несохранённые изменения'; btn.appendChild(mark); }
+      if (has && !mark) { mark = document.createElement('span'); mark.className = 'dirty-mark'; mark.textContent = '●'; mark.title = LL.t('settings.dirty.mark_title'); btn.appendChild(mark); }
       if (!has && mark) mark.remove();
     });
   }
@@ -140,132 +145,140 @@
   });
 
   // ---- project areas -------------------------------------------------------
+  // The area comes from the project_area cookie. A cookie can name an area the settings do not have (for example
+  // a service id written by a report page whose service is in no area); the area-scoped endpoints answer 404 then.
+  function areaKnown() {
+    if (!state.area) return true;
+    return (LL.projectAreas || []).some((a) => (a && typeof a === 'object' ? String(a.id || '') : String(a || '')) === state.area);
+  }
   function renderAreaBar() {
     const label = $('areaScopeLabel');
     const note = $('areaScopeNote');
+    const known = areaKnown();
+    $('areaBar').classList.toggle('is-unknown', !known);
     if (state.area) {
       const meta = (LL.projectAreas || []).find((a) => a && a.id === state.area);
-      label.textContent = `Область: ${meta && meta.title ? meta.title : state.area}`;
-      note.textContent = 'Каталог источников данных общий. Привязка доменов, LLM, SLA, запросы, промпты и визуализации сохраняются как переопределения этой области. Хранилище и Confluence общие.';
+      label.textContent = LL.t('settings.area.scoped', { title: meta && meta.title ? meta.title : state.area });
+      note.textContent = known ? LL.t('settings.area.scoped_note') : LL.t('settings.area.unknown_note', { area: state.area });
     } else {
-      label.textContent = 'Глобальные настройки';
-      note.textContent = 'Выберите область в боковом меню, чтобы задать переопределения для неё; без области редактируются значения по умолчанию для всех областей.';
+      label.textContent = LL.t('settings.area.global');
+      note.textContent = LL.t('settings.area.global_note');
     }
   }
 
   // ---- connection cards ----------------------------------------------------
   const SSL_MODES = ['disable', 'allow', 'prefer', 'require', 'verify-ca', 'verify-full'];
   const LLM_PROVIDERS = [
-    { v: 'perplexity', l: 'Perplexity' }, { v: 'openai', l: 'OpenAI-совместимый API' }, { v: 'anthropic', l: 'Anthropic' }, { v: 'gigachat', l: 'GigaChat' }
+    { v: 'perplexity', l: 'Perplexity' }, { v: 'openai', l: LL.t('settings.llm.provider_openai') }, { v: 'anthropic', l: 'Anthropic' }, { v: 'gigachat', l: 'GigaChat' }
   ];
   const providerFields = (p, extra) => ([
     { path: `${p}.api_base_url`, label: 'API URL', type: 'text', showIf: (m) => m.provider === p },
-    { path: `${p}.model`, label: 'Модель', type: 'combo', showIf: (m) => m.provider === p },
+    { path: `${p}.model`, label: LL.t('settings.field.llm.model.label'), type: 'combo', showIf: (m) => m.provider === p },
     ...(extra || []),
-    { path: `${p}.max_concurrent`, label: 'Параллельных запросов', type: 'number', showIf: (m) => m.provider === p },
-    { path: `${p}.request_timeout_sec`, label: 'Таймаут запроса, с', type: 'number', showIf: (m) => m.provider === p },
+    { path: `${p}.max_concurrent`, label: LL.t('settings.field.llm.max_concurrent.label'), type: 'number', showIf: (m) => m.provider === p },
+    { path: `${p}.request_timeout_sec`, label: LL.t('settings.field.llm.request_timeout_sec.label'), type: 'number', showIf: (m) => m.provider === p },
     { path: `${p}.generation.temperature`, label: 'Temperature', type: 'number', step: '0.05', showIf: (m) => m.provider === p },
-    { path: `${p}.generation.max_tokens`, label: 'Макс. токенов ответа', type: 'number', hint: 'Резерв под ответ: ввод урезается под остаток окна.', showIf: (m) => m.provider === p },
-    { path: `${p}.context_window_tokens`, label: 'Контекстное окно, токенов', type: 'number', hint: 'Ввод и ответ вместе не должны превышать окно модели.', showIf: (m) => m.provider === p && (p === 'anthropic' || p === 'gigachat') }
+    { path: `${p}.generation.max_tokens`, label: LL.t('settings.field.llm.max_tokens.label'), type: 'number', hint: LL.t('settings.field.llm.max_tokens.hint'), showIf: (m) => m.provider === p },
+    { path: `${p}.context_window_tokens`, label: LL.t('settings.field.llm.context_window_tokens.label'), type: 'number', hint: LL.t('settings.field.llm.context_window_tokens.hint'), showIf: (m) => m.provider === p && (p === 'anthropic' || p === 'gigachat') }
   ]);
-  const apiKeyField = (p) => ({ path: `${p}.api_key`, label: 'API-ключ', type: 'password', showIf: (m) => m.provider === p });
+  const apiKeyField = (p) => ({ path: `${p}.api_key`, label: LL.t('settings.field.llm.api_key.label'), type: 'password', showIf: (m) => m.provider === p });
   const CONNECTION_CARDS = [
     {
-      id: 'storage', section: 'storage.timescale', title: 'Хранилище (TimescaleDB)', scope: 'global',
-      desc: 'База, в которой хранятся метрики, отчёты и статусы задач. Нужна для работы всех страниц.',
+      id: 'storage', section: 'storage.timescale', title: LL.t('settings.card.storage.title'), scope: 'global',
+      desc: LL.t('settings.card.storage.desc'),
       fields: [
-        { path: 'host', label: 'Хост', type: 'text', placeholder: 'localhost' },
-        { path: 'port', label: 'Порт', type: 'number', placeholder: '5432' },
-        { path: 'dbname', label: 'База данных', type: 'text' },
-        { path: 'user', label: 'Пользователь', type: 'text' },
-        { path: 'password', label: 'Пароль', type: 'password' },
+        { path: 'host', label: LL.t('settings.field.storage.host.label'), type: 'text', placeholder: 'localhost' },
+        { path: 'port', label: LL.t('settings.field.storage.port.label'), type: 'number', placeholder: '5432' },
+        { path: 'dbname', label: LL.t('settings.field.storage.dbname.label'), type: 'text' },
+        { path: 'user', label: LL.t('settings.field.storage.user.label'), type: 'text' },
+        { path: 'password', label: LL.t('settings.field.storage.password.label'), type: 'password' },
         { path: 'sslmode', label: 'SSL', type: 'select', options: SSL_MODES },
-        { path: 'schema', label: 'Схема', type: 'text', placeholder: 'public' }
+        { path: 'schema', label: LL.t('settings.field.storage.schema.label'), type: 'text', placeholder: 'public' }
       ]
     },
     {
-      id: 'data_sources', section: 'data_sources', title: 'Источники данных', scope: 'global', kind: 'catalog', testable: false,
-      desc: 'Подключения к Grafana, Prometheus и InfluxDB: адрес и учётная запись. Одно подключение можно назначить нескольким доменам.',
+      id: 'data_sources', section: 'data_sources', title: LL.t('settings.card.data_sources.title'), scope: 'global', kind: 'catalog', testable: false,
+      desc: LL.t('settings.card.data_sources.desc'),
       fields: []
     },
     {
-      id: 'domain_sources', section: 'domain_sources', title: 'Источники доменов', scope: 'area', kind: 'bindings', testable: false,
-      desc: 'Откуда каждый домен берёт метрики. Для Grafana выберите датасорс — список приходит из самой Grafana. Своя привязка области заменяет глобальную целиком.',
+      id: 'domain_sources', section: 'domain_sources', title: LL.t('settings.card.domain_sources.title'), scope: 'area', kind: 'bindings', testable: false,
+      desc: LL.t('settings.card.domain_sources.desc'),
       fields: []
     },
     {
-      id: 'default_params', section: 'default_params', title: 'Параметры выборки', scope: 'area', testable: false,
-      desc: 'Шаг запроса к источникам метрик и интервал агрегации временных рядов перед анализом.',
+      id: 'default_params', section: 'default_params', title: LL.t('settings.card.default_params.title'), scope: 'area', testable: false,
+      desc: LL.t('settings.card.default_params.desc'),
       fields: [
-        { path: 'step', label: 'Шаг выборки', type: 'text', placeholder: '1m', hint: 'Гранулярность запроса: 30s, 1m, 5m' },
-        { path: 'resample_interval', label: 'Интервал агрегации', type: 'text', placeholder: '5T', hint: 'Pandas offset: 5T = 5 минут, 1H = час' }
+        { path: 'step', label: LL.t('settings.field.default_params.step.label'), type: 'text', placeholder: '1m', hint: LL.t('settings.field.default_params.step.hint') },
+        { path: 'resample_interval', label: LL.t('settings.field.default_params.resample_interval.label'), type: 'text', placeholder: '5T', hint: LL.t('settings.field.default_params.resample_interval.hint') }
       ]
     },
     {
-      id: 'logs_source', section: 'logs_source', title: 'Логи приложений (OpenSearch)', scope: 'area',
-      desc: 'Необязательный домен: агрегированные ERROR-логи за окно теста попадают в анализ ИИ.',
+      id: 'logs_source', section: 'logs_source', title: LL.t('settings.card.logs_source.title'), scope: 'area',
+      desc: LL.t('settings.card.logs_source.desc'),
       fields: [
-        { path: 'enabled', label: 'Включить домен «Логи приложений»', type: 'checkbox' },
+        { path: 'enabled', label: LL.t('settings.field.logs_source.enabled.label'), type: 'checkbox' },
         { path: 'opensearch.base_url', label: 'URL OpenSearch Dashboards', type: 'text', placeholder: 'https://opensearch:5601' },
-        { path: 'opensearch.index_pattern', label: 'Шаблон индекса', type: 'text', placeholder: 'app-logs-*' },
-        { path: 'opensearch.username_env', label: 'Логин', type: 'text' },
-        { path: 'opensearch.password_env', label: 'Пароль', type: 'password' },
-        { path: 'opensearch.verify_ssl', label: 'Проверять TLS-сертификат', type: 'checkbox' }
+        { path: 'opensearch.index_pattern', label: LL.t('settings.field.logs_source.index_pattern.label'), type: 'text', placeholder: 'app-logs-*' },
+        { path: 'opensearch.username_env', label: LL.t('settings.field.logs_source.username.label'), type: 'text' },
+        { path: 'opensearch.password_env', label: LL.t('settings.field.logs_source.password.label'), type: 'password' },
+        { path: 'opensearch.verify_ssl', label: LL.t('settings.field.logs_source.verify_ssl.label'), type: 'checkbox' }
       ]
     },
     {
-      id: 'confluence', section: 'confluence', title: 'Confluence: публикация веб-отчёта', scope: 'global',
-      desc: 'Публикация готового отчёта страницей в Confluence кнопкой на странице отчёта (вкладки анализа и графики).',
+      id: 'confluence', section: 'confluence', title: LL.t('settings.card.confluence.title'), scope: 'global',
+      desc: LL.t('settings.card.confluence.desc'),
       fields: [
-        { path: 'enabled', label: 'Разрешить публикацию', type: 'checkbox' },
+        { path: 'enabled', label: LL.t('settings.field.confluence.enabled.label'), type: 'checkbox' },
         { path: 'base_url', label: 'URL Confluence', type: 'text', placeholder: 'https://confluence.example.ru' },
-        { path: 'username', label: 'Логин', type: 'text' },
-        { path: 'password', label: 'Пароль', type: 'password' },
-        { path: 'space_key', label: 'Ключ пространства', type: 'text' },
-        { path: 'parent_page_id', label: 'ID родительской страницы', type: 'text', hint: 'Отчёты создаются дочерними страницами' },
-        { path: 'forecast_parent_page_id', label: 'ID родительской страницы прогнозов', type: 'text', hint: 'Отчёты прогноза мощностей создаются дочерними страницами; пусто — та же страница, что для отчётов' },
-        { path: 'verify_ssl', label: 'Проверять TLS-сертификат', type: 'checkbox' }
+        { path: 'username', label: LL.t('settings.field.confluence.username.label'), type: 'text' },
+        { path: 'password', label: LL.t('settings.field.confluence.password.label'), type: 'password' },
+        { path: 'space_key', label: LL.t('settings.field.confluence.space_key.label'), type: 'text' },
+        { path: 'parent_page_id', label: LL.t('settings.field.confluence.parent_page_id.label'), type: 'text', hint: LL.t('settings.field.confluence.parent_page_id.hint') },
+        { path: 'forecast_parent_page_id', label: LL.t('settings.field.confluence.forecast_parent_page_id.label'), type: 'text', hint: LL.t('settings.field.confluence.forecast_parent_page_id.hint') },
+        { path: 'verify_ssl', label: LL.t('settings.field.confluence.verify_ssl.label'), type: 'checkbox' }
       ]
     },
     {
-      id: 'confluence_template', section: 'confluence_template', title: 'Confluence по шаблону, Grafana render, Loki', scope: 'global',
-      desc: 'Классический отчёт при создании: копия страницы-шаблона, снимки панелей Grafana и выгрузка логов Loki. Идентификаторы шаблона задаются в разделе «Визуализации».',
+      id: 'confluence_template', section: 'confluence_template', title: LL.t('settings.card.confluence_template.title'), scope: 'global',
+      desc: LL.t('settings.card.confluence_template.desc'),
       fields: [
         { path: 'url_basic', label: 'URL Confluence', type: 'text', placeholder: 'https://confluence.example.ru' },
-        { path: 'space_conf', label: 'Ключ пространства', type: 'text' },
-        { path: 'user', label: 'Логин Confluence', type: 'text' },
-        { path: 'password', label: 'Пароль Confluence', type: 'password' },
+        { path: 'space_conf', label: LL.t('settings.field.confluence_template.space_conf.label'), type: 'text' },
+        { path: 'user', label: LL.t('settings.field.confluence_template.user.label'), type: 'text' },
+        { path: 'password', label: LL.t('settings.field.confluence_template.password.label'), type: 'password' },
         { path: 'grafana_base_url', label: 'URL Grafana (render)', type: 'text', placeholder: 'http://grafana:3000' },
-        { path: 'grafana_login', label: 'Логин Grafana', type: 'text' },
-        { path: 'grafana_pass', label: 'Пароль Grafana', type: 'password' },
+        { path: 'grafana_login', label: LL.t('settings.field.confluence_template.grafana_login.label'), type: 'text' },
+        { path: 'grafana_pass', label: LL.t('settings.field.confluence_template.grafana_pass.label'), type: 'password' },
         { path: 'loki_url', label: 'URL Loki query_range', type: 'text', placeholder: 'http://loki:3100/loki/api/v1/query_range' }
       ]
     },
     {
-      id: 'llm', section: 'llm', title: 'LLM-провайдер (анализ ИИ)', scope: 'area',
-      desc: 'Модель, которая пишет доменные и итоговый отчёты. Проверка отправляет короткий запрос и тратит немного токенов.',
+      id: 'llm', section: 'llm', title: LL.t('settings.card.llm.title'), scope: 'area',
+      desc: LL.t('settings.card.llm.desc'),
       fields: [
-        { path: 'provider', label: 'Провайдер', type: 'select', options: LLM_PROVIDERS },
-        { path: 'max_domain_workers', label: 'Доменов параллельно', type: 'number', hint: 'Сколько доменов анализировать одновременно' },
-        { path: 'self_consistency_k', label: 'Кандидатов на домен', type: 'number', hint: 'Число вариантов ответа, из которых судья выбирает лучший' },
+        { path: 'provider', label: LL.t('settings.field.llm.provider.label'), type: 'select', options: LLM_PROVIDERS },
+        { path: 'max_domain_workers', label: LL.t('settings.field.llm.max_domain_workers.label'), type: 'number', hint: LL.t('settings.field.llm.max_domain_workers.hint') },
+        { path: 'self_consistency_k', label: LL.t('settings.field.llm.self_consistency_k.label'), type: 'number', hint: LL.t('settings.field.llm.self_consistency_k.hint') },
         ...providerFields('perplexity', [apiKeyField('perplexity')]),
         ...providerFields('openai', [apiKeyField('openai')]),
         ...providerFields('anthropic', [apiKeyField('anthropic')]),
         ...providerFields('gigachat', [
-          { path: 'gigachat.cert_file', label: 'Файл сертификата (mTLS)', type: 'text', hint: 'Путь на сервере LoadLens', showIf: (m) => m.provider === 'gigachat' },
-          { path: 'gigachat.key_file', label: 'Файл ключа (mTLS)', type: 'text', showIf: (m) => m.provider === 'gigachat' },
-          { path: 'gigachat.verify', label: 'Проверять TLS-сертификат API', type: 'checkbox', showIf: (m) => m.provider === 'gigachat' }
+          { path: 'gigachat.cert_file', label: LL.t('settings.field.llm.gigachat_cert_file.label'), type: 'text', hint: LL.t('settings.field.llm.gigachat_cert_file.hint'), showIf: (m) => m.provider === 'gigachat' },
+          { path: 'gigachat.key_file', label: LL.t('settings.field.llm.gigachat_key_file.label'), type: 'text', showIf: (m) => m.provider === 'gigachat' },
+          { path: 'gigachat.verify', label: LL.t('settings.field.llm.gigachat_verify.label'), type: 'checkbox', showIf: (m) => m.provider === 'gigachat' }
         ])
       ]
     },
     {
-      id: 'load_generators', section: 'load_generators', title: 'Генераторы нагрузки', scope: 'global', kind: 'kit', testable: false,
-      desc: 'Серверы, на которых страница «Запуск теста» запускает инструменты НТ по SSH, и ручной режим, где LoadLens только отмечает начало и конец прогона. Запускать тесты могут инженеры: выделите для LoadLens отдельного пользователя на генераторе.',
+      id: 'load_generators', section: 'load_generators', title: LL.t('settings.card.load_generators.title'), scope: 'global', kind: 'kit', testable: false,
+      desc: LL.t('settings.card.load_generators.desc'),
       fields: []
     },
     {
-      id: 'load_tools', section: 'load_tools', title: 'Инструменты НТ', scope: 'global', kind: 'kit', testable: false,
-      desc: 'Шаблоны команд k6, JMeter, Locust и Gatling для страницы «Запуск теста». Сохраняются только отличия от встроенных шаблонов.',
+      id: 'load_tools', section: 'load_tools', title: LL.t('settings.card.load_tools.title'), scope: 'global', kind: 'kit', testable: false,
+      desc: LL.t('settings.card.load_tools.desc'),
       fields: []
     }
   ];
@@ -323,7 +336,7 @@
     input.type = 'text';
     input.id = id;
     input.autocomplete = 'off';
-    input.placeholder = field.placeholder || (names.length ? 'Выберите или введите модель' : '');
+    input.placeholder = field.placeholder || (names.length ? LL.t('settings.llm.model_placeholder') : '');
     input.value = current;
     picker.appendChild(input);
     if (!names.length) return picker;
@@ -331,7 +344,7 @@
     const toggle = document.createElement('button');
     toggle.type = 'button';
     toggle.className = 'model-picker-toggle';
-    toggle.setAttribute('aria-label', 'Показать список моделей');
+    toggle.setAttribute('aria-label', LL.t('settings.llm.models_toggle_aria'));
     toggle.textContent = '▾';
     const list = document.createElement('div');
     list.className = 'combobox-list';
@@ -345,7 +358,7 @@
       if (!shown.length) {
         const empty = document.createElement('div');
         empty.className = 'combobox-empty';
-        empty.textContent = 'Нет подходящих моделей';
+        empty.textContent = LL.t('settings.llm.models_none');
         list.appendChild(empty);
         return;
       }
@@ -411,15 +424,15 @@
         wrap.appendChild(hint);
       }
     } else if (field.type === 'password') {
-      wrap.innerHTML = `<label for="${id}">${esc(field.label)}</label><div class="password-field"><input type="password" id="${id}" value="${esc(value === undefined || value === null ? '' : value)}" autocomplete="new-password" /><button type="button" class="btn btn-reveal" aria-label="Показать">показать</button></div>${field.hint ? `<div class="field-hint">${esc(field.hint)}</div>` : ''}`;
+      wrap.innerHTML = `<label for="${id}">${esc(field.label)}</label><div class="password-field"><input type="password" id="${id}" value="${esc(value === undefined || value === null ? '' : value)}" autocomplete="new-password" /><button type="button" class="btn btn-reveal" aria-label="${LL.tHtml('settings.field.reveal_aria')}">${LL.tHtml('settings.field.reveal')}</button></div>${field.hint ? `<div class="field-hint">${esc(field.hint)}</div>` : ''}`;
       const input = wrap.querySelector('input');
       wrap.querySelector('.btn-reveal').addEventListener('click', (e) => {
         const show = input.type === 'password';
         input.type = show ? 'text' : 'password';
-        e.currentTarget.textContent = show ? 'скрыть' : 'показать';
+        e.currentTarget.textContent = show ? LL.t('settings.field.hide') : LL.t('settings.field.reveal');
       });
     } else if (field.type === 'textarea' || field.type === 'kv' || field.type === 'mounts') {
-      wrap.innerHTML = `<label for="${id}">${esc(field.label)}</label><textarea id="${id}" class="mono" rows="${field.rows || 3}" spellcheck="false" placeholder="${esc(field.placeholder || (field.type === 'kv' ? 'ИМЯ=значение' : ''))}"></textarea>${field.hint ? `<div class="field-hint">${esc(field.hint)}</div>` : ''}`;
+      wrap.innerHTML = `<label for="${id}">${esc(field.label)}</label><textarea id="${id}" class="mono" rows="${field.rows || 3}" spellcheck="false" placeholder="${esc(field.placeholder || (field.type === 'kv' ? LL.t('settings.field.kv_placeholder') : ''))}"></textarea>${field.hint ? `<div class="field-hint">${esc(field.hint)}</div>` : ''}`;
       wrap.querySelector('textarea').value = fieldText(field, value);
     } else {
       wrap.innerHTML = `<label for="${id}">${esc(field.label)}</label><input type="${field.type === 'number' ? 'number' : 'text'}" id="${id}" ${field.step ? `step="${field.step}"` : ''} value="${esc(fieldText(field, value))}" placeholder="${esc(field.placeholder || '')}" />${field.hint ? `<div class="field-hint">${esc(field.hint)}</div>` : ''}`;
@@ -471,25 +484,25 @@
       state.models[card.id] = clone(sectionData(card.section));
       state.saved[card.id] = stable(state.models[card.id]);
       const scopeNote = card.scope === 'area'
-        ? (state.area ? `переопределение для области «${state.area}»` : 'глобальные значения по умолчанию')
-        : 'общие для всех областей';
+        ? (state.area ? LL.t('settings.card.scope_area', { area: state.area }) : LL.t('settings.card.scope_area_global'))
+        : LL.t('settings.card.scope_global');
       const el = document.createElement('article');
       el.className = 'conn-card';
       el.id = `card-${card.id}`;
       const bodyClass = card.kind ? 'card-body' : 'form-grid three';
       el.innerHTML = `
-        <div class="conn-head"><h3>${esc(card.title)}</h3><span class="conn-actions">${card.id === 'llm' ? '<button type="button" class="btn card-models">Получить список моделей</button>' : ''}${card.testable === false ? '' : '<button type="button" class="btn card-test">Проверить соединение</button>'}</span></div>
+        <div class="conn-head"><h3>${esc(card.title)}</h3><span class="conn-actions">${card.id === 'llm' ? `<button type="button" class="btn card-models">${LL.tHtml('settings.llm.models_button')}</button>` : ''}${card.testable === false ? '' : `<button type="button" class="btn card-test">${LL.tHtml('settings.card.test_button')}</button>`}</span></div>
         <p class="help">${esc(card.desc)} <span class="dim">(${esc(scopeNote)})</span></p>
         <div class="${bodyClass}"></div>
         <div class="conn-result" role="status"></div>
         <details class="report-collapsible" style="margin-top:12px">
-          <summary><span>Расширенные параметры (JSON)</span><small class="report-collapsible-subtitle">все ключи раздела ${esc(card.section)}</small></summary>
+          <summary><span>${LL.tHtml('settings.json.advanced_params')}</span><small class="report-collapsible-subtitle">${LL.tHtml('settings.json.all_keys', { section: card.section })}</small></summary>
           <div class="report-collapsible-body">
             <div class="editor-wrap"><div class="editor-header"><span class="editor-title">${esc(card.section)}</span><span class="dim json-status"></span></div><div id="ed_${card.id}" class="ace-host"></div></div>
           </div>
         </details>
         <div class="card-actions">
-          <button type="button" class="btn btn-primary card-save" disabled>Сохранить</button>
+          <button type="button" class="btn btn-primary card-save" disabled>${LL.tHtml('settings.action.save')}</button>
           <span class="status card-status"></span>
         </div>`;
       host.appendChild(el);
@@ -502,13 +515,13 @@
           const status = el.querySelector('.json-status');
           try {
             const parsed = JSON.parse(ed.getValue() || '{}');
-            if (!isPlainObject(parsed)) throw new Error('ожидается объект');
+            if (!isPlainObject(parsed)) throw new Error(LL.t('settings.json.expected_object'));
             state.models[card.id] = parsed;
             status.textContent = 'OK';
             refreshCardFields(card);
             updateCardDirty(card);
           } catch (e) {
-            status.textContent = `Ошибка JSON: ${e.message}`;
+            status.textContent = LL.t('settings.json.error', { error: e.message });
           }
         });
       }
@@ -525,7 +538,7 @@
     const result = el.querySelector('.conn-result');
     const btn = el.querySelector('.card-models');
     result.className = 'conn-result pending';
-    result.textContent = 'Запрашиваем список моделей…';
+    result.textContent = LL.t('settings.llm.models_loading');
     btn.disabled = true;
     try {
       const resp = await fetch('/config/llm_models', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(configBody('llm', state.models[card.id])) });
@@ -534,10 +547,10 @@
       state.llmModels = Array.isArray(data.models) ? data.models : [];
       refreshCardFields(card);
       result.className = `conn-result ${data.ok ? 'ok' : 'error'}`;
-      result.textContent = data.message || (data.ok ? `Доступно моделей: ${state.llmModels.length}` : 'Провайдер не отдаёт список моделей');
+      result.textContent = data.message || (data.ok ? LL.t('settings.llm.models_count', { n: state.llmModels.length }) : LL.t('settings.llm.models_unsupported'));
     } catch (e) {
       result.className = 'conn-result error';
-      result.textContent = `Не удалось получить список моделей: ${e.message}`;
+      result.textContent = LL.t('settings.llm.models_failed', { error: e.message });
     } finally {
       btn.disabled = false;
     }
@@ -549,7 +562,7 @@
     const btn = el.querySelector('.card-test');
     if (!result) return;
     result.className = 'conn-result pending';
-    result.textContent = 'Проверяем…';
+    result.textContent = LL.t('settings.check.pending');
     if (btn) btn.disabled = true;
     try {
       const body = configBody(card.section, state.models[card.id]);
@@ -558,14 +571,14 @@
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
       result.className = `conn-result ${data.ok ? 'ok' : 'error'}`;
-      result.innerHTML = `${esc(data.message)} <span class="dim">(${data.elapsed_ms} мс)</span>${!data.ok && data.details && data.details.error ? `<pre>${esc(data.details.error)}</pre>` : ''}`;
+      result.innerHTML = `${esc(data.message)} <span class="dim">${LL.tHtml('settings.check.elapsed', { ms: data.elapsed_ms })}</span>${!data.ok && data.details && data.details.error ? `<pre>${esc(data.details.error)}</pre>` : ''}`;
       if (data.ok && (!card.kind || card.kind === 'catalog' || (extra && extra.domain === 'default'))) state.checkOk[card.id] = true;
       else if (!card.kind) state.checkOk[card.id] = false;
       updateWizardNav();
       return data;
     } catch (e) {
       result.className = 'conn-result error';
-      result.textContent = `Не удалось выполнить проверку: ${e.message}`;
+      result.textContent = LL.t('settings.check.failed', { error: e.message });
       if (!card.kind) state.checkOk[card.id] = false;
     } finally {
       if (btn) btn.disabled = false;
@@ -575,7 +588,7 @@
   async function saveCard(card) {
     const el = $(`card-${card.id}`);
     const status = el.querySelector('.card-status');
-    status.textContent = 'Сохранение…';
+    status.textContent = LL.t('settings.status.saving');
     try {
       const data = await postConfig(configBody(card.section, state.models[card.id]));
       state.saved[card.id] = stable(state.models[card.id]);
@@ -591,13 +604,14 @@
         if (generators) renderKitBody(generators);
       }
       updateCardDirty(card);
-      status.textContent = 'Сохранено';
-      ui.toast(`${card.title}: сохранено`, { tone: 'ok' });
+      const savedText = LL.t('settings.status.saved');
+      status.textContent = savedText;
+      ui.toast(LL.t('settings.status.section_saved', { section: card.title }), { tone: 'ok' });
       showWarnings(data.warnings);
-      setTimeout(() => { if (status.textContent === 'Сохранено') status.textContent = ''; }, 2000);
+      setTimeout(() => { if (status.textContent === savedText) status.textContent = ''; }, 2000);
       return true;
     } catch (e) {
-      status.textContent = `Ошибка: ${e.message}`;
+      status.textContent = LL.t('settings.status.error', { error: e.message });
       ui.toast(`${card.title}: ${e.message}`, { tone: 'error' });
       return false;
     }
@@ -606,16 +620,16 @@
   // ---- data source catalog and domain bindings ----------------------------
   const SOURCE_ID_RE = /^[a-z0-9][a-z0-9_-]{0,39}$/;
   const SOURCE_TYPES = {
-    grafana_proxy: { label: 'Grafana', baseId: 'grafana', hint: 'Запросы идут через Grafana: PromQL, InfluxQL и Flux по её датасорсам. Датасорс выбирается у каждого домена.' },
-    prometheus: { label: 'Prometheus', baseId: 'prometheus', hint: 'PromQL-запросы напрямую в Prometheus или совместимый API.' },
-    influxdb: { label: 'InfluxDB', baseId: 'influxdb', hint: 'Flux-запросы напрямую в InfluxDB 2.x. Bucket задаётся у домена.' }
+    grafana_proxy: { label: 'Grafana', baseId: 'grafana', hint: LL.t('settings.source.type.grafana_proxy_hint') },
+    prometheus: { label: 'Prometheus', baseId: 'prometheus', hint: LL.t('settings.source.type.prometheus_hint') },
+    influxdb: { label: 'InfluxDB', baseId: 'influxdb', hint: LL.t('settings.source.type.influxdb_hint') }
   };
   const DATASOURCE_MODE_LABELS = { promql: 'PromQL', influxql: 'InfluxQL', flux: 'Flux', sql: 'SQL' };
   const BINDING_FIELDS = {
-    datasource_name: { label: 'Имя датасорса', placeholder: 'как в Grafana' },
-    datasource_uid: { label: 'UID датасорса', placeholder: 'если имя не уникально' },
-    database: { label: 'База InfluxQL', placeholder: 'например, k6' },
-    bucket: { label: 'Bucket для Flux', placeholder: 'подставляется вместо {bucket}' }
+    datasource_name: { label: LL.t('settings.binding.datasource_name.label'), placeholder: LL.t('settings.binding.datasource_name.placeholder') },
+    datasource_uid: { label: LL.t('settings.binding.datasource_uid.label'), placeholder: LL.t('settings.binding.datasource_uid.placeholder') },
+    database: { label: LL.t('settings.binding.database.label'), placeholder: LL.t('settings.binding.database.placeholder') },
+    bucket: { label: LL.t('settings.binding.bucket.label'), placeholder: LL.t('settings.binding.bucket.placeholder') }
   };
   const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 
@@ -625,7 +639,7 @@
     return { title, type: 'grafana_proxy', grafana: { base_url: '', verify_ssl: false, auth: { method: 'basic', username: '', password: '', token: '' } } };
   }
   function sourceTypeLabel(type) {
-    return (SOURCE_TYPES[type] || {}).label || type || 'тип не задан';
+    return (SOURCE_TYPES[type] || {}).label || type || LL.t('settings.summary.no_type');
   }
   function sourceUrl(entry) {
     if (entry.type === 'grafana_proxy') return String(getPath(entry, 'grafana.base_url') || '');
@@ -634,33 +648,33 @@
     return '';
   }
   function sourceSummary(id, entry) {
-    const parts = [`id ${id}`, sourceUrl(entry) || 'адрес не указан'];
+    const parts = [`id ${id}`, sourceUrl(entry) || LL.t('settings.summary.no_address')];
     if (entry.type === 'grafana_proxy') {
-      parts.push(getPath(entry, 'grafana.auth.method') === 'bearer' ? 'вход по API-токену' : `логин ${getPath(entry, 'grafana.auth.username') || 'не указан'}`);
+      parts.push(getPath(entry, 'grafana.auth.method') === 'bearer' ? LL.t('settings.source.summary_token') : LL.t('settings.source.summary_login', { login: getPath(entry, 'grafana.auth.username') || LL.t('settings.source.summary_login_unset') }));
     }
-    if (entry.type === 'influxdb' && getPath(entry, 'influxdb.org')) parts.push(`организация ${getPath(entry, 'influxdb.org')}`);
+    if (entry.type === 'influxdb' && getPath(entry, 'influxdb.org')) parts.push(LL.t('settings.source.summary_org', { org: getPath(entry, 'influxdb.org') }));
     return parts.join(' · ');
   }
   function sourceFields(id, type) {
     const path = (suffix) => `${id}.${suffix}`;
-    const fields = [{ path: path('title'), label: 'Название', type: 'text', group: 'main' }];
+    const fields = [{ path: path('title'), label: LL.t('settings.field.source.title.label'), type: 'text', group: 'main' }];
     if (type === 'prometheus') {
       fields.push({ path: path('prometheus.url'), label: 'URL Prometheus', type: 'text', placeholder: 'http://prometheus:9090', group: 'main' });
     } else if (type === 'influxdb') {
       fields.push(
         { path: path('influxdb.url'), label: 'URL InfluxDB', type: 'text', placeholder: 'http://influxdb:8086', group: 'main' },
-        { path: path('influxdb.org'), label: 'Организация', type: 'text', group: 'auth' },
-        { path: path('influxdb.token'), label: 'Токен', type: 'password', group: 'auth' }
+        { path: path('influxdb.org'), label: LL.t('settings.field.source.influxdb_org.label'), type: 'text', group: 'auth' },
+        { path: path('influxdb.token'), label: LL.t('settings.field.source.influxdb_token.label'), type: 'password', group: 'auth' }
       );
     } else if (type === 'grafana_proxy') {
       const bearer = (m) => getPath(m, path('grafana.auth.method')) === 'bearer';
       fields.push(
         { path: path('grafana.base_url'), label: 'URL Grafana', type: 'text', placeholder: 'http://grafana:3000', group: 'main' },
-        { path: path('grafana.auth.method'), label: 'Авторизация', type: 'select', options: [{ v: 'basic', l: 'Логин и пароль' }, { v: 'bearer', l: 'API-токен' }], group: 'auth' },
-        { path: path('grafana.auth.username'), label: 'Логин', type: 'text', showIf: (m) => !bearer(m), group: 'auth' },
-        { path: path('grafana.auth.password'), label: 'Пароль', type: 'password', showIf: (m) => !bearer(m), group: 'auth' },
-        { path: path('grafana.auth.token'), label: 'API-токен', type: 'password', showIf: bearer, group: 'auth' },
-        { path: path('grafana.verify_ssl'), label: 'Проверять TLS-сертификат Grafana', type: 'checkbox', group: 'flag' }
+        { path: path('grafana.auth.method'), label: LL.t('settings.field.source.grafana_auth_method.label'), type: 'select', options: [{ v: 'basic', l: LL.t('settings.field.source.grafana_auth_method.basic') }, { v: 'bearer', l: LL.t('settings.field.source.grafana_auth_method.bearer') }], group: 'auth' },
+        { path: path('grafana.auth.username'), label: LL.t('settings.field.source.grafana_username.label'), type: 'text', showIf: (m) => !bearer(m), group: 'auth' },
+        { path: path('grafana.auth.password'), label: LL.t('settings.field.source.grafana_password.label'), type: 'password', showIf: (m) => !bearer(m), group: 'auth' },
+        { path: path('grafana.auth.token'), label: LL.t('settings.field.source.grafana_token.label'), type: 'password', showIf: bearer, group: 'auth' },
+        { path: path('grafana.verify_ssl'), label: LL.t('settings.field.source.grafana_verify_ssl.label'), type: 'checkbox', group: 'flag' }
       );
     }
     return fields;
@@ -680,12 +694,12 @@
   }
   function sourceEditor(card, id, entry) {
     const body = makeEl('div', 'q-item-body');
-    body.appendChild(makeEl('p', 'dim', (SOURCE_TYPES[entry.type] || {}).hint || 'Этот тип источника не поддерживается: удалите его и добавьте заново.'));
+    body.appendChild(makeEl('p', 'dim', (SOURCE_TYPES[entry.type] || {}).hint || LL.t('settings.source.type_unsupported')));
     const groups = { main: makeEl('div', 'source-form-main'), auth: makeEl('div', 'source-form-auth'), flag: makeEl('div', 'source-form-flags') };
     sourceFields(id, entry.type).forEach((field) => groups[field.group].appendChild(renderField(card, field)));
     Object.values(groups).forEach((group) => { if (group.childElementCount) body.appendChild(group); });
     const actions = makeEl('div', 'q-item-actions');
-    actions.appendChild(makeBtn('Удалить источник', () => deleteSource(card, id), 'btn btn-sm btn-danger'));
+    actions.appendChild(makeBtn(LL.t('settings.source.delete'), () => deleteSource(card, id), 'btn btn-sm btn-danger'));
     body.appendChild(actions);
     return body;
   }
@@ -709,7 +723,7 @@
     main.append(title, meta);
     const result = makeEl('div', 'conn-result');
     result.setAttribute('role', 'status');
-    const check = makeBtn('Проверить', (event) => {
+    const check = makeBtn(LL.t('settings.action.check'), (event) => {
       event.stopPropagation();
       runCheck(card, { source: id }, result, 'sourceChecks', id);
     }, 'btn btn-sm');
@@ -732,9 +746,9 @@
   }
   async function deleteSource(card, id) {
     const ok = await ui.confirm({
-      title: 'Удалить источник',
-      message: `Источник «${id}» пропадёт из каталога после сохранения. Если на него ссылаются домены, сохранение не пройдёт и покажет, где он используется.`,
-      confirmText: 'Удалить',
+      title: LL.t('settings.source.delete'),
+      message: LL.t('settings.source.delete_confirm', { id }),
+      confirmText: LL.t('settings.action.delete'),
       danger: true
     });
     if (!ok) return;
@@ -774,9 +788,9 @@
     const type = body.querySelector('#dsType').value;
     const title = body.querySelector('#dsTitle').value.trim();
     const id = body.querySelector('#dsId').value.trim();
-    if (!title) return { error: 'Укажите название' };
-    if (!SOURCE_ID_RE.test(id)) return { error: 'Идентификатор: латиница в нижнем регистре, цифры, дефис и подчёркивание, до 40 символов' };
-    if (used.has(id)) return { error: `Источник «${id}» уже есть` };
+    if (!title) return { error: LL.t('settings.form.title_required') };
+    if (!SOURCE_ID_RE.test(id)) return { error: LL.t('settings.form.id_rule') };
+    if (used.has(id)) return { error: LL.t('settings.source.exists', { id }) };
     return { value: { id, type, title } };
   }
   async function openAddSource(card) {
@@ -784,20 +798,20 @@
     const used = new Set(Object.keys(model));
     const options = Object.keys(SOURCE_TYPES).map((type) => `<option value="${type}">${esc(SOURCE_TYPES[type].label)}</option>`).join('');
     const created = await ui.dialog({
-      title: 'Новый источник данных',
+      title: LL.t('settings.source.new_title'),
       bodyHtml: [
-        `<label>Тип<select id="dsType">${options}</select></label>`,
+        `<label>${LL.tHtml('settings.form.type')}<select id="dsType">${options}</select></label>`,
         '<p class="dim" id="dsTypeHint"></p>',
-        '<label>Название<input id="dsTitle" type="text" maxlength="80" /></label>',
-        '<label>Идентификатор<input id="dsId" type="text" maxlength="40" spellcheck="false" autocomplete="off" /></label>',
-        '<p class="dim">По идентификатору домены ссылаются на источник, после сохранения его не изменить.</p>',
+        `<label>${LL.tHtml('settings.form.title')}<input id="dsTitle" type="text" maxlength="80" /></label>`,
+        `<label>${LL.tHtml('settings.form.id')}<input id="dsId" type="text" maxlength="40" spellcheck="false" autocomplete="off" /></label>`,
+        `<p class="dim">${LL.tHtml('settings.source.id_hint')}</p>`,
         '<div class="dialog-error" id="dsError"></div>'
       ].join(''),
       onOpen: (body) => wireAddSourceForm(body, used),
       actions: [
-        { label: 'Отмена' },
+        { label: LL.t('settings.action.cancel') },
         {
-          label: 'Добавить',
+          label: LL.t('settings.action.add'),
           primary: true,
           onClick: (close, body) => {
             const read = readAddSourceForm(body, used);
@@ -823,21 +837,21 @@
     card.fields = ids.flatMap((id) => sourceFields(id, (model[id] || {}).type));
     host.replaceChildren();
     const list = makeEl('div', 'q-list source-list');
-    if (!ids.length) list.appendChild(makeEl('p', 'dim', 'Источников пока нет. Добавьте подключение к Grafana, Prometheus или InfluxDB.'));
+    if (!ids.length) list.appendChild(makeEl('p', 'dim', LL.t('settings.source.empty')));
     ids.forEach((id) => list.appendChild(sourceItem(card, id, isPlainObject(model[id]) ? model[id] : {})));
     const bar = makeEl('div', 'struct-toolbar');
-    bar.appendChild(makeBtn('Добавить источник', () => openAddSource(card)));
+    bar.appendChild(makeBtn(LL.t('settings.source.add'), () => openAddSource(card)));
     host.append(list, bar);
     updateFieldVisibility(card);
   }
   // ---- load generators and load tool templates (Run test page) -----------------------------
   const GENERATOR_TYPES = {
-    ssh: { label: 'SSH', baseId: 'gen', hint: 'LoadLens подключается по SSH, запускает инструмент в фоне и читает его журнал и код выхода. Нужны GNU timeout и nohup.' },
-    docker: { label: 'Docker', baseId: 'docker', hint: 'Контейнер на каждый инстанс через Docker Engine API: https://хост:2376 с клиентскими сертификатами или socket-proxy. Доступ к Docker API равен правам root на хосте.' },
-    kubernetes: { label: 'Kubernetes', baseId: 'k8s', hint: 'Job на каждый инстанс в пространстве имён. Токен сервисного аккаунта с правами на jobs, pods, pods/log и secrets этого пространства имён.' },
-    gitlab: { label: 'GitLab CI', baseId: 'gitlab', hint: 'Запускает ваш пайплайн как есть: инструмент, скрипт и их настройки задаёт пайплайн, а LoadLens выбирает ветку и значения его параметров (переменные с описанием и spec:inputs), следит за статусом и журналом и отменяет пайплайн при остановке. Нужен API-токен со scope api; без него — только запуск по токену триггера.' },
-    jenkins: { label: 'Jenkins', baseId: 'jenkins', hint: 'Запускает вашу задачу как есть: LoadLens читает её параметры (строки, выбор, флаги, пароли, Active Choices), ставит сборку с выбранными значениями, следит за ней и останавливает её. У multibranch-задачи ветка выбирается при запуске.' },
-    manual: { label: 'Вручную', baseId: 'manual', hint: 'LoadLens ничего не запускает: инженер стартует инструмент сам, а в LoadLens отмечает начало и конец прогона кнопками.' }
+    ssh: { label: 'SSH', baseId: 'gen', hint: LL.t('settings.gen.type.ssh_hint') },
+    docker: { label: 'Docker', baseId: 'docker', hint: LL.t('settings.gen.type.docker_hint') },
+    kubernetes: { label: 'Kubernetes', baseId: 'k8s', hint: LL.t('settings.gen.type.kubernetes_hint') },
+    gitlab: { label: 'GitLab CI', baseId: 'gitlab', hint: LL.t('settings.gen.type.gitlab_hint') },
+    jenkins: { label: 'Jenkins', baseId: 'jenkins', hint: LL.t('settings.gen.type.jenkins_hint') },
+    manual: { label: LL.t('settings.gen.type.manual'), baseId: 'manual', hint: LL.t('settings.gen.type.manual_hint') }
   };
   const KIT_GROUPS = { main: 'kit-form-grid', auth: 'kit-form-grid', dirs: 'kit-form-grid', codes: 'kit-form-grid', wide: 'kit-form-wide' };
   const CONTAINER_TYPES = new Set(['docker', 'kubernetes']);
@@ -867,84 +881,84 @@
   }
   function generatorFields(id, type) {
     const p = (suffix) => `${id}.${suffix}`;
-    const fields = [{ path: p('title'), label: 'Название', type: 'text', group: 'main' }];
-    const parallel = { path: p('max_parallel'), label: 'Инстансов одновременно', type: 'number', placeholder: '0 — без лимита', group: 'dirs' };
-    const env = { path: p('env'), label: 'Переменные окружения генератора', type: 'kv', rows: 2, hint: 'Для всех инструментов на этом генераторе, по одной ИМЯ=значение в строке.', group: 'wide' };
+    const fields = [{ path: p('title'), label: LL.t('settings.field.gen.title.label'), type: 'text', group: 'main' }];
+    const parallel = { path: p('max_parallel'), label: LL.t('settings.field.gen.max_parallel.label'), type: 'number', placeholder: LL.t('settings.field.gen.unlimited.placeholder'), group: 'dirs' };
+    const env = { path: p('env'), label: LL.t('settings.field.gen.env.label'), type: 'kv', rows: 2, hint: LL.t('settings.field.gen.env.hint'), group: 'wide' };
     if (type === 'ssh') {
       fields.push(
-        { path: p('ssh.host'), label: 'Адрес', type: 'text', placeholder: '10.0.0.5 или gen1.example.ru', group: 'main' },
-        { path: p('ssh.port'), label: 'Порт SSH', type: 'number', placeholder: '22', group: 'main' },
-        { path: p('ssh.username'), label: 'Пользователь', type: 'text', group: 'auth' },
-        { path: p('ssh.passphrase'), label: 'Парольная фраза ключа', type: 'password', group: 'auth' },
-        { path: p('ssh.password'), label: 'Пароль (вместо ключа)', type: 'password', group: 'auth' },
-        { path: p('ssh.private_key'), label: 'Приватный ключ', type: 'textarea', rows: 4, placeholder: '-----BEGIN OPENSSH PRIVATE KEY-----', hint: 'ed25519, ECDSA или RSA в формате OpenSSH или PEM. Заведите на генераторе отдельного пользователя для LoadLens.', group: 'wide' },
-        { path: p('ssh.host_key'), label: 'Ключ хоста', type: 'text', placeholder: 'заполнится при проверке', hint: 'Проверка показывает отпечаток ключа сервера; после подтверждения ключ закрепляется, затем сохраните генератор. Без ключа хоста LoadLens не подключится для запуска.', group: 'wide' },
-        { path: p('work_dir'), label: 'Рабочий каталог', type: 'text', placeholder: '/opt/loadlens/runs', hint: 'Каталоги инстансов: журнал, код выхода и служебные файлы.', group: 'dirs' },
-        { path: p('scripts_dir'), label: 'Каталог скриптов', type: 'text', placeholder: '/opt/loadlens/tests', hint: 'От него считаются относительные пути; форма запуска ищет здесь скрипты.', group: 'dirs' },
+        { path: p('ssh.host'), label: LL.t('settings.field.gen.ssh_host.label'), type: 'text', placeholder: LL.t('settings.field.gen.ssh_host.placeholder'), group: 'main' },
+        { path: p('ssh.port'), label: LL.t('settings.field.gen.ssh_port.label'), type: 'number', placeholder: '22', group: 'main' },
+        { path: p('ssh.username'), label: LL.t('settings.field.gen.ssh_username.label'), type: 'text', group: 'auth' },
+        { path: p('ssh.passphrase'), label: LL.t('settings.field.gen.ssh_passphrase.label'), type: 'password', group: 'auth' },
+        { path: p('ssh.password'), label: LL.t('settings.field.gen.ssh_password.label'), type: 'password', group: 'auth' },
+        { path: p('ssh.private_key'), label: LL.t('settings.field.gen.ssh_private_key.label'), type: 'textarea', rows: 4, placeholder: '-----BEGIN OPENSSH PRIVATE KEY-----', hint: LL.t('settings.field.gen.ssh_private_key.hint'), group: 'wide' },
+        { path: p('ssh.host_key'), label: LL.t('settings.field.gen.ssh_host_key.label'), type: 'text', placeholder: LL.t('settings.field.gen.ssh_host_key.placeholder'), hint: LL.t('settings.field.gen.ssh_host_key.hint'), group: 'wide' },
+        { path: p('work_dir'), label: LL.t('settings.field.gen.work_dir.label'), type: 'text', placeholder: '/opt/loadlens/runs', hint: LL.t('settings.field.gen.work_dir.hint'), group: 'dirs' },
+        { path: p('scripts_dir'), label: LL.t('settings.field.gen.scripts_dir.label'), type: 'text', placeholder: '/opt/loadlens/tests', hint: LL.t('settings.field.gen.scripts_dir.hint'), group: 'dirs' },
         parallel, env
       );
     } else if (type === 'docker') {
       fields.push(
-        { path: p('docker.url'), label: 'Адрес Docker API', type: 'text', placeholder: 'https://gen2.example.ru:2376', group: 'main' },
-        { path: p('network'), label: 'Сеть контейнеров', type: 'text', placeholder: 'пусто — сеть по умолчанию', group: 'main' },
-        { path: p('docker.verify'), label: 'Проверять TLS-сертификат', type: 'checkbox', group: 'auth' },
-        { path: p('remove_finished'), label: 'Удалять контейнер после завершения (журнал остаётся в прогоне)', type: 'checkbox', group: 'auth' },
-        { path: p('docker.ca_cert'), label: 'Сертификат CA', type: 'textarea', rows: 3, placeholder: '-----BEGIN CERTIFICATE-----', group: 'wide' },
-        { path: p('docker.client_cert'), label: 'Клиентский сертификат', type: 'textarea', rows: 3, placeholder: '-----BEGIN CERTIFICATE-----', group: 'wide' },
-        { path: p('docker.client_key'), label: 'Клиентский ключ', type: 'textarea', rows: 3, placeholder: '-----BEGIN PRIVATE KEY-----', group: 'wide' },
-        { path: p('mounts'), label: 'Монтирования', type: 'mounts', rows: 2, placeholder: 'loadlens-scripts:/scripts:ro', hint: 'По одному в строке: том или абсолютный путь на Docker-хосте, путь в контейнере и ro или rw.', group: 'wide' },
-        { path: p('scripts_dir'), label: 'Каталог скриптов в контейнере', type: 'text', placeholder: '/scripts', group: 'dirs' },
-        { path: p('work_dir'), label: 'Рабочий каталог в контейнере', type: 'text', placeholder: '/tmp', group: 'dirs' },
-        { path: p('resources.cpus'), label: 'CPU на контейнер', type: 'number', step: '0.5', placeholder: '0 — без лимита', group: 'dirs' },
-        { path: p('resources.memory_mb'), label: 'Память на контейнер, МБ', type: 'number', placeholder: '0 — без лимита', group: 'dirs' },
+        { path: p('docker.url'), label: LL.t('settings.field.gen.docker_url.label'), type: 'text', placeholder: 'https://gen2.example.ru:2376', group: 'main' },
+        { path: p('network'), label: LL.t('settings.field.gen.network.label'), type: 'text', placeholder: LL.t('settings.field.gen.network.placeholder'), group: 'main' },
+        { path: p('docker.verify'), label: LL.t('settings.field.gen.verify.label'), type: 'checkbox', group: 'auth' },
+        { path: p('remove_finished'), label: LL.t('settings.field.gen.remove_finished.label'), type: 'checkbox', group: 'auth' },
+        { path: p('docker.ca_cert'), label: LL.t('settings.field.gen.docker_ca_cert.label'), type: 'textarea', rows: 3, placeholder: '-----BEGIN CERTIFICATE-----', group: 'wide' },
+        { path: p('docker.client_cert'), label: LL.t('settings.field.gen.docker_client_cert.label'), type: 'textarea', rows: 3, placeholder: '-----BEGIN CERTIFICATE-----', group: 'wide' },
+        { path: p('docker.client_key'), label: LL.t('settings.field.gen.docker_client_key.label'), type: 'textarea', rows: 3, placeholder: '-----BEGIN PRIVATE KEY-----', group: 'wide' },
+        { path: p('mounts'), label: LL.t('settings.field.gen.mounts.label'), type: 'mounts', rows: 2, placeholder: 'loadlens-scripts:/scripts:ro', hint: LL.t('settings.field.gen.mounts.hint'), group: 'wide' },
+        { path: p('scripts_dir'), label: LL.t('settings.field.gen.container_scripts_dir.label'), type: 'text', placeholder: '/scripts', group: 'dirs' },
+        { path: p('work_dir'), label: LL.t('settings.field.gen.container_work_dir.label'), type: 'text', placeholder: '/tmp', group: 'dirs' },
+        { path: p('resources.cpus'), label: LL.t('settings.field.gen.docker_cpus.label'), type: 'number', step: '0.5', placeholder: LL.t('settings.field.gen.unlimited.placeholder'), group: 'dirs' },
+        { path: p('resources.memory_mb'), label: LL.t('settings.field.gen.docker_memory_mb.label'), type: 'number', placeholder: LL.t('settings.field.gen.unlimited.placeholder'), group: 'dirs' },
         parallel, env
       );
     } else if (type === 'kubernetes') {
       const outside = (m) => !getPath(m, p('kubernetes.in_cluster'));
       fields.push(
-        { path: p('kubernetes.api_url'), label: 'Адрес Kubernetes API', type: 'text', placeholder: 'https://k8s.example.ru:6443', showIf: outside, group: 'main' },
-        { path: p('namespace'), label: 'Пространство имён', type: 'text', placeholder: 'loadtest', group: 'main' },
-        { path: p('kubernetes.in_cluster'), label: 'LoadLens работает в этом кластере (сервисный аккаунт пода)', type: 'checkbox', group: 'auth' },
-        { path: p('kubernetes.verify'), label: 'Проверять TLS-сертификат', type: 'checkbox', showIf: outside, group: 'auth' },
-        { path: p('kubernetes.token'), label: 'Токен сервисного аккаунта', type: 'password', showIf: outside, group: 'auth' },
-        { path: p('kubernetes.ca_cert'), label: 'Сертификат CA кластера', type: 'textarea', rows: 3, placeholder: '-----BEGIN CERTIFICATE-----', showIf: outside, group: 'wide' },
-        { path: p('scripts.config_map'), label: 'ConfigMap со скриптами', type: 'text', placeholder: 'loadtest-scripts', group: 'dirs' },
-        { path: p('scripts.pvc'), label: 'Или PVC со скриптами', type: 'text', group: 'dirs' },
-        { path: p('scripts_dir'), label: 'Каталог скриптов в контейнере', type: 'text', placeholder: '/scripts', group: 'dirs' },
-        { path: p('resources.cpu'), label: 'CPU пода', type: 'text', placeholder: '2', group: 'dirs' },
-        { path: p('resources.memory'), label: 'Память пода', type: 'text', placeholder: '2Gi', group: 'dirs' },
-        { path: p('service_account'), label: 'Сервисный аккаунт пода', type: 'text', group: 'dirs' },
-        { path: p('image_pull_secret'), label: 'Секрет реестра образов', type: 'text', group: 'dirs' },
-        { path: p('ttl_seconds'), label: 'Хранить завершённый Job, с', type: 'number', placeholder: '3600', group: 'dirs' },
-        { path: p('node_selector'), label: 'Узлы (nodeSelector)', type: 'kv', rows: 2, placeholder: 'role=loadgen', group: 'wide' },
+        { path: p('kubernetes.api_url'), label: LL.t('settings.field.gen.k8s_api_url.label'), type: 'text', placeholder: 'https://k8s.example.ru:6443', showIf: outside, group: 'main' },
+        { path: p('namespace'), label: LL.t('settings.field.gen.k8s_namespace.label'), type: 'text', placeholder: 'loadtest', group: 'main' },
+        { path: p('kubernetes.in_cluster'), label: LL.t('settings.field.gen.k8s_in_cluster.label'), type: 'checkbox', group: 'auth' },
+        { path: p('kubernetes.verify'), label: LL.t('settings.field.gen.verify.label'), type: 'checkbox', showIf: outside, group: 'auth' },
+        { path: p('kubernetes.token'), label: LL.t('settings.field.gen.k8s_token.label'), type: 'password', showIf: outside, group: 'auth' },
+        { path: p('kubernetes.ca_cert'), label: LL.t('settings.field.gen.k8s_ca_cert.label'), type: 'textarea', rows: 3, placeholder: '-----BEGIN CERTIFICATE-----', showIf: outside, group: 'wide' },
+        { path: p('scripts.config_map'), label: LL.t('settings.field.gen.k8s_config_map.label'), type: 'text', placeholder: 'loadtest-scripts', group: 'dirs' },
+        { path: p('scripts.pvc'), label: LL.t('settings.field.gen.k8s_pvc.label'), type: 'text', group: 'dirs' },
+        { path: p('scripts_dir'), label: LL.t('settings.field.gen.container_scripts_dir.label'), type: 'text', placeholder: '/scripts', group: 'dirs' },
+        { path: p('resources.cpu'), label: LL.t('settings.field.gen.k8s_cpu.label'), type: 'text', placeholder: '2', group: 'dirs' },
+        { path: p('resources.memory'), label: LL.t('settings.field.gen.k8s_memory.label'), type: 'text', placeholder: '2Gi', group: 'dirs' },
+        { path: p('service_account'), label: LL.t('settings.field.gen.k8s_service_account.label'), type: 'text', group: 'dirs' },
+        { path: p('image_pull_secret'), label: LL.t('settings.field.gen.k8s_image_pull_secret.label'), type: 'text', group: 'dirs' },
+        { path: p('ttl_seconds'), label: LL.t('settings.field.gen.k8s_ttl_seconds.label'), type: 'number', placeholder: '3600', group: 'dirs' },
+        { path: p('node_selector'), label: LL.t('settings.field.gen.k8s_node_selector.label'), type: 'kv', rows: 2, placeholder: 'role=loadgen', group: 'wide' },
         parallel, env
       );
     } else if (type === 'gitlab' || type === 'jenkins') {
       const ci = [
-        { path: p('loadlens_url'), label: 'Адрес LoadLens для событий пайплайна', type: 'text', placeholder: 'https://loadlens.example.ru', hint: 'Необязательно. Пайплайн может прислать по нему started и finished с переменными LOADLENS_EVENTS_URL и LOADLENS_TOKEN; без событий окно берётся из CI и сужается по RPS.', group: 'dirs' },
-        { path: p('tags_metrics'), label: 'Пайплайн передаёт LOADLENS_RUN_TAG инструменту (метрики помечены тегом прогона)', type: 'checkbox', hint: 'Тогда живые графики и отчёт отделяют метрики прогона от других тестов тегом; иначе — только окном времени.', group: 'wide' },
-        { path: p('param_options'), label: 'Варианты параметров', type: 'kv', rows: 2, placeholder: 'STAND=stage, preprod', hint: 'Для параметров, варианты которых CI не отдаёт (Active Choices со скриптом): ИМЯ=вариант1, вариант2. Поле станет выбором в форме запуска.', group: 'wide' },
+        { path: p('loadlens_url'), label: LL.t('settings.field.gen.loadlens_url.label'), type: 'text', placeholder: 'https://loadlens.example.ru', hint: LL.t('settings.field.gen.loadlens_url.hint'), group: 'dirs' },
+        { path: p('tags_metrics'), label: LL.t('settings.field.gen.tags_metrics.label'), type: 'checkbox', hint: LL.t('settings.field.gen.tags_metrics.hint'), group: 'wide' },
+        { path: p('param_options'), label: LL.t('settings.field.gen.param_options.label'), type: 'kv', rows: 2, placeholder: 'STAND=stage, preprod', hint: LL.t('settings.field.gen.param_options.hint'), group: 'wide' },
         parallel
       ];
       if (type === 'gitlab') {
         fields.push(
-          { path: p('gitlab.url'), label: 'Адрес GitLab', type: 'text', placeholder: 'https://gitlab.example.ru', group: 'main' },
-          { path: p('gitlab.project'), label: 'Проект', type: 'text', placeholder: 'perf/load-tests или id', group: 'main' },
-          { path: p('gitlab.ref'), label: 'Ветка по умолчанию', type: 'text', placeholder: 'пусто — ветка проекта по умолчанию', group: 'main' },
-          { path: p('gitlab.api_token'), label: 'API-токен (scope api)', type: 'password', hint: 'Читает параметры и статус, запускает и отменяет пайплайн. С read_api LoadLens только читает.', group: 'auth' },
-          { path: p('gitlab.trigger_token'), label: 'Токен триггера (если API-токена нет)', type: 'password', group: 'auth' },
-          { path: p('gitlab.verify'), label: 'Проверять TLS-сертификат', type: 'checkbox', group: 'auth' },
-          { path: p('gitlab.inputs'), label: 'Входные параметры (spec:inputs) через API', type: 'select', options: [{ v: 'auto', l: 'по версии GitLab (17.11+)' }, { v: 'on', l: 'передавать' }, { v: 'off', l: 'не передавать' }], group: 'dirs' },
+          { path: p('gitlab.url'), label: LL.t('settings.field.gen.gitlab_url.label'), type: 'text', placeholder: 'https://gitlab.example.ru', group: 'main' },
+          { path: p('gitlab.project'), label: LL.t('settings.field.gen.gitlab_project.label'), type: 'text', placeholder: LL.t('settings.field.gen.gitlab_project.placeholder'), group: 'main' },
+          { path: p('gitlab.ref'), label: LL.t('settings.field.gen.gitlab_ref.label'), type: 'text', placeholder: LL.t('settings.field.gen.gitlab_ref.placeholder'), group: 'main' },
+          { path: p('gitlab.api_token'), label: LL.t('settings.field.gen.gitlab_api_token.label'), type: 'password', hint: LL.t('settings.field.gen.gitlab_api_token.hint'), group: 'auth' },
+          { path: p('gitlab.trigger_token'), label: LL.t('settings.field.gen.gitlab_trigger_token.label'), type: 'password', group: 'auth' },
+          { path: p('gitlab.verify'), label: LL.t('settings.field.gen.verify.label'), type: 'checkbox', group: 'auth' },
+          { path: p('gitlab.inputs'), label: LL.t('settings.field.gen.gitlab_inputs.label'), type: 'select', options: [{ v: 'auto', l: LL.t('settings.field.gen.gitlab_inputs.auto') }, { v: 'on', l: LL.t('settings.field.gen.gitlab_inputs.on') }, { v: 'off', l: LL.t('settings.field.gen.gitlab_inputs.off') }], group: 'dirs' },
           ...ci
         );
       } else {
         fields.push(
-          { path: p('jenkins.url'), label: 'Адрес Jenkins', type: 'text', placeholder: 'https://jenkins.example.ru', group: 'main' },
-          { path: p('jenkins.job'), label: 'Задача', type: 'text', placeholder: 'perf/load-test', group: 'main' },
-          { path: p('jenkins.ref'), label: 'Ветка multibranch-задачи по умолчанию', type: 'text', placeholder: 'пусто — main или первая', group: 'main' },
-          { path: p('jenkins.username'), label: 'Пользователь', type: 'text', group: 'auth' },
-          { path: p('jenkins.api_token'), label: 'API-токен', type: 'password', group: 'auth' },
-          { path: p('jenkins.verify'), label: 'Проверять TLS-сертификат', type: 'checkbox', group: 'auth' },
+          { path: p('jenkins.url'), label: LL.t('settings.field.gen.jenkins_url.label'), type: 'text', placeholder: 'https://jenkins.example.ru', group: 'main' },
+          { path: p('jenkins.job'), label: LL.t('settings.field.gen.jenkins_job.label'), type: 'text', placeholder: 'perf/load-test', group: 'main' },
+          { path: p('jenkins.ref'), label: LL.t('settings.field.gen.jenkins_ref.label'), type: 'text', placeholder: LL.t('settings.field.gen.jenkins_ref.placeholder'), group: 'main' },
+          { path: p('jenkins.username'), label: LL.t('settings.field.gen.jenkins_username.label'), type: 'text', group: 'auth' },
+          { path: p('jenkins.api_token'), label: LL.t('settings.field.gen.jenkins_api_token.label'), type: 'password', group: 'auth' },
+          { path: p('jenkins.verify'), label: LL.t('settings.field.gen.verify.label'), type: 'checkbox', group: 'auth' },
           ...ci
         );
       }
@@ -964,12 +978,12 @@
   function formatStamp(iso) {
     const date = new Date(iso);
     if (Number.isNaN(date.getTime())) return String(iso || '');
-    return date.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+    return LL.fmt.dateTime(date, { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
   }
   function generatorStatus(entry) {
     if (!isPlainObject(entry) || !entry.type || entry.type === 'manual') return null;
     const verified = isPlainObject(entry.verified) && entry.verified.at ? entry.verified : null;
-    return verified ? { text: `проверен ${formatStamp(verified.at)}`, tone: 'ok' } : { text: 'не проверен', tone: 'warn' };
+    return verified ? { text: LL.t('settings.gen.status_verified', { at: formatStamp(verified.at) }), tone: 'ok' } : { text: LL.t('settings.gen.status_unverified'), tone: 'warn' };
   }
   function hasPinnedKey(entry) {
     return !isPlainObject(entry) || entry.type !== 'ssh' || (isPlainObject(entry.ssh) && !!entry.ssh.host_key);
@@ -988,65 +1002,66 @@
       const full = isPlainObject(info.versions) && info.versions[toolId] ? String(info.versions[toolId]) : '';
       // `k6 v0.54.0 (commit/…)` and `locust 2.31.8 from /opt/…` become the version number; the full line is the tooltip.
       const short = full ? (full.match(VERSION_RE) || [full.slice(0, 24)])[0] : '';
-      const badge = makeEl('span', 'gen-tool-badge ok', short || ({ docker: 'образ есть', kubernetes: 'образ задан' }[type] || 'найден'));
+      const badge = makeEl('span', 'gen-tool-badge ok', short || ({ docker: LL.t('settings.gen.badge.image_present'), kubernetes: LL.t('settings.gen.badge.image_set') }[type] || LL.t('settings.gen.badge.found')));
       if (full) badge.title = full;
       return badge;
     }
     if (Array.isArray(info.tools_missing) && info.tools_missing.includes(toolId)) {
-      return makeEl('span', 'gen-tool-badge warn', type === 'docker' ? 'нет образа' : 'не найден');
+      return makeEl('span', 'gen-tool-badge warn', type === 'docker' ? LL.t('settings.gen.badge.image_missing') : LL.t('settings.gen.badge.not_found'));
     }
     return null;
   }
   function generatorSummary(id, entry) {
-    if (entry.type === 'manual') return `id ${id} · LoadLens только отмечает начало и конец прогона`;
-    const tools = isPlainObject(entry.tools) && Object.keys(entry.tools).length ? Object.keys(entry.tools).join(', ') : 'все инструменты';
-    if (entry.type === 'docker') return `id ${id} · ${getPath(entry, 'docker.url') || 'адрес не указан'} · ${tools}`;
+    if (entry.type === 'manual') return `id ${id} · ${LL.t('settings.gen.summary.manual')}`;
+    const noAddress = LL.t('settings.summary.no_address');
+    const tools = isPlainObject(entry.tools) && Object.keys(entry.tools).length ? Object.keys(entry.tools).join(', ') : LL.t('settings.gen.summary.all_tools');
+    if (entry.type === 'docker') return `id ${id} · ${getPath(entry, 'docker.url') || noAddress} · ${tools}`;
     if (entry.type === 'kubernetes') {
-      const where = getPath(entry, 'kubernetes.in_cluster') ? 'в кластере LoadLens' : (getPath(entry, 'kubernetes.api_url') || 'адрес не указан');
+      const where = getPath(entry, 'kubernetes.in_cluster') ? LL.t('settings.gen.summary.in_cluster') : (getPath(entry, 'kubernetes.api_url') || noAddress);
       return `id ${id} · ${where} · ${entry.namespace || 'default'} · ${tools}`;
     }
-    if (entry.type === 'gitlab') return `id ${id} · ${getPath(entry, 'gitlab.url') || 'адрес не указан'} · ${getPath(entry, 'gitlab.project') || 'проект не указан'} · ${getPath(entry, 'gitlab.ref') || 'ветка по умолчанию'}`;
-    if (entry.type === 'jenkins') return `id ${id} · ${getPath(entry, 'jenkins.url') || 'адрес не указан'} · ${getPath(entry, 'jenkins.job') || 'задача не указана'}${getPath(entry, 'jenkins.ref') ? ` · ${getPath(entry, 'jenkins.ref')}` : ''}`;
+    if (entry.type === 'gitlab') return `id ${id} · ${getPath(entry, 'gitlab.url') || noAddress} · ${getPath(entry, 'gitlab.project') || LL.t('settings.gen.summary.no_project')} · ${getPath(entry, 'gitlab.ref') || LL.t('settings.gen.summary.default_ref')}`;
+    if (entry.type === 'jenkins') return `id ${id} · ${getPath(entry, 'jenkins.url') || noAddress} · ${getPath(entry, 'jenkins.job') || LL.t('settings.gen.summary.no_job')}${getPath(entry, 'jenkins.ref') ? ` · ${getPath(entry, 'jenkins.ref')}` : ''}`;
     const ssh = isPlainObject(entry.ssh) ? entry.ssh : {};
-    const target = ssh.host ? `${ssh.username || '?'}@${ssh.host}${ssh.port && Number(ssh.port) !== 22 ? `:${ssh.port}` : ''}` : 'адрес не указан';
-    return `id ${id} · ${target} · ${tools} · ${ssh.host_key ? 'ключ хоста закреплён' : 'ключ хоста не закреплён'}`;
+    const target = ssh.host ? `${ssh.username || '?'}@${ssh.host}${ssh.port && Number(ssh.port) !== 22 ? `:${ssh.port}` : ''}` : noAddress;
+    return `id ${id} · ${target} · ${tools} · ${ssh.host_key ? LL.t('settings.gen.summary.host_key_pinned') : LL.t('settings.gen.summary.host_key_unpinned')}`;
   }
   function toolFields(id) {
     const p = (suffix) => `${id}.${suffix}`;
     return [
-      { path: p('title'), label: 'Название', type: 'text', group: 'main' },
-      { path: p('executable'), label: 'Исполняемый файл', type: 'text', hint: 'Подставляется вместо {exe}; генератор может задать свой путь.', group: 'main' },
-      { path: p('cwd'), label: 'Рабочий каталог', type: 'text', placeholder: '{script_dir}', group: 'main' },
-      { path: p('image'), label: 'Образ для Docker и Kubernetes', type: 'text', placeholder: 'grafana/k6:0.54.0', group: 'main' },
-      { path: p('command'), label: 'Команда', type: 'textarea', rows: 2, hint: 'Подстановки: {exe} {exe_dir} {script} {script_dir} {scripts_dir} {run_name} {run_tag} {instance} {instance_tag} {instance_dir} {control_port}. {params} — параметры из формы запуска, отдельным словом.', group: 'wide' },
-      { path: p('env'), label: 'Переменные окружения', type: 'kv', rows: 2, hint: 'Значение из формы запуска с тем же именем дописывается через пробел (удобно для JAVA_OPTS).', group: 'wide' },
-      { path: p('script_kind'), label: 'Что выбирается как скрипт', type: 'select', options: [{ v: 'file', l: 'Файл' }, { v: 'class', l: 'Класс симуляции' }, { v: 'none', l: 'Ничего' }], group: 'codes' },
-      { path: p('scripts_glob'), label: 'Маски скриптов', type: 'list', placeholder: '*.js, *.ts', group: 'codes' },
-      { path: p('stop_signal'), label: 'Сигнал остановки', type: 'select', options: ['TERM', 'INT', 'HUP', 'QUIT'], group: 'codes' },
-      { path: p('success_exit_codes'), label: 'Коды успеха', type: 'intlist', placeholder: '0', group: 'codes' },
-      { path: p('failed_checks_exit_codes'), label: 'Коды «пороги не пройдены»', type: 'intlist', placeholder: '99', group: 'codes' },
-      { path: p('grace_seconds'), label: 'Ждать после сигнала, с', type: 'number', placeholder: '30', group: 'codes' },
-      { path: p('version_command'), label: 'Команда версии для проверки', type: 'text', placeholder: '{exe} --version', group: 'wide' },
-      { path: p('stop_command'), label: 'Команда мягкой остановки', type: 'text', placeholder: '{exe_dir}shutdown.sh {control_port}', hint: 'Выполняется рядом с инструментом вместо сигнала (SSH и Docker); при ошибке уходит сигнал. {control_port} — порт управления инстанса.', group: 'wide' },
-      { path: p('status_command'), label: 'Команда статуса', type: 'text', placeholder: '{exe} status --address 127.0.0.1:{control_port}', hint: 'Раз в 15 с, ответ показывается у инстанса (k6: число VU).', group: 'wide' },
-      { path: p('run_filter_packs'), label: 'Пакеты запросов, которые видят тег прогона', type: 'list', hint: 'Только если команда действительно помечает метрики тегом {run_tag}. Иначе метрики прогона отделяются окном.', group: 'wide' },
-      { path: p('help'), label: 'Подсказка в форме запуска', type: 'textarea', rows: 2, group: 'wide' }
+      { path: p('title'), label: LL.t('settings.field.tool.title.label'), type: 'text', group: 'main' },
+      { path: p('executable'), label: LL.t('settings.field.tool.executable.label'), type: 'text', hint: LL.t('settings.field.tool.executable.hint'), group: 'main' },
+      { path: p('cwd'), label: LL.t('settings.field.tool.cwd.label'), type: 'text', placeholder: '{script_dir}', group: 'main' },
+      { path: p('image'), label: LL.t('settings.field.tool.image.label'), type: 'text', placeholder: 'grafana/k6:0.54.0', group: 'main' },
+      { path: p('command'), label: LL.t('settings.field.tool.command.label'), type: 'textarea', rows: 2, hint: LL.t('settings.field.tool.command.hint'), group: 'wide' },
+      { path: p('env'), label: LL.t('settings.field.tool.env.label'), type: 'kv', rows: 2, hint: LL.t('settings.field.tool.env.hint'), group: 'wide' },
+      { path: p('script_kind'), label: LL.t('settings.field.tool.script_kind.label'), type: 'select', options: [{ v: 'file', l: LL.t('settings.field.tool.script_kind.file') }, { v: 'class', l: LL.t('settings.field.tool.script_kind.class') }, { v: 'none', l: LL.t('settings.field.tool.script_kind.none') }], group: 'codes' },
+      { path: p('scripts_glob'), label: LL.t('settings.field.tool.scripts_glob.label'), type: 'list', placeholder: '*.js, *.ts', group: 'codes' },
+      { path: p('stop_signal'), label: LL.t('settings.field.tool.stop_signal.label'), type: 'select', options: ['TERM', 'INT', 'HUP', 'QUIT'], group: 'codes' },
+      { path: p('success_exit_codes'), label: LL.t('settings.field.tool.success_exit_codes.label'), type: 'intlist', placeholder: '0', group: 'codes' },
+      { path: p('failed_checks_exit_codes'), label: LL.t('settings.field.tool.failed_checks_exit_codes.label'), type: 'intlist', placeholder: '99', group: 'codes' },
+      { path: p('grace_seconds'), label: LL.t('settings.field.tool.grace_seconds.label'), type: 'number', placeholder: '30', group: 'codes' },
+      { path: p('version_command'), label: LL.t('settings.field.tool.version_command.label'), type: 'text', placeholder: '{exe} --version', group: 'wide' },
+      { path: p('stop_command'), label: LL.t('settings.field.tool.stop_command.label'), type: 'text', placeholder: '{exe_dir}shutdown.sh {control_port}', hint: LL.t('settings.field.tool.stop_command.hint'), group: 'wide' },
+      { path: p('status_command'), label: LL.t('settings.field.tool.status_command.label'), type: 'text', placeholder: '{exe} status --address 127.0.0.1:{control_port}', hint: LL.t('settings.field.tool.status_command.hint'), group: 'wide' },
+      { path: p('run_filter_packs'), label: LL.t('settings.field.tool.run_filter_packs.label'), type: 'list', hint: LL.t('settings.field.tool.run_filter_packs.hint'), group: 'wide' },
+      { path: p('help'), label: LL.t('settings.field.tool.help.label'), type: 'textarea', rows: 2, group: 'wide' }
     ];
   }
   function toolSummary(id, entry) {
-    return `id ${id} · ${String(entry.command || 'команда не задана')}`;
+    return `id ${id} · ${String(entry.command || LL.t('settings.tool.no_command'))}`;
   }
   const KITS = {
     load_generators: {
       title: (id, entry) => String(entry.title || id),
-      pill: (entry) => (GENERATOR_TYPES[entry.type] || {}).label || entry.type || 'тип не задан',
+      pill: (entry) => (GENERATOR_TYPES[entry.type] || {}).label || entry.type || LL.t('settings.summary.no_type'),
       summary: generatorSummary,
       fields: (id, entry) => generatorFields(id, entry.type),
-      hint: (entry) => (GENERATOR_TYPES[entry.type] || {}).hint || 'Неизвестный тип генератора.',
+      hint: (entry) => (GENERATOR_TYPES[entry.type] || {}).hint || LL.t('settings.gen.type_unknown'),
       checkable: (entry) => !!entry.type && entry.type !== 'manual',
-      empty: 'Генераторов пока нет. Добавьте сервер, на котором установлены инструменты НТ, или ручной генератор.',
-      addLabel: 'Добавить генератор',
-      deleteLabel: 'Удалить генератор',
+      empty: LL.t('settings.gen.empty'),
+      addLabel: LL.t('settings.gen.add'),
+      deleteLabel: LL.t('settings.gen.delete'),
       extra: generatorToolsEditor,
       add: openGeneratorWizard,
       status: generatorStatus,
@@ -1057,14 +1072,14 @@
     },
     load_tools: {
       title: (id, entry) => String(entry.title || id),
-      pill: (entry) => ({ file: 'файл', class: 'класс', none: 'без скрипта' }[entry.script_kind] || 'файл'),
+      pill: (entry) => ({ file: LL.t('settings.tool.pill.file'), class: LL.t('settings.tool.pill.class'), none: LL.t('settings.tool.pill.none') }[entry.script_kind] || LL.t('settings.tool.pill.file')),
       summary: toolSummary,
       fields: (id) => toolFields(id),
-      hint: () => 'Команда строится по шаблону: сначала делится на слова, затем в каждое слово подставляются значения, поэтому значение никогда не становится несколькими аргументами.',
+      hint: () => LL.t('settings.tool.hint'),
       checkable: () => false,
-      empty: 'Инструментов нет: добавьте шаблон команды.',
-      addLabel: 'Добавить инструмент',
-      deleteLabel: 'Удалить инструмент',
+      empty: LL.t('settings.tool.empty'),
+      addLabel: LL.t('settings.tool.add'),
+      deleteLabel: LL.t('settings.tool.delete'),
       add: openAddTool,
       open: {},
       checks: {}
@@ -1084,21 +1099,25 @@
     const container = CONTAINER_TYPES.has(entry.type);
     const ci = CI_TYPES.has(entry.type);
     const box = makeEl('div', 'gen-tools');
-    box.appendChild(makeEl('label', '', 'Инструменты на генераторе'));
+    box.appendChild(makeEl('label', '', LL.t('settings.gen.tools.label')));
     const own = isPlainObject(entry.tools) ? entry.tools : {};
     const all = !Object.keys(own).length;
     const note = container
-      ? 'Образ задаёт, где искать инструмент; пустой образ берётся из шаблона инструмента. Инструменты без образа в форме запуска не появятся.'
-      : (ci ? 'Задача CI запускает инструмент в своём образе: здесь только имя исполняемого файла, если оно отличается.'
-        : 'Укажите свой путь, если инструмент установлен не там, где ищет шаблон.');
-    box.appendChild(makeEl('div', 'field-hint', `${all ? 'Список не задан: форма запуска предлагает все инструменты. ' : 'Форма запуска предлагает только отмеченные инструменты. '}${note}`));
+      ? LL.t('settings.gen.tools.note_container')
+      : (ci ? LL.t('settings.gen.tools.note_ci')
+        : LL.t('settings.gen.tools.note_ssh'));
+    box.appendChild(makeEl('div', 'field-hint', LL.t(all ? 'settings.gen.tools.all' : 'settings.gen.tools.some', { note })));
     const columns = container ? ['image', 'executable'] : (ci ? ['executable'] : ['executable', 'scripts_dir']);
     const placeholders = (tool) => ({
-      image: String(tool.image || 'образ не задан'),
+      image: String(tool.image || LL.t('settings.gen.tools.no_image')),
       executable: String(tool.executable || ''),
-      scripts_dir: entry.scripts_dir ? `скрипты: ${entry.scripts_dir}` : 'каталог скриптов инструмента'
+      scripts_dir: entry.scripts_dir ? LL.t('settings.gen.tools.scripts_at', { dir: entry.scripts_dir }) : LL.t('settings.gen.tools.tool_scripts_dir')
     });
-    const labels = { image: 'Образ', executable: 'Путь к', scripts_dir: 'Каталог скриптов' };
+    const labels = {
+      image: (name) => LL.t('settings.gen.tools.aria_image', { tool: name }),
+      executable: (name) => LL.t('settings.gen.tools.aria_executable', { tool: name }),
+      scripts_dir: (name) => LL.t('settings.gen.tools.aria_scripts_dir', { tool: name })
+    };
     ids.forEach((toolId) => {
       const tool = tools[toolId] || {};
       const row = makeEl('div', `gen-tool-row cols-${columns.length}`);
@@ -1115,7 +1134,7 @@
         const input = makeEl('input', 'mono');
         input.type = 'text';
         input.placeholder = placeholders(tool)[column];
-        input.setAttribute('aria-label', `${labels[column]} ${tool.title || toolId}`);
+        input.setAttribute('aria-label', labels[column](tool.title || toolId));
         input.value = isPlainObject(own[toolId]) ? String(own[toolId][column] || '') : '';
         inputs[column] = input;
       });
@@ -1171,9 +1190,7 @@
   function hostKeyMessage(entry, details) {
     const ssh = isPlainObject(entry.ssh) ? entry.ssh : {};
     const where = `${ssh.host || '?'}${ssh.port && Number(ssh.port) !== 22 ? `:${ssh.port}` : ''}`;
-    return `Сервер ${where} предъявил ключ хоста ${details.host_key_fingerprint || details.host_key}. `
-      + 'Сверьте отпечаток с ключом на самом сервере, например командой ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub. '
-      + 'После подтверждения LoadLens будет подключаться только к серверу с этим ключом.';
+    return LL.t('settings.gen.host_key_message', { where, key: details.host_key_fingerprint || details.host_key });
   }
   async function checkGenerator(card, kit, id, result) {
     const data = await testCard(card, { source: id }, result);
@@ -1184,7 +1201,7 @@
     kit.checkData[id] = details;
     let changed = false;
     if (details.host_key && isPlainObject(entry.ssh) && !entry.ssh.host_key) {
-      const trusted = await ui.confirm({ title: 'Ключ хоста SSH', message: hostKeyMessage(entry, details), confirmText: 'Доверяю этому ключу', cancelText: 'Не доверяю' });
+      const trusted = await ui.confirm({ title: LL.t('settings.gen.host_key_title'), message: hostKeyMessage(entry, details), confirmText: LL.t('settings.gen.trust'), cancelText: LL.t('settings.gen.distrust') });
       if (trusted) {
         entry.ssh.host_key = details.host_key;
         changed = true;
@@ -1199,7 +1216,7 @@
     }
     if (changed) syncKit(card);
     renderKitBody(card);
-    if (changed) ui.toast('Результат проверки записан в генератор: сохраните раздел', { tone: 'warn', timeout: 8000 });
+    if (changed) ui.toast(LL.t('settings.gen.check_recorded'), { tone: 'warn', timeout: 8000 });
   }
   function kitItem(card, kit, id, entry) {
     const open = !!kit.open[id];
@@ -1232,7 +1249,7 @@
     result.setAttribute('role', 'status');
     head.appendChild(main);
     if (kit.checkable(entry)) {
-      head.appendChild(makeBtn('Проверить', (event) => { event.stopPropagation(); checkGenerator(card, kit, id, result); }, 'btn btn-sm'));
+      head.appendChild(makeBtn(LL.t('settings.action.check'), (event) => { event.stopPropagation(); checkGenerator(card, kit, id, result); }, 'btn btn-sm'));
     }
     head.appendChild(makeEl('span', 'q-item-caret', open ? '▾' : '▸'));
     item.appendChild(head);
@@ -1274,8 +1291,8 @@
     const kit = kitFor(card);
     const ok = await ui.confirm({
       title: kit.deleteLabel,
-      message: `«${id}» пропадёт после сохранения. Идущие прогоны на нём продолжатся, но LoadLens перестанет за ними следить.`,
-      confirmText: 'Удалить',
+      message: LL.t('settings.kit.delete_confirm', { id }),
+      confirmText: LL.t('settings.action.delete'),
       danger: true
     });
     if (!ok) return;
@@ -1291,14 +1308,19 @@
     while (used.has(`${base}-${number}`)) number += 1;
     return `${base}-${number}`;
   }
-  const WIZARD_STEP_TITLES = { type: 'Тип и название', connect: 'Подключение', setup: 'Инструменты и каталоги', finish: 'Лимиты и сохранение' };
+  const WIZARD_STEP_TITLES = {
+    type: LL.t('settings.gen.wizard.step_type'),
+    connect: LL.t('settings.gen.wizard.step_connect'),
+    setup: LL.t('settings.gen.wizard.step_setup'),
+    finish: LL.t('settings.gen.wizard.step_finish')
+  };
   // New generator, step by step: type and title, connection with a check (SSH: also trust in the host key),
   // tools and directories prefilled from the check, limits and saving. The identifier is assigned by LoadLens.
   async function openGeneratorWizard(card) {
     const kit = kitFor(card);
     const model = state.models[card.id];
     const otherEdits = stable(model) !== state.saved[card.id];
-    const w = { step: 0, type: 'ssh', id: '', title: '', check: null, view: null, toolsTouched: false, distrust: false, checking: false, saving: false, error: '' };
+    const w = { step: 0, type: 'ssh', id: '', title: '', titleAuto: false, check: null, view: null, toolsTouched: false, distrust: false, checking: false, saving: false, error: '' };
     const entry = () => model[w.id];
     const stepList = () => (w.type === 'manual' ? ['type', 'finish'] : ['type', 'connect', 'setup', 'finish']);
     const details = () => (w.check && isPlainObject(w.check.details) ? w.check.details : {});
@@ -1308,7 +1330,9 @@
       if (w.id) delete model[w.id];
       w.type = type;
       w.id = suggestKitId(GENERATOR_TYPES[type].baseId, new Set(Object.keys(model)));
-      const title = type === 'manual' ? (w.title || 'Вручную') : (w.title === 'Вручную' ? '' : w.title);
+      // A title the wizard filled in itself (the manual type) is dropped when the type changes again.
+      const title = type === 'manual' ? (w.title || LL.t('settings.gen.type.manual')) : (w.titleAuto ? '' : w.title);
+      w.titleAuto = type === 'manual' && !w.title;
       model[w.id] = blankGenerator(type, title);
       if (CI_TYPES.has(type)) model[w.id].loadlens_url = window.location.origin;
       w.check = null;
@@ -1362,17 +1386,17 @@
           const trust = makeEl('div', 'gen-trust');
           trust.appendChild(makeEl('div', '', hostKeyMessage(current, d)));
           if (w.distrust) {
-            trust.appendChild(makeEl('div', 'gen-trust-note', 'Без закреплённого ключа LoadLens не подключится к генератору. Проверьте адрес и порт: возможно, ответил не тот сервер.'));
+            trust.appendChild(makeEl('div', 'gen-trust-note', LL.t('settings.gen.wizard.distrust_note')));
           }
           const buttons = makeEl('div', 'gen-trust-actions');
           buttons.append(
-            makeBtn('Доверяю этому ключу', () => { current.ssh.host_key = d.host_key; w.distrust = false; syncKit(card); renderCheck(); renderActions(); }, 'btn btn-sm btn-primary'),
-            makeBtn('Не доверяю', () => { w.distrust = true; renderCheck(); renderActions(); }, 'btn btn-sm')
+            makeBtn(LL.t('settings.gen.trust'), () => { current.ssh.host_key = d.host_key; w.distrust = false; syncKit(card); renderCheck(); renderActions(); }, 'btn btn-sm btn-primary'),
+            makeBtn(LL.t('settings.gen.distrust'), () => { w.distrust = true; renderCheck(); renderActions(); }, 'btn btn-sm')
           );
           trust.appendChild(buttons);
           host.appendChild(trust);
         } else if (current.ssh.host_key) {
-          host.appendChild(makeEl('div', 'gen-pinned', `Ключ хоста закреплён: ${d.host_key_fingerprint || `${String(current.ssh.host_key).slice(0, 40)}…`}`));
+          host.appendChild(makeEl('div', 'gen-pinned', LL.t('settings.gen.wizard.pinned', { key: d.host_key_fingerprint || `${String(current.ssh.host_key).slice(0, 40)}…` })));
         }
       }
       const problems = Array.isArray(d.problems) ? d.problems : [];
@@ -1416,7 +1440,7 @@
     };
 
     const renderTypeStep = () => {
-      const typeLabel = makeEl('label', '', 'Тип');
+      const typeLabel = makeEl('label', '', LL.t('settings.form.type'));
       const select = makeEl('select');
       Object.keys(GENERATOR_TYPES).forEach((type) => {
         const option = makeEl('option', '', GENERATOR_TYPES[type].label);
@@ -1425,25 +1449,25 @@
         select.appendChild(option);
       });
       typeLabel.appendChild(select);
-      const titleLabel = makeEl('label', '', 'Название');
+      const titleLabel = makeEl('label', '', LL.t('settings.form.title'));
       const title = makeEl('input');
       title.type = 'text';
       title.maxLength = 80;
-      title.placeholder = 'Например, «Генератор в ЦОД-2»';
+      title.placeholder = LL.t('settings.gen.wizard.title_placeholder');
       title.value = String(entry().title || '');
       titleLabel.appendChild(title);
       select.addEventListener('change', () => { w.title = title.value.trim(); w.error = ''; startDraft(select.value); render(); });
-      title.addEventListener('input', () => { entry().title = title.value; w.title = title.value.trim(); syncKit(card); });
+      title.addEventListener('input', () => { entry().title = title.value; w.title = title.value.trim(); w.titleAuto = false; syncKit(card); });
       body.append(typeLabel, makeEl('p', 'dim', GENERATOR_TYPES[w.type].hint), titleLabel,
-        makeEl('p', 'dim', 'Название видят инженеры в форме запуска. Служебный идентификатор LoadLens назначит сам.'));
+        makeEl('p', 'dim', LL.t('settings.gen.wizard.title_note')));
     };
     const renderConnectStep = () => {
       body.appendChild(makeEl('p', 'dim', GENERATOR_TYPES[w.type].hint));
       body.appendChild(fieldsBlock('connect'));
       const note = w.type === 'ssh'
-        ? 'Для SSH проверка обязательна: она показывает ключ хоста, которому нужно доверять.'
-        : 'Без проверки генератор сохранится с пометкой «не проверен».';
-      body.appendChild(checkBar('Проверить подключение', note));
+        ? LL.t('settings.gen.wizard.ssh_check_required')
+        : LL.t('settings.gen.wizard.check_optional');
+      body.appendChild(checkBar(LL.t('settings.gen.wizard.check'), note));
       body.appendChild(makeEl('div', 'gen-check-host'));
       renderCheck();
     };
@@ -1452,17 +1476,17 @@
       const panel = makeEl('div', 'gen-check-panel');
       const params = Array.isArray(d.params) ? d.params : [];
       if (connected()) {
-        panel.appendChild(makeEl('div', '', `${d.system || ''}${d.ref ? ` · ветка ${d.ref}` : ''}`));
+        panel.appendChild(makeEl('div', '', `${d.system || ''}${d.ref ? ` · ${LL.t('settings.gen.wizard.ref', { ref: d.ref })}` : ''}`));
         panel.appendChild(makeEl('div', '', params.length
-          ? `Параметры пайплайна: ${params.map((param) => `${param.name}${param.options && param.options.length ? ` (${param.options.length} вар.)` : ''}`).join(', ')}`
-          : 'Пайплайн не объявляет параметров: запуск пойдёт с его значениями по умолчанию.'));
-        if (Array.isArray(d.auto) && d.auto.length) panel.appendChild(makeEl('div', 'dim', `LoadLens заполнит сам: ${d.auto.join(', ')}`));
+          ? LL.t('settings.gen.wizard.ci_params', { list: params.map((param) => `${param.name}${param.options && param.options.length ? ` ${LL.t('settings.gen.wizard.param_options', { n: param.options.length })}` : ''}`).join(', ') })
+          : LL.t('settings.gen.wizard.ci_no_params')));
+        if (Array.isArray(d.auto) && d.auto.length) panel.appendChild(makeEl('div', 'dim', LL.t('settings.gen.wizard.ci_auto', { list: d.auto.join(', ') })));
       } else {
-        panel.appendChild(makeEl('div', 'warn-text', 'Подключение не проверено: параметры пайплайна не прочитаны.'));
+        panel.appendChild(makeEl('div', 'warn-text', LL.t('settings.gen.wizard.ci_unchecked')));
       }
       body.appendChild(panel);
       body.appendChild(fieldsBlock('setup'));
-      body.appendChild(checkBar(w.check ? 'Проверить ещё раз' : 'Проверить подключение', ''));
+      body.appendChild(checkBar(w.check ? LL.t('settings.gen.wizard.recheck') : LL.t('settings.gen.wizard.check'), ''));
       body.appendChild(makeEl('div', 'gen-check-host'));
       renderCheck();
     };
@@ -1472,16 +1496,16 @@
       const d = details();
       const panel = makeEl('div', 'gen-check-panel');
       if (connected()) {
-        panel.appendChild(makeEl('div', '', `Система: ${d.system || 'не определена'}`));
-        panel.appendChild(makeEl('div', 'dim', 'Отметки у инструментов и список ниже — по результату проверки. Поменяли каталоги — проверьте ещё раз.'));
+        panel.appendChild(makeEl('div', '', LL.t('settings.gen.wizard.system', { system: d.system || LL.t('settings.gen.wizard.system_unknown') })));
+        panel.appendChild(makeEl('div', 'dim', LL.t('settings.gen.wizard.setup_note')));
       } else {
-        panel.appendChild(makeEl('div', 'warn-text', 'Подключение не проверено: каталоги и инструменты не сверены с генератором.'));
+        panel.appendChild(makeEl('div', 'warn-text', LL.t('settings.gen.wizard.setup_unchecked')));
       }
       body.appendChild(panel);
       body.appendChild(fieldsBlock('setup'));
       const tools = generatorToolsEditor(card, w.id, entry(), { info: connected() ? d : null, rerender: () => { w.toolsTouched = true; render(); } });
       if (tools) body.appendChild(tools);
-      body.appendChild(checkBar(w.check ? 'Проверить ещё раз' : 'Проверить подключение', ''));
+      body.appendChild(checkBar(w.check ? LL.t('settings.gen.wizard.recheck') : LL.t('settings.gen.wizard.check'), ''));
       body.appendChild(makeEl('div', 'gen-check-host'));
       renderCheck();
     };
@@ -1492,33 +1516,33 @@
       summary.appendChild(makeEl('div', 'gen-summary-title', `${GENERATOR_TYPES[w.type].label} · ${current.title || w.id}`));
       summary.appendChild(makeEl('div', 'dim', generatorSummary(w.id, current)));
       const problems = Array.isArray(details().problems) ? details().problems : [];
-      if (w.type === 'manual') summary.appendChild(makeEl('div', '', 'Ручной генератор проверять не нужно.'));
-      else if (passed()) summary.appendChild(makeEl('div', 'ok-text', `Проверка пройдена: ${w.check.message}`));
-      else if (connected()) summary.appendChild(makeEl('div', 'warn-text', `Генератор отвечает, но есть замечания: ${problems.join('; ') || w.check.message}. До успешной проверки он будет отмечен как непроверенный.`));
-      else summary.appendChild(makeEl('div', 'warn-text', 'Подключение не проверено: генератор будет отмечен как непроверенный, проверить его можно в карточке.'));
-      if (otherEdits) summary.appendChild(makeEl('div', 'dim', 'Сохраняется только новый генератор: другие несохранённые правки раздела останутся в форме.'));
+      if (w.type === 'manual') summary.appendChild(makeEl('div', '', LL.t('settings.gen.wizard.manual_no_check')));
+      else if (passed()) summary.appendChild(makeEl('div', 'ok-text', LL.t('settings.gen.wizard.passed', { message: w.check.message })));
+      else if (connected()) summary.appendChild(makeEl('div', 'warn-text', LL.t('settings.gen.wizard.problems', { problems: problems.join('; ') || w.check.message })));
+      else summary.appendChild(makeEl('div', 'warn-text', LL.t('settings.gen.wizard.finish_unchecked')));
+      if (otherEdits) summary.appendChild(makeEl('div', 'dim', LL.t('settings.gen.wizard.other_edits')));
       body.appendChild(summary);
     };
 
     const renderActions = () => {
       actions.replaceChildren();
       const name = stepList()[w.step];
-      actions.appendChild(makeBtn('Отмена', () => close(null), 'btn'));
-      if (w.step > 0) actions.appendChild(makeBtn('Назад', () => { w.error = ''; w.step -= 1; render(); focusFirst(); }, 'btn'));
+      actions.appendChild(makeBtn(LL.t('settings.action.cancel'), () => close(null), 'btn'));
+      if (w.step > 0) actions.appendChild(makeBtn(LL.t('settings.wizard.back'), () => { w.error = ''; w.step -= 1; render(); focusFirst(); }, 'btn'));
       if (name === 'finish') {
-        const save = makeBtn(w.saving ? 'Сохранение…' : 'Сохранить генератор', () => saveDraft(), 'btn btn-primary');
+        const save = makeBtn(w.saving ? LL.t('settings.status.saving') : LL.t('settings.gen.wizard.save'), () => saveDraft(), 'btn btn-primary');
         save.disabled = w.saving || w.checking;
         actions.appendChild(save);
       } else {
-        let label = 'Далее';
+        let label = LL.t('settings.wizard.next');
         let blocked = w.checking;
         if (name === 'connect') {
           if (w.type === 'ssh') blocked = blocked || !connected() || !hasPinnedKey(entry());
-          else if (!connected()) label = 'Продолжить без проверки';
+          else if (!connected()) label = LL.t('settings.gen.wizard.continue_unchecked');
         }
         const next = makeBtn(label, () => goNext(), 'btn btn-primary');
         next.disabled = blocked;
-        if (blocked && !w.checking) next.title = 'Нужна успешная проверка подключения и подтверждённый ключ хоста';
+        if (blocked && !w.checking) next.title = LL.t('settings.gen.wizard.next_blocked');
         actions.appendChild(next);
       }
       body.querySelectorAll('.gen-check-btn').forEach((btn) => { btn.disabled = w.checking; });
@@ -1529,7 +1553,7 @@
       const name = list[w.step];
       body.replaceChildren();
       const progress = makeEl('ol', 'gen-wizard-steps');
-      const stepTitle = (step) => (step === 'setup' && CI_TYPES.has(w.type) ? 'Параметры пайплайна' : WIZARD_STEP_TITLES[step]);
+      const stepTitle = (step) => (step === 'setup' && CI_TYPES.has(w.type) ? LL.t('settings.gen.wizard.step_ci_params') : WIZARD_STEP_TITLES[step]);
       list.forEach((step, index) => progress.appendChild(makeEl('li', index === w.step ? 'active' : (index < w.step ? 'done' : ''), `${index + 1}. ${stepTitle(step)}`)));
       body.appendChild(progress);
       if (name === 'type') renderTypeStep();
@@ -1545,7 +1569,7 @@
     const goNext = () => {
       if (stepList()[w.step] === 'type') {
         const title = String(entry().title || '').trim();
-        if (!title) { w.error = 'Укажите название'; render(); return; }
+        if (!title) { w.error = LL.t('settings.form.title_required'); render(); return; }
         entry().title = title;
         syncKit(card);
       }
@@ -1576,7 +1600,7 @@
         close('saved');
       } catch (e) {
         w.saving = false;
-        w.error = `Не сохранилось: ${e.message}`;
+        w.error = LL.t('settings.gen.wizard.save_failed', { error: e.message });
         render();
       }
     };
@@ -1588,7 +1612,7 @@
       applyVisibility();
       if (generatorStep(rel) !== 'connect' || !w.check) return;
       w.check = null;
-      w.view = { className: 'conn-result pending', html: 'Данные подключения изменились: проверьте снова.' };
+      w.view = { className: 'conn-result pending', html: LL.tHtml('settings.gen.wizard.changed') };
       w.distrust = false;
       const current = entry();
       if (w.type === 'ssh' && ['ssh.host', 'ssh.port'].includes(rel) && isPlainObject(current.ssh) && current.ssh.host_key) {
@@ -1600,7 +1624,7 @@
     };
 
     const outcome = await ui.dialog({
-      title: 'Новый генератор нагрузки',
+      title: LL.t('settings.gen.wizard.title'),
       wide: true,
       actions: [],
       onOpen: (el, closer) => {
@@ -1622,34 +1646,34 @@
     kit.open[w.id] = false;
     renderKitBody(card);
     updateCardDirty(card);
-    ui.toast(`Генератор «${entry().title}» сохранён`, { tone: 'ok' });
+    ui.toast(LL.t('settings.gen.saved', { title: entry().title }), { tone: 'ok' });
   }
   async function openAddTool(card) {
     const model = state.models[card.id];
     const used = new Set(Object.keys(model));
-    const options = ['<option value="">Пустой шаблон</option>'].concat(Object.keys(model).map((id) => `<option value="${esc(id)}">${esc(String((model[id] || {}).title || id))}</option>`)).join('');
+    const options = [`<option value="">${LL.tHtml('settings.tool.blank_template')}</option>`].concat(Object.keys(model).map((id) => `<option value="${esc(id)}">${esc(String((model[id] || {}).title || id))}</option>`)).join('');
     const created = await ui.dialog({
-      title: 'Новый инструмент',
+      title: LL.t('settings.tool.new_title'),
       bodyHtml: [
-        `<label>Скопировать шаблон<select id="ltFrom">${options}</select></label>`,
-        '<label>Название<input id="ltTitle" type="text" maxlength="80" /></label>',
-        '<label>Идентификатор<input id="ltId" type="text" maxlength="40" spellcheck="false" autocomplete="off" /></label>',
+        `<label>${LL.tHtml('settings.tool.copy_from')}<select id="ltFrom">${options}</select></label>`,
+        `<label>${LL.tHtml('settings.form.title')}<input id="ltTitle" type="text" maxlength="80" /></label>`,
+        `<label>${LL.tHtml('settings.form.id')}<input id="ltId" type="text" maxlength="40" spellcheck="false" autocomplete="off" /></label>`,
         '<div class="dialog-error" id="ltError"></div>'
       ].join(''),
       onOpen: (body) => body.querySelector('#ltFrom').focus(),
       actions: [
-        { label: 'Отмена' },
+        { label: LL.t('settings.action.cancel') },
         {
-          label: 'Добавить',
+          label: LL.t('settings.action.add'),
           primary: true,
           onClick: (close, body) => {
             const from = body.querySelector('#ltFrom').value;
             const title = body.querySelector('#ltTitle').value.trim();
             const id = body.querySelector('#ltId').value.trim();
             const error = body.querySelector('#ltError');
-            if (!title) { error.textContent = 'Укажите название'; return; }
-            if (!SOURCE_ID_RE.test(id)) { error.textContent = 'Идентификатор: латиница в нижнем регистре, цифры, дефис и подчёркивание, до 40 символов'; return; }
-            if (used.has(id)) { error.textContent = `Инструмент «${id}» уже есть`; return; }
+            if (!title) { error.textContent = LL.t('settings.form.title_required'); return; }
+            if (!SOURCE_ID_RE.test(id)) { error.textContent = LL.t('settings.form.id_rule'); return; }
+            if (used.has(id)) { error.textContent = LL.t('settings.tool.exists', { id }); return; }
             close({ id, title, from });
           }
         }
@@ -1675,16 +1699,16 @@
     return isPlainObject(entry) ? entry : null;
   }
   function bindingRows() {
-    return [{ id: 'default', title: 'По умолчанию', note: 'для доменов без своей строки' }]
+    return [{ id: 'default', title: LL.t('settings.binding.default_row'), note: LL.t('settings.binding.default_row_note') }]
       .concat(QUERY_DOMAINS.map((id) => ({ id, title: LL.domainTitle(id) })));
   }
   function bindingSummary(binding) {
-    if (!isPlainObject(binding) || !binding.source) return 'источник по умолчанию не выбран';
+    if (!isPlainObject(binding) || !binding.source) return LL.t('settings.binding.no_default');
     const entry = savedSource(binding.source);
-    const parts = [entry ? String(entry.title || binding.source) : `${binding.source} (нет в каталоге)`];
+    const parts = [entry ? String(entry.title || binding.source) : LL.t('settings.binding.source_missing', { source: binding.source })];
     const datasource = binding.datasource_name || binding.datasource_uid;
     if (datasource) parts.push(datasource);
-    if (binding.database) parts.push(`база ${binding.database}`);
+    if (binding.database) parts.push(LL.t('settings.binding.summary_database', { name: binding.database }));
     if (binding.bucket) parts.push(`bucket ${binding.bucket}`);
     return parts.join(' · ');
   }
@@ -1703,7 +1727,7 @@
       if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
       next = data.ok
         ? { status: 'ok', items: Array.isArray(data.datasources) ? data.datasources : [], message: data.message || '' }
-        : { status: 'error', items: [], message: data.message || 'Grafana не вернула список датасорсов' };
+        : { status: 'error', items: [], message: data.message || LL.t('settings.binding.ds_list_failed') };
     } catch (e) {
       next = { status: 'error', items: [], message: e.message };
     }
@@ -1720,7 +1744,7 @@
   function datasourceLabel(ds) {
     const parts = [ds.name];
     if (ds.type === 'influxdb') parts.push(DATASOURCE_MODE_LABELS[ds.mode] || ds.mode);
-    if (ds.is_default) parts.push('по умолчанию в Grafana');
+    if (ds.is_default) parts.push(LL.t('settings.binding.ds_default'));
     return parts.join(' · ');
   }
   function commitBindings(card) {
@@ -1779,14 +1803,14 @@
   }
   function datasourceSelect(card, row, binding, items) {
     const select = makeEl('select');
-    select.setAttribute('aria-label', `Датасорс Grafana: ${row.title}`);
+    select.setAttribute('aria-label', LL.t('settings.binding.ds_aria', { domain: row.title }));
     const current = findDatasource(items, binding);
-    const placeholder = makeEl('option', '', 'Выберите датасорс');
+    const placeholder = makeEl('option', '', LL.t('settings.binding.ds_pick'));
     placeholder.value = '';
     select.appendChild(placeholder);
     const stored = binding.datasource_name || binding.datasource_uid;
     if (!current && stored) {
-      const missing = makeEl('option', '', `${stored} — нет в Grafana`);
+      const missing = makeEl('option', '', LL.t('settings.binding.ds_missing', { name: stored }));
       missing.value = '__missing__';
       select.appendChild(missing);
     }
@@ -1819,19 +1843,19 @@
   function grafanaParams(card, row, binding, sourceId, box) {
     const list = datasourceList(sourceId);
     if (list.status === 'loading') {
-      box.appendChild(makeEl('div', 'binding-note', 'Загружаем датасорсы из Grafana…'));
+      box.appendChild(makeEl('div', 'binding-note', LL.t('settings.binding.ds_loading')));
       return;
     }
     if (list.status === 'error') {
       const note = makeEl('div', 'binding-error');
-      note.append(makeEl('span', '', `Список датасорсов недоступен: ${list.message}`), makeBtn('Повторить', () => {
+      note.append(makeEl('span', '', LL.t('settings.binding.ds_unavailable', { error: list.message })), makeBtn(LL.t('settings.action.retry'), () => {
         delete state.grafanaDatasources[sourceId];
         renderBindingsBody(card);
       }, 'btn btn-sm'));
       box.append(note, bindingFieldGrid(card, row.id, binding, ['datasource_name', 'datasource_uid', 'database', 'bucket']));
       return;
     }
-    if (!list.items.length) box.appendChild(makeEl('div', 'binding-error', 'В Grafana нет датасорсов Prometheus или InfluxDB'));
+    if (!list.items.length) box.appendChild(makeEl('div', 'binding-error', LL.t('settings.binding.ds_none')));
     const { select, current } = datasourceSelect(card, row, binding, list.items);
     box.appendChild(select);
     const extra = grafanaExtraFields(binding, current);
@@ -1840,15 +1864,15 @@
   function bindingParams(card, row, model) {
     const box = makeEl('div', 'binding-params');
     if (row.id !== 'default' && !hasOwn(model, row.id)) {
-      box.appendChild(makeEl('div', 'binding-note', `Как по умолчанию: ${bindingSummary(model.default)}`));
+      box.appendChild(makeEl('div', 'binding-note', LL.t('settings.binding.as_default_summary', { summary: bindingSummary(model.default) })));
       return box;
     }
     const binding = isPlainObject(model[row.id]) ? model[row.id] : {};
     const sourceId = String(binding.source || '');
     const entry = sourceId ? savedSource(sourceId) : null;
-    if (!sourceId) box.appendChild(makeEl('div', 'binding-note', 'Выберите источник'));
-    else if (!entry) box.appendChild(makeEl('div', 'binding-error', 'Источника нет в сохранённом каталоге: сохраните каталог или выберите другой'));
-    else if (entry.type === 'prometheus') box.appendChild(makeEl('div', 'binding-note', 'Дополнительных параметров нет: запросы идут прямо в Prometheus'));
+    if (!sourceId) box.appendChild(makeEl('div', 'binding-note', LL.t('settings.binding.pick_source')));
+    else if (!entry) box.appendChild(makeEl('div', 'binding-error', LL.t('settings.binding.source_not_saved')));
+    else if (entry.type === 'prometheus') box.appendChild(makeEl('div', 'binding-note', LL.t('settings.binding.prometheus_direct')));
     else if (entry.type === 'influxdb') box.appendChild(bindingFieldGrid(card, row.id, binding, ['bucket']));
     else grafanaParams(card, row, binding, sourceId, box);
     return box;
@@ -1857,8 +1881,8 @@
     const own = row.id === 'default' || hasOwn(model, row.id);
     const current = own && isPlainObject(model[row.id]) ? String(model[row.id].source || '') : '';
     const select = makeEl('select');
-    select.setAttribute('aria-label', `Источник: ${row.title}`);
-    const first = makeEl('option', '', row.id === 'default' ? 'Выберите источник' : 'Как по умолчанию');
+    select.setAttribute('aria-label', LL.t('settings.binding.source_aria', { domain: row.title }));
+    const first = makeEl('option', '', row.id === 'default' ? LL.t('settings.binding.pick_source') : LL.t('settings.binding.as_default'));
     first.value = '';
     select.appendChild(first);
     const catalog = savedCatalog();
@@ -1871,7 +1895,7 @@
       select.appendChild(option);
     });
     if (current && !hasOwn(catalog, current)) {
-      const missing = makeEl('option', '', `${current} — нет в каталоге`);
+      const missing = makeEl('option', '', LL.t('settings.binding.source_missing_option', { id: current }));
       missing.value = current;
       select.appendChild(missing);
     }
@@ -1889,7 +1913,7 @@
     const result = makeEl('div', 'conn-result');
     result.setAttribute('role', 'status');
     const actions = makeEl('div', 'binding-actions');
-    actions.appendChild(makeBtn('Проверить', () => runCheck(card, { domain: row.id }, result, 'bindingChecks', row.id), 'btn btn-sm'));
+    actions.appendChild(makeBtn(LL.t('settings.action.check'), () => runCheck(card, { domain: row.id }, result, 'bindingChecks', row.id), 'btn btn-sm'));
     wrap.append(domain, bindingSourceSelect(card, row, model), bindingParams(card, row, model), actions, result);
     restoreCheck('bindingChecks', row.id, result);
     return wrap;
@@ -1897,7 +1921,7 @@
   function bindingHeader() {
     const head = makeEl('div', 'binding-row binding-head');
     head.setAttribute('aria-hidden', 'true');
-    ['Домен', 'Источник', 'Датасорс и параметры', ''].forEach((text) => head.appendChild(makeEl('div', '', text)));
+    [LL.t('settings.binding.col_domain'), LL.t('settings.binding.col_source'), LL.t('settings.binding.col_params'), ''].forEach((text) => head.appendChild(makeEl('div', '', text)));
     return head;
   }
   function renderBindingsBody(card) {
@@ -1907,7 +1931,7 @@
     state.models[card.id] = model;
     host.replaceChildren();
     if (!Object.keys(savedCatalog()).length) {
-      host.appendChild(makeEl('p', 'dim', 'Сначала добавьте и сохраните источник в карточке «Источники данных».'));
+      host.appendChild(makeEl('p', 'dim', LL.t('settings.binding.need_catalog')));
       return;
     }
     const list = makeEl('div', 'binding-list');
@@ -1918,31 +1942,31 @@
 
   // ---- SLA -----------------------------------------------------------------
   const SLA_FIELDS = [
-    { key: 'target_rps', queryKey: 'max_performance_query', domain: 'lt_framework', label: 'Целевой RPS', unit: 'RPS', term: 'target_rps', desc: 'Главный критерий. Ступенчатый и стресс-тест: достигнут на стабильной ступени; soak: удерживается весь тест; spike: уровень всплеска.' },
-    { key: 'max_error_rate_pct', queryKey: 'error_rate_query', domain: 'lt_framework', label: 'Доля ошибок', unit: '%', term: 'error_rate' },
-    { key: 'max_p95_ms', queryKey: 'p95_query', domain: 'lt_framework', label: 'P95 задержки', unit: 'мс', term: 'p95' },
-    { key: 'max_p99_ms', queryKey: 'p99_query', domain: 'lt_framework', label: 'P99 задержки', unit: 'мс' },
-    { key: 'max_cpu_pct', queryKey: 'cpu_query', domain: 'hard_resources', label: 'CPU узлов', unit: '%' },
-    { key: 'max_memory_pct', queryKey: 'memory_query', domain: 'hard_resources', label: 'Память узлов', unit: '%' }
+    { key: 'target_rps', queryKey: 'max_performance_query', domain: 'lt_framework', label: LL.t('settings.sla.field.target_rps'), unit: 'RPS', term: 'target_rps', desc: LL.t('settings.sla.field.target_rps_desc') },
+    { key: 'max_error_rate_pct', queryKey: 'error_rate_query', domain: 'lt_framework', label: LL.t('settings.sla.field.max_error_rate_pct'), unit: '%', term: 'error_rate' },
+    { key: 'max_p95_ms', queryKey: 'p95_query', domain: 'lt_framework', label: LL.t('settings.sla.field.max_p95_ms'), unit: LL.t('settings.sla.unit_ms'), term: 'p95' },
+    { key: 'max_p99_ms', queryKey: 'p99_query', domain: 'lt_framework', label: LL.t('settings.sla.field.max_p99_ms'), unit: LL.t('settings.sla.unit_ms') },
+    { key: 'max_cpu_pct', queryKey: 'cpu_query', domain: 'hard_resources', label: LL.t('settings.sla.field.max_cpu_pct'), unit: '%' },
+    { key: 'max_memory_pct', queryKey: 'memory_query', domain: 'hard_resources', label: LL.t('settings.sla.field.max_memory_pct'), unit: '%' }
   ];
   // One explanation for every criterion except the target RPS (it used to repeat under each row).
-  const SLA_SHARED_DESC = 'Доля ошибок, задержки, CPU и память: 95-й перцентиль на участке stable_max, до просадки RPS; хвост после плато не входит. Для soak — окно удержания, для spike — худший всплеск. Пороги задаются в единицах запроса.';
+  const SLA_SHARED_DESC = LL.t('settings.sla.shared_desc');
   const SLA_PEAK_FIELDS = [
-    { key: 'min_stable_minutes', label: 'Мин. длительность стабильной ступени, мин', type: 'number', step: '0.5' },
-    { key: 'step_detection_preset', label: 'Чувствительность детектора ступеней', type: 'select', options: null },
-    { key: 'step_detection_enabled', label: 'Использовать детектор ступеней (ступенчатые и стресс-тесты)', type: 'checkbox', term: 'step_profile' },
-    { key: 'target_rps_allow_peak_fallback', label: 'Если стабильной ступени нет — использовать пиковый RPS', type: 'checkbox', term: 'peak_max' },
-    { key: 'debug_peak_logging', label: 'Подробные логи расчёта RPS (для диагностики)', type: 'checkbox' }
+    { key: 'min_stable_minutes', label: LL.t('settings.sla.field.min_stable_minutes'), type: 'number', step: '0.5' },
+    { key: 'step_detection_preset', label: LL.t('settings.sla.field.step_detection_preset'), type: 'select', options: null },
+    { key: 'step_detection_enabled', label: LL.t('settings.sla.field.step_detection_enabled'), type: 'checkbox', term: 'step_profile' },
+    { key: 'target_rps_allow_peak_fallback', label: LL.t('settings.sla.field.target_rps_allow_peak_fallback'), type: 'checkbox', term: 'peak_max' },
+    { key: 'debug_peak_logging', label: LL.t('settings.sla.field.debug_peak_logging'), type: 'checkbox' }
   ];
   const SLA_FORECAST_FIELDS = [
-    { key: 'mean_latency_query', label: 'Запрос среднего времени отклика', type: 'query', domain: 'lt_framework' },
-    { key: 'vus_query', label: 'Запрос числа VU', type: 'query', domain: 'lt_framework' },
-    { key: 'load_model', label: 'Модель нагрузки', type: 'select', options: null, hint: 'Открытая: параллелизм = RPS × среднее время отклика. Закрытая: параллелизм = число VU.' },
-    { key: 'service_cpu_query', label: 'Запрос CPU экземпляров сервисов', type: 'query', domain: 'jvm', hint: 'Доля CPU одного экземпляра от 0 до 1 по (сервис, instance), например process_cpu_usage by (application, instance). По нему считается, сколько подов нужно для цели.' }
+    { key: 'mean_latency_query', label: LL.t('settings.sla.field.mean_latency_query'), type: 'query', domain: 'lt_framework' },
+    { key: 'vus_query', label: LL.t('settings.sla.field.vus_query'), type: 'query', domain: 'lt_framework' },
+    { key: 'load_model', label: LL.t('settings.sla.field.load_model'), type: 'select', options: null, hint: LL.t('settings.sla.field.load_model_hint') },
+    { key: 'service_cpu_query', label: LL.t('settings.sla.field.service_cpu_query'), type: 'query', domain: 'jvm', hint: LL.t('settings.sla.field.service_cpu_query_hint') }
   ];
-  const SLA_PRESETS = [{ v: 'strict', l: 'strict — строгий' }, { v: 'balanced', l: 'balanced — сбалансированный' }, { v: 'lenient', l: 'lenient — мягкий' }];
-  const LATENCY_UNIT_OPTIONS = [{ v: 'ms', l: 'миллисекунды' }, { v: 's', l: 'секунды' }];
-  const LOAD_MODEL_OPTIONS = [{ v: 'open', l: 'открытая — задаётся RPS (arrival-rate)' }, { v: 'closed', l: 'закрытая — задаются VU' }];
+  const SLA_PRESETS = [{ v: 'strict', l: LL.t('settings.sla.preset.strict') }, { v: 'balanced', l: LL.t('settings.sla.preset.balanced') }, { v: 'lenient', l: LL.t('settings.sla.preset.lenient') }];
+  const LATENCY_UNIT_OPTIONS = [{ v: 'ms', l: LL.t('settings.sla.latency_unit.ms') }, { v: 's', l: LL.t('settings.sla.latency_unit.s') }];
+  const LOAD_MODEL_OPTIONS = [{ v: 'open', l: LL.t('settings.sla.load_model.open') }, { v: 'closed', l: LL.t('settings.sla.load_model.closed') }];
 
   function slaModel() { return state.models.sla; }
   function slaSavedKey() { return `sla:${state.slaScope}`; }
@@ -1977,16 +2001,16 @@
   function queryOptions(labels, current, autoLabel) {
     const options = labels.map((label) => ({ v: label, l: label }));
     // A reference to a query that no longer exists stays visible, marked, until it is changed.
-    if (current && !labels.includes(current)) options.push({ v: current, l: `${current} — запроса нет` });
-    const empty = autoLabel ? `авто по роли: ${autoLabel}` : 'не задано';
+    if (current && !labels.includes(current)) options.push({ v: current, l: LL.t('settings.sla.query_missing_option', { name: current }) });
+    const empty = autoLabel ? LL.t('settings.sla.query_auto', { name: autoLabel }) : LL.t('settings.sla.query_unset');
     return [{ v: '', l: empty }].concat(options);
   }
   // Warning under a query selector whose saved reference names a missing query; '' when it is fine.
   function deadRefText(labels, current, autoLabel) {
     if (!current || labels.includes(current)) return '';
     return autoLabel
-      ? `Запроса «${current}» больше нет. Отчёт возьмёт «${autoLabel}» по роли; выберите запрос и сохраните.`
-      : `Запроса «${current}» больше нет: критерий не получит данных. Выберите другой запрос.`;
+      ? LL.t('settings.sla.dead_ref_auto', { name: current, auto: autoLabel })
+      : LL.t('settings.sla.dead_ref', { name: current });
   }
   function renderSlaForm(options) {
     const skipJson = !!(options && options.skipJson);
@@ -2004,11 +2028,11 @@
       const row = document.createElement('div');
       row.className = 'sla-row';
       row.innerHTML = `
-        <input type="checkbox" id="sla-on-${field.key}" ${enabled ? 'checked' : ''} aria-label="Проверять: ${esc(field.label)}" />
+        <input type="checkbox" id="sla-on-${field.key}" ${enabled ? 'checked' : ''} aria-label="${LL.tHtml('settings.sla.check_aria', { name: field.label })}" />
         <div><label for="sla-val-${field.key}" class="sla-name" style="margin:0">${field.term ? ui.term(field.term, field.label) : esc(field.label)}</label></div>
         <input type="number" id="sla-val-${field.key}" value="${enabled ? esc(value) : ''}" ${enabled ? '' : 'disabled'} step="any" />
         <span class="dim">${esc(field.unit)}</span>
-        <select id="sla-query-${field.key}" aria-label="Запрос для критерия: ${esc(field.label)}">${options.map((o) => `<option value="${esc(o.v)}" ${o.v === currentQuery ? 'selected' : ''}>${esc(o.l)}</option>`).join('')}</select>
+        <select id="sla-query-${field.key}" aria-label="${LL.tHtml('settings.sla.query_aria', { name: field.label })}">${options.map((o) => `<option value="${esc(o.v)}" ${o.v === currentQuery ? 'selected' : ''}>${esc(o.l)}</option>`).join('')}</select>
         ${field.desc ? `<div class="sla-desc">${esc(field.desc)}</div>` : ''}
         ${dead ? `<div class="sla-desc sla-dead" role="status">${esc(dead)}</div>` : ''}`;
       const check = row.querySelector(`#sla-on-${field.key}`);
@@ -2093,7 +2117,7 @@
   function renderSlaUnitRow(model) {
     const host = $('slaUnitRow');
     host.replaceChildren();
-    const f = { key: 'latency_unit', label: 'Единицы времени отклика в запросах P95, P99 и среднего', type: 'select' };
+    const f = { key: 'latency_unit', label: LL.t('settings.sla.field.latency_unit'), type: 'select' };
     const field = slaField(f, model);
     field.className = 'sla-field sla-unit-field';
     host.appendChild(field);
@@ -2114,19 +2138,19 @@
     renderSlaForm();
   }
   async function saveSla() {
-    setStatus('slaStatus', 'Сохранение…');
+    setStatus('slaStatus', LL.t('settings.status.saving'));
     try {
       const data = await postConfig(configBody('sla', slaModel(), state.slaScope));
       if (state.slaScope) { state.config.service_sla = state.config.service_sla || {}; state.config.service_sla[state.slaScope] = clone(slaModel()); }
       else state.config.sla = clone(slaModel());
       state.saved[slaSavedKey()] = stable(slaModel());
       updateSlaDirty();
-      setStatus('slaStatus', 'Сохранено', 'ok');
-      ui.toast('SLA-критерии сохранены', { tone: 'ok' });
+      setStatus('slaStatus', LL.t('settings.status.saved'), 'ok');
+      ui.toast(LL.t('settings.sla.saved'), { tone: 'ok' });
       showWarnings(data.warnings);
       return true;
     } catch (e) {
-      setStatus('slaStatus', `Ошибка: ${e.message}`, 'error');
+      setStatus('slaStatus', LL.t('settings.status.error', { error: e.message }), 'error');
       return false;
     }
   }
@@ -2142,10 +2166,10 @@
   // Positional arrays of one domain; a row operation is applied to all of them.
   const QUERY_PARALLEL_KEYS = ['labels', 'promql_queries', 'label_keys_list', 'influxql_queries', 'flux_queries', 'label_tag_keys_list'];
   const SLA_QUERY_TITLES = {
-    max_performance_query: 'макс. RPS', error_rate_query: 'ошибки', p95_query: 'P95',
-    p99_query: 'P99', cpu_query: 'CPU', memory_query: 'память',
-    mean_latency_query: 'среднее время (прогноз)', vus_query: 'VU (прогноз)',
-    service_cpu_query: 'CPU сервисов (прогноз)'
+    max_performance_query: LL.t('settings.sla.ref.max_performance_query'), error_rate_query: LL.t('settings.sla.ref.error_rate_query'), p95_query: 'P95',
+    p99_query: 'P99', cpu_query: 'CPU', memory_query: LL.t('settings.sla.ref.memory_query'),
+    mean_latency_query: LL.t('settings.sla.ref.mean_latency_query'), vus_query: LL.t('settings.sla.ref.vus_query'),
+    service_cpu_query: LL.t('settings.sla.ref.service_cpu_query')
   };
   let structuredFieldSeq = 0;
 
@@ -2190,48 +2214,49 @@
     if (!from || from === to) return;
     const used = slaLabelsUsing(from);
     if (!used.length) return;
-    if (!window.confirm(`«${from}» используется в SLA (${slaUsageText(used)}). Обновить ссылки на «${to}»?`)) return;
+    if (!window.confirm(LL.t('settings.sla.rename_confirm', { from, usage: slaUsageText(used), to }))) return;
     used.forEach((key) => {
       if (state.models.sla) state.models.sla[key] = to;
       if (state.config.sla) state.config.sla[key] = to;
     });
     if (state.editors.ed_sla && state.models.sla) setJson(state.editors.ed_sla, state.models.sla);
-    ui.toast('Ссылки в SLA обновлены в форме. Сохраните раздел SLA.', { tone: 'warn', timeout: 8000 });
+    ui.toast(LL.t('settings.sla.rename_done'), { tone: 'warn', timeout: 8000 });
   }
 
   // ---- system context form -------------------------------------------------
-  const LEVEL_OPTIONS = [['', '—'], ['high', 'высокая'], ['medium', 'средняя'], ['low', 'низкая']];
-  const DEP_KIND_OPTIONS = [['', '—'], ['sync', 'синхронная'], ['async', 'асинхронная']];
-  const ARCH_STYLES = [['', '—'], ['microservices', 'Микросервисы'], ['monolith', 'Монолит'], ['modular-monolith', 'Модульный монолит'], ['event-driven', 'Событийная'], ['serverless', 'Serverless']];
+  const LEVEL_OPTIONS = [['', '—'], ['high', LL.t('settings.ctx.level.high')], ['medium', LL.t('settings.ctx.level.medium')], ['low', LL.t('settings.ctx.level.low')]];
+  const DEP_KIND_OPTIONS = [['', '—'], ['sync', LL.t('settings.ctx.dep.sync')], ['async', LL.t('settings.ctx.dep.async')]];
+  const ARCH_STYLES = [['', '—'], ['microservices', LL.t('settings.ctx.arch.microservices')], ['monolith', LL.t('settings.ctx.arch.monolith')], ['modular-monolith', LL.t('settings.ctx.arch.modular_monolith')], ['event-driven', LL.t('settings.ctx.arch.event_driven')], ['serverless', 'Serverless']];
   const CONTEXT_LIST_FIELDS = new Set(['technologies', 'used_by', 'steps', 'success_signals']);
   const CONTEXT_GROUPS = [
-    { key: 'system', title: 'О системе', open: true, hint: 'Передаётся ИИ вместе с метриками каждого домена.' },
+    { key: 'system', title: LL.t('settings.ctx.group.system'), open: true, hint: LL.t('settings.ctx.group.system_hint') },
     {
-      key: 'architecture', title: 'Архитектура',
-      hint: 'Компоненты и зависимости помогают ИИ связывать метрики разных доменов.',
+      key: 'architecture', title: LL.t('settings.ctx.group.architecture'),
+      hint: LL.t('settings.ctx.group.architecture_hint'),
       lists: [
-        ['components', 'Компоненты', [['name', 'Имя'], ['role', 'Роль'], ['criticality', 'Критичность', LEVEL_OPTIONS], ['technologies', 'Технологии, через запятую']]],
-        ['dependencies', 'Зависимости', [['from', 'Откуда'], ['to', 'Куда'], ['kind', 'Тип', DEP_KIND_OPTIONS], ['purpose', 'Назначение']]],
-        ['data_stores', 'Хранилища', [['id', 'Имя'], ['type', 'Тип: PostgreSQL, Redis…'], ['purpose', 'Назначение'], ['used_by', 'Кем используется, через запятую']]]
+        ['components', LL.t('settings.ctx.components.title'), [['name', LL.t('settings.ctx.components.name')], ['role', LL.t('settings.ctx.components.role')], ['criticality', LL.t('settings.ctx.components.criticality'), LEVEL_OPTIONS], ['technologies', LL.t('settings.ctx.components.technologies')]]],
+        ['dependencies', LL.t('settings.ctx.dependencies.title'), [['from', LL.t('settings.ctx.dependencies.from')], ['to', LL.t('settings.ctx.dependencies.to')], ['kind', LL.t('settings.ctx.dependencies.kind'), DEP_KIND_OPTIONS], ['purpose', LL.t('settings.ctx.dependencies.purpose')]]],
+        ['data_stores', LL.t('settings.ctx.data_stores.title'), [['id', LL.t('settings.ctx.data_stores.id')], ['type', LL.t('settings.ctx.data_stores.type')], ['purpose', LL.t('settings.ctx.data_stores.purpose')], ['used_by', LL.t('settings.ctx.data_stores.used_by')]]]
       ]
     },
     {
-      key: 'load_model', title: 'Модель нагрузки',
-      hint: 'Показывает ИИ, какие точки входа и сценарии важнее для бизнеса.',
+      key: 'load_model', title: LL.t('settings.ctx.group.load_model'),
+      hint: LL.t('settings.ctx.group.load_model_hint'),
       lists: [
-        ['entrypoints', 'Точки входа', [['name', 'Имя'], ['kind', 'Тип: http, kafka…'], ['business_priority', 'Приоритет', LEVEL_OPTIONS]]],
-        ['critical_user_flows', 'Критичные сценарии', [['name', 'Сценарий'], ['steps', 'Шаги, через запятую'], ['success_signals', 'Признаки успеха, через запятую']]]
+        ['entrypoints', LL.t('settings.ctx.entrypoints.title'), [['name', LL.t('settings.ctx.entrypoints.name')], ['kind', LL.t('settings.ctx.entrypoints.kind')], ['business_priority', LL.t('settings.ctx.entrypoints.business_priority'), LEVEL_OPTIONS]]],
+        ['critical_user_flows', LL.t('settings.ctx.critical_user_flows.title'), [['name', LL.t('settings.ctx.critical_user_flows.name')], ['steps', LL.t('settings.ctx.critical_user_flows.steps')], ['success_signals', LL.t('settings.ctx.critical_user_flows.success_signals')]]]
       ],
-      lines: [['expected_hotspots', 'Ожидаемые узкие места']]
+      lines: [['expected_hotspots', LL.t('settings.ctx.line.expected_hotspots')]]
     },
     {
-      key: 'operational_context', title: 'Эксплуатация',
-      hint: 'Попадает в промпт как правила заказчика: что считать нормой и на чём сосредоточиться.',
+      key: 'operational_context', title: LL.t('settings.ctx.group.operational_context'),
+      hint: LL.t('settings.ctx.group.operational_context_hint'),
+      // The summary line of the group shows the part of a title before ' — '.
       lines: [
-        ['normal_degradation_rules', 'Нормальная деградация — не считать проблемой'],
-        ['known_risks', 'Известные риски — проверить по данным'],
-        ['known_constraints', 'Ограничения'],
-        ['analysis_focus', 'Фокус анализа']
+        ['normal_degradation_rules', LL.t('settings.ctx.line.normal_degradation_rules')],
+        ['known_risks', LL.t('settings.ctx.line.known_risks')],
+        ['known_constraints', LL.t('settings.ctx.line.known_constraints')],
+        ['analysis_focus', LL.t('settings.ctx.line.analysis_focus')]
       ]
     }
   ];
@@ -2247,8 +2272,8 @@
   function updateContextOverrideNote() {
     const note = $('contextOverrideNote');
     if (!note) return;
-    if (!state.contextScope) note.textContent = state.area ? 'Контекст области' : 'Общий контекст';
-    else note.textContent = serviceContext(state.contextScope) ? 'Свой контекст сервиса' : 'Сервис использует контекст области';
+    if (!state.contextScope) note.textContent = state.area ? LL.t('settings.ctx.note.area') : LL.t('settings.ctx.note.global');
+    else note.textContent = serviceContext(state.contextScope) ? LL.t('settings.ctx.note.service_own') : LL.t('settings.ctx.note.service_inherits');
   }
   function contextSnapshot() {
     return isPlainObject(state.models.system_context) ? state.models.system_context : {};
@@ -2256,7 +2281,7 @@
   function writeContext(mutator) {
     const next = clone(contextSnapshot());
     mutator(next);
-    commitStructured('system_context', next, 'ed_system_context', 'contextSaveBtn', 'context', 'Контекст системы');
+    commitStructured('system_context', next, 'ed_system_context', 'contextSaveBtn', 'context', LL.t('settings.menu.context'));
   }
   function setContextPath(group, key, value) {
     writeContext((ctx) => { ctx[group] = Object.assign({}, isPlainObject(ctx[group]) ? ctx[group] : {}, { [key]: value }); });
@@ -2283,7 +2308,7 @@
     input.type = 'checkbox';
     input.checked = ctx.enabled !== false;
     input.addEventListener('change', () => writeContext((next) => { next.enabled = input.checked; }));
-    label.append(input, makeEl('span', '', ' Передавать контекст в анализ ИИ'));
+    label.append(input, makeEl('span', '', ` ${LL.t('settings.ctx.enabled')}`));
     return label;
   }
 
@@ -2299,7 +2324,7 @@
     const section = isPlainObject(ctx[group.key]) ? ctx[group.key] : {};
     if (group.key === 'system') body.appendChild(systemFields(section));
     if (group.key === 'architecture') {
-      const style = selectField('Стиль архитектуры', section.style, ARCH_STYLES, (v) => setContextPath('architecture', 'style', v));
+      const style = selectField(LL.t('settings.ctx.arch.style'), section.style, ARCH_STYLES, (v) => setContextPath('architecture', 'style', v));
       style.dataset.ctxPath = 'architecture.style';
       body.appendChild(style);
     }
@@ -2311,11 +2336,11 @@
 
   function contextGroupSummary(group, ctx) {
     const section = isPlainObject(ctx[group.key]) ? ctx[group.key] : {};
-    if (group.key === 'system') return section.name ? String(section.name) : 'не заполнено';
+    if (group.key === 'system') return section.name ? String(section.name) : LL.t('settings.ctx.summary.unfilled');
     const count = (key) => (Array.isArray(section[key]) ? section[key].length : 0);
     const parts = (group.lists || []).map(([key, title]) => `${title.toLowerCase()}: ${count(key)}`);
     (group.lines || []).forEach(([key, title]) => { if (count(key)) parts.push(`${title.split(' — ')[0].toLowerCase()}: ${count(key)}`); });
-    return parts.join(' · ') || 'пусто';
+    return parts.join(' · ') || LL.t('settings.ctx.summary.empty');
   }
 
   function systemFields(section) {
@@ -2326,8 +2351,8 @@
       wrap.dataset.ctxPath = `system.${key}`;
       return wrap;
     };
-    grid.append(field('Название', 'name'), field('Домен', 'domain'));
-    box.append(grid, field('Описание', 'description', true), field('Цель теста', 'test_goal', true));
+    grid.append(field(LL.t('settings.ctx.system.name'), 'name'), field(LL.t('settings.ctx.system.domain'), 'domain'));
+    box.append(grid, field(LL.t('settings.ctx.system.description'), 'description', true), field(LL.t('settings.ctx.system.test_goal'), 'test_goal', true));
     return box;
   }
 
@@ -2375,13 +2400,13 @@
     const box = makeEl('div', 'struct-block');
     box.dataset.ctxPath = `${groupKey}.${key}`;
     const head = makeEl('div', 'struct-head');
-    head.append(makeEl('h4', '', title), makeBtn('Добавить', () => {
+    head.append(makeEl('h4', '', title), makeBtn(LL.t('settings.action.add'), () => {
       setContextPath(groupKey, key, currentContextList(groupKey, key).concat([{}]));
       renderContextForm();
     }));
     box.appendChild(head);
     if (!rows.length) {
-      box.appendChild(makeEl('p', 'dim', 'Пока пусто.'));
+      box.appendChild(makeEl('p', 'dim', LL.t('settings.ctx.table.empty')));
       return box;
     }
     const table = makeEl('table', 'data-table ctx-table');
@@ -2427,7 +2452,7 @@
       setContextPath(groupKey, key, currentContextList(groupKey, key).filter((_, i) => i !== index));
       renderContextForm();
     });
-    remove.setAttribute('aria-label', 'Удалить строку');
+    remove.setAttribute('aria-label', LL.t('settings.ctx.table.remove_row'));
     actions.appendChild(remove);
     tr.appendChild(actions);
     return tr;
@@ -2442,7 +2467,7 @@
     const area = makeEl('textarea');
     area.id = id;
     area.rows = 3;
-    area.placeholder = 'По одному на строку';
+    area.placeholder = LL.t('settings.ctx.lines_placeholder');
     area.value = (Array.isArray(values) ? values : []).join('\n');
     area.addEventListener('change', () => setContextPath(groupKey, key, splitList(area.value, '\n')));
     wrap.append(lab, area);
@@ -2451,14 +2476,19 @@
 
   // ---- system context from a document ---------------------------------------
   const CONTEXT_IMPORT_MAX_BYTES = 10 * 1024 * 1024;
-  const CONTEXT_IMPORT_ACTIONS = { filled: 'заполнено', added: 'добавлено', replaced: 'заменено', cleared: 'очищено' };
+  const CONTEXT_IMPORT_ACTIONS = {
+    filled: LL.t('settings.ctx.import.action.filled'),
+    added: LL.t('settings.ctx.import.action.added'),
+    replaced: LL.t('settings.ctx.import.action.replaced'),
+    cleared: LL.t('settings.ctx.import.action.cleared')
+  };
 
   function contextScopeTitle() {
     const areaMeta = (state.config.areas_meta || []).find((item) => item && item.id === state.area);
-    const areaTitle = state.area ? ((areaMeta && areaMeta.title) || state.area) : 'общий контекст';
-    if (!state.contextScope) return state.area ? `область «${areaTitle}»` : areaTitle;
+    const areaTitle = state.area ? ((areaMeta && areaMeta.title) || state.area) : LL.t('settings.ctx.import.scope_global');
+    if (!state.contextScope) return state.area ? LL.t('settings.ctx.import.scope_area', { area: areaTitle }) : areaTitle;
     const svc = state.servicesMeta[state.contextScope];
-    return `сервис «${(svc && svc.title) || state.contextScope}» в области «${areaTitle}»`;
+    return LL.t('settings.ctx.import.scope_service', { service: (svc && svc.title) || state.contextScope, area: areaTitle });
   }
   function contextLlmTitle() {
     const llm = isPlainObject(state.config.llm) ? state.config.llm : {};
@@ -2483,22 +2513,22 @@
     const banner = $('contextImportBanner');
     banner.replaceChildren();
     const source = result.source || {};
-    let from = 'вставленного текста';
-    if (source.format === 'confluence') from = `страницы Confluence «${source.name}»`;
-    else if (source.name) from = `файла «${source.name}»`;
+    let from = LL.t('settings.ctx.import.from_text');
+    if (source.format === 'confluence') from = LL.t('settings.ctx.import.from_confluence', { name: source.name });
+    else if (source.name) from = LL.t('settings.ctx.import.from_file', { name: source.name });
     const changes = Array.isArray(result.changes) ? result.changes : [];
     const head = makeEl('div', 'ctx-import-head');
     head.appendChild(makeEl('strong', '', changes.length
-      ? `Контекст заполнен из ${from}. Проверьте подсвеченные поля и сохраните.`
-      : `Разбор ${from} не дал ничего нового для этого контекста.`));
+      ? LL.t('settings.ctx.import.filled', { from })
+      : LL.t('settings.ctx.import.nothing', { from })));
     const actions = makeEl('div', 'ctx-import-actions');
     actions.append(
-      makeBtn('Отменить импорт', () => {
-        if (state.contextImport) commitStructured('system_context', state.contextImport.previous, 'ed_system_context', 'contextSaveBtn', 'context', 'Контекст системы');
+      makeBtn(LL.t('settings.ctx.import.undo'), () => {
+        if (state.contextImport) commitStructured('system_context', state.contextImport.previous, 'ed_system_context', 'contextSaveBtn', 'context', LL.t('settings.menu.context'));
         clearContextImport();
         renderContextForm();
       }, 'btn btn-sm'),
-      makeBtn('Скрыть', () => { clearContextImport(); renderContextForm(); }, 'btn btn-sm btn-ghost')
+      makeBtn(LL.t('settings.ctx.import.hide'), () => { clearContextImport(); renderContextForm(); }, 'btn btn-sm btn-ghost')
     );
     head.appendChild(actions);
     banner.appendChild(head);
@@ -2515,7 +2545,7 @@
   }
   function applyContextImport(result) {
     const previous = clone(contextSnapshot());
-    commitStructured('system_context', result.context || {}, 'ed_system_context', 'contextSaveBtn', 'context', 'Контекст системы');
+    commitStructured('system_context', result.context || {}, 'ed_system_context', 'contextSaveBtn', 'context', LL.t('settings.menu.context'));
     state.contextImport = { previous, paths: new Set((result.changes || []).map((change) => change.path)) };
     renderContextForm();
     showContextImportBanner(result);
@@ -2528,8 +2558,8 @@
     let init;
     if (source === 'file') {
       const file = body.querySelector('.ctx-import-file').files[0];
-      if (!file) { setStatus('Выберите файл', 'error'); return null; }
-      if (file.size > CONTEXT_IMPORT_MAX_BYTES) { setStatus('Файл больше 10 МБ', 'error'); return null; }
+      if (!file) { setStatus(LL.t('settings.ctx.import.pick_file'), 'error'); return null; }
+      if (file.size > CONTEXT_IMPORT_MAX_BYTES) { setStatus(LL.t('settings.ctx.import.file_too_big'), 'error'); return null; }
       const form = new FormData();
       form.append('file', file);
       Object.entries(common).forEach(([key, value]) => form.append(key, value));
@@ -2537,23 +2567,23 @@
       init = { method: 'POST', body: form };
     } else if (source === 'confluence') {
       const url = body.querySelector('.ctx-import-url').value.trim();
-      if (!/^https?:\/\//i.test(url)) { setStatus('Вставьте полную ссылку на страницу Confluence', 'error'); return null; }
+      if (!/^https?:\/\//i.test(url)) { setStatus(LL.t('settings.ctx.import.need_url'), 'error'); return null; }
       init = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...common, confluence_url: url, current: contextSnapshot() }) };
     } else {
       const text = body.querySelector('.ctx-import-text').value;
-      if (text.trim().length < 40) { setStatus('Вставьте описание системы: хотя бы несколько предложений', 'error'); return null; }
+      if (text.trim().length < 40) { setStatus(LL.t('settings.ctx.import.need_text'), 'error'); return null; }
       init = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...common, text, current: contextSnapshot() }) };
     }
     const started = Date.now();
-    setStatus('Модель разбирает документ… обычно 20–60 с', '');
-    const timer = setInterval(() => setStatus(`Модель разбирает документ… прошло ${Math.round((Date.now() - started) / 1000)} с`, ''), 1000);
+    setStatus(LL.t('settings.ctx.import.parsing'), '');
+    const timer = setInterval(() => setStatus(LL.t('settings.ctx.import.parsing_elapsed', { n: Math.round((Date.now() - started) / 1000) }), ''), 1000);
     try {
       const resp = await fetch('/config/system_context/import', init);
       const data = await resp.json().catch(() => ({}));
-      if (!resp.ok) { setStatus(data.error || `Ошибка HTTP ${resp.status}`, 'error'); return null; }
+      if (!resp.ok) { setStatus(data.error || LL.t('settings.ctx.import.http_error', { status: resp.status }), 'error'); return null; }
       return data;
     } catch (e) {
-      setStatus('Сервер не отвечает, попробуйте ещё раз', 'error');
+      setStatus(LL.t('settings.ctx.import.no_response'), 'error');
       return null;
     } finally {
       clearInterval(timer);
@@ -2564,38 +2594,38 @@
     const confluence = isPlainObject(state.config.confluence) ? state.config.confluence : {};
     const confluenceBase = String(confluence.base_url || '').trim().replace(/\/+$/, '');
     const warning = llm
-      ? `Текст документа или страницы будет отправлен модели ${esc(llm)} из настроек LLM. Ничего не сохранится, пока вы не нажмёте «Сохранить» в форме.`
-      : 'Провайдер LLM не настроен: сначала задайте его в карточке «LLM» раздела «Подключения».';
+      ? LL.tHtml('settings.ctx.import.warning', { model: llm })
+      : LL.tHtml('settings.ctx.import.no_llm');
     const bodyHtml = `
       <p class="field-hint warn">${warning}</p>
-      <p class="dim">Куда: ${esc(contextScopeTitle())}</p>
-      <div class="seg-group ctx-import-source" role="group" aria-label="Источник">
-        <button type="button" class="seg-btn" data-source="file" aria-pressed="true">Файл</button>
-        <button type="button" class="seg-btn" data-source="text" aria-pressed="false">Текст</button>
+      <p class="dim">${LL.tHtml('settings.ctx.import.target', { scope: contextScopeTitle() })}</p>
+      <div class="seg-group ctx-import-source" role="group" aria-label="${LL.tHtml('settings.ctx.import.source_aria')}">
+        <button type="button" class="seg-btn" data-source="file" aria-pressed="true">${LL.tHtml('settings.ctx.import.source_file')}</button>
+        <button type="button" class="seg-btn" data-source="text" aria-pressed="false">${LL.tHtml('settings.ctx.import.source_text')}</button>
         <button type="button" class="seg-btn" data-source="confluence" aria-pressed="false">Confluence</button>
       </div>
       <div class="ctx-import-pane" data-pane="file">
-        <input type="file" class="ctx-import-file" accept=".pdf,.docx,.md,.markdown,.txt" aria-label="Документ" />
-        <div class="field-hint">PDF с текстовым слоем, Word (.docx), Markdown или текст, до 10 МБ. Сканы без текста не читаются.</div>
+        <input type="file" class="ctx-import-file" accept=".pdf,.docx,.md,.markdown,.txt" aria-label="${LL.tHtml('settings.ctx.import.file_aria')}" />
+        <div class="field-hint">${LL.tHtml('settings.ctx.import.file_hint')}</div>
       </div>
       <div class="ctx-import-pane" data-pane="text" hidden>
-        <textarea class="ctx-import-text" rows="10" aria-label="Описание системы" placeholder="Вставьте описание системы: назначение, компоненты, зависимости, сценарии, риски…"></textarea>
+        <textarea class="ctx-import-text" rows="10" aria-label="${LL.tHtml('settings.ctx.import.text_aria')}" placeholder="${LL.tHtml('settings.ctx.import.text_placeholder')}"></textarea>
       </div>
       <div class="ctx-import-pane" data-pane="confluence" hidden>
-        <input type="url" class="ctx-import-url" aria-label="Ссылка на страницу Confluence" placeholder="${esc(confluenceBase ? `${confluenceBase}/pages/viewpage.action?pageId=…` : 'https://confluence.example.ru/pages/viewpage.action?pageId=…')}" />
+        <input type="url" class="ctx-import-url" aria-label="${LL.tHtml('settings.ctx.import.url_aria')}" placeholder="${esc(confluenceBase ? `${confluenceBase}/pages/viewpage.action?pageId=…` : 'https://confluence.example.ru/pages/viewpage.action?pageId=…')}" />
         <div class="field-hint">${confluenceBase
-          ? `Страница из ${esc(confluenceBase)} читается учётной записью из подключения Confluence. Подойдёт адрес страницы из браузера или короткая ссылка.`
-          : 'Сначала настройте подключение Confluence в разделе «Подключения»: страница читается его учётной записью.'}</div>
+          ? LL.tHtml('settings.ctx.import.url_hint', { base: confluenceBase })
+          : LL.tHtml('settings.ctx.import.url_hint_unset')}</div>
       </div>
       <fieldset class="ctx-import-mode">
-        <legend>Как применить</legend>
-        <label class="checkbox-row"><input type="radio" name="ctxImportMode" value="fill" checked /> <span>Дополнить: заполнить пустые поля и добавить новые элементы</span></label>
-        <label class="checkbox-row"><input type="radio" name="ctxImportMode" value="replace" /> <span>Заменить: весь контекст из документа</span></label>
+        <legend>${LL.tHtml('settings.ctx.import.mode_legend')}</legend>
+        <label class="checkbox-row"><input type="radio" name="ctxImportMode" value="fill" checked /> <span>${LL.tHtml('settings.ctx.import.mode_fill')}</span></label>
+        <label class="checkbox-row"><input type="radio" name="ctxImportMode" value="replace" /> <span>${LL.tHtml('settings.ctx.import.mode_replace')}</span></label>
       </fieldset>
       <div class="ctx-import-status" role="status" aria-live="polite"></div>`;
     let busy = false;
     await ui.dialog({
-      title: 'Заполнить контекст из документа',
+      title: LL.t('settings.ctx.import.title'),
       wide: true,
       bodyHtml,
       onOpen: (body) => {
@@ -2605,9 +2635,9 @@
         }));
       },
       actions: [
-        { label: 'Отмена' },
+        { label: LL.t('settings.action.cancel') },
         {
-          label: 'Разобрать',
+          label: LL.t('settings.ctx.import.parse'),
           primary: true,
           onClick: async (close, body) => {
             if (busy || !llm) return;
@@ -2682,7 +2712,7 @@
     const count = alignQueryBlock(block, spec);
     mutate(block, spec, count);
     queries[domain] = block;
-    commitStructured('queries', queries, 'ed_queries', 'queriesSaveBtn', 'queries', state.queriesScope ? `Запросы (${state.queriesScope})` : 'Запросы');
+    commitStructured('queries', queries, 'ed_queries', 'queriesSaveBtn', 'queries', state.queriesScope ? LL.t('settings.dirty.queries_scoped', { scope: state.queriesScope }) : LL.t('settings.menu.queries'));
   }
   function queryRows(block, spec) {
     const labels = Array.isArray(block.labels) ? block.labels : [];
@@ -2707,16 +2737,16 @@
     host.appendChild(previewWindowBar());
     const search = makeEl('input');
     search.type = 'search';
-    search.placeholder = 'Поиск по названию или запросу';
+    search.placeholder = LL.t('settings.queries.search_placeholder');
     search.value = state.querySearch || '';
     search.addEventListener('input', () => { state.querySearch = search.value; renderQueryList(); });
     const toolbar = makeEl('div', 'struct-toolbar');
-    const fromPack = makeBtn('Добавить из пакета', () => openPackDialog(state.wizard ? '' : domain), 'btn btn-primary');
+    const fromPack = makeBtn(LL.t('settings.queries.add_from_pack'), () => openPackDialog(state.wizard ? '' : domain), 'btn btn-primary');
     fromPack.id = 'addFromPackBtn';  // target of the project readiness checklist (projects.js)
-    toolbar.append(search, makeBtn('Добавить запрос', addQueryRow), fromPack);
+    toolbar.append(search, makeBtn(LL.t('settings.queries.add'), addQueryRow), fromPack);
     if (domain === 'lt_framework' && rpsRoleCount(queryBlock(domain)) >= 2) {
-      const sum = makeBtn('Суммарный RPS инструментов', () => addSummedRps(sum));
-      sum.title = 'Строка, складывающая общий RPS всех инструментов домена; ступени и SLA будут считаться по ней';
+      const sum = makeBtn(LL.t('settings.queries.summed_rps'), () => addSummedRps(sum));
+      sum.title = LL.t('settings.queries.summed_rps_title');
       toolbar.appendChild(sum);
     }
     host.appendChild(toolbar);
@@ -2748,7 +2778,7 @@
     const bar = makeEl('div', 'struct-toolbar');
     const switcher = savedSourceType(domain) === 'grafana_proxy' || filledLangs(block).length > 1 || state.domainLangPicker[domain];
     if (!switcher) {
-      bar.appendChild(makeEl('span', 'pill na', `Язык: ${QUERY_LANG[lang].label}`));
+      bar.appendChild(makeEl('span', 'pill na', LL.t('settings.queries.lang', { lang: QUERY_LANG[lang].label })));
       return bar;
     }
     LT_QUERY_PRIORITY.forEach((name) => {
@@ -2772,7 +2802,7 @@
       .filter((row) => !needle || row.label.toLowerCase().includes(needle) || row.query.toLowerCase().includes(needle));
     list.innerHTML = '';
     if (!rows.length) {
-      list.appendChild(makeEl('p', 'dim', needle ? 'Ничего не найдено.' : 'Запросов пока нет.'));
+      list.appendChild(makeEl('p', 'dim', needle ? LL.t('settings.queries.not_found') : LL.t('settings.queries.empty')));
       return;
     }
     rows.forEach((row) => list.appendChild(queryItem(domain, spec, row)));
@@ -2788,16 +2818,16 @@
     head.addEventListener('click', toggle);
     head.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
     const main = makeEl('div', 'q-item-main');
-    main.appendChild(makeEl('div', 'q-item-title', row.label || 'Без названия'));
+    main.appendChild(makeEl('div', 'q-item-title', row.label || LL.t('settings.queries.untitled')));
     const meta = [spec.label];
-    if (row.keys.length) meta.push(`серии: ${row.keys.join(', ')}`);
+    if (row.keys.length) meta.push(LL.t('settings.queries.series', { keys: row.keys.join(', ') }));
     if (meta.length) main.appendChild(makeEl('div', 'q-item-meta', meta.join(' · ')));
     if (!open) main.appendChild(makeEl('div', 'q-item-code', (row.query.split('\n').find((line) => line.trim()) || '').trim() || '—'));
     head.appendChild(main);
     const roles = isPlainObject(queryBlock(domain).roles) ? queryBlock(domain).roles : {};
     if (roles[row.label]) {
       const rolePill = makeEl('span', 'pill na', roleTitle(roles[row.label]));
-      rolePill.title = `Роль из пакета запросов: ${roles[row.label]}`;
+      rolePill.title = LL.t('settings.queries.role_title', { role: roles[row.label] });
       head.appendChild(rolePill);
     }
     const used = slaLabelsUsing(row.label);
@@ -2825,14 +2855,14 @@
     const start = makeEl('input');
     start.type = 'datetime-local';
     start.value = state.previewStart;
-    start.setAttribute('aria-label', 'Начало окна проверки');
+    start.setAttribute('aria-label', LL.t('settings.queries.window_start_aria'));
     start.addEventListener('change', () => { state.previewStart = start.value; });
     const end = makeEl('input');
     end.type = 'datetime-local';
     end.value = state.previewEnd;
-    end.setAttribute('aria-label', 'Конец окна проверки');
+    end.setAttribute('aria-label', LL.t('settings.queries.window_end_aria'));
     end.addEventListener('change', () => { state.previewEnd = end.value; });
-    bar.append(makeEl('span', 'dim', 'Окно проверки'), start, makeEl('span', 'dim', '—'), end);
+    bar.append(makeEl('span', 'dim', LL.t('settings.queries.window')), start, makeEl('span', 'dim', '—'), end);
     return bar;
   }
   function queryLangName(domain) {
@@ -2841,10 +2871,10 @@
   async function runQueryPreview(domain, queryInput, keysInput, result) {
     const query = String(queryInput.value || '').trim();
     result.className = 'conn-result pending';
-    result.textContent = 'Проверка…';
+    result.textContent = LL.t('settings.check.running');
     if (!query) {
       result.className = 'conn-result error';
-      result.textContent = 'Запрос пустой';
+      result.textContent = LL.t('settings.queries.empty_query');
       return;
     }
     const body = {
@@ -2873,7 +2903,7 @@
   }
   function queryEditor(domain, spec, row) {
     const body = makeEl('div', 'q-item-body');
-    const name = textField('Название', row.label, () => {});
+    const name = textField(LL.t('settings.queries.field_name'), row.label, () => {});
     const nameInput = name.querySelector('input');
     nameInput.addEventListener('change', () => {
       renameSlaLabel(row.label, nameInput.value);
@@ -2887,27 +2917,27 @@
       });
       renderQueriesForm();
     });
-    const query = textField(`Запрос (${spec.label})`, row.query, () => {}, true);
+    const query = textField(LL.t('settings.queries.field_query', { lang: spec.label }), row.query, () => {}, true);
     const queryInput = query.querySelector('textarea');
     queryInput.rows = Math.min(14, Math.max(4, row.query.split('\n').length + 1));
     queryInput.addEventListener('change', () => {
       editQueryBlock(domain, (block, active) => { block[active.query][row.index] = queryInput.value; });
     });
-    const keys = textField('Ключи подписи серии, через запятую', row.keys.join(', '), () => {});
+    const keys = textField(LL.t('settings.queries.field_keys'), row.keys.join(', '), () => {});
     const keysInput = keys.querySelector('input');
     keysInput.addEventListener('change', () => {
       editQueryBlock(domain, (block, active) => { block[active.keys][row.index] = splitList(keysInput.value); });
     });
     body.append(name, query, keys);
-    if (spec.keys === 'label_tag_keys_list') body.appendChild(makeEl('p', 'help', 'Ключи подписи общие для InfluxQL и Flux.'));
+    if (spec.keys === 'label_tag_keys_list') body.appendChild(makeEl('p', 'help', LL.t('settings.queries.keys_shared')));
     const preview = makeEl('div', 'conn-result');
-    const check = makeBtn('Проверить', async () => {
+    const check = makeBtn(LL.t('settings.action.check'), async () => {
       check.disabled = true;
       try {
         await runQueryPreview(domain, queryInput, keysInput, preview);
       } catch (e) {
         preview.className = 'conn-result error';
-        preview.textContent = e.message || 'Ошибка проверки';
+        preview.textContent = e.message || LL.t('settings.check.error');
       } finally {
         check.disabled = false;
       }
@@ -2915,10 +2945,10 @@
     const actions = makeEl('div', 'q-item-actions');
     actions.append(
       check,
-      makeBtn('Выше', () => moveQueryRow(domain, row.index, -1)),
-      makeBtn('Ниже', () => moveQueryRow(domain, row.index, 1)),
-      makeBtn('Удалить', () => removeQueryRow(domain, row.index)),
-      makeBtn('Свернуть', () => { state.queryOpen = null; renderQueryList(); })
+      makeBtn(LL.t('settings.queries.move_up'), () => moveQueryRow(domain, row.index, -1)),
+      makeBtn(LL.t('settings.queries.move_down'), () => moveQueryRow(domain, row.index, 1)),
+      makeBtn(LL.t('settings.action.delete'), () => removeQueryRow(domain, row.index)),
+      makeBtn(LL.t('settings.queries.collapse'), () => { state.queryOpen = null; renderQueryList(); })
     );
     body.append(preview, actions);
     return body;
@@ -2940,7 +2970,7 @@
 
   function removeQueryRow(domain, index) {
     const label = String((queryBlock(domain).labels || [])[index] || '');
-    if (!window.confirm(`Удалить запрос «${label || 'без названия'}»?`)) return;
+    if (!window.confirm(LL.t('settings.queries.delete_confirm', { name: label || LL.t('settings.queries.untitled_lower') }))) return;
     editQueryBlock(domain, (block) => {
       QUERY_PARALLEL_KEYS.forEach((key) => { if (Array.isArray(block[key]) && index < block[key].length) block[key].splice(index, 1); });
       if (isPlainObject(block.roles)) delete block.roles[label];
@@ -2970,9 +3000,9 @@
   // section edits (area and service), checks a pack against the sources, previews the changes and
   // applies them through /config/query_packs/*; the page then reloads queries and SLA from the server.
   const PACK_COMPAT = {
-    ok: { cls: 'ok', text: 'Совместим' },
-    replace_only: { cls: 'warn', text: 'Только с заменой' },
-    incompatible: { cls: 'error', text: 'Несовместим' }
+    ok: { cls: 'ok', text: LL.t('settings.packs.compat.ok') },
+    replace_only: { cls: 'warn', text: LL.t('settings.packs.compat.replace_only') },
+    incompatible: { cls: 'error', text: LL.t('settings.packs.compat.incompatible') }
   };
   const packUi = { catalog: null, forms: {}, view: { name: 'list', domain: '' }, body: null };
 
@@ -2983,18 +3013,18 @@
   }
   async function addSummedRps(button) {
     const ok = await ui.confirm({
-      title: 'Суммарный RPS инструментов',
-      message: 'В домене появится строка, складывающая общий RPS всех инструментов (только PromQL), и она станет запросом производительности SLA: ступени будут считаться по всей нагрузке комплексного теста.',
-      confirmText: 'Добавить'
+      title: LL.t('settings.queries.summed_rps'),
+      message: LL.t('settings.queries.summed_rps_confirm'),
+      confirmText: LL.t('settings.action.add')
     });
     if (!ok) return;
     button.disabled = true;
     try {
       const resp = await postPack('summed_rps', { ...packScope(), use_for_sla: true });
       await refreshQueriesAndSla();
-      ui.toast(`Добавлена строка «${resp.label}»: ${resp.parts.join(' + ')}`, { tone: 'ok', timeout: 10000 });
+      ui.toast(LL.t('settings.queries.summed_rps_added', { label: resp.label, parts: resp.parts.join(' + ') }), { tone: 'ok', timeout: 10000 });
     } catch (e) {
-      ui.toast(`Не удалось добавить: ${e.message}`, { tone: 'error' });
+      ui.toast(LL.t('settings.queries.summed_rps_failed', { error: e.message }), { tone: 'error' });
       button.disabled = false;
     }
   }
@@ -3049,9 +3079,9 @@
     return data;
   }
   function scopeLine() {
-    const parts = [state.area ? `область «${state.area}»` : 'общие настройки (без области)'];
-    if (state.area && state.queriesScope) parts.push(`сервис «${state.queriesScope}»`);
-    return makeEl('p', 'help', `Применяется к: ${parts.join(', ')}. Обновятся запросы домена и ссылки SLA этой области видимости.`);
+    const parts = [state.area ? LL.t('settings.packs.scope_area', { area: state.area }) : LL.t('settings.packs.scope_global')];
+    if (state.area && state.queriesScope) parts.push(LL.t('settings.packs.scope_service', { service: state.queriesScope }));
+    return makeEl('p', 'help', LL.t('settings.packs.scope_line', { scope: parts.join(', ') }));
   }
   function packPills(pack) {
     const wrap = makeEl('span', 'pack-pills');
@@ -3062,11 +3092,13 @@
     wrap.appendChild(pill);
     if (pack.installed) {
       const outdated = pack.installed.outdated;
-      wrap.appendChild(makeEl('span', `pill ${outdated ? 'warn' : 'ok'}`, outdated ? `Установлен v${pack.installed.version}, есть v${pack.version}` : `Установлен v${pack.installed.version}`));
+      wrap.appendChild(makeEl('span', `pill ${outdated ? 'warn' : 'ok'}`, outdated
+        ? LL.t('settings.packs.installed_outdated', { installed: pack.installed.version, latest: pack.version })
+        : LL.t('settings.packs.installed', { version: pack.installed.version })));
     }
     if (pack.verified) {
-      const verified = makeEl('span', 'pill done', 'Проверен на стенде');
-      verified.title = 'Все запросы пакета вернули данные на стенде docker/dev-stack с живыми экспортерами';
+      const verified = makeEl('span', 'pill done', LL.t('settings.packs.verified'));
+      verified.title = LL.t('settings.packs.verified_title');
       wrap.appendChild(verified);
     }
     const detected = detectionPill(pack);
@@ -3092,10 +3124,10 @@
     if (!item) return null;
     const total = item.found.length + item.missing.length;
     let pill;
-    if (item.score >= 1) pill = makeEl('span', 'pill ok', 'Метрики найдены');
-    else if (item.found.length) pill = makeEl('span', 'pill warn', `Найдено ${item.found.length} из ${total} метрик`);
-    else pill = makeEl('span', 'pill na', 'Метрик нет в источнике');
-    if (item.missing.length) pill.title = `Нет: ${item.missing.join(', ')}`;
+    if (item.score >= 1) pill = makeEl('span', 'pill ok', LL.t('settings.packs.detect.found_all'));
+    else if (item.found.length) pill = makeEl('span', 'pill warn', LL.t('settings.packs.detect.found_some', { found: item.found.length, total }));
+    else pill = makeEl('span', 'pill na', LL.t('settings.packs.detect.found_none'));
+    if (item.missing.length) pill.title = LL.t('settings.packs.detect.missing', { list: item.missing.join(', ') });
     return pill;
   }
   async function runPackDetection() {
@@ -3115,14 +3147,14 @@
   function detectionBar() {
     const wrap = makeEl('div');
     const bar = makeEl('div', 'struct-toolbar');
-    const label = packUi.detecting ? 'Читаю метрики источников…' : (packUi.detection ? 'Определить заново' : 'Определить по источникам');
+    const label = packUi.detecting ? LL.t('settings.packs.detect.running') : (packUi.detection ? LL.t('settings.packs.detect.again') : LL.t('settings.packs.detect.start'));
     const btn = makeBtn(label, runPackDetection, packUi.detection ? 'btn btn-sm' : 'btn btn-sm btn-primary');
     btn.disabled = !!packUi.detecting;
     bar.append(btn, makeEl('span', 'dim', packUi.detection
-      ? 'Пакеты отсортированы по найденным у источников метрикам.'
-      : 'Прочитает имена метрик у источников доменов и подскажет подходящие пакеты и наборы.'));
+      ? LL.t('settings.packs.detect.sorted')
+      : LL.t('settings.packs.detect.hint')));
     wrap.appendChild(bar);
-    if (packUi.detectError) wrap.appendChild(makeEl('p', 'pack-note error', `Не удалось определить: ${packUi.detectError}`));
+    if (packUi.detectError) wrap.appendChild(makeEl('p', 'pack-note error', LL.t('settings.packs.detect.failed', { error: packUi.detectError })));
     if (packUi.detection) {
       Object.entries(packUi.detection.domains || {}).forEach(([domain, info]) => {
         if (info.error) wrap.appendChild(makeEl('p', 'pack-note warn', `${LL.domainTitle(domain)}: ${info.error}`));
@@ -3134,12 +3166,12 @@
     const det = packUi.detection && (packUi.detection.bundles || {})[bundle.id];
     if (!det) return null;
     const tone = det.matched === det.total ? 'ok' : (det.score > 0 ? 'warn' : 'na');
-    return makeEl('span', `pill ${tone}`, `Подходят ${det.matched} из ${det.total} пакетов`);
+    return makeEl('span', `pill ${tone}`, LL.t('settings.packs.bundle_match', { matched: det.matched, total: det.total }));
   }
 
   async function openPackDialog(domain, packId) {
     if (state.dirty.has('queries:queries') || state.dirty.has('sla:model')) {
-      ui.toast('Сначала сохраните или отмените изменения в разделах «Запросы» и «SLA»: пакет применяется к сохранённым настройкам.', { tone: 'warn', timeout: 8000 });
+      ui.toast(LL.t('settings.packs.unsaved_first'), { tone: 'warn', timeout: 8000 });
       return;
     }
     packUi.forms = {};
@@ -3151,9 +3183,9 @@
       ? { name: 'pack', packId, back: { name: 'list', domain: domain || '' } }
       : { name: 'list', domain: domain || '' };
     await ui.dialog({
-      title: 'Пакеты запросов',
+      title: LL.t('settings.packs.title'),
       wide: true,
-      actions: [{ label: 'Закрыть' }],
+      actions: [{ label: LL.t('settings.action.close') }],
       onOpen: (body) => { packUi.body = body; renderPackDialog(true); }
     });
     packUi.body = null;
@@ -3163,12 +3195,12 @@
     if (!body) return;
     if (reload || !packUi.catalog) {
       body.innerHTML = '';
-      body.appendChild(makeEl('p', 'dim', 'Загрузка каталога…'));
+      body.appendChild(makeEl('p', 'dim', LL.t('settings.packs.catalog_loading')));
       try {
         await loadPackCatalog();
       } catch (e) {
         body.innerHTML = '';
-        body.appendChild(makeEl('p', 'binding-error', `Не удалось загрузить пакеты: ${e.message}`));
+        body.appendChild(makeEl('p', 'binding-error', LL.t('settings.packs.catalog_failed', { error: e.message })));
         return;
       }
       if (packUi.autoDetect && !packUi.detection && !packUi.detecting) {
@@ -3194,14 +3226,14 @@
     const host = makeEl('div', 'pack-browser');
     host.appendChild(scopeLine());
     const tabs = makeEl('div', 'struct-tabs');
-    [['', 'Все домены']].concat(QUERY_DOMAINS.map((d) => [d, LL.domainTitle(d)])).forEach(([key, title]) => {
+    [['', LL.t('settings.packs.all_domains')]].concat(QUERY_DOMAINS.map((d) => [d, LL.domainTitle(d)])).forEach(([key, title]) => {
       tabs.appendChild(makeBtn(title, () => showPackView({ name: 'list', domain: key }), 'btn btn-sm' + (key === domain ? ' is-active' : '')));
     });
     host.appendChild(tabs);
     host.appendChild(detectionBar());
     const catalog = packUi.catalog || {};
     if (!domain && (catalog.bundles || []).length) {
-      host.appendChild(makeEl('h4', 'pack-group', 'Наборы для типовых стеков'));
+      host.appendChild(makeEl('h4', 'pack-group', LL.t('settings.packs.bundles_heading')));
       const bundleScore = (bundle) => ((packUi.detection && (packUi.detection.bundles || {})[bundle.id]) || { score: -1 }).score;
       catalog.bundles.slice().sort((a, b) => bundleScore(b) - bundleScore(a)).forEach((bundle) => {
         const row = makeEl('div', 'pack-row');
@@ -3210,8 +3242,8 @@
         head.appendChild(makeEl('strong', '', bundle.title));
         const pill = bundlePill(bundle);
         if (pill) head.appendChild(pill);
-        main.append(head, makeEl('div', 'pack-row-desc', bundle.description), makeEl('div', 'dim', `Пакетов: ${bundle.packs.length}`));
-        row.append(main, makeBtn('Открыть', () => showPackView({ name: 'bundle', bundleId: bundle.id }), 'btn btn-sm'));
+        main.append(head, makeEl('div', 'pack-row-desc', bundle.description), makeEl('div', 'dim', LL.t('settings.packs.bundle_count', { n: bundle.packs.length })));
+        row.append(main, makeBtn(LL.t('settings.packs.open'), () => showPackView({ name: 'bundle', bundleId: bundle.id }), 'btn btn-sm'));
         host.appendChild(row);
       });
     }
@@ -3222,7 +3254,7 @@
       host.appendChild(makeEl('h4', 'pack-group', title));
       items.forEach((pack) => host.appendChild(packRow(pack, { name: 'list', domain })));
     });
-    if (!packs.length) host.appendChild(makeEl('p', 'dim', 'Для этого домена пакетов нет.'));
+    if (!packs.length) host.appendChild(makeEl('p', 'dim', LL.t('settings.packs.none_for_domain')));
     return host;
   }
   function packRow(pack, back) {
@@ -3230,17 +3262,17 @@
     const main = makeEl('div', 'pack-row-main');
     const head = makeEl('div', 'pack-row-title');
     head.append(makeEl('strong', '', pack.title), packPills(pack));
-    main.append(head, makeEl('div', 'dim', `${LL.domainTitle(pack.domain)} · запросов: ${pack.queries.length}`), makeEl('div', 'pack-row-desc', pack.description));
-    row.append(main, makeBtn('Открыть', () => showPackView({ name: 'pack', packId: pack.id, back }), 'btn btn-sm'));
+    main.append(head, makeEl('div', 'dim', `${LL.domainTitle(pack.domain)} · ${LL.t('settings.packs.query_count', { n: pack.queries.length })}`), makeEl('div', 'pack-row-desc', pack.description));
+    row.append(main, makeBtn(LL.t('settings.packs.open'), () => showPackView({ name: 'pack', packId: pack.id, back }), 'btn btn-sm'));
     return row;
   }
   function bundleCard(bundle) {
     const host = makeEl('div', 'pack-browser');
-    host.appendChild(makeBtn('← К списку', () => showPackView({ name: 'list', domain: '' }), 'btn btn-sm'));
+    host.appendChild(makeBtn(LL.t('settings.packs.back_to_list'), () => showPackView({ name: 'list', domain: '' }), 'btn btn-sm'));
     host.appendChild(makeEl('h4', 'pack-group', bundle.title));
     host.appendChild(makeEl('p', 'help', bundle.description));
     host.appendChild(scopeLine());
-    host.appendChild(makeEl('p', 'help', 'Откройте пакеты по очереди: задайте переменные, проверьте запросы и примените. Начните с нагрузочного инструмента — по нему ищутся ступени нагрузки.'));
+    host.appendChild(makeEl('p', 'help', LL.t('settings.packs.bundle_help')));
     bundle.packs.map(findPack).filter(Boolean).forEach((pack) => host.appendChild(packRow(pack, { name: 'bundle', bundleId: bundle.id })));
     return host;
   }
@@ -3258,31 +3290,31 @@
     const form = packForm(pack);
     const host = makeEl('div', 'pack-browser');
     const back = packUi.view.back || { name: 'list', domain: pack.domain };
-    host.appendChild(makeBtn(back.name === 'bundle' ? '← К набору' : '← К списку', () => showPackView(back), 'btn btn-sm'));
+    host.appendChild(makeBtn(back.name === 'bundle' ? LL.t('settings.packs.back_to_bundle') : LL.t('settings.packs.back_to_list'), () => showPackView(back), 'btn btn-sm'));
     const title = makeEl('div', 'pack-row-title');
     title.append(makeEl('h4', 'pack-group', pack.title), packPills(pack));
     host.appendChild(title);
     host.appendChild(makeEl('p', 'help', pack.description));
-    host.appendChild(makeEl('p', 'dim', `Домен: ${LL.domainTitle(pack.domain)}. Нужные метрики: ${pack.requires_metrics.join(', ') || '—'}.`));
+    host.appendChild(makeEl('p', 'dim', LL.t('settings.packs.domain_metrics', { domain: LL.domainTitle(pack.domain), metrics: pack.requires_metrics.join(', ') || '—' })));
     const detected = packDetection(pack);
     if (detected) {
       const parts = [];
-      if (detected.found.length) parts.push(`найдены ${detected.found.join(', ')}`);
-      if (detected.missing.length) parts.push(`нет ${detected.missing.join(', ')}`);
-      host.appendChild(makeEl('p', `pack-note ${detected.score >= 1 ? '' : 'warn'}`, `У источника домена ${parts.join('; ')}.`));
+      if (detected.found.length) parts.push(LL.t('settings.packs.detect.found_list', { list: detected.found.join(', ') }));
+      if (detected.missing.length) parts.push(LL.t('settings.packs.detect.missing_list', { list: detected.missing.join(', ') }));
+      host.appendChild(makeEl('p', `pack-note ${detected.score >= 1 ? '' : 'warn'}`, LL.t('settings.packs.detect.source_has', { details: parts.join('; ') })));
     }
     if (pack.compatibility.reason) host.appendChild(makeEl('p', `pack-note ${pack.compatibility.status === 'incompatible' ? 'error' : 'warn'}`, pack.compatibility.reason));
     if (pack.installed && pack.installed.outdated) {
-      host.appendChild(makeEl('p', 'pack-note warn', `Установлена v${pack.installed.version}, доступна v${pack.version}. Отмечены запросы, которые уже есть в домене, и новые запросы версии (${pack.installed.new_queries}). Переменные взяты из установленного пакета; «Показать изменения» покажет обновление.`));
+      host.appendChild(makeEl('p', 'pack-note warn', LL.t('settings.packs.outdated_note', { installed: pack.installed.version, latest: pack.version, count: pack.installed.new_queries })));
     } else if (pack.installed) {
-      host.appendChild(makeEl('p', 'help', 'Пакет установлен: отмечены запросы, которые есть в домене, переменные взяты из установки.'));
+      host.appendChild(makeEl('p', 'help', LL.t('settings.packs.installed_note')));
     }
     host.appendChild(scopeLine());
     const incompatible = pack.compatibility.status === 'incompatible';
 
     const invalidate = () => { form.check = null; form.preview = null; renderQueries(); renderPlan(); };
     if (pack.variables.length) {
-      host.appendChild(makeEl('h4', 'pack-group', 'Переменные'));
+      host.appendChild(makeEl('h4', 'pack-group', LL.t('settings.packs.variables')));
       const grid = makeEl('div', 'pack-vars');
       pack.variables.forEach((v) => {
         const onChange = (value) => { form.variables[v.name] = value; invalidate(); };
@@ -3295,35 +3327,35 @@
       host.appendChild(grid);
     }
 
-    host.appendChild(makeEl('h4', 'pack-group', 'Запросы'));
+    host.appendChild(makeEl('h4', 'pack-group', LL.t('settings.packs.queries_heading')));
     host.appendChild(previewWindowBar());
     const checkBar = makeEl('div', 'struct-toolbar');
-    const checkBtn = makeBtn('Проверить', async () => {
-      if (!includedIndexes(form).length) { ui.toast('Отметьте хотя бы один запрос', { tone: 'warn' }); return; }
+    const checkBtn = makeBtn(LL.t('settings.action.check'), async () => {
+      if (!includedIndexes(form).length) { ui.toast(LL.t('settings.packs.pick_one'), { tone: 'warn' }); return; }
       checkBtn.disabled = true;
-      checkStatus.textContent = 'Проверка запросов…';
+      checkStatus.textContent = LL.t('settings.packs.checking');
       try {
         const indexes = includedIndexes(form);
         const data = await postPack('check', packRequest(pack, form, { start: state.previewStart, end: state.previewEnd }));
         form.check = { byIndex: Object.fromEntries(indexes.map((index, k) => [index, data.results[k]])), data };
-        checkStatus.textContent = data.ok ? `Источник «${data.source}»: обязательные запросы вернули данные.` : `Без данных обязательные запросы: ${data.missing_required.join(', ')}`;
+        checkStatus.textContent = data.ok ? LL.t('settings.packs.check_ok', { source: data.source }) : LL.t('settings.packs.check_missing', { list: data.missing_required.join(', ') });
       } catch (e) {
         form.check = null;
-        checkStatus.textContent = `Ошибка проверки: ${e.message}`;
+        checkStatus.textContent = LL.t('settings.packs.check_failed', { error: e.message });
       } finally {
         checkBtn.disabled = incompatible;
         renderQueries();
       }
     }, 'btn');
     checkBtn.disabled = incompatible;
-    const keepBtn = makeBtn('Оставить только с данными', () => {
+    const keepBtn = makeBtn(LL.t('settings.packs.keep_with_data'), () => {
       if (!form.check) return;
       Object.entries(form.check.byIndex).forEach(([index, result]) => { if (result && !result.ok && !pack.queries[index].required) form.include[index] = false; });
       form.preview = null;
       renderQueries();
       renderPlan();
     }, 'btn');
-    const checkStatus = makeEl('span', 'dim', 'Проверка выполняет запросы на источнике домена за окно выше.');
+    const checkStatus = makeEl('span', 'dim', LL.t('settings.packs.check_hint'));
     checkBar.append(checkBtn, keepBtn, checkStatus);
     host.appendChild(checkBar);
     const tableWrap = makeEl('div');
@@ -3334,7 +3366,7 @@
       keepBtn.style.display = form.check && Object.values(form.check.byIndex).some((r, i) => r && !r.ok) ? '' : 'none';
       const table = makeEl('table', 'data-table pack-queries');
       const head = makeEl('tr');
-      ['', 'Запрос', 'Смысл', 'Единица', 'Проверка'].forEach((text) => head.appendChild(makeEl('th', '', text)));
+      ['', LL.t('settings.packs.col_query'), LL.t('settings.packs.col_meaning'), LL.t('settings.packs.col_unit'), LL.t('settings.packs.col_check')].forEach((text) => head.appendChild(makeEl('th', '', text)));
       table.appendChild(head);
       const renderedAll = form.preview && Array.isArray(form.preview.all_queries) ? form.preview.all_queries : null;
       pack.queries.forEach((query, index) => {
@@ -3345,23 +3377,23 @@
         const box = makeEl('input');
         box.type = 'checkbox';
         box.checked = !!form.include[index];
-        box.setAttribute('aria-label', `Применить запрос ${query.label}`);
+        box.setAttribute('aria-label', LL.t('settings.packs.apply_query_aria', { name: query.label }));
         box.addEventListener('change', () => { form.include[index] = box.checked; form.preview = null; renderPlan(); });
         pick.appendChild(box);
         const main = makeEl('td');
         main.appendChild(makeEl('div', 'q-item-title', (result && result.label) || (shown && shown.label) || query.label));
         const badges = makeEl('div', 'pack-pills');
-        if (query.required) badges.appendChild(makeEl('span', 'pill warn', 'обязательный'));
+        if (query.required) badges.appendChild(makeEl('span', 'pill warn', LL.t('settings.packs.required')));
         if (query.sla_field) badges.appendChild(makeEl('span', 'pill na', `SLA: ${SLA_QUERY_TITLES[query.sla_field] || query.sla_field}`));
         if (badges.childNodes.length) main.appendChild(badges);
         if (query.description) main.appendChild(makeEl('div', 'dim', query.description));
         const details = makeEl('details');
-        details.appendChild(makeEl('summary', 'dim', shown ? 'Текст запроса' : 'Текст запроса (значения по умолчанию)'));
+        details.appendChild(makeEl('summary', 'dim', shown ? LL.t('settings.packs.query_text') : LL.t('settings.packs.query_text_default')));
         details.appendChild(makeEl('pre', 'pack-code', shown ? shown.query : query.query));
         main.appendChild(details);
         const status = makeEl('td');
         if (result) {
-          status.appendChild(makeEl('span', `pill ${result.ok ? 'ok' : (query.required ? 'error' : 'warn')}`, result.ok ? `${result.series_count} сер.` : 'нет данных'));
+          status.appendChild(makeEl('span', `pill ${result.ok ? 'ok' : (query.required ? 'error' : 'warn')}`, result.ok ? LL.t('settings.packs.series_count', { n: result.series_count }) : LL.t('settings.packs.no_data')));
           status.appendChild(makeEl('div', 'pack-check-msg', result.ok && result.series && result.series.length ? result.series.join(', ') : result.message));
         } else {
           status.appendChild(makeEl('span', 'dim', '—'));
@@ -3372,25 +3404,25 @@
       tableWrap.appendChild(table);
     }
 
-    host.appendChild(makeEl('h4', 'pack-group', 'Применение'));
+    host.appendChild(makeEl('h4', 'pack-group', LL.t('settings.packs.apply_heading')));
     const options = makeEl('div', 'pack-vars');
-    options.appendChild(selectField('Как применить', form.mode, [
-      ['merge', 'Добавить и обновить запросы пакета'],
-      ['replace', 'Заменить все запросы домена']
+    options.appendChild(selectField(LL.t('settings.packs.mode_label'), form.mode, [
+      ['merge', LL.t('settings.packs.mode_merge')],
+      ['replace', LL.t('settings.packs.mode_replace')]
     ], (value) => { form.mode = value; form.preview = null; renderPlan(); }));
     if (pack.sla_fields.length) {
       const sla = makeEl('div', 'ctx-field');
-      sla.appendChild(checkboxField(`Заполнить ссылки SLA (${pack.sla_fields.map((f) => SLA_QUERY_TITLES[f] || f).join(', ')})`, form.fillSla, (on) => { form.fillSla = on; form.preview = null; renderPlan(); }));
-      sla.appendChild(checkboxField('Заменить уже заданные ссылки запросами пакета', form.overwriteSla, (on) => { form.overwriteSla = on; form.preview = null; renderPlan(); }));
-      sla.appendChild(makeEl('div', 'field-hint', 'Ссылки на запросы, которых больше нет, заменяются всегда.'));
+      sla.appendChild(checkboxField(LL.t('settings.packs.fill_sla', { fields: pack.sla_fields.map((f) => SLA_QUERY_TITLES[f] || f).join(', ') }), form.fillSla, (on) => { form.fillSla = on; form.preview = null; renderPlan(); }));
+      sla.appendChild(checkboxField(LL.t('settings.packs.overwrite_sla'), form.overwriteSla, (on) => { form.overwriteSla = on; form.preview = null; renderPlan(); }));
+      sla.appendChild(makeEl('div', 'field-hint', LL.t('settings.packs.dead_refs_note')));
       options.appendChild(sla);
     }
     host.appendChild(options);
     const planBox = makeEl('div', 'pack-plan');
     host.appendChild(planBox);
     const actions = makeEl('div', 'struct-toolbar');
-    const previewBtn = makeBtn('Показать изменения', async () => {
-      if (!includedIndexes(form).length) { ui.toast('Отметьте хотя бы один запрос', { tone: 'warn' }); return; }
+    const previewBtn = makeBtn(LL.t('settings.packs.preview'), async () => {
+      if (!includedIndexes(form).length) { ui.toast(LL.t('settings.packs.pick_one'), { tone: 'warn' }); return; }
       previewBtn.disabled = true;
       try {
         form.preview = await postPack('preview', packRequest(pack, form, applyOptions()));
@@ -3405,7 +3437,7 @@
       }
     }, 'btn');
     previewBtn.disabled = incompatible;
-    const applyBtn = makeBtn('Применить', () => applyPack(pack, form, applyBtn), 'btn btn-primary');
+    const applyBtn = makeBtn(LL.t('settings.packs.apply'), () => applyPack(pack, form, applyBtn), 'btn btn-primary');
     actions.append(previewBtn, applyBtn);
     host.appendChild(actions);
 
@@ -3427,23 +3459,23 @@
       applyBtn.disabled = incompatible || !form.preview;
       if (form.previewError) { planBox.appendChild(makeEl('p', 'binding-error', form.previewError)); return; }
       if (!form.preview) {
-        planBox.appendChild(makeEl('p', 'dim', 'Нажмите «Показать изменения», чтобы увидеть, какие запросы и ссылки SLA изменятся.'));
+        planBox.appendChild(makeEl('p', 'dim', LL.t('settings.packs.plan.hint')));
         return;
       }
       const plan = form.preview.plan;
       [
-        planList('Добавятся', plan.added, 'ok'),
-        planList('Изменятся', plan.updated, 'warn'),
-        planList('Удалятся', plan.removed, 'error'),
-        planList('Без изменений', plan.unchanged, '')
+        planList(LL.t('settings.packs.plan.added'), plan.added, 'ok'),
+        planList(LL.t('settings.packs.plan.updated'), plan.updated, 'warn'),
+        planList(LL.t('settings.packs.plan.removed'), plan.removed, 'error'),
+        planList(LL.t('settings.packs.plan.unchanged'), plan.unchanged, '')
       ].filter(Boolean).forEach((node) => planBox.appendChild(node));
       const sla = form.preview.sla || {};
       const changes = Object.entries(sla.changes || {}).map(([fieldName, change]) => {
-        const from = change.reason === 'missing' ? `${change.from} (запроса больше нет)` : (change.from || 'не задано');
+        const from = change.reason === 'missing' ? LL.t('settings.packs.plan.ref_missing', { name: change.from }) : (change.from || LL.t('settings.sla.query_unset'));
         return `${SLA_QUERY_TITLES[fieldName] || fieldName}: «${from}» → «${change.to}»`;
       });
-      const kept = Object.entries(sla.kept || {}).map(([fieldName, value]) => `${SLA_QUERY_TITLES[fieldName] || fieldName}: оставлено «${value}»`);
-      [planList('Ссылки SLA', changes, 'ok'), planList('Ссылки SLA без изменений', kept, '')].filter(Boolean).forEach((node) => planBox.appendChild(node));
+      const kept = Object.entries(sla.kept || {}).map(([fieldName, value]) => LL.t('settings.packs.plan.ref_kept', { field: SLA_QUERY_TITLES[fieldName] || fieldName, value }));
+      [planList(LL.t('settings.packs.plan.sla_refs'), changes, 'ok'), planList(LL.t('settings.packs.plan.sla_refs_kept'), kept, '')].filter(Boolean).forEach((node) => planBox.appendChild(node));
       (form.preview.warnings || []).forEach((warning) => planBox.appendChild(makeEl('p', 'pack-note warn', warning)));
     }
     renderQueries();
@@ -3454,7 +3486,7 @@
   async function applyPack(pack, form, button) {
     if (!form.preview) return;
     const removed = form.preview.plan.removed || [];
-    if (removed.length && !window.confirm(`Будут удалены запросы домена (${removed.length}): ${removed.join(', ')}. Ряды с этими названиями перестанут собираться. Продолжить?`)) return;
+    if (removed.length && !window.confirm(LL.t('settings.packs.remove_confirm', { n: removed.length, list: removed.join(', ') }))) return;
     const scope = packScope();
     button.disabled = true;
     try {
@@ -3465,7 +3497,7 @@
       await loadPackCatalog();
       renderPackDialog(false);
     } catch (e) {
-      ui.toast(`Не удалось применить пакет: ${e.message}`, { tone: 'error' });
+      ui.toast(LL.t('settings.packs.apply_failed', { error: e.message }), { tone: 'error' });
       button.disabled = false;
     }
   }
@@ -3486,20 +3518,20 @@
   }
   function offerPackUndo(resp, scope, title) {
     const plan = resp.plan || {};
-    const parts = [`добавлено ${(plan.added || []).length}`, `изменено ${(plan.updated || []).length}`];
-    if ((plan.removed || []).length) parts.push(`удалено ${plan.removed.length}`);
-    if (resp.sla_changed) parts.push('ссылки SLA обновлены');
-    const toast = ui.toast(`Пакет «${title}» применён: ${parts.join(', ')}.`, { tone: 'ok', timeout: 20000 });
+    const parts = [LL.t('settings.packs.undo.added', { n: (plan.added || []).length }), LL.t('settings.packs.undo.updated', { n: (plan.updated || []).length })];
+    if ((plan.removed || []).length) parts.push(LL.t('settings.packs.undo.removed', { n: plan.removed.length }));
+    if (resp.sla_changed) parts.push(LL.t('settings.packs.undo.sla'));
+    const toast = ui.toast(LL.t('settings.packs.applied', { title, parts: parts.join(', ') }), { tone: 'ok', timeout: 20000 });
     (resp.warnings || []).forEach((warning) => ui.toast(warning, { tone: 'warn', timeout: 12000 }));
-    const undo = makeBtn('Отменить', async () => {
+    const undo = makeBtn(LL.t('settings.packs.undo.button'), async () => {
       undo.disabled = true;
       try {
         await undoPackApply(resp, scope);
         toast.remove();
-        ui.toast('Применение пакета отменено', { tone: 'ok' });
+        ui.toast(LL.t('settings.packs.undo.done'), { tone: 'ok' });
         if (packUi.body) { await loadPackCatalog(); renderPackDialog(false); }
       } catch (e) {
-        ui.toast(`Не удалось отменить: ${e.message}`, { tone: 'error' });
+        ui.toast(LL.t('settings.packs.undo.failed', { error: e.message }), { tone: 'error' });
         undo.disabled = false;
       }
     }, 'btn btn-sm');
@@ -3538,7 +3570,7 @@
   }
   function domainTitleField(domain) {
     const own = typeof queryBlock(domain).title === 'string' ? queryBlock(domain).title : '';
-    const field = textField('Заголовок домена в отчётах', own, () => {});
+    const field = textField(LL.t('settings.queries.domain_title'), own, () => {});
     field.classList.add('ctx-field-short');
     const input = field.querySelector('input');
     input.placeholder = autoDomainTitle(domain);
@@ -3549,7 +3581,7 @@
         if (value) block.title = value; else delete block.title;
       });
     });
-    field.appendChild(makeEl('div', 'dim', 'Пусто — заголовок по установленным пакетам или стандартный. Сохраняется с каждым новым отчётом.'));
+    field.appendChild(makeEl('div', 'dim', LL.t('settings.queries.domain_title_hint')));
     return field;
   }
 
@@ -3561,11 +3593,11 @@
       const meta = findPack(entry.id);
       return `${meta ? meta.title : entry.id} v${entry.version}`;
     });
-    line.appendChild(makeEl('span', 'dim', `Установлены пакеты: ${titles.join('; ')}`));
+    line.appendChild(makeEl('span', 'dim', LL.t('settings.packs.installed_line', { list: titles.join('; ') })));
     entries.forEach((entry) => {
       const meta = findPack(entry.id);
       if (!meta || !(entry.version < meta.version)) return;
-      line.appendChild(makeBtn(`Обновить «${meta.title}» до v${meta.version}`, () => openPackDialog(domain, entry.id), 'btn btn-sm'));
+      line.appendChild(makeBtn(LL.t('settings.packs.update_to', { title: meta.title, version: meta.version }), () => openPackDialog(domain, entry.id), 'btn btn-sm'));
     });
     return line;
   }
@@ -3578,7 +3610,7 @@
       if (state.jsonSyncing) return;
       try {
         const parsed = JSON.parse(ed.getValue() || '{}');
-        if (!isPlainObject(parsed)) throw new Error('ожидается объект');
+        if (!isPlainObject(parsed)) throw new Error(LL.t('settings.json.expected_object'));
         state.models[cfg.key] = parsed;
         if (typeof cfg.render === 'function') cfg.render();
         $(cfg.jsonStatus).textContent = 'OK';
@@ -3586,22 +3618,22 @@
         $(cfg.saveBtn).disabled = !dirty;
         markDirty(`${cfg.menu}:${cfg.key}`, cfg.label(), dirty);
       } catch (e) {
-        $(cfg.jsonStatus).textContent = `Ошибка JSON: ${e.message}`;
+        $(cfg.jsonStatus).textContent = LL.t('settings.json.error', { error: e.message });
         $(cfg.saveBtn).disabled = true;
       }
     });
     $(cfg.saveBtn).addEventListener('click', async () => {
-      setStatus(cfg.status, 'Сохранение…');
+      setStatus(cfg.status, LL.t('settings.status.saving'));
       try {
         const data = await cfg.save(state.models[cfg.key]);
         state.saved[cfg.key] = stable(state.models[cfg.key]);
         $(cfg.saveBtn).disabled = true;
         markDirty(`${cfg.menu}:${cfg.key}`, cfg.label(), false);
-        setStatus(cfg.status, 'Сохранено', 'ok');
-        ui.toast(`${cfg.label()}: сохранено`, { tone: 'ok' });
+        setStatus(cfg.status, LL.t('settings.status.saved'), 'ok');
+        ui.toast(LL.t('settings.status.section_saved', { section: cfg.label() }), { tone: 'ok' });
         showWarnings(data && data.warnings);
       } catch (e) {
-        setStatus(cfg.status, `Ошибка: ${e.message}`, 'error');
+        setStatus(cfg.status, LL.t('settings.status.error', { error: e.message }), 'error');
       }
     });
     return { load };
@@ -3621,7 +3653,70 @@
     const resp = await fetch(u);
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    state.promptMeta[service || ''] = {
+      language: typeof data.language === 'string' && data.language ? data.language : state.promptLanguage,
+      sources: isPlainObject(data.sources) ? data.sources : {},
+      overrideLanguage: isPlainObject(data.override_language) ? data.override_language : {}
+    };
     return isPlainObject(data.domains) ? data.domains : {};
+  }
+  function promptMeta(service) {
+    return (service && state.promptMeta[service]) || state.promptMeta[''] || { language: state.promptLanguage, sources: {}, overrideLanguage: {} };
+  }
+  // An override written in another language than the reports (plans/i18n-plan.md, 3.4): the answer still follows
+  // the report language. `scope` is 'service' or 'area' (the level being edited); reset is offered only when the
+  // override belongs to that level. Pure, for tests.
+  function promptLanguageNote(meta, domain, scope) {
+    const info = meta || {};
+    const source = (info.sources || {})[domain];
+    const written = (info.overrideLanguage || {})[domain];
+    const lang = info.language || 'ru';
+    if ((source !== 'area' && source !== 'service') || !written || written === lang) return { show: false, lang };
+    return {
+      show: true,
+      lang,
+      text: written === 'en' ? LL.t('settings.prompts.override_lang.en') : LL.t('settings.prompts.override_lang.ru'),
+      button: LL.t('settings.prompts.show_default', { lang }),
+      canReset: source === scope
+    };
+  }
+  function updatePromptLanguageNote() {
+    const box = $('promptLanguageNote');
+    if (!box) return;
+    const note = promptLanguageNote(promptMeta(state.promptService), state.promptDomain, state.promptService ? 'service' : 'area');
+    box.hidden = !state.area || !note.show;
+    if (box.hidden) return;
+    $('promptLanguageText').textContent = note.text;
+    $('promptShowDefaultBtn').textContent = note.button;
+    $('promptLanguageResetBtn').hidden = !note.canReset;
+  }
+  function promptDomainTitle(domain) {
+    return domain === 'overall' ? LL.t('settings.prompts.domain_overall') : `${LL.domainTitle(domain)} (${domain})`;
+  }
+  async function showPromptDefault() {
+    const lang = promptMeta(state.promptService).language || state.promptLanguage;
+    const text = promptDefault(state.promptDomain);
+    await ui.dialog({
+      title: LL.t('settings.prompts.default_title', { lang, domain: promptDomainTitle(state.promptDomain) }),
+      bodyHtml: '<pre class="diff-view prompt-default-view" style="max-height:360px;padding:10px;white-space:pre-wrap"></pre>',
+      wide: true,
+      actions: [{ label: LL.t('settings.action.close') }],
+      onOpen: (bodyEl) => { const pre = bodyEl.querySelector('pre'); if (pre) pre.textContent = text; }
+    });
+  }
+  // The language of reports changed: defaults and the language fields of /prompts are read again.
+  async function reloadPromptsForLanguage() {
+    try {
+      const resp = await fetch('/prompts/defaults');
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      state.promptDefaults = isPlainObject(data.domains) ? data.domains : {};
+      state.promptLanguage = data.language || state.promptLanguage;
+      state.prompts.area = await fetchPrompts('');
+      state.prompts.byService = {};
+      if (!state.dirty.has('prompts:editor')) await loadPromptEditor();
+      else updatePromptLanguageNote();
+    } catch (e) { /* the old texts stay until the page is reloaded */ }
   }
   async function ensureServicePrompts(service) {
     if (!service || state.prompts.byService[service]) return;
@@ -3650,12 +3745,12 @@
     const expected = new Set((promptDefault(state.promptDomain).match(PLACEHOLDER_RE) || []));
     const present = new Set((text.match(PLACEHOLDER_RE) || []));
     const missing = Array.from(expected).filter((p) => !present.has(p));
-    return missing.length ? `В тексте отсутствуют плейсхолдеры из стандартного промпта: ${missing.join(', ')} — соответствующие данные не попадут в запрос к модели.` : '';
+    return missing.length ? LL.t('settings.prompts.missing_placeholders', { list: missing.join(', ') }) : '';
   }
   async function loadPromptEditor() {
     const ed = state.editors.ed_prompt;
     try { await ensureServicePrompts(state.promptService); }
-    catch (e) { ui.toast(`Не удалось загрузить промпты сервиса: ${e.message}`, { tone: 'error' }); }
+    catch (e) { ui.toast(LL.t('settings.prompts.service_load_failed', { error: e.message }), { tone: 'error' }); }
     const text = promptEffective(state.promptService, state.promptDomain);
     state.promptLoaded = text;
     state.jsonSyncing = true;
@@ -3667,17 +3762,18 @@
     const overriddenForService = state.promptService && text !== promptArea(state.promptDomain);
     const overriddenForArea = promptArea(state.promptDomain) !== promptDefault(state.promptDomain);
     $('promptOverrideNote').textContent = !state.area
-      ? 'Только просмотр: выберите область, чтобы редактировать'
-      : (overriddenForService ? 'Переопределён для сервиса' : (overriddenForArea ? 'Переопределён для области' : 'Стандартный текст'));
+      ? LL.t('settings.prompts.read_only')
+      : (overriddenForService ? LL.t('settings.prompts.overridden_service') : (overriddenForArea ? LL.t('settings.prompts.overridden_area') : LL.t('settings.prompts.standard')));
     $('promptWarnings').textContent = promptWarnings(text);
     $('promptDiff').style.display = 'none';
+    updatePromptLanguageNote();
     updatePromptDirty();
   }
   function updatePromptDirty() {
     const ed = state.editors.ed_prompt;
     const dirty = ed.getValue() !== state.promptLoaded;
     $('promptSaveBtn').disabled = !dirty || !state.area;
-    markDirty('prompts:editor', `Промпт ${state.promptDomain}`, dirty);
+    markDirty('prompts:editor', LL.t('settings.prompts.dirty_label', { domain: state.promptDomain }), dirty);
   }
   async function savePromptText(text) {
     const baseline = promptBaseline(state.promptService, state.promptDomain);
@@ -3695,6 +3791,11 @@
       // Service texts inherit from the area unless overridden: refetch lazily.
       state.prompts.byService = {};
     }
+    // Sources and the override language come from the server (a copy of a default is not an override).
+    try {
+      if (state.promptService) state.prompts.byService[state.promptService] = await fetchPrompts(state.promptService);
+      else state.prompts.area = await fetchPrompts('');
+    } catch (e) { /* the local copy above stays */ }
   }
   function lineDiff(a, b) {
     const x = a.split('\n'); const y = b.split('\n');
@@ -3720,22 +3821,22 @@
     const diff = lineDiff(baseline, current);
     const changed = diff.filter((d) => d.type !== 'ctx').length;
     box.innerHTML = changed
-      ? `<div class="diff-line ctx">— ${state.promptService ? 'текст области' : 'стандартный текст'} / + текущий (${changed} строк отличается)</div>` + diff.map((d) => `<div class="diff-line ${d.type}">${d.type === 'add' ? '+ ' : (d.type === 'del' ? '− ' : '  ')}${esc(d.text)}</div>`).join('')
-      : '<div class="diff-line ctx">Текст совпадает с базовым.</div>';
+      ? `<div class="diff-line ctx">${esc(LL.t('settings.prompts.diff_head', { baseline: state.promptService ? LL.t('settings.prompts.diff_baseline_area') : LL.t('settings.prompts.diff_baseline_standard'), changed: LL.tn('settings.prompts.diff_changed', changed) }))}</div>` + diff.map((d) => `<div class="diff-line ${d.type}">${d.type === 'add' ? '+ ' : (d.type === 'del' ? '− ' : '  ')}${esc(d.text)}</div>`).join('')
+      : `<div class="diff-line ctx">${LL.tHtml('settings.prompts.diff_same')}</div>`;
     box.style.display = '';
   }
   async function resetPrompt() {
-    if (!requireArea('Сброс промпта')) return;
-    const ok = await ui.confirm({ title: 'Сбросить промпт', message: state.promptService ? 'Переопределение для сервиса будет удалено, будет использоваться текст области.' : 'Переопределение области будет удалено, вернётся стандартный текст из файла.', confirmText: 'Сбросить', danger: true });
+    if (!requireArea(LL.t('settings.prompts.action_reset'))) return;
+    const ok = await ui.confirm({ title: LL.t('settings.prompts.reset_title'), message: state.promptService ? LL.t('settings.prompts.reset_service') : LL.t('settings.prompts.reset_area'), confirmText: LL.t('settings.action.reset'), danger: true });
     if (!ok) return;
     try {
       await savePromptText(promptBaseline(state.promptService, state.promptDomain));
       await loadPromptEditor();
-      ui.toast('Промпт сброшен', { tone: 'ok' });
-    } catch (e) { ui.toast(`Ошибка: ${e.message}`, { tone: 'error' }); }
+      ui.toast(LL.t('settings.prompts.reset_done'), { tone: 'ok' });
+    } catch (e) { ui.toast(LL.t('settings.status.error', { error: e.message }), { tone: 'error' }); }
   }
   async function showPromptHistory() {
-    if (!requireArea('История промптов')) return;
+    if (!requireArea(LL.t('settings.prompts.action_history'))) return;
     let versions = [];
     try {
       const u = new URL('/prompts/history', location.origin);
@@ -3746,15 +3847,15 @@
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
       versions = data.versions || [];
-    } catch (e) { ui.toast(`Не удалось загрузить историю: ${e.message}`, { tone: 'error' }); return; }
+    } catch (e) { ui.toast(LL.t('settings.prompts.history_failed', { error: e.message }), { tone: 'error' }); return; }
     const body = versions.length
-      ? `<div class="history-list">${versions.map((v, i) => `<div class="history-item"><span>${esc(LL.formatDateTime(v.saved_at))} · ${esc(String(v.text || '').length)} симв.</span><span><button type="button" class="btn btn-sm" data-preview="${i}">Показать</button> <button type="button" class="btn btn-sm btn-primary" data-restore="${i}">Восстановить</button></span></div>`).join('')}</div><pre id="historyPreview" class="diff-view" style="display:none;max-height:260px;padding:10px"></pre>`
-      : '<p>История пуста: сохранённых ранее версий для этого домена нет.</p>';
+      ? `<div class="history-list">${versions.map((v, i) => `<div class="history-item"><span>${esc(LL.formatDateTime(v.saved_at))} · ${LL.tHtml('settings.prompts.history_chars', { n: String(v.text || '').length })}</span><span><button type="button" class="btn btn-sm" data-preview="${i}">${LL.tHtml('settings.prompts.history_show')}</button> <button type="button" class="btn btn-sm btn-primary" data-restore="${i}">${LL.tHtml('settings.prompts.history_restore')}</button></span></div>`).join('')}</div><pre id="historyPreview" class="diff-view" style="display:none;max-height:260px;padding:10px"></pre>`
+      : `<p>${LL.tHtml('settings.prompts.history_empty')}</p>`;
     await ui.dialog({
-      title: `История промпта: ${LL.domainTitle(state.promptDomain)}`,
+      title: LL.t('settings.prompts.history_title', { domain: LL.domainTitle(state.promptDomain) }),
       bodyHtml: body,
       wide: true,
-      actions: [{ label: 'Закрыть' }],
+      actions: [{ label: LL.t('settings.action.close') }],
       onOpen: (bodyEl, close) => {
         bodyEl.querySelectorAll('[data-preview]').forEach((btn) => btn.addEventListener('click', () => { const pre = bodyEl.querySelector('#historyPreview'); pre.textContent = versions[Number(btn.dataset.preview)].text; pre.style.display = ''; }));
         bodyEl.querySelectorAll('[data-restore]').forEach((btn) => btn.addEventListener('click', () => {
@@ -3763,7 +3864,7 @@
           refreshPromptMarkers(ed);
           updatePromptDirty();
           close(true);
-          ui.toast('Версия загружена в редактор — нажмите «Сохранить», чтобы применить', { tone: 'info' });
+          ui.toast(LL.t('settings.prompts.history_loaded'), { tone: 'info' });
         }));
       }
     });
@@ -3778,22 +3879,24 @@
       updatePromptDirty();
     });
     const domainSel = $('promptDomainSelect');
-    domainSel.innerHTML = PROMPT_DOMAINS.map((d) => `<option value="${d}">${esc(d === 'overall' ? 'Итоговый (overall)' : `${LL.domainTitle(d)} (${d})`)}</option>`).join('');
+    domainSel.innerHTML = PROMPT_DOMAINS.map((d) => `<option value="${d}">${esc(d === 'overall' ? LL.t('settings.prompts.domain_overall') : `${LL.domainTitle(d)} (${d})`)}</option>`).join('');
     domainSel.addEventListener('change', async () => { if (!(await confirmDiscardPrompt())) { domainSel.value = state.promptDomain; return; } state.promptDomain = domainSel.value; await loadPromptEditor(); });
     $('promptServiceSelect').addEventListener('change', async (e) => { if (!(await confirmDiscardPrompt())) { e.target.value = state.promptService; return; } state.promptService = e.target.value; await loadPromptEditor(); });
     $('promptSaveBtn').addEventListener('click', async () => {
-      if (!requireArea('Сохранение промпта')) return;
-      setStatus('promptStatus', 'Сохранение…');
-      try { await savePromptText(ed.getValue()); await loadPromptEditor(); setStatus('promptStatus', 'Сохранено', 'ok'); ui.toast('Промпт сохранён', { tone: 'ok' }); }
-      catch (e) { setStatus('promptStatus', `Ошибка: ${e.message}`, 'error'); }
+      if (!requireArea(LL.t('settings.prompts.action_save'))) return;
+      setStatus('promptStatus', LL.t('settings.status.saving'));
+      try { await savePromptText(ed.getValue()); await loadPromptEditor(); setStatus('promptStatus', LL.t('settings.status.saved'), 'ok'); ui.toast(LL.t('settings.prompts.saved'), { tone: 'ok' }); }
+      catch (e) { setStatus('promptStatus', LL.t('settings.status.error', { error: e.message }), 'error'); }
     });
     $('promptDiffBtn').addEventListener('click', togglePromptDiff);
     $('promptResetBtn').addEventListener('click', resetPrompt);
+    $('promptShowDefaultBtn').addEventListener('click', showPromptDefault);
+    $('promptLanguageResetBtn').addEventListener('click', resetPrompt);
     $('promptHistoryBtn').addEventListener('click', showPromptHistory);
   }
   async function confirmDiscardPrompt() {
     if (!state.dirty.has('prompts:editor')) return true;
-    return ui.confirm({ title: 'Несохранённые изменения', message: 'Текущий промпт изменён, но не сохранён. Переключиться и потерять изменения?', confirmText: 'Переключиться', danger: true });
+    return ui.confirm({ title: LL.t('settings.prompts.discard_title'), message: LL.t('settings.prompts.discard_message'), confirmText: LL.t('settings.prompts.discard_confirm'), danger: true });
   }
 
   // ---- services --------------------------------------------------------------
@@ -3803,7 +3906,8 @@
   }
   function fillServiceSelects() {
     const options = allServiceIds().map((id) => `<option value="${esc(id)}">${esc((state.servicesMeta[id] && state.servicesMeta[id].title) || id)}</option>`).join('');
-    [['slaServiceSelect', state.slaScope, 'Область (по умолчанию)'], ['queriesServiceSelect', state.queriesScope, 'Область (по умолчанию)'], ['contextServiceSelect', state.contextScope, 'Область (по умолчанию)'], ['promptServiceSelect', state.promptService, 'Область (по умолчанию)'], ['metricsServiceSelect', state.metricsScope, 'Область целиком']].forEach(([id, current, placeholder]) => {
+    const areaDefault = LL.t('settings.scope.area_default');
+    [['slaServiceSelect', state.slaScope, areaDefault], ['queriesServiceSelect', state.queriesScope, areaDefault], ['contextServiceSelect', state.contextScope, areaDefault], ['promptServiceSelect', state.promptService, areaDefault], ['metricsServiceSelect', state.metricsScope, LL.t('settings.scope.area_whole')]].forEach(([id, current, placeholder]) => {
       const sel = $(id);
       sel.innerHTML = `<option value="">${esc(placeholder)}</option>${options}`;
       sel.value = allServiceIds().includes(current) ? current : '';
@@ -3814,11 +3918,11 @@
     body.innerHTML = '';
     const ids = allServiceIds();
     if (!state.area) {
-      body.innerHTML = ui.emptyRow(4, 'Сервисы принадлежат областям: выберите область в боковом меню или создайте новую.');
+      body.innerHTML = ui.emptyRow(4, LL.t('settings.services.need_area'));
       return;
     }
     if (!ids.length) {
-      body.innerHTML = ui.emptyRow(4, 'В этой области сервисов пока нет. Добавьте первый — идентификатор используется в имени отчёта и как ключ metrics_config.');
+      body.innerHTML = ui.emptyRow(4, LL.t('settings.services.empty'));
       return;
     }
     ids.forEach((id) => {
@@ -3826,10 +3930,10 @@
       const disabled = Array.isArray(meta.disabled_domains) ? meta.disabled_domains : [];
       const tr = document.createElement('tr');
       tr.innerHTML = `
-        <td><strong>${esc(id)}</strong>${state.metricsConfigIds.includes(id) ? '' : '<div class="dim">нет в metrics_config: снимки панелей недоступны</div>'}</td>
-        <td><input type="text" value="${esc(meta.title || '')}" placeholder="${esc(id)}" aria-label="Отображаемое имя ${esc(id)}" /></td>
+        <td><strong>${esc(id)}</strong>${state.metricsConfigIds.includes(id) ? '' : `<div class="dim">${LL.tHtml('settings.services.no_metrics_config')}</div>`}</td>
+        <td><input type="text" value="${esc(meta.title || '')}" placeholder="${esc(id)}" aria-label="${LL.tHtml('settings.services.title_aria', { id })}" /></td>
         <td><div class="domain-toggle-list">${state.domainList.map((d) => `<label><input type="checkbox" data-domain="${esc(d)}" ${disabled.includes(d) ? '' : 'checked'}/> ${esc(LL.domainTitle(d))}</label>`).join('')}</div></td>
-        <td class="actions"><div class="actions-inner" style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap"><button type="button" class="btn btn-sm svc-save">Сохранить</button><button type="button" class="btn btn-sm svc-reset">Сбросить настройки</button><button type="button" class="btn btn-sm btn-danger svc-delete">Удалить с данными</button></div></td>`;
+        <td class="actions"><div class="actions-inner" style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap"><button type="button" class="btn btn-sm svc-save">${LL.tHtml('settings.action.save')}</button><button type="button" class="btn btn-sm svc-reset">${LL.tHtml('settings.services.reset')}</button><button type="button" class="btn btn-sm btn-danger svc-delete">${LL.tHtml('settings.services.delete')}</button></div></td>`;
       tr.querySelector('.svc-save').addEventListener('click', async () => {
         const title = tr.querySelector('input[type="text"]').value.trim();
         const disabledDomains = Array.from(tr.querySelectorAll('input[data-domain]')).filter((c) => !c.checked).map((c) => c.dataset.domain);
@@ -3841,8 +3945,8 @@
     });
   }
   async function saveServiceMeta(id, data) {
-    if (!requireArea('Сохранение сервиса')) return;
-    setStatus('servicesStatus', 'Сохранение…');
+    if (!requireArea(LL.t('settings.services.action_save'))) return;
+    setStatus('servicesStatus', LL.t('settings.status.saving'));
     try {
       const resp = await fetch('/service_meta', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ area: state.area, service: id, data }) });
       const j = await resp.json();
@@ -3850,50 +3954,88 @@
       state.servicesMeta[id] = { ...(state.servicesMeta[id] || {}), ...(j.meta || {}) };
       renderServices();
       fillServiceSelects();
-      setStatus('servicesStatus', 'Сохранено', 'ok');
-      ui.toast(`Сервис «${id}» сохранён`, { tone: 'ok' });
+      setStatus('servicesStatus', LL.t('settings.status.saved'), 'ok');
+      ui.toast(LL.t('settings.services.saved', { id }), { tone: 'ok' });
     } catch (e) {
-      setStatus('servicesStatus', `Ошибка: ${e.message}`, 'error');
+      setStatus('servicesStatus', LL.t('settings.status.error', { error: e.message }), 'error');
     }
   }
   async function resetServiceSettings(id) {
-    const ok = await ui.confirm({ title: 'Сбросить настройки сервиса', message: `Пользовательские настройки сервиса «${id}» (имя, домены, промпты, запросы, SLA, визуализации) будут удалены. Отчёты и метрики останутся.`, confirmText: 'Сбросить', danger: true });
+    const ok = await ui.confirm({ title: LL.t('settings.services.reset_title'), message: LL.t('settings.services.reset_message', { id }), confirmText: LL.t('settings.action.reset'), danger: true });
     if (!ok) return;
     try {
       const resp = await fetch('/service_meta', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ area: state.area, service: id }) });
       const j = await resp.json();
       if (!resp.ok) throw new Error(j.error || `HTTP ${resp.status}`);
-      ui.toast(`Настройки сервиса «${id}» сброшены`, { tone: 'ok' });
+      ui.toast(LL.t('settings.services.reset_done', { id }), { tone: 'ok' });
       location.reload();
-    } catch (e) { ui.toast(`Ошибка: ${e.message}`, { tone: 'error' }); }
+    } catch (e) { ui.toast(LL.t('settings.status.error', { error: e.message }), { tone: 'error' }); }
   }
   async function deleteServiceWithData(id) {
-    const ok = await ui.confirm({ title: 'Удалить сервис', message: `Сервис «${id}» будет удалён вместе с настройками, метриками и отчётами. Это действие необратимо.`, confirmText: 'Удалить', danger: true });
+    const ok = await ui.confirm({ title: LL.t('settings.services.delete_title'), message: LL.t('settings.services.delete_message', { id }), confirmText: LL.t('settings.action.delete'), danger: true });
     if (!ok) return;
     try {
       const resp = await fetch('/service', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ area: state.area, service: id }) });
       const j = await resp.json();
       if (!resp.ok) throw new Error(j.error || `HTTP ${resp.status}`);
-      ui.toast(`Сервис «${id}» удалён`, { tone: 'ok' });
+      ui.toast(LL.t('settings.services.deleted', { id }), { tone: 'ok' });
       location.reload();
-    } catch (e) { ui.toast(`Ошибка: ${e.message}`, { tone: 'error' }); }
+    } catch (e) { ui.toast(LL.t('settings.status.error', { error: e.message }), { tone: 'error' }); }
   }
   async function addService() {
-    if (!requireArea('Добавление сервиса')) return;
+    if (!requireArea(LL.t('settings.services.action_add'))) return;
     const known = state.metricsConfigIds.filter((id) => !state.servicesMeta[id]);
     const id = await ui.prompt({
-      title: 'Добавить сервис',
-      message: known.length ? `Сервисы из metrics_config без настроек: ${known.join(', ')}. Можно ввести и другой идентификатор — конфигурация визуализаций для него будет создана из шаблона.` : `Идентификатор сервиса в области «${state.area}»: он используется в имени отчёта и как ключ metrics_config.`,
-      label: 'Идентификатор',
+      title: LL.t('settings.services.add'),
+      message: known.length ? LL.t('settings.services.add_known', { list: known.join(', ') }) : LL.t('settings.services.add_message', { area: state.area }),
+      label: LL.t('settings.form.id'),
       list: known,
-      validate: (v) => (!v.trim() ? 'Введите идентификатор' : (/[\s/\\]/.test(v) ? 'Без пробелов и слэшей' : ''))
+      validate: (v) => (!v.trim() ? LL.t('settings.services.id_required') : (/[\s/\\]/.test(v) ? LL.t('settings.services.id_no_spaces') : ''))
     });
     if (!id) return;
-    const title = await ui.prompt({ title: 'Отображаемое имя', message: 'Как показывать сервис в интерфейсе (необязательно).', label: 'Имя', value: '', confirmText: 'Добавить' });
+    const title = await ui.prompt({ title: LL.t('settings.services.col_title'), message: LL.t('settings.services.title_message'), label: LL.t('settings.services.title_label'), value: '', confirmText: LL.t('settings.action.add') });
     if (title === null) return;
     await saveServiceMeta(id.trim(), { title: title.trim() });
     // The server bootstraps per-service configs on the next GET /config: reload to pick them up.
     location.reload();
+  }
+
+  // ---- about ------------------------------------------------------------------------
+  // THIRD_PARTY_NOTICES.md (GET /about/third-party) rendered with the vendored marked + DOMPurify, the same
+  // allow-list as the report page: formatting, tables and http(s) links only. Without the libraries the text
+  // is shown escaped, never as markup.
+  const NOTICES_PURIFY = {
+    ALLOWED_TAGS: ['p', 'br', 'b', 'strong', 'i', 'em', 'u', 's', 'del', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+      'blockquote', 'pre', 'code', 'hr', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'a', 'span'],
+    ALLOWED_ATTR: ['href', 'title', 'align'],
+    ALLOWED_URI_REGEXP: new RegExp('^(?:https?:|mailto:|/(?!/)|#)', 'i'),
+  };
+  function aboutMarkdown(md) {
+    const source = String(md || '');
+    if (!source) return '';
+    const escaped = () => esc(source).replace(/\n/g, '<br>');
+    if (!(window.marked && typeof window.marked.parse === 'function')) return escaped();
+    if (!(window.DOMPurify && typeof window.DOMPurify.sanitize === 'function')) return escaped();
+    try { return window.DOMPurify.sanitize(window.marked.parse(source), NOTICES_PURIFY); } catch (e) { return escaped(); }
+  }
+  function initAbout() {
+    const details = $('aboutThirdParty');
+    const box = $('aboutThirdPartyBody');
+    if (!details || !box) return;
+    let loaded = false;
+    details.addEventListener('toggle', async () => {
+      if (!details.open || loaded) return;
+      loaded = true;
+      try {
+        const resp = await fetch(box.dataset.url, { headers: { Accept: 'text/plain, application/json' } });
+        if (resp.status === 404) throw new Error(LL.t('about.third_party.missing'));
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        box.innerHTML = aboutMarkdown(await resp.text());
+      } catch (error) {
+        loaded = false;  // a transient failure: opening the block again retries
+        box.innerHTML = `<p class="help">${esc(LL.t('about.third_party.failed', { error: error.message }))}</p>`;
+      }
+    });
   }
 
   // ---- menu / sections ----------------------------------------------------------
@@ -3904,19 +4046,22 @@
   }
 
   // ---- wizard ---------------------------------------------------------------------
+  // The language comes first: switching the interface language reloads the page, and the wizard starts over.
   const WIZARD_STEPS = [
-    { key: 'storage', label: 'Хранилище', section: 'connections', card: 'storage' },
-    { key: 'data_sources', label: 'Источники данных', section: 'connections', card: 'data_sources' },
-    { key: 'domain_sources', label: 'Привязка доменов', section: 'connections', card: 'domain_sources' },
-    { key: 'queries', label: 'Запросы', section: 'queries' },
+    { key: 'appearance', label: LL.t('settings.wizard.step.language'), section: 'appearance' },
+    { key: 'storage', label: LL.t('settings.wizard.step.storage'), section: 'connections', card: 'storage' },
+    { key: 'data_sources', label: LL.t('settings.wizard.step.data_sources'), section: 'connections', card: 'data_sources' },
+    { key: 'domain_sources', label: LL.t('settings.wizard.step.domain_sources'), section: 'connections', card: 'domain_sources' },
+    { key: 'queries', label: LL.t('settings.wizard.step.queries'), section: 'queries' },
     { key: 'llm', label: 'LLM', section: 'connections', card: 'llm' },
     { key: 'sla', label: 'SLA', section: 'sla' },
-    { key: 'done', label: 'Готово', section: 'wizard-done' }
+    { key: 'done', label: LL.t('settings.wizard.step.done'), section: 'wizard-done' }
   ];
   function renderWizard() {
     const step = WIZARD_STEPS[state.wizardStep];
     const stepper = $('wizardStepper');
-    stepper.innerHTML = WIZARD_STEPS.map((s, i) => `<span class="step-item ${i === state.wizardStep ? 'active' : ''} ${i < state.wizardStep ? 'done' : ''}">${i < state.wizardStep ? '✓' : i + 1}. ${esc(s.label)}</span>`).join('');
+    // Text steps: the number (a check once done) in mono, the current step underlined.
+    stepper.innerHTML = WIZARD_STEPS.map((s, i) => `<span class="step-item ${i === state.wizardStep ? 'active' : ''} ${i < state.wizardStep ? 'done' : ''}"${i === state.wizardStep ? ' aria-current="step"' : ''}><span class="step-num" aria-hidden="true">${i < state.wizardStep ? '✓' : i + 1}</span>${esc(s.label)}</span>`).join('');
     activateSection(step.section);
     CONNECTION_CARDS.forEach((card) => { const el = $(`card-${card.id}`); if (el) el.style.display = (step.card && step.card !== card.id) ? 'none' : ''; });
     $('wizardNav').style.display = step.key === 'done' ? 'none' : '';
@@ -3932,16 +4077,19 @@
     if (step.card) {
       const ok = !!state.checkOk[step.card];
       next.disabled = !ok;
-      hint.textContent = ok ? 'Соединение проверено — можно продолжать.' : 'Проверьте соединение, чтобы перейти дальше, или пропустите шаг.';
+      hint.textContent = ok ? LL.t('settings.wizard.hint.checked') : LL.t('settings.wizard.hint.check_or_skip');
     } else if (step.key === 'queries') {
       const ltLabels = Array.isArray(queryBlock('lt_framework').labels) ? queryBlock('lt_framework').labels.filter(Boolean) : [];
       next.disabled = !ltLabels.length;
       hint.textContent = ltLabels.length
-        ? 'Запросы нагрузочного инструмента заданы — можно продолжать.'
-        : 'Нажмите «Добавить из пакета» и выберите набор под ваш стек: нужны хотя бы запросы нагрузочного инструмента. Шаг можно пропустить.';
+        ? LL.t('settings.wizard.hint.queries_ok')
+        : LL.t('settings.wizard.hint.queries_needed');
+    } else if (step.key === 'appearance') {
+      next.disabled = false;
+      hint.textContent = LL.t('settings.wizard.hint.language');
     } else {
       next.disabled = false;
-      hint.textContent = 'Задайте пороги (можно позже) и нажмите «Далее».';
+      hint.textContent = LL.t('settings.wizard.hint.sla');
     }
   }
   async function wizardNext(skip) {
@@ -3950,6 +4098,8 @@
       if (step.card) {
         const card = CONNECTION_CARDS.find((c) => c.id === step.card);
         if (state.dirty.has(`connections:${card.id}`) && !(await saveCard(card))) return;
+      } else if (step.key === 'appearance' && (state.dirty.has('appearance:language') || state.dirty.has('appearance:accent'))) {
+        if (!(await saveAppearanceNow())) return;
       } else if (step.key === 'sla' && state.dirty.has('sla:model') && !(await saveSla())) return;
       else if (step.key === 'queries' && state.dirty.has('queries:queries')) $('queriesSaveBtn').click();
     }
@@ -3966,16 +4116,16 @@
     $('wizardDemoBtn').addEventListener('click', async () => {
       const btn = $('wizardDemoBtn');
       btn.disabled = true;
-      setStatus('wizardDemoStatus', 'Создаём демонстрационный прогон…');
+      setStatus('wizardDemoStatus', LL.t('settings.wizard.demo_creating'));
       try {
         const resp = await fetch('/demo/seed', { method: 'POST' });
         const data = await resp.json();
-        if (resp.status === 409 && data.report_url) { setStatus('wizardDemoStatus', 'Демо-прогон уже существует.'); location.href = data.report_url; return; }
+        if (resp.status === 409 && data.report_url) { setStatus('wizardDemoStatus', LL.t('settings.wizard.demo_exists')); location.href = data.report_url; return; }
         if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-        setStatus('wizardDemoStatus', 'Готово, открываем отчёт…', 'ok');
+        setStatus('wizardDemoStatus', LL.t('settings.wizard.demo_ready'), 'ok');
         location.href = data.report_url;
       } catch (e) {
-        setStatus('wizardDemoStatus', `Не удалось создать демо: ${e.message}`, 'error');
+        setStatus('wizardDemoStatus', LL.t('settings.wizard.demo_failed', { error: e.message }), 'error');
         btn.disabled = false;
       }
     });
@@ -3989,7 +4139,7 @@
     if (state.area) cfgUrl.searchParams.set('area', state.area);
     const [cfgResp, defaultsResp] = await Promise.all([fetch(cfgUrl), fetch('/prompts/defaults')]);
     const cfg = await cfgResp.json();
-    if (!cfgResp.ok) throw new Error(cfg.error || 'Не удалось загрузить конфигурацию');
+    if (!cfgResp.ok) throw new Error(cfg.error || LL.t('settings.load_failed'));
     const defaults = await defaultsResp.json();
     state.config = cfg;
     // Per-service maps come as queries_map (with "" for the area) and service_sla.
@@ -4001,28 +4151,38 @@
     state.metricsConfigIds = Object.keys(metricsServices);
     state.servicesMeta = isPlainObject(cfg.services_meta) ? clone(cfg.services_meta) : {};
     state.promptDefaults = isPlainObject(defaults.domains) ? defaults.domains : {};
+    state.promptLanguage = typeof defaults.language === 'string' && defaults.language ? defaults.language : 'ru';
     state.prompts.area = await fetchPrompts('');
     state.prompts.byService = {};
   }
 
   const ACCENT_PRESETS = [
-    { label: 'Фиолетовый', color: '#6c5ce7' },
-    { label: 'Синий', color: '#1d4ed8' },
-    { label: 'Голубой', color: '#0284c7' },
-    { label: 'Бирюзовый', color: '#0f766e' },
-    { label: 'Зелёный', color: '#15803d' },
-    { label: 'Оранжевый', color: '#c2410c' },
-    { label: 'Красный', color: '#b91c1c' },
-    { label: 'Розовый', color: '#be185d' },
-    { label: 'Графитовый', color: '#64748b' }
+    { label: LL.t('settings.appearance.preset.violet'), color: '#6c5ce7' },
+    { label: LL.t('settings.appearance.preset.blue'), color: '#1d4ed8' },
+    { label: LL.t('settings.appearance.preset.sky'), color: '#0284c7' },
+    { label: LL.t('settings.appearance.preset.teal'), color: '#0f766e' },
+    { label: LL.t('settings.appearance.preset.green'), color: '#15803d' },
+    { label: LL.t('settings.appearance.preset.orange'), color: '#c2410c' },
+    { label: LL.t('settings.appearance.preset.red'), color: '#b91c1c' },
+    { label: LL.t('settings.appearance.preset.pink'), color: '#be185d' },
+    { label: LL.t('settings.appearance.preset.graphite'), color: '#64748b' }
   ];
   const DEFAULT_ACCENT = '#6c5ce7';
+  const REPORT_LANGUAGES = ['ru', 'en'];
+  // Saves the appearance section (accent and language); set by initAppearance, used by the wizard.
+  let saveAppearanceNow = async () => true;
 
   function initAppearance() {
     const stored = String((state.config.appearance || {}).accent || DEFAULT_ACCENT);
     let saved = stored.toLowerCase();
     let current = saved;
     let previewTimer = 0;
+    const languageSelect = $('reportLanguage');
+    const storedLanguage = String((state.config.appearance || {}).language || 'ru').toLowerCase().slice(0, 2);
+    let savedLanguage = REPORT_LANGUAGES.includes(storedLanguage) ? storedLanguage : 'ru';
+    languageSelect.value = savedLanguage;
+    languageSelect.addEventListener('change', updateDirty);
+    saveAppearanceNow = saveAppearance;
     const presets = $('accentPresets');
     ACCENT_PRESETS.forEach((preset) => {
       const button = document.createElement('button');
@@ -4038,8 +4198,8 @@
     const custom = document.createElement('button');
     custom.type = 'button';
     custom.className = 'accent-swatch is-custom';
-    custom.title = 'Свой цвет';
-    custom.setAttribute('aria-label', 'Свой цвет');
+    custom.title = LL.t('settings.appearance.custom');
+    custom.setAttribute('aria-label', LL.t('settings.appearance.custom'));
     custom.addEventListener('click', () => { $('accentCustom').hidden = false; choose(current, true); });
     presets.appendChild(custom);
     const wheel = $('accentWheel');
@@ -4055,7 +4215,7 @@
     if (!/^#[0-9a-fA-F]{6}$/.test(stored)) {
       const error = $('appearanceError');
       error.hidden = false;
-      error.textContent = `Сохранённый цвет «${stored}» не в формате #rrggbb — на страницах пока фиолетовый`;
+      error.textContent = LL.t('settings.appearance.bad_color', { color: stored });
       current = DEFAULT_ACCENT;
     }
     choose(current, !ACCENT_PRESETS.some((preset) => preset.color === current.toLowerCase()), true);
@@ -4071,9 +4231,14 @@
       });
       custom.setAttribute('aria-pressed', customOpen ? 'true' : 'false');
       if (!silent) schedulePreview();
-      const dirty = current !== saved;
-      $('appearanceSave').disabled = !dirty;
-      markDirty('appearance:accent', 'Оформление', dirty);
+      updateDirty();
+    }
+    function updateDirty() {
+      const accentDirty = current !== saved;
+      const languageDirty = languageSelect.value !== savedLanguage;
+      $('appearanceSave').disabled = !(accentDirty || languageDirty);
+      markDirty('appearance:accent', LL.t('settings.menu.appearance'), accentDirty);
+      markDirty('appearance:language', LL.t('settings.appearance.language_label'), languageDirty);
     }
     function schedulePreview() {
       clearTimeout(previewTimer);
@@ -4095,18 +4260,24 @@
       }
     }
     async function saveAppearance() {
-      setStatus('appearanceStatus', 'Сохранение…');
+      setStatus('appearanceStatus', LL.t('settings.status.saving'));
+      const language = languageSelect.value;
+      const languageChanged = language !== savedLanguage;
       try {
-        await postConfig(configBody('appearance', { accent: current }));
+        // The server merges the section: other keys (language_switch) stay as they are.
+        await postConfig(configBody('appearance', { accent: current, language }));
         saved = current;
-        state.config.appearance = { accent: current };
-        $('appearanceSave').disabled = true;
-        markDirty('appearance:accent', 'Оформление', false);
+        savedLanguage = language;
+        state.config.appearance = Object.assign({}, state.config.appearance || {}, { accent: current, language });
+        updateDirty();
         $('appearanceError').hidden = true;
-        setStatus('appearanceStatus', 'Сохранено', 'ok');
-        ui.toast('Оформление сохранено', { tone: 'ok' });
+        setStatus('appearanceStatus', LL.t('settings.status.saved'), 'ok');
+        ui.toast(LL.t('settings.appearance.saved'), { tone: 'ok' });
+        if (languageChanged) reloadPromptsForLanguage();
+        return true;
       } catch (error) {
         setStatus('appearanceStatus', error.message, 'error');
+        return false;
       }
     }
     function pickWheel(event) {
@@ -4163,6 +4334,49 @@
     return { h: hue, s: max ? delta / max : 0, v: max };
   }
 
+  // ---- pure parts for tests (tests/test_i18n_settings.py) ------------------------------------------
+  // Every user-visible string of the static tables and field schemas, for the language checks.
+  function schemaTexts() {
+    const out = [];
+    const push = (value) => { if (typeof value === 'string' && value) out.push(value); };
+    const fieldTexts = (field) => {
+      push(field.label);
+      push(field.hint);
+      push(field.placeholder);
+      (field.options || []).forEach((o) => push(typeof o === 'string' ? o : o.l));
+    };
+    CONNECTION_CARDS.forEach((card) => { push(card.title); push(card.desc); (card.fields || []).forEach(fieldTexts); });
+    Object.keys(SOURCE_TYPES).forEach((type) => { push(SOURCE_TYPES[type].label); push(SOURCE_TYPES[type].hint); sourceFields('x', type).forEach(fieldTexts); });
+    Object.values(BINDING_FIELDS).forEach((field) => { push(field.label); push(field.placeholder); });
+    Object.keys(GENERATOR_TYPES).forEach((type) => { push(GENERATOR_TYPES[type].label); push(GENERATOR_TYPES[type].hint); generatorFields('x', type).forEach(fieldTexts); });
+    toolFields('x').forEach(fieldTexts);
+    Object.values(KITS).forEach((kit) => { push(kit.empty); push(kit.addLabel); push(kit.deleteLabel); push(kit.hint({})); push(kit.pill({})); });
+    Object.values(WIZARD_STEP_TITLES).forEach(push);
+    [SLA_FIELDS, SLA_PEAK_FIELDS, SLA_FORECAST_FIELDS].forEach((list) => list.forEach((f) => { push(f.label); push(f.desc); push(f.hint); push(f.unit); }));
+    push(SLA_SHARED_DESC);
+    [SLA_PRESETS, LATENCY_UNIT_OPTIONS, LOAD_MODEL_OPTIONS, LLM_PROVIDERS].forEach((list) => list.forEach((o) => push(o.l)));
+    Object.values(SLA_QUERY_TITLES).forEach(push);
+    [LEVEL_OPTIONS, DEP_KIND_OPTIONS, ARCH_STYLES].forEach((list) => list.forEach(([, text]) => push(text)));
+    CONTEXT_GROUPS.forEach((group) => {
+      push(group.title);
+      push(group.hint);
+      (group.lists || []).forEach(([, title, columns]) => { push(title); columns.forEach(([, label]) => push(label)); });
+      (group.lines || []).forEach(([, title]) => push(title));
+    });
+    Object.values(CONTEXT_IMPORT_ACTIONS).forEach(push);
+    Object.values(PACK_COMPAT).forEach((compat) => push(compat.text));
+    WIZARD_STEPS.forEach((step) => push(step.label));
+    ACCENT_PRESETS.forEach((preset) => push(preset.label));
+    return out;
+  }
+  LL.settings = {
+    _internals: {
+      schemaTexts, sourceSummary, generatorSummary, generatorStatus, toolSummary, toolBadge, hostKeyMessage,
+      queryOptions, deadRefText, contextGroupSummary, slaUsageText, CONTEXT_GROUPS, promptLanguageNote, WIZARD_STEPS,
+      aboutMarkdown
+    }
+  };
+
   document.addEventListener('DOMContentLoaded', async () => {
     try {
       const servicesBody = $('servicesBody');
@@ -4181,15 +4395,15 @@
     makeAce('ed_sla', 'ace/mode/json', 10);
     state.editors.ed_sla.session.on('change', () => {
       if (state.jsonSyncing) return;
-      try { const parsed = JSON.parse(state.editors.ed_sla.getValue() || '{}'); if (!isPlainObject(parsed)) throw new Error('ожидается объект'); state.models.sla = parsed; $('slaJsonStatus').textContent = 'OK'; renderSlaForm({ skipJson: true }); }
-      catch (e) { $('slaJsonStatus').textContent = `Ошибка JSON: ${e.message}`; }
+      try { const parsed = JSON.parse(state.editors.ed_sla.getValue() || '{}'); if (!isPlainObject(parsed)) throw new Error(LL.t('settings.json.expected_object')); state.models.sla = parsed; $('slaJsonStatus').textContent = 'OK'; renderSlaForm({ skipJson: true }); }
+      catch (e) { $('slaJsonStatus').textContent = LL.t('settings.json.error', { error: e.message }); }
     });
     $('slaSaveBtn').addEventListener('click', saveSla);
     $('slaServiceSelect').addEventListener('change', (e) => loadSlaScope(e.target.value));
 
     const contextSection = bindJsonSection({
       key: 'system_context', menu: 'context', editorId: 'ed_system_context', saveBtn: 'contextSaveBtn', status: 'contextStatus', jsonStatus: 'contextJsonStatus',
-      label: () => (state.contextScope ? `Контекст системы (${state.contextScope})` : 'Контекст системы'),
+      label: () => (state.contextScope ? LL.t('settings.dirty.context_scoped', { scope: state.contextScope }) : LL.t('settings.menu.context')),
       getData: () => effectiveContext(state.contextScope),
       save: async (data) => {
         const r = await postConfig(configBody('system_context', data, state.contextScope));
@@ -4218,7 +4432,7 @@
     $('contextImportBtn').addEventListener('click', () => openContextImport());
     const queriesSection = bindJsonSection({
       key: 'queries', menu: 'queries', editorId: 'ed_queries', saveBtn: 'queriesSaveBtn', status: 'queriesStatus', jsonStatus: 'queriesJsonStatus',
-      label: () => (state.queriesScope ? `Запросы (${state.queriesScope})` : 'Запросы'),
+      label: () => (state.queriesScope ? LL.t('settings.dirty.queries_scoped', { scope: state.queriesScope }) : LL.t('settings.menu.queries')),
       getData: () => {
         const base = isPlainObject(state.config.queries) ? state.config.queries : {};
         if (!state.queriesScope) return base;
@@ -4235,18 +4449,19 @@
     });
     $('queriesServiceSelect').addEventListener('change', (e) => { state.queriesScope = e.target.value; queriesSection.load(); });
     state.reloadQueries = () => queriesSection.load();
-    // Role titles and installed pack names in the queries list; the dialog reloads the catalog itself.
-    loadPackCatalog().then(() => { renderQueriesForm(); renderSlaForm({ skipJson: true }); }).catch(() => { /* the list falls back to role ids */ });
+    // Role titles and installed pack names in the queries list; the dialog reloads the catalog itself. An area the
+    // settings do not know has no catalog (404): the list keeps role ids and the area bar says what to do.
+    if (areaKnown()) loadPackCatalog().then(() => { renderQueriesForm(); renderSlaForm({ skipJson: true }); }).catch(() => { /* the list falls back to role ids */ });
 
     const metricsSection = bindJsonSection({
       key: 'metrics_config', menu: 'metrics', editorId: 'ed_metrics_config', saveBtn: 'metricsSaveBtn', status: 'metricsStatus', jsonStatus: 'metricsJsonStatus',
-      label: () => (state.metricsScope ? `Визуализации (${state.metricsScope})` : 'Визуализации'),
+      label: () => (state.metricsScope ? LL.t('settings.dirty.metrics_scoped', { scope: state.metricsScope }) : LL.t('settings.menu.metrics')),
       getData: () => {
         const map = isPlainObject(state.config.metrics_config_map) ? state.config.metrics_config_map : {};
         return map[state.metricsScope || ''] || (state.metricsScope ? {} : (state.config.metrics_config || {}));
       },
       save: async (data) => {
-        if (!state.area) throw new Error('Выберите область в боковом меню');
+        if (!state.area) throw new Error(LL.t('settings.area.pick'));
         const r = await postConfig(configBody('metrics_config', data, state.metricsScope));
         state.config.metrics_config_map = state.config.metrics_config_map || {};
         state.config.metrics_config_map[state.metricsScope || ''] = clone(data);
@@ -4256,6 +4471,7 @@
     $('metricsServiceSelect').addEventListener('change', (e) => { state.metricsScope = e.target.value; metricsSection.load(); });
 
     initAppearance();
+    initAbout();
     initPrompts();
     fillServiceSelects();
     renderServices();
@@ -4275,7 +4491,7 @@
       if (state.dirty.has('queries:queries')) $('queriesSaveBtn').click();
       if (state.dirty.has('metrics:metrics_config')) $('metricsSaveBtn').click();
       if (state.dirty.has('prompts:editor')) $('promptSaveBtn').click();
-      if (state.dirty.has('appearance:accent')) $('appearanceSave').click();
+      if (state.dirty.has('appearance:accent') || state.dirty.has('appearance:language')) $('appearanceSave').click();
     });
 
     initWizard();

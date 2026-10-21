@@ -2,6 +2,7 @@ schema_version = 1
 id = "lt-gatling-graphite-victoriametrics-labels"
 version = 1
 title = "Gatling Graphite → VictoriaMetrics с relabeling (PromQL)"
+title_en = "Gatling Graphite → VictoriaMetrics with relabeling (PromQL)"
 category = "load_tool"
 stack = ["gatling", "graphite", "victoriametrics"]
 domain = "lt_framework"
@@ -18,6 +19,17 @@ gatling_users_<метрика>{simulation, request}. Правила — в docs/
 count — запросы за writePeriod (по умолчанию 1 с), время в мс. По умолчанию VictoriaMetrics не отдаёт \
 последние 30 с (-search.latencyOffset): отчёт по только что закончившемуся тесту строите через минуту.
 """
+description_en = """
+Gatling Graphite output in VictoriaMetrics where relabeling rules (-relabelConfig, action: graphite) turn \
+paths into series with labels: gatling.<simulation>.<request>.<status>.<metric> → \
+gatling_request_<metric>{simulation, request, status}, gatling.<simulation>.users.<scenario>.<metric> → \
+gatling_users_<metric>{simulation, request}. The rules are in docs/load-tests.md. Users are also read from \
+gatling_request_active{request="users"}: they land there when the users rule did not fire. Requests inside \
+Gatling groups show up per request only with a rule for six-part paths. If VictoriaMetrics stores whole paths, \
+use the "Gatling Graphite → VictoriaMetrics (PromQL)" pack. count is requests per writePeriod (1 s by \
+default), times are in ms. By default VictoriaMetrics hides the last 30 s (-search.latencyOffset): build the \
+report of a test that has just finished a minute later.
+"""
 requires_metrics = ["gatling_request_count", "gatling_request_percentiles95"]
 prompt_addendum = """
 Метрики Gatling в VictoriaMetrics с метками: gatling_request_<метрика>{simulation, request, status} — \
@@ -26,21 +38,33 @@ request="allRequests", status — ok, ko или all. RPS — сумма счёт
 p95/p99 и mean — время ответа в мс, усреднённое по периодам записи в окне; active users — активные \
 пользователи всех сценариев.
 """
+prompt_addendum_en = """
+Gatling metrics in VictoriaMetrics with labels: gatling_request_<metric>{simulation, request, status}, where \
+request is the request name ("group.request" for requests in groups, spaces replaced with "_"), the summary is \
+request="allRequests", status is ok, ko or all. RPS is the sum of the count counters over the window divided \
+by the window; p95/p99 and mean are the response time in ms averaged over the write periods in the window; \
+active users are the active users of all scenarios.
+"""
 
 [variables.simulation]
 title = "Симуляция (регулярное выражение)"
+title_en = "Simulation (regular expression)"
 default = ".+"
 pattern = '^[^"\\\s]+$'
 help = "Значение метки simulation: имя симуляции в нижнем регистре, например checkoutsimulation. По умолчанию — любая."
+help_en = "Value of the simulation label: the simulation name in lower case, for example checkoutsimulation. Any by default."
 
 [variables.window_sec]
 title = "Окно усреднения, с"
+title_en = "Averaging window, s"
 default = "30"
 pattern = '^[1-9][0-9]*$'
 help = "За это окно суммируются счётчики и усредняются задержки. Должно быть не меньше периода записи (writePeriod)."
+help_en = "Counters are summed and latencies averaged over this window. It must be no shorter than the write period (writePeriod)."
 
 [variables.load_model]
 title = "Модель нагрузки сценария"
+title_en = "Load model of the scenario"
 default = "open"
 choices = ["open", "closed"]
 help = "open — constantUsersPerSec, rampUsersPerSec; closed — constantConcurrentUsers, rampConcurrentUsers."
@@ -69,6 +93,7 @@ required = true
 query = '''label_replace(sum(sum_over_time(gatling_request_count{simulation=~"{{simulation}}", request="allRequests", status="all"}[{{window_sec}}s])) / {{window_sec}}, "series", "all", "", "")'''
 keys = ["series"]
 description = "Общий RPS теста: запросы за окно, делённые на окно."
+description_en = "Total test RPS: requests over the window divided by the window."
 
 [[queries]]
 label = "LT (Gatling VM labels): RPS by request"
@@ -77,6 +102,7 @@ unit = "per_second"
 query = '''topk(20, sum by (request) (sum_over_time(gatling_request_count{simulation=~"{{simulation}}", request!="allRequests", status="all"}[{{window_sec}}s])) / {{window_sec}})'''
 keys = ["request"]
 description = "RPS по запросам."
+description_en = "RPS by request."
 
 [[queries]]
 label = "LT (Gatling VM labels): p95(ms) total"
@@ -85,6 +111,7 @@ unit = "ms"
 query = '''label_replace(max(avg_over_time(gatling_request_percentiles95{simulation=~"{{simulation}}", request="allRequests", status="all"}[{{window_sec}}s])), "series", "all", "", "")'''
 keys = ["series"]
 description = "p95 времени ответа всех запросов, мс: среднее p95 периодов записи в окне."
+description_en = "p95 of the response time of all requests, ms: the average p95 of the write periods in the window."
 
 [[queries]]
 label = "LT (Gatling VM labels): p99(ms) total"
@@ -93,6 +120,7 @@ unit = "ms"
 query = '''label_replace(max(avg_over_time(gatling_request_percentiles99{simulation=~"{{simulation}}", request="allRequests", status="all"}[{{window_sec}}s])), "series", "all", "", "")'''
 keys = ["series"]
 description = "p99 времени ответа всех запросов, мс."
+description_en = "p99 of the response time of all requests, ms."
 
 [[queries]]
 label = "LT (Gatling VM labels): p95(ms) by request"
@@ -101,6 +129,7 @@ unit = "ms"
 query = '''topk(20, max by (request) (avg_over_time(gatling_request_percentiles95{simulation=~"{{simulation}}", request!="allRequests", status="all"}[{{window_sec}}s])))'''
 keys = ["request"]
 description = "p95 по запросам, мс."
+description_en = "p95 by request, ms."
 
 [[queries]]
 label = "LT (Gatling VM labels): mean response time(ms)"
@@ -110,6 +139,7 @@ required = true
 query = '''label_replace(max(avg_over_time(gatling_request_mean{simulation=~"{{simulation}}", request="allRequests", status="all"}[{{window_sec}}s])), "series", "all", "", "")'''
 keys = ["series"]
 description = "Среднее время ответа, мс."
+description_en = "Average response time, ms."
 
 [[queries]]
 label = "LT (Gatling VM labels): error rate (%)"
@@ -118,6 +148,7 @@ unit = "percent"
 query = '''label_replace(100 * (sum(sum_over_time(gatling_request_count{simulation=~"{{simulation}}", request="allRequests", status="ko"}[{{window_sec}}s])) or vector(0)) / sum(sum_over_time(gatling_request_count{simulation=~"{{simulation}}", request="allRequests", status="all"}[{{window_sec}}s])), "series", "all", "", "")'''
 keys = ["series"]
 description = "Доля ошибочных (KO) запросов за окно, %."
+description_en = "Share of failed (KO) requests over the window, %."
 
 [[queries]]
 label = "LT (Gatling VM labels): errors per second by request"
@@ -126,6 +157,7 @@ unit = "per_second"
 query = '''topk(20, sum by (request) (sum_over_time(gatling_request_count{simulation=~"{{simulation}}", request!="allRequests", status="ko"}[{{window_sec}}s])) / {{window_sec}})'''
 keys = ["request"]
 description = "Ошибочные запросы в секунду по запросам."
+description_en = "Failed requests per second by request."
 
 [[queries]]
 label = "LT (Gatling VM labels): active users"
@@ -134,3 +166,4 @@ unit = "count"
 query = '''label_replace(sum(max_over_time(gatling_users_active{simulation=~"{{simulation}}", request="allUsers"}[{{window_sec}}s])) or sum(max_over_time(gatling_request_active{simulation=~"{{simulation}}", request="users", status="allUsers"}[{{window_sec}}s])), "series", "all", "", "")'''
 keys = ["series"]
 description = "Активные пользователи всех сценариев (аналог VU): gatling_users_active или, без правила пользователей, gatling_request_active{request=\"users\"}."
+description_en = 'Active users of all scenarios (the VU equivalent): gatling_users_active or, without the users rule, gatling_request_active{request="users"}.'

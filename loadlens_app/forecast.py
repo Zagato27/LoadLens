@@ -1,8 +1,13 @@
-"""Capacity forecast for one stored report: samples, USL fit and the calculator answer."""
+# SPDX-License-Identifier: Apache-2.0
+"""Capacity forecast for one stored report: samples, USL fit and the calculator answer.
+
+Texts (errors, notes, plan messages) are :func:`AI.i18n.msg` values rendered in the current locale: the request
+locale for the forecast page, the report language when ``forecast_confluence.publish_forecast`` builds the page.
+"""
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Optional
 
 import numpy as np
@@ -47,6 +52,7 @@ from AI.db_store import StoredFinalReport, list_final_reports, load_final_report
 from AI.query_packs import ROLES, resolve_sla_refs
 from AI.pipeline import _cfg_float, _designated_rps_series, _time_shift_hours
 from AI.test_profile import profile_for
+from AI.verdicts import to_code
 from AI.resource_plan import (
     MAX_CPU_FRACTION,
     MIN_PLAN_STEPS,
@@ -67,8 +73,11 @@ from AI.resource_plan import (
     utilization_lines,
 )
 from AI.sla_evaluator import _safe_float, _worst_series_p95
+from AI.i18n import DEFAULT, msg, render_ref, t
+from AI.report_texts import localized_step_label
 from loadlens_app.core import _find_area_for_service, _ts_conn
-from loadlens_app.errors import log_failure
+from loadlens_app.errors import log_failure, with_error_id
+from loadlens_app.i18n import stored_report_language
 from settings import CONFIG
 from update_page import _effective_config_for_scope
 
@@ -78,17 +87,31 @@ SERVICES_CPU_DOMAIN = ROLES["runtime.cpu"].domain
 NODES_CPU_DOMAIN = ROLES["node.cpu_pct"].domain
 NODE_CPU_SCALE = 0.01  # sla.cpu_query is node CPU in percent
 DEFAULT_CPU_CEILING_PCT = 80.0
-SETTING_HINT = "SLA-критерии → Определение максимальной производительности"
-FORECAST_NOT_APPLICABLE = "Прогноз строится только для ступенчатых и стресс-тестов"
 
 
 class ForecastError(Exception):
-    """Forecast is unavailable; ``code`` lets the page tell setup problems from inapplicable tests."""
+    """Forecast is unavailable; ``code`` lets the page tell setup problems from inapplicable tests.
+
+    ``message`` is usually a :func:`AI.i18n.msg`: ``str()`` renders it again in the locale current where the error
+    is shown (the request of the forecast page, the job of a publication).
+    """
 
     def __init__(self, message: str, status_code: int, code: str) -> None:
         super().__init__(message)
+        self.message = message
         self.status_code = status_code
         self.code = code
+
+    def __str__(self) -> str:
+        return render_ref(self.message, str(self.message))
+
+
+def _not_applicable() -> str:
+    return msg("capacity.error.not_applicable")
+
+
+def _missing_series(label: str) -> str:
+    return msg("capacity.error.missing_series", label=label, domain=msg("common.domain.lt_framework"))
 
 
 @dataclass(frozen=True)
@@ -163,7 +186,7 @@ def build_forecast(
     """Fits the model on the stored samples of a run and evaluates the target load."""
     report = _stored_report(run_id)
     if not profile_for(report.test_type).forecast_allowed:
-        raise ForecastError(FORECAST_NOT_APPLICABLE, 422, "not_applicable")
+        raise ForecastError(_not_applicable(), 422, "not_applicable")
     settings = _forecast_settings(_scope_sla(report))
     start, cutoff, cutoff_kind = _window(report)
     inputs = _input_series(_stored_frames(run_id, settings), settings, start, cutoff)
@@ -185,10 +208,24 @@ def _stored_report(run_id: str) -> StoredFinalReport:
     finally:
         conn.close()
     if report is None:
-        raise ForecastError("Отчёт не найден", 404, "not_found")
+        raise ForecastError(msg("capacity.error.not_found"), 404, "not_found")
     if report.start_ms is None or report.end_ms is None:
-        raise ForecastError("У отчёта нет интервала теста", 422, "missing_window")
+        raise ForecastError(msg("capacity.error.missing_window"), 422, "missing_window")
     return report
+
+
+def report_language_of(run_id: str) -> str:
+    """Language of the stored report of a run: ``ru`` for reports saved before the field or when it cannot be read."""
+    cfg = _storage()
+    try:
+        conn = _ts_conn()
+        try:
+            report = load_final_report(conn, str(cfg.get("schema") or "public"), str(cfg.get("llm_table") or "llm_reports"), run_id)
+        finally:
+            conn.close()
+    except Exception:
+        return DEFAULT
+    return stored_report_language(report) if report is not None else DEFAULT
 
 
 def _scope_sla(report: StoredFinalReport) -> dict[str, Any]:
@@ -204,7 +241,8 @@ def _resolved_sla(cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 def _missing_setting(title: str) -> ForecastError:
-    return ForecastError(f"Не задан {title}: {SETTING_HINT}", 422, "missing_setting")
+    """``title`` is a msg of capacity.setting.*."""
+    return ForecastError(msg("capacity.error.missing_setting", title=title, hint=msg("capacity.setting_hint")), 422, "missing_setting")
 
 
 def _required_text(sla: dict[str, Any], key: str, title: str) -> str:
@@ -218,15 +256,15 @@ def _forecast_settings(sla: dict[str, Any]) -> ForecastSettings:
     model = str(sla.get("load_model") or "").strip()
     unit = str(sla.get("latency_unit") or "").strip()
     if model not in LOAD_MODELS:
-        raise _missing_setting("параметр «модель нагрузки»")
+        raise _missing_setting(msg("capacity.setting.load_model"))
     if unit not in LATENCY_UNIT_SECONDS:
-        raise _missing_setting("параметр «единицы времени отклика»")
+        raise _missing_setting(msg("capacity.setting.latency_unit"))
     vus_label = str(sla.get("vus_query") or "").strip()
     if model == "closed" and not vus_label:
-        raise _missing_setting("запрос числа VU")
+        raise _missing_setting(msg("capacity.setting.vus_query"))
     return ForecastSettings(
-        rps_label=_required_text(sla, "max_performance_query", "запрос производительности"),
-        mean_label=_required_text(sla, "mean_latency_query", "запрос среднего времени отклика"),
+        rps_label=_required_text(sla, "max_performance_query", msg("capacity.setting.rps_query")),
+        mean_label=_required_text(sla, "mean_latency_query", msg("capacity.setting.mean_query")),
         vus_label=vus_label,
         p95_label=str(sla.get("p95_query") or "").strip(),
         latency_unit=unit,
@@ -278,13 +316,9 @@ def _stored_frames(run_id: str, settings: ForecastSettings) -> dict[str, pd.Data
 
 def _one_series(frame: Optional[pd.DataFrame], label: str) -> pd.Series:
     if frame is None or frame.empty:
-        raise ForecastError(
-            f"В данных отчёта нет ряда «{label}». Добавьте запрос в «Нагрузочный инструмент» и перегенерируйте отчёт",
-            422,
-            "missing_series",
-        )
+        raise ForecastError(_missing_series(label), 422, "missing_series")
     if len(list(frame.columns)) != 1:
-        raise ForecastError(f"Запрос «{label}» вернул несколько серий. Для прогноза нужна одна серия", 422, "multiple_series")
+        raise ForecastError(msg("capacity.error.multiple_series", label=label), 422, "multiple_series")
     return frame.iloc[:, 0]
 
 
@@ -292,11 +326,7 @@ def _rps_series(frames: dict[str, pd.DataFrame], label: str) -> pd.Series:
     frame = frames.get(label)
     series = _designated_rps_series([{"label": label, "df": frame}], label) if frame is not None else None
     if series is None or series.dropna().empty:
-        raise ForecastError(
-            f"В данных отчёта нет ряда «{label}». Добавьте запрос в «Нагрузочный инструмент» и перегенерируйте отчёт",
-            422,
-            "missing_series",
-        )
+        raise ForecastError(_missing_series(label), 422, "missing_series")
     return series
 
 
@@ -305,9 +335,9 @@ def _optional_vus(frames: dict[str, pd.DataFrame], label: str) -> tuple[Optional
         return None, []
     frame = frames.get(label)
     if frame is None or frame.empty:
-        return None, [f"Ряд VU «{label}» не найден — на графике только расчётный параллелизм"]
+        return None, [msg("capacity.note.vus_missing", label=label)]
     if len(list(frame.columns)) != 1:
-        return None, [f"Запрос VU «{label}» вернул несколько серий — он не используется"]
+        return None, [msg("capacity.note.vus_multiple", label=label)]
     return frame.iloc[:, 0], []
 
 
@@ -318,13 +348,13 @@ def _p95_series(
     cutoff: pd.Timestamp,
 ) -> tuple[Optional[pd.Series], list[str]]:
     if not label:
-        return None, ["p95 не назначен в SLA — прогноз только для среднего времени отклика"]
+        return None, [msg("capacity.note.p95_unset")]
     frame = frames.get(label)
     if frame is None or frame.empty:
-        return None, [f"Ряд p95 «{label}» не найден"]
+        return None, [msg("capacity.note.p95_missing", label=label)]
     name = _worst_series_p95(frame, start, cutoff)[1]
     if not name or name not in frame.columns:
-        return None, [f"На участке до падения RPS нет точек запроса «{label}»"]
+        return None, [msg("capacity.note.p95_no_points", label=label)]
     return frame[name], []
 
 
@@ -364,15 +394,17 @@ def _p95_in_mean_units(mean: pd.Series, p95: Optional[pd.Series], unit: str) -> 
         return p95, []
     ratio = float((joined["p95"] / joined["mean"]).median())
     if unit == "s" and ratio >= 50.0:
-        return p95 / 1000.0, ["p95 в отчёте в миллисекундах, для прогноза переведён в секунды"]
+        return p95 / 1000.0, [msg("capacity.note.p95_ms_to_s")]
     if unit == "ms" and 0 < ratio <= 0.02:
-        return p95 * 1000.0, ["p95 в отчёте в секундах, для прогноза переведён в миллисекунды"]
+        return p95 * 1000.0, [msg("capacity.note.p95_s_to_ms")]
     return p95, []
 
 
 def _report_steps(report: StoredFinalReport) -> tuple[StepWindow, ...]:
+    """Load steps of the report; their stored labels (in the report's language) are shown in the current locale."""
     steps = report.context.get("load_steps") if isinstance(report.context, dict) else None
-    return step_windows(steps if isinstance(steps, list) else [])
+    windows = step_windows(steps if isinstance(steps, list) else [])
+    return tuple(replace(window, label=localized_step_label(window.label)) for window in windows)
 
 
 def _samples(
@@ -395,7 +427,8 @@ def _samples(
             steps=steps,
         )
     except CapacityModelError as exc:
-        raise ForecastError(str(exc), 422, exc.code) from exc
+        # The first argument keeps a msg (rendered again where it is shown); a plain text stays as it is.
+        raise ForecastError(exc.args[0] if exc.args else str(exc), 422, exc.code) from exc
 
 
 def _model_context(samples: Samples, fit: UslFit, coverage: LoadCoverage, instability: Optional[Instability]) -> ModelContext:
@@ -442,9 +475,9 @@ def _node_lines(
     loads: list[StepLoad],
 ) -> tuple[list[UtilizationLine], str]:
     if not settings.node_cpu_label:
-        return [], "Узлы не проверены: в SLA не задан запрос CPU узлов"
+        return [], msg("capacity.nodes.no_query")
     if frame is None or frame.empty:
-        return [], f"Узлы не проверены: в данных отчёта нет ряда «{settings.node_cpu_label}»"
+        return [], msg("capacity.nodes.no_series", label=settings.node_cpu_label)
     return utilization_lines(frame, loads, NODE_CPU_SCALE), ""
 
 
@@ -461,20 +494,18 @@ def _resource_plan(
     """Instances per service for ``rps``; the status tells the page why the plan is missing."""
     label = settings.service_cpu_label
     if not label:
-        return unavailable_plan("missing_setting", f"Не задан запрос CPU экземпляров сервисов: {SETTING_HINT}", ceiling, rps)
+        return unavailable_plan("missing_setting", msg("capacity.plan.no_query", hint=msg("capacity.setting_hint")), ceiling, rps)
     frames = _resource_frames(run_id, settings)
     services = frames.get((SERVICES_CPU_DOMAIN, label))
     if services is None or services.empty:
-        message = f"В данных отчёта нет ряда «{label}» домена JVM: добавьте запрос и перегенерируйте отчёт"
-        return unavailable_plan("missing_series", message, ceiling, rps)
+        return unavailable_plan("missing_series", msg("capacity.plan.no_series", label=label), ceiling, rps)
     peak = float(np.nanmax(services.to_numpy(dtype=float)))
     if peak > MAX_CPU_FRACTION:
-        message = f"Запрос «{label}» возвращает значения до {peak:.1f}: нужна загрузка CPU экземпляра в долях от 0 до 1, как у process_cpu_usage"
-        return unavailable_plan("bad_unit", message, ceiling, rps)
+        return unavailable_plan("bad_unit", msg("capacity.plan.bad_unit", label=label, peak=f"{peak:.1f}"), ceiling, rps)
     loads = stable_step_loads(samples, steps, instability)
     lines = utilization_lines(services, loads, 1.0) if len(loads) >= MIN_PLAN_STEPS else []
     if not lines:
-        message = f"Для расчёта подов нужно не меньше {MIN_PLAN_STEPS} ступеней без провалов с данными CPU, в отчёте {len(loads)}"
+        message = msg("capacity.plan.too_few_steps", min=MIN_PLAN_STEPS, count=len(loads))
         return unavailable_plan("too_few_steps", message, ceiling, rps)
     nodes, nodes_message = _node_lines(settings, frames.get((NODES_CPU_DOMAIN, settings.node_cpu_label)), loads)
     return build_plan(lines, nodes, nodes_message, loads, rps, ceiling, limit)
@@ -568,7 +599,7 @@ class ForecastAvailability:
 def forecast_availability(test_type: str, series_labels: Optional[list[str]], sla: dict[str, Any]) -> ForecastAvailability:
     """Whether a stored report can be forecast: capacity test, forecast settings, required series."""
     if not profile_for(test_type).forecast_allowed:
-        return ForecastAvailability(False, "not_applicable", FORECAST_NOT_APPLICABLE)
+        return ForecastAvailability(False, "not_applicable", t("capacity.error.not_applicable"))
     try:
         settings = _forecast_settings(sla)
     except ForecastError as exc:
@@ -577,13 +608,10 @@ def forecast_availability(test_type: str, series_labels: Optional[list[str]], sl
     if settings.load_model == "closed":
         required.append(settings.vus_label)
     if series_labels is None:
-        return ForecastAvailability(
-            False, "missing_series",
-            "Отчёт создан до появления прогноза. Добавьте запросы и перегенерируйте отчёт",
-        )
+        return ForecastAvailability(False, "missing_series", t("capacity.availability.legacy"))
     for label in required:
         if label not in series_labels:
-            return ForecastAvailability(False, "missing_series", f"В данных отчёта нет ряда «{label}»")
+            return ForecastAvailability(False, "missing_series", t("capacity.availability.missing_series", label=label))
     return ForecastAvailability(True, "ok", "")
 
 
@@ -647,7 +675,7 @@ def list_forecast_reports(services: list[str]) -> ForecastCatalog:
             service=row.service,
             test_type=row.test_type,
             created_at=row.created_at.isoformat() if row.created_at else None,
-            verdict=row.verdict,
+            verdict=to_code(row.verdict),
             load_model=str(sla.get("load_model") or ""),
         ))
     return ForecastCatalog(reports=reports, missing_settings=missing_settings, missing_series=missing_series)
@@ -670,5 +698,5 @@ def forecast_status(run_id: str) -> ForecastAvailability:
 
 def database_unavailable(exc: psycopg2.Error) -> ForecastError:
     """Maps a database failure to the API error the page shows; the details stay in the server log."""
-    error_id = log_failure(exc, "База данных недоступна")
-    return ForecastError(f"База данных недоступна. Код ошибки: {error_id}", 502, "database")
+    error_id = log_failure(exc, "api.error.database_unavailable")
+    return ForecastError(with_error_id("api.error.database_unavailable", error_id), 502, "database")

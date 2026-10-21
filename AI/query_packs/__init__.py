@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Query packs: ready-made metric queries for common stacks (exporters, runtimes, load tools).
 
 A pack is a TOML file in ``packs/``: queries for one domain in one language, with roles, units and
@@ -38,9 +39,9 @@ from .blocks import (
     update_selection,
 )
 from .catalog import Catalog, PackCatalogError, load_catalog
-from .models import CATEGORY_TITLES, LANGUAGE_TITLES, Bundle, QueryPack
+from .models import CATEGORY_TITLES, LANGUAGE_TITLES, Bundle, QueryPack, localized
 from .render import PackRenderError, RenderedPack, RenderedQuery, render_pack, resolve_variables
-from .roles import LIVE_ONLY_ROLES, READINESS_SLA_FIELDS, ROLES, SLA_FIELDS, UNIT_TITLES, Role, role_for_sla_field
+from .roles import LIVE_ONLY_ROLES, READINESS_SLA_FIELDS, ROLES, SLA_FIELDS, UNIT_TITLES, Role, role_for_sla_field, unit_title
 
 __all__ = [
     "DERIVED_KEY",
@@ -75,6 +76,7 @@ __all__ = [
     "installed_packs",
     "labels_for_role",
     "load_catalog",
+    "localized",
     "merge_conflict",
     "merge_pack",
     "missing_sla_references",
@@ -86,6 +88,7 @@ __all__ = [
     "resolve_variables",
     "role_for_sla_field",
     "resolve_sla_refs",
+    "unit_title",
     "run_filter_variables",
     "series_annotations",
     "sla_update",

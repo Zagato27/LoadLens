@@ -1,17 +1,22 @@
+// SPDX-License-Identifier: Apache-2.0
 // Reports page logic
 (function () {
   // Chart background plugin: the plot area gets the color passed in options.plugins.cmpBg (ui.restyleCharts
-  // keeps it in sync with the theme), else --bg-chart of the current theme.
+  // keeps it in sync with the theme), else --bg of the current theme; without the token the canvas stays
+  // transparent and shows the page.
   function chartBackground() {
-    try { return getComputedStyle(document.documentElement).getPropertyValue('--bg-chart').trim() || '#12151c'; } catch (e) { return '#12151c'; }
+    try {
+      const css = getComputedStyle(document.documentElement);
+      return css.getPropertyValue('--bg').trim();
+    } catch (e) { return ''; }
   }
-  const cmpBgPlugin = { id: 'cmpBg', beforeDraw(chart, args, opts) { const { ctx, chartArea } = chart; if (!chartArea) return; ctx.save(); ctx.fillStyle = (opts && opts.color) || chartBackground(); ctx.fillRect(chartArea.left, chartArea.top, chartArea.right - chartArea.left, chartArea.bottom - chartArea.top); ctx.restore(); } };
+  const cmpBgPlugin = { id: 'cmpBg', beforeDraw(chart, args, opts) { const { ctx, chartArea } = chart; if (!chartArea) return; const color = (opts && opts.color) || chartBackground(); if (!color) return; ctx.save(); ctx.fillStyle = color; ctx.fillRect(chartArea.left, chartArea.top, chartArea.right - chartArea.left, chartArea.bottom - chartArea.top); ctx.restore(); } };
   if (window.Chart && Chart.register) Chart.register(cmpBgPlugin);
 
   const LL = window.LoadLens;
   // Report-wide chart state: markers and thresholds of the final row, every chart drawn so far and the
   // per-tab chart groups (synchronized hover, drag zoom, legend chips).
-  const reportState = { finalRow: null, stepTable: null, markers: [], thresholds: [], queryLabels: [], charts: [], groups: {}, activePane: '', paneRenderers: {} };
+  const reportState = { finalRow: null, stepTable: null, markers: [], thresholds: [], queryLabels: [], charts: [], groups: {}, activePane: '', paneRenderers: {}, profile: null, domainVerdicts: {} };
   const MAX_VISIBLE_SERIES = 12;
   // Rows in the hover tooltip next to the cursor; the rest is «ещё N», all values are in the legend.
   const TOOLTIP_ROWS = 8;
@@ -68,11 +73,11 @@
     let comment = '';
     if (vote === 'disagree') {
       const typed = await LL.ui.prompt({
-        title: target === 'verdict' ? 'Почему вердикт неверен?' : 'Почему находка неверна?',
-        message: 'Короткий комментарий поможет сравнить правки промптов.',
-        label: 'Комментарий',
-        confirmText: 'Сохранить',
-        cancelText: 'Отмена',
+        title: target === 'verdict' ? LL.t('report.feedback.why_verdict') : LL.t('report.feedback.why_finding'),
+        message: LL.t('report.feedback.comment_hint'),
+        label: LL.t('report.feedback.comment_label'),
+        confirmText: LL.t('common.action.save'),
+        cancelText: LL.t('common.action.cancel'),
         multiline: true
       });
       if (typed === null) return;
@@ -86,11 +91,11 @@
         body: JSON.stringify({ run_name: run, domain, target, finding_id: findingId, vote, comment })
       });
       const data = await resp.json().catch(() => ({}));
-      if (!resp.ok) throw new Error((data && data.error) || 'Не удалось сохранить оценку');
+      if (!resp.ok) throw new Error((data && data.error) || LL.t('report.feedback.save_failed'));
       setVote(domain, target, findingId, (data && data.vote) || vote, (data && data.comment) || comment);
       document.querySelectorAll('.feedback-votes').forEach(paintVoteGroup);
     } catch (e) {
-      LL.ui.alert({ title: 'Оценка не сохранена', message: e.message || String(e) });
+      LL.ui.alert({ title: LL.t('report.feedback.not_saved'), message: e.message || String(e) });
     } finally {
       delete group.dataset.busy;
     }
@@ -136,15 +141,8 @@
     if (!usage || !Number.isFinite(Number(usage.calls)) || Number(usage.calls) <= 0) return '';
     const prompt = formatTokenCount(usage.prompt);
     const completion = formatTokenCount(usage.completion);
-    if (prompt != null && completion != null) return `${usage.calls} вызовов · ${prompt} / ${completion} токенов`;
-    return `${usage.calls} вызовов`;
-  }
-  function pluralFindings(count) {
-    const mod10 = count % 10;
-    const mod100 = count % 100;
-    if (mod10 === 1 && mod100 !== 11) return 'находка';
-    if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'находки';
-    return 'находок';
+    if (prompt != null && completion != null) return LL.t('report.usage.calls_tokens', { calls: usage.calls, prompt: prompt, completion: completion });
+    return LL.t('report.usage.calls', { calls: usage.calls });
   }
   function isUnverifiedFinding(item) {
     const verification = item && item.verification;
@@ -153,8 +151,9 @@
   function renderUnverifiedPill(item) {
     if (!isUnverifiedFinding(item)) return '';
     const unmatched = Array.isArray(item.verification.unmatched) ? item.verification.unmatched.map(safeStr).filter(Boolean) : [];
-    const tip = `${(LL.GLOSSARY && LL.GLOSSARY.unverified) || ''}${unmatched.length ? ` Не найдены в данных: ${unmatched.join(', ')}.` : ''}`.trim();
-    return `<abbr class="term" data-term="unverified" data-tip="${escapeHtml(tip)}" title="${escapeHtml(tip)}" tabindex="0" style="text-decoration:none"><span class="pill warn finding-unverified">Не подтверждено данными</span></abbr>`;
+    const missing = unmatched.length ? ` ${LL.t('report.finding.unmatched', { items: unmatched.join(', ') })}` : '';
+    const tip = `${(LL.GLOSSARY && LL.GLOSSARY.unverified) || ''}${missing}`.trim();
+    return `<abbr class="term" data-term="unverified" data-tip="${escapeHtml(tip)}" title="${escapeHtml(tip)}" tabindex="0" style="text-decoration:none"><span class="pill warn finding-unverified">${escapeHtml(LL.t('report.finding.unverified'))}</span></abbr>`;
   }
 
 
@@ -186,19 +185,24 @@
     if (data && data.run_name) reportRef = data;
   }
 
+  // The title is the run name itself (the crumbs and the meta line say what it is); the tab title keeps the words.
   function setPageTitle(run) {
     const title = document.getElementById('pageTitle');
-    if (title) title.textContent = run ? `Отчет по тесту ${run}` : 'Отчет по тесту';
-    document.title = run ? `Отчёт: ${run}` : 'Отчёт';
+    if (title) {
+      title.textContent = run || LL.t('report.page.title');
+      title.title = run ? LL.t('report.page.title_run', { run: run }) : '';
+    }
+    document.title = run ? LL.t('report.page.doc_title_run', { run: run }) : LL.t('report.page.doc_title');
     renderBreadcrumbs(getServiceFromPath(), run);
   }
 
   function renderBreadcrumbs(service, run) {
     const nav = document.getElementById('reportBreadcrumbs');
     if (!nav) return;
-    const parts = ['<a href="/reports">Архив</a>'];
-    if (service) parts.push(`<span class="sep">›</span><a href="/reports?service=${encodeURIComponent(service)}">${escapeHtml(service)}</a>`);
-    if (run) parts.push(`<span class="sep">›</span><span class="current">${escapeHtml(run)}</span>`);
+    const sep = '<span class="sep" aria-hidden="true">/</span>';
+    const parts = [`<a href="/reports">${escapeHtml(LL.t('report.page.breadcrumb_archive'))}</a>`];
+    if (service) parts.push(`${sep}<a href="/reports?service=${encodeURIComponent(service)}">${escapeHtml(service)}</a>`);
+    if (run) parts.push(`${sep}<span class="current" aria-current="page">${escapeHtml(run)}</span>`);
     nav.innerHTML = parts.join('');
   }
 
@@ -209,12 +213,15 @@
     const save = document.getElementById('renameReportSave');
     const cancel = document.getElementById('renameReportCancel');
     const status = document.getElementById('renameReportStatus');
+    // The form takes the place of the title while it is open.
+    const title = document.getElementById('pageTitle');
     if (!btn || !form || !input || !save || !cancel) return;
 
     function openForm() {
       input.value = getRunFromPath() || '';
       form.style.display = 'flex';
       btn.style.display = 'none';
+      if (title) title.hidden = true;
       if (status) status.textContent = '';
       input.focus();
       input.select();
@@ -223,6 +230,7 @@
     function closeForm() {
       form.style.display = 'none';
       btn.style.display = '';
+      if (title) title.hidden = false;
       if (status) status.textContent = '';
     }
 
@@ -230,15 +238,15 @@
       const run = getRunFromPath();
       const next = String(input.value || '').trim();
       if (!run) {
-        if (status) status.textContent = 'Не удалось определить запуск';
+        if (status) status.textContent = LL.t('report.page.no_run');
         return;
       }
       if (!next) {
-        if (status) status.textContent = 'Название не может быть пустым';
+        if (status) status.textContent = LL.t('report.rename.empty');
         return;
       }
       save.disabled = true;
-      if (status) status.textContent = 'Сохранение…';
+      if (status) status.textContent = LL.t('report.status.saving');
       try {
         const resp = await fetch('/runs/' + encodeURIComponent(run), {
           method: 'PATCH',
@@ -250,15 +258,15 @@
         });
         const data = await resp.json();
         if (!resp.ok) {
-          if (status) status.textContent = data.error || 'Ошибка переименования';
+          if (status) status.textContent = data.error || LL.t('report.rename.failed');
           save.disabled = false;
           return;
         }
         const url = data.page_url || (reportRef.run_id ? ('/reports/' + encodeURIComponent(reportRef.run_id)) : location.pathname);
-        LL.ui.toast(`Отчёт переименован в «${data.run_name}»`, { tone: 'ok' });
+        LL.ui.toast(LL.t('report.rename.done', { name: data.run_name }), { tone: 'ok' });
         location.replace(url);
       } catch (e) {
-        if (status) status.textContent = 'Ошибка переименования';
+        if (status) status.textContent = LL.t('report.rename.failed');
         save.disabled = false;
       }
     }
@@ -283,10 +291,10 @@
     if (url) {
       link.href = url;
       link.style.display = '';
-      if (btn) btn.textContent = 'Обновить отчет в Confluence';
+      if (btn) btn.textContent = LL.t('report.confluence.update');
     } else {
       link.style.display = 'none';
-      if (btn) btn.textContent = 'Добавить отчет в Confluence';
+      if (btn) btn.textContent = LL.t('report.confluence.add');
     }
   }
 
@@ -300,35 +308,44 @@
     } catch (e) {}
   }
 
-  async function pollConfluenceJob(jobId) {
+  // Status next to the publish button; `state` marks a status that clears itself (data-state, not its text).
+  function setPublishStatus(text, state) {
     const statusEl = document.getElementById('confluenceStatus');
+    if (!statusEl) return;
+    statusEl.textContent = text;
+    if (state) statusEl.dataset.state = state;
+    else delete statusEl.dataset.state;
+  }
+
+  async function pollConfluenceJob(jobId) {
     const btn = document.getElementById('publishConfluence');
     for (let i = 0; i < 180; i += 1) {
       const resp = await fetch('/job_status/' + encodeURIComponent(jobId));
       const job = await resp.json();
-      if (statusEl) {
-        const pct = Number(job.progress || 0);
-        statusEl.textContent = (job.message || 'Публикация…') + (pct ? ` (${pct}%)` : '');
-      }
+      const pct = Number(job.progress || 0);
+      setPublishStatus((job.message || LL.t('report.confluence.publishing')) + (pct ? ` (${pct}%)` : ''));
       if (job.status === 'done') {
         setConfluenceLink(job.page_url || '');
-        if (statusEl) statusEl.textContent = 'Опубликовано';
+        setPublishStatus(LL.t('report.confluence.published'), 'published');
         if (btn) btn.disabled = false;
-        LL.ui.toast('Отчёт опубликован в Confluence', { tone: 'ok' });
-        setTimeout(() => { if (statusEl && statusEl.textContent === 'Опубликовано') statusEl.textContent = ''; }, 2500);
+        LL.ui.toast(LL.t('report.confluence.published_toast'), { tone: 'ok' });
+        setTimeout(() => {
+          const statusEl = document.getElementById('confluenceStatus');
+          if (statusEl && statusEl.dataset.state === 'published') setPublishStatus('');
+        }, 2500);
         return;
       }
       if (job.status === 'error' || job.status === 'not_found') {
-        const headline = job.message || 'Ошибка публикации';
+        const headline = job.message || LL.t('report.confluence.failed');
         const text = job.error ? `${headline}: ${job.error}` : headline;
-        if (statusEl) statusEl.textContent = text;
+        setPublishStatus(text);
         LL.ui.toast(text, { tone: 'error' });
         if (btn) btn.disabled = false;
         return;
       }
       await new Promise((resolve) => setTimeout(resolve, 1500));
     }
-    if (statusEl) statusEl.textContent = 'Публикация занимает слишком долго, проверьте статус позже';
+    setPublishStatus(LL.t('report.confluence.too_long'));
     if (btn) btn.disabled = false;
   }
 
@@ -337,13 +354,12 @@
     if (!btn) return;
     btn.addEventListener('click', async () => {
       const run = getRunFromPath();
-      const statusEl = document.getElementById('confluenceStatus');
       if (!run) {
-        if (statusEl) statusEl.textContent = 'Не удалось определить запуск';
+        setPublishStatus(LL.t('report.page.no_run'));
         return;
       }
       btn.disabled = true;
-      if (statusEl) statusEl.textContent = 'Публикация…';
+      setPublishStatus(LL.t('report.confluence.publishing'));
       try {
         const resp = await fetch('/publish_confluence', {
           method: 'POST',
@@ -356,13 +372,13 @@
         });
         const data = await resp.json();
         if (!resp.ok || !data.job_id) {
-          if (statusEl) statusEl.textContent = data.error || data.message || 'Ошибка запуска публикации';
+          setPublishStatus(data.error || data.message || LL.t('report.confluence.start_failed'));
           btn.disabled = false;
           return;
         }
         await pollConfluenceJob(data.job_id);
       } catch (e) {
-        if (statusEl) statusEl.textContent = 'Ошибка запуска публикации';
+        setPublishStatus(LL.t('report.confluence.start_failed'));
         btn.disabled = false;
       }
     });
@@ -415,28 +431,28 @@
     const operational = (ctx.operational_context && typeof ctx.operational_context === 'object') ? ctx.operational_context : {};
     const lines = [];
     const sysBits = [];
-    if (safeStr(system.name)) sysBits.push(`**Система:** ${safeStr(system.name)}`);
-    if (safeStr(system.domain)) sysBits.push(`**Домен:** ${safeStr(system.domain)}`);
+    if (safeStr(system.name)) sysBits.push(`**${LL.t('report.context.system')}:** ${safeStr(system.name)}`);
+    if (safeStr(system.domain)) sysBits.push(`**${LL.t('report.context.domain')}:** ${safeStr(system.domain)}`);
     if (safeStr(system.description)) sysBits.push(safeStr(system.description));
-    if (safeStr(system.test_goal)) sysBits.push(`**Цель теста:** ${safeStr(system.test_goal)}`);
+    if (safeStr(system.test_goal)) sysBits.push(`**${LL.t('report.context.test_goal')}:** ${safeStr(system.test_goal)}`);
     if (sysBits.length) {
       lines.push('');
       sysBits.forEach((item) => lines.push(`- ${item}`));
     }
     if (safeStr(architecture.style)) {
       lines.push('');
-      lines.push(`- **Архитектура:** ${safeStr(architecture.style)}`);
+      lines.push(`- **${LL.t('report.context.architecture')}:** ${safeStr(architecture.style)}`);
     }
     const components = Array.isArray(architecture.components) ? architecture.components : [];
     if (components.length) {
       lines.push('');
-      lines.push('#### Компоненты');
+      lines.push(`#### ${LL.t('report.context.components')}`);
       components.forEach((item) => {
         if (!item || typeof item !== 'object') return;
         const name = safeStr(item.name || item.id);
         if (!name) return;
         const bits = [];
-        if (safeStr(item.role)) bits.push(`роль: ${safeStr(item.role)}`);
+        if (safeStr(item.role)) bits.push(`${LL.t('report.context.role')}: ${safeStr(item.role)}`);
         if (safeStr(item.criticality)) bits.push(`criticality: ${safeStr(item.criticality)}`);
         const technologies = Array.isArray(item.technologies) ? item.technologies.map((x) => safeStr(x)).filter(Boolean) : [];
         if (technologies.length) bits.push(`tech: ${technologies.join(', ')}`);
@@ -446,7 +462,7 @@
     const deps = Array.isArray(architecture.dependencies) ? architecture.dependencies : [];
     if (deps.length) {
       lines.push('');
-      lines.push('#### Зависимости');
+      lines.push(`#### ${LL.t('report.context.dependencies')}`);
       deps.forEach((item) => {
         if (!item || typeof item !== 'object') return;
         const from = safeStr(item.from);
@@ -454,14 +470,14 @@
         if (!from && !to) return;
         const kind = safeStr(item.kind);
         const purpose = safeStr(item.purpose);
-        const suffix = [kind && `тип: ${kind}`, purpose && purpose].filter(Boolean).join('; ');
+        const suffix = [kind && `${LL.t('report.context.kind')}: ${kind}`, purpose && purpose].filter(Boolean).join('; ');
         lines.push(`- ${from || 'unknown'} -> ${to || 'unknown'}${suffix ? ` (${suffix})` : ''}`);
       });
     }
     const flows = Array.isArray(loadModel.critical_user_flows) ? loadModel.critical_user_flows : [];
     if (flows.length) {
       lines.push('');
-      lines.push('#### Критичные потоки');
+      lines.push(`#### ${LL.t('report.context.critical_flows')}`);
       flows.forEach((item) => {
         if (!item || typeof item !== 'object') return;
         const name = safeStr(item.name || item.id);
@@ -469,27 +485,27 @@
         const steps = Array.isArray(item.steps) ? item.steps.map((x) => safeStr(x)).filter(Boolean) : [];
         const successSignals = Array.isArray(item.success_signals) ? item.success_signals.map((x) => safeStr(x)).filter(Boolean) : [];
         lines.push(`- **${name}**${steps.length ? `: ${steps.join(' -> ')}` : ''}`);
-        if (successSignals.length) lines.push(`  Успех: ${successSignals.join(', ')}`);
+        if (successSignals.length) lines.push(`  ${LL.t('report.context.success')}: ${successSignals.join(', ')}`);
       });
     }
     const entrypoints = Array.isArray(loadModel.entrypoints) ? loadModel.entrypoints : [];
     if (entrypoints.length) {
       lines.push('');
-      lines.push('#### Точки входа');
+      lines.push(`#### ${LL.t('report.context.entrypoints')}`);
       entrypoints.forEach((item) => {
         if (!item || typeof item !== 'object') return;
         const name = safeStr(item.name || item.id);
         if (!name) return;
         const kind = safeStr(item.kind);
         const priority = safeStr(item.business_priority);
-        const suffix = [kind && `тип: ${kind}`, priority && `priority: ${priority}`].filter(Boolean).join('; ');
+        const suffix = [kind && `${LL.t('report.context.kind')}: ${kind}`, priority && `priority: ${priority}`].filter(Boolean).join('; ');
         lines.push(`- ${name}${suffix ? ` (${suffix})` : ''}`);
       });
     }
     const hotspots = Array.isArray(loadModel.expected_hotspots) ? loadModel.expected_hotspots.map((x) => safeStr(x)).filter(Boolean) : [];
     if (hotspots.length) {
       lines.push('');
-      lines.push(`- **Ожидаемые hotspots:** ${hotspots.join(', ')}`);
+      lines.push(`- **${LL.t('report.context.hotspots')}:** ${hotspots.join(', ')}`);
     }
     const pushSimpleList = (title, items) => {
       const clean = Array.isArray(items) ? items.map((x) => safeStr(x)).filter(Boolean) : [];
@@ -498,10 +514,10 @@
       lines.push(`#### ${title}`);
       clean.forEach((item) => lines.push(`- ${item}`));
     };
-    pushSimpleList('Известные ограничения', operational.known_constraints);
-    pushSimpleList('Известные риски', operational.known_risks);
-    pushSimpleList('Нормальные правила деградации', operational.normal_degradation_rules);
-    pushSimpleList('Фокус анализа', operational.analysis_focus);
+    pushSimpleList(LL.t('report.context.known_constraints'), operational.known_constraints);
+    pushSimpleList(LL.t('report.context.known_risks'), operational.known_risks);
+    pushSimpleList(LL.t('report.context.degradation_rules'), operational.normal_degradation_rules);
+    pushSimpleList(LL.t('report.context.analysis_focus'), operational.analysis_focus);
     return lines.join('\n');
   }
   function escapeHtml(value) {
@@ -511,19 +527,6 @@
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
-  }
-  function standardizeVerdict(vRaw) {
-    const v = (safeStr(vRaw) || '').toLowerCase();
-    if (!v) return 'Недостаточно данных';
-    const ok = ['ok', 'okay', 'успех', 'успешно', 'success', 'passed', 'green'];
-    const warn = ['warn', 'warning', 'есть риски', 'риски', 'risk', 'risks', 'degrad', 'degraded', 'предупреждение'];
-    const crit = ['critical', 'критично', 'fail', 'failed', 'ошибка', 'error', 'red', 'провал'];
-    const na = ['insufficient', 'нет данных', 'недостаточно', 'no data', 'unknown', 'n/a'];
-    if (ok.some((x) => v.includes(x))) return 'Успешно';
-    if (warn.some((x) => v.includes(x))) return 'Есть риски';
-    if (crit.some((x) => v.includes(x))) return 'Провал';
-    if (na.some((x) => v.includes(x))) return 'Недостаточно данных';
-    return 'Недостаточно данных';
   }
   // Model output and engineer notes are untrusted: only formatting survives. No images (they would
   // load from any host and leak data), styles, forms or event handlers; links to http(s), mailto,
@@ -569,9 +572,9 @@
     const text = safeStr(raw);
     const excerpt = (text.length > 500 ? `${text.slice(0, 500)}...` : text).replace(/```/g, '` ` `');
     const lines = [
-      '### Ошибка структуры ответа LLM',
-      '- Ответ модели похож на JSON, но не прошёл валидацию и не был показан как полноценный отчёт.',
-      '- Проверьте лимит токенов, prompt и повторите генерацию.'
+      `### ${LL.t('report.invalid.title')}`,
+      `- ${LL.t('report.invalid.not_valid')}`,
+      `- ${LL.t('report.invalid.hint')}`
     ];
     if (excerpt) {
       lines.push('');
@@ -581,15 +584,7 @@
     }
     return lines.join('\n');
   }
-  function verdictTone(verdict) {
-    const text = standardizeVerdict(verdict);
-    if (text === 'Успешно') return { text, className: 'report-verdict-success' };
-    if (text === 'Есть риски') return { text, className: 'report-verdict-risk' };
-    if (text === 'Провал') return { text, className: 'report-verdict-fail' };
-    return { text, className: 'report-verdict-na' };
-  }
   // ---- manual verdict ----------------------------------------------------------------------------
-  const VERDICT_CHOICES = ['Успешно', 'Есть риски', 'Провал', 'Недостаточно данных'];
   function manualOf(row) {
     const manual = row && row.manual_verdict;
     return manual && manual.verdict ? manual : null;
@@ -600,27 +595,27 @@
     const manual = manualOf(row);
     if (manual) {
       const who = [safeStr(manual.author), manual.changed_at ? LL.formatDateTime(manual.changed_at) : ''].filter(Boolean).join(', ');
-      const auto = standardizeVerdict(row.auto_verdict || row.sla_verdict || row.llm_verdict);
-      return `Изменён вручную${who ? `: ${who}` : ''}. Автоматически: ${auto}.`;
+      const auto = LL.verdictLabel(row.auto_verdict || row.sla_verdict || row.llm_verdict);
+      return who ? LL.t('report.verdict.source_manual_by', { who: who, auto: auto }) : LL.t('report.verdict.source_manual', { auto: auto });
     }
     const sla = safeStr(row.sla_verdict);
     const llm = safeStr(row.llm_verdict);
     if (sla) {
       // Reports built before the SLA verdict replaced the model's one keep a different model verdict.
-      return llm && standardizeVerdict(llm) !== standardizeVerdict(sla)
-        ? `Определён по SLA-критериям. Оценка ИИ: ${standardizeVerdict(llm)}.`
-        : 'Определён по SLA-критериям.';
+      return llm && LL.verdictCode(llm) !== LL.verdictCode(sla)
+        ? LL.t('report.verdict.source_sla_ai', { verdict: LL.verdictLabel(llm) })
+        : LL.t('report.verdict.source_sla');
     }
-    return standardizeVerdict(row.auto_verdict || row.verdict) === 'Недостаточно данных'
-      ? 'SLA-критерии не заданы, поэтому автоматический вердикт — «Недостаточно данных». Задайте SLA сервиса или поставьте вердикт вручную.'
-      : 'SLA-критерии не заданы: вердикт определён оценкой ИИ.';
+    return LL.verdictCode(row.auto_verdict || row.verdict) === 'no_data'
+      ? LL.t('report.verdict.source_no_sla_no_data', { verdict: LL.verdictLabel('no_data') })
+      : LL.t('report.verdict.source_no_sla');
   }
   function verdictHistoryItem(entry) {
     const e = entry || {};
     const head = [e.changed_at ? LL.formatDateTime(e.changed_at) : '', safeStr(e.author)].filter(Boolean).join(' · ');
     const change = e.verdict
-      ? `${standardizeVerdict(e.previous_verdict)} → ${standardizeVerdict(e.verdict)}`
-      : `возвращён автоматический: ${standardizeVerdict(e.auto_verdict)}`;
+      ? `${LL.verdictLabel(e.previous_verdict)} → ${LL.verdictLabel(e.verdict)}`
+      : LL.t('report.verdict.history_reset', { verdict: LL.verdictLabel(e.auto_verdict) });
     const reason = safeStr(e.reason);
     return `<li>${head ? `<span class="dim">${escapeHtml(head)}</span> ` : ''}${escapeHtml(change)}`
       + `${reason ? `<div class="verdict-history-reason">${escapeHtml(reason)}</div>` : ''}</li>`;
@@ -628,38 +623,40 @@
   function verdictHistoryHtml(history) {
     const items = Array.isArray(history) ? history : [];
     if (!items.length) return '';
-    return `<details class="verdict-history"><summary>История изменений (${items.length})</summary>`
+    return `<details class="verdict-history"><summary>${escapeHtml(LL.t('report.verdict.history_title', { count: items.length }))}</summary>`
       + `<ul>${items.map(verdictHistoryItem).join('')}</ul></details>`;
   }
   // Body of the «Изменить вердикт» dialog from GET /runs/<run>/verdict.
   function verdictDialogHtml(state) {
     const s = state || {};
-    const current = standardizeVerdict(s.verdict);
-    const auto = standardizeVerdict(s.automatic);
+    // Radio values are verdict codes (the API accepts them); the pills show the labels.
+    const current = LL.verdictCode(s.verdict);
+    const auto = LL.verdictLabel(s.automatic);
     const max = Number(s.reason_max) || 1000;
-    const choices = (Array.isArray(s.choices) && s.choices.length ? s.choices : VERDICT_CHOICES).map((v) => {
-      const same = v === current;
-      return `<label class="verdict-choice${same ? ' is-current' : ''}"><input type="radio" name="verdictChoice" value="${escapeHtml(v)}"${same ? ' disabled' : ''}>`
-        + `<span class="report-verdict-pill ${verdictTone(v).className}">${escapeHtml(v)}</span>${same ? '<span class="dim">сейчас</span>' : ''}</label>`;
+    const choices = (Array.isArray(s.choices) && s.choices.length ? s.choices : LL.VERDICTS).map((v) => {
+      const code = LL.verdictCode(v);
+      const same = code === current;
+      return `<label class="verdict-choice${same ? ' is-current' : ''}"><input type="radio" name="verdictChoice" value="${escapeHtml(code)}"${same ? ' disabled' : ''}>`
+        + `<span class="report-verdict-pill ${LL.verdictReportClass(code)}">${escapeHtml(LL.verdictLabel(code))}</span>${same ? `<span class="dim">${escapeHtml(LL.t('report.verdict.current_mark'))}</span>` : ''}</label>`;
     }).join('');
     const now = s.manual
-      ? `Сейчас «${current}», изменён вручную; автоматический — «${auto}».`
-      : `Сейчас «${current}», определён автоматически.`;
+      ? LL.t('report.verdict.now_manual', { verdict: LL.verdictLabel(current), auto: auto })
+      : LL.t('report.verdict.now_auto', { verdict: LL.verdictLabel(current) });
     return [
       '<div class="verdict-dialog">',
-      `<p class="muted">${escapeHtml(now)} Ручной вердикт действует на дашборде, в архиве, сравнении и при выборе базового прогона; анализ отчёта не меняется.</p>`,
-      `<fieldset class="verdict-choices"><legend>Новый вердикт</legend>${choices}</fieldset>`,
-      `<label class="verdict-reason"><span>Причина</span><textarea name="verdictReason" rows="3" maxlength="${max}" placeholder="Например: провал из-за сбоя генератора, сервис держал целевую нагрузку"></textarea></label>`,
+      `<p class="muted">${escapeHtml(now)} ${escapeHtml(LL.t('report.verdict.dialog_note'))}</p>`,
+      `<fieldset class="verdict-choices"><legend>${escapeHtml(LL.t('report.verdict.new_legend'))}</legend>${choices}</fieldset>`,
+      `<label class="verdict-reason"><span>${escapeHtml(LL.t('report.verdict.reason_label'))}</span><textarea name="verdictReason" rows="3" maxlength="${max}" placeholder="${escapeHtml(LL.t('report.verdict.reason_placeholder'))}"></textarea></label>`,
       '<div class="dialog-error" data-verdict-error role="alert"></div>',
       verdictHistoryHtml(s.history),
       '</div>'
     ].join('');
   }
   function verdictFormProblem(verdict, reason, state) {
-    if (!verdict) return 'Выберите новый вердикт';
-    if (!reason) return 'Укажите причину: её увидят в отчёте, архиве и Confluence';
+    if (!verdict) return LL.t('report.verdict.pick');
+    if (!reason) return LL.t('report.verdict.reason_required');
     const max = Number(state && state.reason_max) || 1000;
-    if (reason.length > max) return `Причина — не длиннее ${max} символов`;
+    if (reason.length > max) return LL.t('report.verdict.reason_too_long', { max: max });
     return '';
   }
   async function verdictRequest(method, body) {
@@ -681,7 +678,7 @@
     const link = document.getElementById('confluencePageLink');
     const published = !!(link && link.style.display !== 'none' && link.getAttribute('href') && link.getAttribute('href') !== '#');
     if (published) {
-      LL.ui.toast(`${doneText}. Страница в Confluence показывает прежний вердикт — нажмите «Обновить отчет в Confluence».`, { tone: 'info', timeout: 10000 });
+      LL.ui.toast(LL.t('report.verdict.done_published', { done: doneText, button: LL.t('report.confluence.update') }), { tone: 'info', timeout: 10000 });
     } else {
       LL.ui.toast(doneText, { tone: 'ok' });
     }
@@ -691,12 +688,12 @@
     try {
       state = await verdictRequest('GET');
     } catch (e) {
-      LL.ui.toast(`Вердикт не загрузился: ${e.message}`, { tone: 'error' });
+      LL.ui.toast(LL.t('report.verdict.load_failed', { error: e.message }), { tone: 'error' });
       return;
     }
     let busy = false;
     await LL.ui.dialog({
-      title: 'Изменить вердикт',
+      title: LL.t('report.verdict.change'),
       bodyHtml: verdictDialogHtml(state),
       // A message about a missing choice or reason goes away as soon as the form changes.
       onOpen: (body) => {
@@ -705,9 +702,9 @@
         body.addEventListener('change', () => { error.textContent = ''; });
       },
       actions: [
-        { label: 'Отмена' },
+        { label: LL.t('common.action.cancel') },
         {
-          label: 'Сохранить',
+          label: LL.t('common.action.save'),
           primary: true,
           onClick: async (close, body) => {
             if (busy) return;
@@ -721,7 +718,7 @@
             try {
               const next = await verdictRequest('PUT', { verdict: picked.value, reason });
               close(next);
-              applyVerdictState(next, 'Вердикт изменён');
+              applyVerdictState(next, LL.t('report.verdict.changed'));
             } catch (e) {
               error.textContent = e.message;
             } finally {
@@ -735,15 +732,15 @@
   async function resetVerdict() {
     const row = reportState.finalRow || {};
     const ok = await LL.ui.confirm({
-      title: 'Вернуть автоматический вердикт',
-      message: `Отчёт снова покажет «${standardizeVerdict(row.auto_verdict)}» — вердикт по SLA. История изменений сохранится.`,
-      confirmText: 'Вернуть'
+      title: LL.t('report.verdict.reset_title'),
+      message: LL.t('report.verdict.reset_message', { verdict: LL.verdictLabel(row.auto_verdict) }),
+      confirmText: LL.t('report.verdict.reset_confirm')
     });
     if (!ok) return;
     try {
-      applyVerdictState(await verdictRequest('DELETE', {}), 'Возвращён автоматический вердикт');
+      applyVerdictState(await verdictRequest('DELETE', {}), LL.t('report.verdict.reset_done'));
     } catch (e) {
-      LL.ui.toast(`Не удалось вернуть вердикт: ${e.message}`, { tone: 'error' });
+      LL.ui.toast(LL.t('report.verdict.reset_failed', { error: e.message }), { tone: 'error' });
     }
   }
   function bindVerdictActions(root) {
@@ -781,24 +778,23 @@
       '</section>'
     ].join('');
   }
+  // «Проблемы и рекомендации»: two columns without boxes, a problem and its recommendation side by side on one
+  // grid row (one column on narrow screens, where each item names its column).
   function renderProblemRecommendationRows(rows) {
+    const empty = `<span class="report-empty">${escapeHtml('—')}</span>`;
+    const problems = escapeHtml(LL.t('report.findings.problems'));
+    const recommendations = escapeHtml(LL.t('report.findings.recommendations'));
     const body = rows.map((row) => [
-      '<tr>',
-      `<td>${row.problemHtml || `<span class="report-empty">${escapeHtml('—')}</span>`}</td>`,
-      `<td>${row.recommendationHtml || `<span class="report-empty">${escapeHtml('—')}</span>`}</td>`,
-      '</tr>'
+      `<div class="rep-f rep-f-problem" data-col="${problems}">${row.problemHtml || empty}</div>`,
+      `<div class="rep-f rep-f-action" data-col="${recommendations}">${row.recommendationHtml || empty}</div>`
     ].join('')).join('');
     return [
-      '<section>',
-      '<div class="report-block-title">Проблемы и рекомендации</div>',
-      '<div class="report-table-shell">',
-      '<table class="report-table report-two-col-table">',
-      '<thead><tr>',
-      '<th>Проблемы</th>',
-      '<th>Рекомендации по устранению</th>',
-      '</tr></thead>',
-      `<tbody>${body}</tbody>`,
-      '</table>',
+      '<section class="rep-findings">',
+      `<div class="report-block-title">${escapeHtml(LL.t('report.findings.title'))}</div>`,
+      '<div class="rep-findings-grid">',
+      `<div class="rep-findings-col lbl">${problems}</div>`,
+      `<div class="rep-findings-col lbl">${recommendations}</div>`,
+      body,
       '</div>',
       '</section>'
     ].join('');
@@ -820,10 +816,10 @@
     ].join('');
   }
   function renderRationaleBox(text) {
-    const contentHtml = markdownToSafeHtml(text) || '<p class="report-empty">Нет пояснения.</p>';
+    const contentHtml = markdownToSafeHtml(text) || `<p class="report-empty">${escapeHtml(LL.t('report.rationale.empty'))}</p>`;
     return [
       '<section class="report-note">',
-      '<div class="report-note-title">Обоснование вердикта</div>',
+      `<div class="report-note-title">${escapeHtml(LL.t('report.rationale.title'))}</div>`,
       `<div class="report-note-body report-markdown-block">${contentHtml}</div>`,
       '</section>'
     ].join('');
@@ -875,8 +871,8 @@
         `<ul class="report-item-evidence-list">${evidenceItems.map((evidenceItem) => {
           const bits = [];
           if (evidenceItem.metric) bits.push(evidenceItem.metric);
-          if (evidenceItem.observedValue) bits.push(`значение: ${evidenceItem.observedValue}`);
-          if (evidenceItem.threshold) bits.push(`порог: ${evidenceItem.threshold}`);
+          if (evidenceItem.observedValue) bits.push(LL.t('report.evidence.value', { value: evidenceItem.observedValue }));
+          if (evidenceItem.threshold) bits.push(LL.t('report.evidence.threshold', { value: evidenceItem.threshold }));
           if (evidenceItem.note) bits.push(evidenceItem.note);
           return `<li>${escapeHtml(bits.join(' | '))}</li>`;
         }).join('')}</ul>`
@@ -888,12 +884,12 @@
     if (!item || typeof item !== 'object') return escapeHtml(safeStr(item));
     const summary = safeStr(item.summary || item.title || item.text);
     const metaHtml = renderMetaGrid([
-      { label: 'Критичность', value: safeStr(item.severity) },
-      { label: 'Компонент', value: safeStr(item.component) }
+      { label: LL.t('report.finding.severity'), value: safeStr(item.severity) },
+      { label: LL.t('report.finding.component'), value: safeStr(item.component) }
     ]);
     const evidenceHtml = renderFindingEvidence(item);
     const findingId = normalizeFindingLinkId(item.id || item.finding_id || item.key, '');
-    const voteHtml = (domain && findingId) ? renderVoteGroup(domain, 'finding', findingId, 'Верно', 'Неверно') : '';
+    const voteHtml = (domain && findingId) ? renderVoteGroup(domain, 'finding', findingId, LL.t('report.finding.agree'), LL.t('report.finding.disagree')) : '';
     return [
       `<div class="report-item-card${isUnverifiedFinding(item) ? ' report-item-unverified' : ''}">`,
       `<div class="report-item-summary">${escapeHtml(summary || '—')} ${renderUnverifiedPill(item)}</div>`,
@@ -1031,7 +1027,7 @@
         : (legacyMatch ? [legacyMatch.item] : []);
       return {
         problemHtml: renderFindingDetails(finding.item, domain),
-        recommendationHtml: renderActionEntries(recommendationTexts, 'Нет рекомендации.')
+        recommendationHtml: renderActionEntries(recommendationTexts, LL.t('report.findings.no_recommendation'))
       };
     });
     actionEntries
@@ -1041,14 +1037,14 @@
       ))
       .forEach((action) => {
         rows.push({
-          problemHtml: '<span class="report-empty">Дополнительная рекомендация</span>',
-          recommendationHtml: renderActionEntries([action.item], 'Нет рекомендации.')
+          problemHtml: `<span class="report-empty">${escapeHtml(LL.t('report.findings.extra_recommendation'))}</span>`,
+          recommendationHtml: renderActionEntries([action.item], LL.t('report.findings.no_recommendation'))
         });
       });
     if (!rows.length) {
       rows.push({
-        problemHtml: '<span class="report-empty">Нет существенных проблем.</span>',
-        recommendationHtml: renderActionEntries(actionEntries.map((action) => action.item), 'Нет рекомендаций.')
+        problemHtml: `<span class="report-empty">${escapeHtml(LL.t('report.findings.no_problems'))}</span>`,
+        recommendationHtml: renderActionEntries(actionEntries.map((action) => action.item), LL.t('report.findings.no_recommendations'))
       });
     }
     return rows;
@@ -1065,8 +1061,8 @@
     box.innerHTML = [
       '<details class="report-collapsible">',
       '<summary>',
-      '<span>Контекст тестируемой системы</span>',
-      '<small class="report-collapsible-subtitle">Снимок на момент генерации отчета</small>',
+      `<span>${escapeHtml(LL.t('report.context.title'))}</span>`,
+      `<small class="report-collapsible-subtitle">${escapeHtml(LL.t('report.context.subtitle'))}</small>`,
       '</summary>',
       `<div class="report-collapsible-body report-markdown-block">${html}</div>`,
       '</details>'
@@ -1076,14 +1072,14 @@
   function renderAnalysisError(report) {
     const error = report && report.analysis_error;
     if (!error || typeof error !== 'object') return '';
-    const message = safeStr(error.message) || 'Анализ ИИ не выполнен.';
+    const message = safeStr(error.message) || LL.t('report.analysis_error.default_message');
     const bits = [];
     if (error.provider) bits.push(String(error.provider));
-    if (error.max_tokens) bits.push('лимит ' + error.max_tokens);
-    if (error.output_tokens != null && error.output_tokens !== '') bits.push('выдано ' + error.output_tokens);
+    if (error.max_tokens) bits.push(LL.t('report.analysis_error.limit', { value: error.max_tokens }));
+    if (error.output_tokens != null && error.output_tokens !== '') bits.push(LL.t('report.analysis_error.output', { value: error.output_tokens }));
     const meta = bits.length ? `<p class="dim">${escapeHtml(bits.join(' · '))}</p>` : '';
     const excerpt = error.excerpt ? `<pre>${escapeHtml(String(error.excerpt))}</pre>` : '';
-    return `<div class="report-note"><div class="report-note-title">Анализ ИИ не выполнен</div><div class="report-note-body"><p>${escapeHtml(message)}</p>${meta}${excerpt}</div></div>`;
+    return `<div class="report-note"><div class="report-note-title">${escapeHtml(LL.t('report.analysis_error.title'))}</div><div class="report-note-body"><p>${escapeHtml(message)}</p>${meta}${excerpt}</div></div>`;
   }
   function peakTableApplies(domain, peak) {
     if (domain !== 'final' && domain !== 'lt_framework') return false;
@@ -1120,90 +1116,153 @@
     if (value === null || value === undefined || value === '' || !Number.isFinite(n)) return '';
     return (n > 0 ? '+' : '') + formatNumber(n) + unit;
   }
-  const TREND_TITLES = { rps: 'RPS', p95: 'p95 latency', error_rate: 'доля ошибок', cpu: 'CPU', memory: 'память' };
-  const RESOURCE_TITLES = { cpu: 'CPU', memory: 'память' };
+  const TEST_TYPES = ['step', 'soak', 'spike', 'stress'];
+  const METRIC_KINDS = ['rps', 'p95', 'error_rate', 'cpu', 'memory'];
+  const RESOURCE_KINDS = ['cpu', 'memory'];
+  // Name of a metric kind (trends, limiting resource) in the UI language; '' for an unknown kind.
+  function metricTitle(kind) {
+    const key = safeStr(kind);
+    return METRIC_KINDS.indexOf(key) >= 0 ? LL.t(`report.metric.${key}`) : '';
+  }
+  function resourceTitle(kind) {
+    return RESOURCE_KINDS.indexOf(safeStr(kind)) >= 0 ? metricTitle(kind) : '';
+  }
+  // Codes stored by the analysis and the dictionary keys of their texts (report.<group>.<code>); the Python
+  // tables of AI/test_profile.py, AI/stability.py, AI/spike.py and AI/saturation.py hold the same texts
+  // (tests/test_verdicts.py). Reports saved before the codes carry only the text, which is shown as it is.
+  const STORED_CODES = {
+    typeFocus: ['report.focus.', TEST_TYPES],
+    holdNotes: ['report.hold_note.', ['no_steady_level', 'early_drop', 'long_ramp_up']],
+    spikeNotes: ['report.spike_note.', ['no_latency_after', 'no_latency_query']],
+    saturationNotes: ['report.saturation_note.', ['limit_not_reached', 'no_sla_step']],
+    failureModes: ['report.failure_mode.', ['latency+errors', 'latency', 'errors', 'throughput_drop', 'none']]
+  };
+  // Key segment of a code: 'latency+errors' -> 'latency_errors'.
+  function codeKey(code) {
+    return String(code).replace(/[^a-z0-9_]+/g, '_');
+  }
+  // Text of a stored code in the UI language; '' for an unknown code.
+  function storedText(group, code) {
+    const spec = STORED_CODES[group];
+    const value = safeStr(code);
+    return spec && value && spec[1].indexOf(value) >= 0 ? LL.t(spec[0] + codeKey(value)) : '';
+  }
+  // {group: {code: text}} of every stored code (tests compare it with the Python tables).
+  function storedTexts() {
+    const out = {};
+    Object.keys(STORED_CODES).forEach((group) => {
+      out[group] = {};
+      STORED_CODES[group][1].forEach((code) => { out[group][code] = storedText(group, code); });
+    });
+    return out;
+  }
+  // Note of a payload: rendered from note_codes / note_code, else the saved text.
+  function storedNote(item, group) {
+    const source = item || {};
+    const codes = Array.isArray(source.note_codes) ? source.note_codes : (safeStr(source.note_code) ? [source.note_code] : []);
+    const rendered = codes.map((code) => storedText(group, code) || safeStr(code)).filter(Boolean).join('; ');
+    return rendered || safeStr(source.note);
+  }
+  function failureModeTitle(sat) {
+    return storedText('failureModes', (sat || {}).failure_mode) || safeStr((sat || {}).failure_mode_title);
+  }
+  // Name of the test type by normalized_test_type; old reports without a known type keep their saved label.
+  function storedTypeLabel(profile) {
+    const key = safeStr(profile.normalized_test_type).toLowerCase();
+    return TEST_TYPES.indexOf(key) >= 0 ? LL.t(`common.test_type.${key}`) : safeStr(profile.label_ru || profile.label);
+  }
   function stabilityRows(report) {
     const st = report.stability_under_load || {};
     const profile = report.test_profile || {};
     const rows = [
-      { label: 'Тип теста', value: safeStr(profile.label_ru || profile.test_type) || 'stability/soak' },
-      { label: 'Фокус оценки', value: safeStr(st.focus || profile.focus) || 'Удержание нагрузки без накопления деградации' },
-      { label: 'Целевой RPS', value: formatNumber(st.target_rps) },
-      { label: 'Фактический RPS', value: formatNumber(st.actual_rps) }
+      { label: LL.t('report.section.test_type'), value: safeStr(storedTypeLabel(profile) || profile.test_type) || 'stability/soak' },
+      { label: LL.t('report.section.focus'), value: storedText('typeFocus', safeStr(profile.normalized_test_type).toLowerCase()) || safeStr(st.focus || profile.focus) || LL.t('report.section.focus_default_soak') },
+      { label: LL.t('report.section.target_rps'), value: formatNumber(st.target_rps) },
+      { label: LL.t('report.section.actual_rps'), value: formatNumber(st.actual_rps) }
     ];
     const hold = (st.hold && typeof st.hold === 'object') ? st.hold : null;
     if (hold) {
-      rows.push({ label: 'Окно удержания', value: hhmm(hold.start_iso) + '–' + hhmm(hold.end_iso) + (hold.duration_min != null ? ` (${formatNumber(hold.duration_min)} мин)` : '') });
+      const span = hhmm(hold.start_iso) + '–' + hhmm(hold.end_iso);
+      rows.push({ label: LL.t('report.section.hold_window'), value: hold.duration_min != null ? LL.t('report.section.hold_window_minutes', { span: span, minutes: formatNumber(hold.duration_min) }) : span });
       if (hold.min_bucket_rps != null) {
-        rows.push({ label: 'Минимальный интервал', value: `${safeStr(hold.min_bucket_label) || 'интервал'}: ${formatNumber(hold.min_bucket_rps)} RPS` + (hold.drop_pct ? ` (−${formatNumber(hold.drop_pct)} % от среднего)` : '') });
+        const bucket = { label: safeStr(hold.min_bucket_label) || LL.t('report.section.interval'), rps: formatNumber(hold.min_bucket_rps), drop: formatNumber(hold.drop_pct) };
+        rows.push({ label: LL.t('report.section.min_interval'), value: hold.drop_pct ? LL.t('report.section.min_interval_drop', bucket) : `${bucket.label}: ${bucket.rps} RPS` });
       }
-      if (hold.early_drop_iso) rows.push({ label: 'Падение RPS до конца теста', value: hhmm(hold.early_drop_iso) });
-      if (safeStr(hold.note)) rows.push({ label: 'Примечание', value: safeStr(hold.note) });
+      if (hold.early_drop_iso) rows.push({ label: LL.t('report.section.early_drop'), value: hhmm(hold.early_drop_iso) });
+      const holdNote = storedNote(hold, 'holdNotes');
+      if (holdNote) rows.push({ label: LL.t('report.section.note'), value: holdNote });
     }
-    rows.push({ label: 'Итог SLA', value: safeStr(st.sla_summary) || '—' });
+    rows.push({ label: LL.t('report.section.sla_summary'), value: safeStr(st.sla_summary) || '—' });
     return rows;
   }
   function spikeRows(report) {
     const sa = report.spike_analysis || {};
     const profile = report.test_profile || {};
-    const rows = [{ label: 'Тип теста', value: safeStr(profile.label_ru || profile.test_type) || 'spike' }];
-    if (sa.baseline_rps != null) rows.push({ label: 'Фоновая нагрузка', value: formatNumber(sa.baseline_rps) + ' RPS' });
+    const rows = [{ label: LL.t('report.section.test_type'), value: safeStr(storedTypeLabel(profile) || profile.test_type) || 'spike' }];
+    if (sa.baseline_rps != null) rows.push({ label: LL.t('report.section.baseline'), value: formatNumber(sa.baseline_rps) + ' RPS' });
     if (!sa.detected) {
-      rows.push({ label: 'Всплеск', value: safeStr(sa.reason) || 'не обнаружен' });
+      rows.push({ label: LL.t('report.section.spike'), value: safeStr(sa.reason) || LL.t('report.section.spike_not_detected') });
     } else {
       if (sa.target_rps != null) {
-        const reached = sa.target_reached === true ? ' — достигнут' : (sa.target_reached === false ? ' — не достигнут' : '');
-        rows.push({ label: 'Целевой RPS всплеска', value: formatNumber(sa.target_rps) + reached });
+        const rps = formatNumber(sa.target_rps);
+        const target = sa.target_reached === true
+          ? LL.t('report.section.target_reached', { rps: rps })
+          : (sa.target_reached === false ? LL.t('report.section.target_missed', { rps: rps }) : rps);
+        rows.push({ label: LL.t('report.section.spike_target_rps'), value: target });
       }
       (Array.isArray(sa.spikes) ? sa.spikes : []).forEach((spike) => {
         const pre = spike.pre || {};
         const during = spike.during || {};
-        const bits = [`${hhmm(spike.start_iso)}–${hhmm(spike.end_iso)} (${formatNumber(spike.duration_sec)} с)`];
+        const bits = [LL.t('report.section.spike_window', { span: `${hhmm(spike.start_iso)}–${hhmm(spike.end_iso)}`, seconds: formatNumber(spike.duration_sec) })];
         if (pre.p95 != null && during.p95 != null) {
           const over = signed(spike.overshoot_p95_pct, ' %');
           bits.push(`p95 ${formatNumber(pre.p95)} → ${formatNumber(during.p95)}` + (over ? ` (${over})` : ''));
         }
-        const errors = signed(spike.overshoot_error_rate_pp, ' п.п.');
-        if (errors) bits.push('ошибки ' + errors);
-        if (spike.recovered === true) bits.push(`восстановление за ${formatNumber(spike.recovery_time_sec)} с`);
-        else if (spike.recovered === false) bits.push('задержки не вернулись к фону');
-        if (safeStr(spike.note)) bits.push(safeStr(spike.note));
-        rows.push({ label: safeStr(spike.label) || 'всплеск', value: bits.join(', ') });
+        const errors = signed(spike.overshoot_error_rate_pp, ' ' + LL.t('report.unit.pp'));
+        if (errors) bits.push(LL.t('report.section.spike_errors', { value: errors }));
+        if (spike.recovered === true) bits.push(LL.t('report.section.spike_recovered', { seconds: formatNumber(spike.recovery_time_sec) }));
+        else if (spike.recovered === false) bits.push(LL.t('report.section.spike_not_recovered'));
+        const spikeNote = storedNote(spike, 'spikeNotes');
+        if (spikeNote) bits.push(spikeNote);
+        rows.push({ label: safeStr(spike.label) || LL.t('report.section.spike_fallback'), value: bits.join(', ') });
       });
     }
-    rows.push({ label: 'Итог SLA', value: safeStr(sa.sla_summary) || '—' });
+    rows.push({ label: LL.t('report.section.sla_summary'), value: safeStr(sa.sla_summary) || '—' });
     return rows;
   }
   function resourceText(resource) {
-    const title = RESOURCE_TITLES[safeStr(resource.kind)] || safeStr(resource.kind);
+    const title = resourceTitle(resource.kind) || safeStr(resource.kind);
     if (resource.evidence === 'threshold') {
-      return `${title}: p95 ${formatNumber(resource.value)} > порог ${formatNumber(resource.threshold)}` + (safeStr(resource.series) ? `, серия «${safeStr(resource.series)}»` : '');
+      // The comparison sign is a parameter: dictionary values carry no < or >.
+      const params = { title: title, value: formatNumber(resource.value), op: '>', threshold: formatNumber(resource.threshold), series: safeStr(resource.series) };
+      return params.series ? LL.t('report.resource.threshold_series', params) : LL.t('report.resource.threshold', params);
     }
-    return `${title}: рост ${signed(resource.growth_pct, ' %')} от первой ступени (p95 ${formatNumber(resource.value)})`;
+    return LL.t('report.resource.growth', { title: title, growth: signed(resource.growth_pct, ' %'), value: formatNumber(resource.value) });
   }
   function saturationRows(report) {
     const sat = report.saturation || {};
     const peak = report.peak_performance || report.peak_perfomance || {};
-    const rows = [{ label: 'Точка насыщения', value: formatNumber(sat.saturation_rps != null ? sat.saturation_rps : peak.max_rps) + ' RPS' }];
-    if (safeStr(sat.saturation_step_label)) rows.push({ label: 'Ступень насыщения', value: safeStr(sat.saturation_step_label) });
-    if (safeStr(peak.max_time)) rows.push({ label: 'Время пиковой производительности', value: safeStr(peak.max_time) });
+    const rows = [{ label: LL.t('report.section.saturation_point'), value: formatNumber(sat.saturation_rps != null ? sat.saturation_rps : peak.max_rps) + ' RPS' }];
+    if (safeStr(sat.saturation_step_label)) rows.push({ label: LL.t('report.section.saturation_step'), value: safeStr(sat.saturation_step_label) });
+    if (safeStr(peak.max_time)) rows.push({ label: LL.t('report.section.peak_time'), value: safeStr(peak.max_time) });
     if (safeStr(sat.degraded_step_label) || sat.first_degraded_rps != null) {
-      rows.push({ label: 'Первая деградировавшая ступень', value: safeStr(sat.degraded_step_label) || `≈${formatNumber(sat.first_degraded_rps)} RPS` });
+      rows.push({ label: LL.t('report.section.first_degraded_step'), value: safeStr(sat.degraded_step_label) || `≈${formatNumber(sat.first_degraded_rps)} RPS` });
     }
     const checks = Array.isArray(sat.degraded_checks) ? sat.degraded_checks : [];
-    if (checks.length) rows.push({ label: 'Нарушенные критерии', value: checks.map((name) => SLA_CHECK_LABELS[name] || name).join(', ') });
-    rows.push({ label: 'Характер деградации', value: safeStr(sat.failure_mode_title || sat.failure_mode) || '—' });
-    rows.push({ label: 'Ограничивающий ресурс', value: (sat.limiting_resource && typeof sat.limiting_resource === 'object') ? resourceText(sat.limiting_resource) : 'не определён' });
-    if (safeStr(peak.drop_time || sat.rps_drop_iso)) rows.push({ label: 'Время деградации', value: safeStr(peak.drop_time || sat.rps_drop_iso) });
-    if (safeStr(sat.note)) rows.push({ label: 'Примечание', value: safeStr(sat.note) });
+    if (checks.length) rows.push({ label: LL.t('report.section.broken_checks'), value: checks.map((name) => slaCheckLabel(name) || name).join(', ') });
+    rows.push({ label: LL.t('report.section.failure_mode'), value: safeStr(failureModeTitle(sat) || sat.failure_mode) || '—' });
+    rows.push({ label: LL.t('report.section.limiting_resource'), value: (sat.limiting_resource && typeof sat.limiting_resource === 'object') ? resourceText(sat.limiting_resource) : LL.t('report.section.not_determined') });
+    if (safeStr(peak.drop_time || sat.rps_drop_iso)) rows.push({ label: LL.t('report.section.drop_time'), value: safeStr(peak.drop_time || sat.rps_drop_iso) });
+    const saturationNote = storedNote(sat, 'saturationNotes');
+    if (saturationNote) rows.push({ label: LL.t('report.section.note'), value: saturationNote });
     return rows;
   }
   function testTypeSection(report) {
     const r = report || {};
     const mode = reportMode(r);
-    if (mode === 'stability') return { title: 'Стабильность под нагрузкой', rows: stabilityRows(r) };
-    if (mode === 'spike') return { title: 'Всплески нагрузки', rows: spikeRows(r) };
-    if (mode === 'stress' && r.saturation && typeof r.saturation === 'object') return { title: 'Точка насыщения', rows: saturationRows(r) };
+    if (mode === 'stability') return { title: LL.t('report.section.title_stability'), rows: stabilityRows(r) };
+    if (mode === 'spike') return { title: LL.t('report.section.title_spike'), rows: spikeRows(r) };
+    if (mode === 'stress' && r.saturation && typeof r.saturation === 'object') return { title: LL.t('report.section.title_saturation'), rows: saturationRows(r) };
     return null;
   }
   function renderTrendsTable(report) {
@@ -1212,21 +1271,24 @@
     if (!trends.length) return '';
     const rows = trends.map((trend) => [
       `<tr class="${trend.flagged ? 'is-unstable' : ''}">`,
-      `<td>${escapeHtml(safeStr(trend.title) || TREND_TITLES[safeStr(trend.metric_kind)] || safeStr(trend.metric_kind))}${trend.flagged ? '<span class="step-flag">риск</span>' : ''}<div class="sla-check-note">${escapeHtml(safeStr(trend.label))}</div></td>`,
+      `<td>${escapeHtml(metricTitle(trend.metric_kind) || safeStr(trend.title) || safeStr(trend.metric_kind))}${trend.flagged ? `<span class="step-flag">${escapeHtml(LL.t('report.trends.risk_flag'))}</span>` : ''}<div class="sla-check-note">${escapeHtml(safeStr(trend.label))}</div></td>`,
       `<td class="num">${escapeHtml(formatNumber(trend.first))}</td>`,
       `<td class="num">${escapeHtml(formatNumber(trend.last))}</td>`,
       `<td class="num">${escapeHtml(signed(trend.change_pct, ' %') || '—')}</td>`,
       `<td class="num">${escapeHtml(formatNumber(trend.slope_per_hour))}</td>`,
       '</tr>'
     ].join('')).join('');
-    const threshold = st.trend_threshold_pct != null ? ` Риск — неблагоприятное изменение больше ${formatNumber(st.trend_threshold_pct)} %.` : '';
+    const note = st.trend_threshold_pct != null
+      ? LL.t('report.trends.note_threshold', { pct: formatNumber(st.trend_threshold_pct) })
+      : LL.t('report.trends.note');
+    const th = (key, cls) => `<th${cls ? ` class="${cls}"` : ''}>${escapeHtml(LL.t(key))}</th>`;
     return [
       '<section>',
-      `<div class="report-block-title">${LL.ui.term('trend_drift', 'Тренды за окно удержания')}</div>`,
+      `<div class="report-block-title">${LL.ui.term('trend_drift', LL.t('report.trends.title'))}</div>`,
       '<div class="step-table-wrap"><table class="step-table">',
-      '<thead><tr><th>Метрика</th><th class="num">Начало</th><th class="num">Конец</th><th class="num">Изменение</th><th class="num">Наклон в час</th></tr></thead>',
+      `<thead><tr>${th('report.trends.col_metric')}${th('report.trends.col_first', 'num')}${th('report.trends.col_last', 'num')}${th('report.trends.col_change', 'num')}${th('report.trends.col_slope', 'num')}</tr></thead>`,
       `<tbody>${rows}</tbody></table></div>`,
-      `<p class="step-note">Среднее первой и последней четверти окна удержания.${escapeHtml(threshold)}</p>`,
+      `<p class="step-note">${escapeHtml(note)}</p>`,
       '</section>'
     ].join('');
   }
@@ -1243,7 +1305,8 @@
     if (analysisError) {
       return `<div class="report-stack">${analysisError}${extraHtml || ''}</div>`;
     }
-    const verdict = verdictTone((report || {}).verdict || '');
+    // A verdict code from the API (old labels map as well, see LL.verdictCode).
+    const verdict = (report || {}).verdict || '';
     const verdictRationale = safeStr((report || {}).verdict_rationale || (report || {}).verdict_reason || (report || {}).rationale)
       .replace(/^([^\n]+)\n(?=- )/, '$1\n\n');
     const peak = ((report || {}).peak_performance || (report || {}).peak_perfomance || {});
@@ -1251,22 +1314,22 @@
     const actions = (report || {}).recommended_actions || (report || {}).actions || [];
     const verdictRows = [
       {
-        label: 'Вердикт ИИ',
-        html: `<span class="report-verdict-pill ${verdict.className}">${escapeHtml(verdict.text)}</span>`
+        label: LL.t('report.structured.ai_verdict'),
+        html: `<span class="report-verdict-pill ${LL.verdictReportClass(verdict)}">${escapeHtml(LL.verdictLabel(verdict))}</span>`
       }
     ];
     verdictRows._tableClass = 'report-aligned-value-table';
     const peakRows = [
-      { label: 'Максимальный RPS', html: escapeHtml(safeStr(peak.max_rps) || '—') },
-      { label: 'Время пиковой производительности', html: escapeHtml(safeStr(peak.max_time) || '—') },
-      { label: 'Время деградации', html: escapeHtml(safeStr(peak.drop_time) || '—') }
+      { label: LL.t('report.structured.max_rps'), html: escapeHtml(safeStr(peak.max_rps) || '—') },
+      { label: LL.t('report.section.peak_time'), html: escapeHtml(safeStr(peak.max_time) || '—') },
+      { label: LL.t('report.section.drop_time'), html: escapeHtml(safeStr(peak.drop_time) || '—') }
     ];
     peakRows._tableClass = 'report-aligned-value-table';
     const typeSection = renderTestTypeSection(report, domain);
     const sections = [
       renderKeyValueTable('', verdictRows),
       renderRationaleBox(verdictRationale),
-      typeSection || (peakTableApplies(domain, peak) ? renderKeyValueTable('Пиковая производительность', peakRows) : ''),
+      typeSection || (peakTableApplies(domain, peak) ? renderKeyValueTable(LL.t('report.structured.peak_title'), peakRows) : ''),
       renderProblemRecommendationRows(pairFindingsWithActions(findings, actions, domain)),
       extraHtml || ''
     ].filter(Boolean);
@@ -1291,11 +1354,20 @@
     if (skipped) final = data;
     let reason = '';
     if (unavailable) {
-      if (meta.reason === 'partial_scores') reason = 'он оценил не все варианты ответа';
-      else if (meta.reason === 'error' || meta.error) reason = 'вызов модели завершился ошибкой, подробности в журнале приложения';
-      else reason = 'его ответ не удалось разобрать';
+      if (meta.reason === 'partial_scores') reason = LL.t('report.judge.reason_partial');
+      else if (meta.reason === 'error' || meta.error) reason = LL.t('report.judge.reason_error');
+      else reason = LL.t('report.judge.reason_unparsed');
     }
     return { skipped, unavailable, reason, final };
+  }
+  // Words of a 0…1 score as the report shows them; '' for no score.
+  function scoreLevel(x) {
+    const v = Number(x);
+    if (!Number.isFinite(v) || v <= 0) return '';
+    if (v >= 0.9) return LL.t('report.judge.level.very_high');
+    if (v >= 0.75) return LL.t('report.judge.level.high');
+    if (v >= 0.55) return LL.t('report.judge.level.moderate');
+    return LL.t('report.judge.level.low');
   }
   function judgeDetailsMarkdown(scores) {
     try {
@@ -1313,14 +1385,7 @@
       // The judge ran but gave no usable scores: the result rests on the data check and confidence.
       const judgeUnavailable = scoreState.unavailable;
       const finalScore = judgeUnavailable ? scoreState.final : s.final_score;
-      const level = (x) => {
-        const v = Number(x);
-        if (!Number.isFinite(v) || v <= 0) return 'нет данных';
-        if (v >= 0.9) return 'очень высокая';
-        if (v >= 0.75) return 'высокая';
-        if (v >= 0.55) return 'умеренная';
-        return 'низкая';
-      };
+      const level = (x) => scoreLevel(x) || LL.t('report.judge.level.none');
       const num = (x) => {
         const v = Number(x);
         return Number.isFinite(v) ? v : null;
@@ -1331,13 +1396,13 @@
         const final = num(finalScore);
         if (judgeSkipped || judgeUnavailable) {
           const intro = judgeSkipped
-            ? 'Модель дала один вариант ответа, поэтому судья не запускался: выбирать было не из чего.'
-            : `Судья не дал оценку: ${scoreState.reason}. Итог посчитан по проверке данных и уверенности модели.`;
+            ? LL.t('report.judge.intro_skipped')
+            : LL.t('report.judge.intro_unavailable', { reason: scoreState.reason });
           if (data === null) return intro;
           // Same thresholds as the level in the section title.
-          if (data >= 0.75) return `${intro} Проверка по данным хорошо подтверждает выводы.`;
-          if (data >= 0.55) return `${intro} Проверка по данным в целом подтверждает выводы.`;
-          return `${intro} Проверка по данным подтверждает выводы слабо: сверяйте их с графиками.`;
+          if (data >= 0.75) return `${intro} ${LL.t('report.judge.data_good')}`;
+          if (data >= 0.55) return `${intro} ${LL.t('report.judge.data_fair')}`;
+          return `${intro} ${LL.t('report.judge.data_weak')}`;
         }
         const numericGrounding = num(dataDetails.numeric_grounding);
         const numericClaimsTotal = Number(dataDetails.numeric_claims_total || 0);
@@ -1353,92 +1418,98 @@
             && labelGrounding < 0.35
           ) {
             if (peakChecked && peakConsistency !== null && peakConsistency < 0.35) {
-              return 'Числа в тексте в целом сходятся с данными, но в findings мало прямых ссылок на имена метрик и серий, а peak_performance не подтвердился.';
+              return LL.t('report.judge.summary.labels_weak_peak');
             }
-            return 'Числа в тексте в целом сходятся с данными, но в findings мало прямых ссылок на имена метрик и серий из контекста.';
+            return LL.t('report.judge.summary.labels_weak');
           }
           if (numericClaimsTotal > 0 && numericGrounding !== null && numericGrounding < 0.35) {
-            return 'Судья оценивает ответ высоко, но числовые утверждения из текста подтверждаются данными слабо.';
+            return LL.t('report.judge.summary.numbers_weak');
           }
           if (
             labelGrounding !== null
             && labelGrounding < 0.35
             && (numericClaimsTotal === 0 || numericGrounding === null || numericGrounding < 0.55)
           ) {
-            return 'Судья оценивает ответ высоко, но текст слабо привязан к конкретным метрикам и сериям из контекста.';
+            return LL.t('report.judge.summary.binding_weak');
           }
           if (peakChecked && peakConsistency !== null && peakConsistency < 0.2 && data >= 0.4) {
-            return 'Основные выводы частично подтверждаются, но значение peak_performance заметно расходится с расчётом по данным.';
+            return LL.t('report.judge.summary.peak_mismatch');
           }
-          if (judge >= 0.8 && data >= 0.7) return 'Ответ выглядит надежным: и судья, и эвристическая проверка по данным оценивают его высоко.';
-          if (judge >= 0.8 && data < 0.5) return 'Судья оценивает ответ высоко, но эвристическая проверка по данным подтверждает его только частично.';
-          if (judge < 0.6 && data >= 0.7) return 'По данным ответ подтверждается лучше, чем по оценке судьи: вероятно, ему не хватило полноты или конкретики.';
-          if (judge < 0.6 && data < 0.6) return 'И судья, и эвристическая проверка по данным оценивают ответ сдержанно.';
-          if (Math.abs(judge - data) < 0.12) return 'Судья и эвристическая проверка по данным дают близкие оценки.';
+          if (judge >= 0.8 && data >= 0.7) return LL.t('report.judge.summary.reliable');
+          if (judge >= 0.8 && data < 0.5) return LL.t('report.judge.summary.data_partial');
+          if (judge < 0.6 && data >= 0.7) return LL.t('report.judge.summary.data_better');
+          if (judge < 0.6 && data < 0.6) return LL.t('report.judge.summary.both_reserved');
+          if (Math.abs(judge - data) < 0.12) return LL.t('report.judge.summary.close');
         }
         if (judge !== null && final !== null && final + 0.15 < judge) {
-          return 'Итоговая оценка заметно ниже оценки судьи, потому что проверка по данным нашла мало подтверждений.';
+          return LL.t('report.judge.summary.final_lower');
         }
-        return 'Это служебная оценка качества ответа: она помогает выбрать лучший кандидат среди нескольких вариантов.';
+        return LL.t('report.judge.summary.service');
       })();
       const lines = [];
       if (summary) lines.push(summary);
       lines.push('');
-      lines.push('#### Главное');
+      const item = (text) => lines.push(`- ${text}`);
+      const heading = (text) => lines.push(`#### ${text}`);
+      heading(LL.t('report.judge.main'));
       if (judgeSkipped) {
-        lines.push('- Судья: не запускался, модель дала один вариант ответа');
-        lines.push(`- Эвристическая проверка по данным: ${pct(dataScore)} (${level(dataScore)})`);
-        if (typeof conf === 'number') lines.push(`- Уверенность модели: ${pct(conf)} (${level(conf)})`);
+        item(LL.t('report.judge.judge_skipped'));
+        item(LL.t('report.judge.data_check', { pct: pct(dataScore), level: level(dataScore) }));
+        if (typeof conf === 'number') item(LL.t('report.judge.confidence', { pct: pct(conf), level: level(conf) }));
       } else if (judgeUnavailable) {
-        lines.push('- Судья: не дал оценку');
-        lines.push(`- Эвристическая проверка по данным: ${pct(dataScore)} (${level(dataScore)})`);
-        lines.push(`- Итог без судьи: ${pct(finalScore)} (${level(finalScore)})`);
-        if (typeof conf === 'number') lines.push(`- Уверенность модели: ${pct(conf)} (${level(conf)})`);
+        item(LL.t('report.judge.judge_unavailable'));
+        item(LL.t('report.judge.data_check', { pct: pct(dataScore), level: level(dataScore) }));
+        item(LL.t('report.judge.final_without_judge', { pct: pct(finalScore), level: level(finalScore) }));
+        if (typeof conf === 'number') item(LL.t('report.judge.confidence', { pct: pct(conf), level: level(conf) }));
       } else {
-        lines.push(`- Оценка текста судьей: ${pct(overall)} (${level(overall)})`);
-        lines.push(`- Эвристическая проверка по данным: ${pct(dataScore)} (${level(dataScore)})`);
-        lines.push(`- Итог для выбора кандидата: ${pct(finalScore)} (${level(finalScore)})`);
-        if (typeof conf === 'number') lines.push(`- Уверенность модели: ${pct(conf)} (${level(conf)})`);
+        item(LL.t('report.judge.judge_score', { pct: pct(overall), level: level(overall) }));
+        item(LL.t('report.judge.data_check', { pct: pct(dataScore), level: level(dataScore) }));
+        item(LL.t('report.judge.final_score', { pct: pct(finalScore), level: level(finalScore) }));
+        if (typeof conf === 'number') item(LL.t('report.judge.confidence', { pct: pct(conf), level: level(conf) }));
         lines.push('');
-        lines.push('#### За что поставлена оценка');
-        lines.push(`- Точность относительно данных: ${pct(factual)}`);
-        lines.push(`- Полнота покрытия важных наблюдений: ${pct(completeness)}`);
-        lines.push(`- Конкретика по метрикам и компонентам: ${pct(specificity)}`);
+        heading(LL.t('report.judge.criteria_title'));
+        item(LL.t('report.judge.factual', { pct: pct(factual) }));
+        item(LL.t('report.judge.completeness', { pct: pct(completeness) }));
+        item(LL.t('report.judge.specificity', { pct: pct(specificity) }));
       }
       if (!judgeSkipped && !judgeUnavailable && Object.keys(rubric).length) {
         lines.push('');
-        lines.push('#### Детальная проверка');
-        lines.push(`- Опора на данные: ${pct(rubric.evidence_grounding)}`);
-        lines.push(`- Покрытие важных проблем: ${pct(rubric.issue_coverage)}`);
-        lines.push(`- Насыщенность конкретикой: ${pct(rubric.specificity)}`);
-        lines.push(`- Учет SLA и рисков: ${pct(rubric.sla_alignment)}`);
-        lines.push(`- Полезность рекомендаций: ${pct(rubric.actionability)}`);
+        heading(LL.t('report.judge.rubric_title'));
+        item(LL.t('report.judge.rubric.evidence_grounding', { pct: pct(rubric.evidence_grounding) }));
+        item(LL.t('report.judge.rubric.issue_coverage', { pct: pct(rubric.issue_coverage) }));
+        item(LL.t('report.judge.rubric.specificity', { pct: pct(rubric.specificity) }));
+        item(LL.t('report.judge.rubric.sla_alignment', { pct: pct(rubric.sla_alignment) }));
+        item(LL.t('report.judge.rubric.actionability', { pct: pct(rubric.actionability) }));
       }
       if (Object.keys(dataDetails).length) {
         lines.push('');
-        lines.push('#### Что подтвердилось по данным');
-        lines.push(`- Прямые ссылки на имена метрик и серий: ${pct(dataDetails.label_grounding)}`);
+        heading(LL.t('report.judge.data_title'));
+        item(LL.t('report.judge.data.label_grounding', { pct: pct(dataDetails.label_grounding) }));
         if (Number(dataDetails.numeric_claims_total || 0) > 0) {
-          lines.push(`- Совпадение чисел из текста: ${pct(dataDetails.numeric_grounding)} (подтверждено ${Number(dataDetails.numeric_claims_supported || 0)} из ${Number(dataDetails.numeric_claims_total || 0)})`);
+          item(LL.t('report.judge.data.numeric', {
+            pct: pct(dataDetails.numeric_grounding),
+            supported: Number(dataDetails.numeric_claims_supported || 0),
+            total: Number(dataDetails.numeric_claims_total || 0)
+          }));
         } else {
-          lines.push('- Совпадение чисел из текста: не проверялось, в findings не найдено явных числовых утверждений.');
+          item(LL.t('report.judge.data.numeric_none'));
         }
         if (dataDetails.peak_checked) {
-          lines.push(`- Совпадение peak_performance: ${pct(dataDetails.peak_consistency)}`);
+          item(LL.t('report.judge.data.peak', { pct: pct(dataDetails.peak_consistency) }));
         } else {
-          lines.push('- Совпадение peak_performance: не проверялось.');
+          item(LL.t('report.judge.data.peak_none'));
         }
-        lines.push(`- Опора рекомендаций на подтвержденные наблюдения: ${pct(dataDetails.recommendation_grounding)}`);
+        item(LL.t('report.judge.data.recommendation_grounding', { pct: pct(dataDetails.recommendation_grounding) }));
       }
       if (meta.used_safe_path || meta.context_truncated || Number(meta.truncated_candidates || 0) > 0) {
         lines.push('');
-        lines.push('#### Особенности оценки');
-        if (meta.used_safe_path) lines.push('- Для этого ответа использовался совместимый fallback-режим без доменной rubric.');
-        if (meta.context_truncated) lines.push('- Для этого отчета judge работал с укороченной версией контекста.');
-        if (Number(meta.truncated_candidates || 0) > 0) lines.push(`- В этом отчете часть candidate-ответов была укорочена перед оценкой: ${Number(meta.truncated_candidates || 0)}.`);
+        heading(LL.t('report.judge.notes_title'));
+        if (meta.used_safe_path) item(LL.t('report.judge.notes.safe_path'));
+        if (meta.context_truncated) item(LL.t('report.judge.notes.context_truncated'));
+        if (Number(meta.truncated_candidates || 0) > 0) item(LL.t('report.judge.notes.truncated_candidates', { count: Number(meta.truncated_candidates || 0) }));
       }
       lines.push('');
-      lines.push('_Проверка по данным остаётся эвристической: она оценивает привязку текста к метрикам, совпадение чисел и согласованность peak_performance, а не выполняет полноценный факт-чекинг каждой фразы._');
+      lines.push(`_${LL.t('report.judge.footer')}_`);
       return lines.join('\n');
     } catch (e) { return ''; }
   }
@@ -1447,42 +1518,35 @@
     const judge = s.judge || {};
     const state = answerScoreState(s);
     const raw = state.final !== null ? state.final : Number(judge.overall);
-    if (!Number.isFinite(raw) || raw <= 0) return '';
-    if (raw >= 0.9) return 'очень высокая';
-    if (raw >= 0.75) return 'высокая';
-    if (raw >= 0.55) return 'умеренная';
-    return 'низкая';
+    return scoreLevel(raw);
   }
   function answerSubtitle(scores) {
     const state = answerScoreState(scores);
-    if (state.skipped) return 'по проверке данных, без судьи';
-    if (state.unavailable) return 'по проверке данных: судья не дал оценку';
-    return 'как выбран и проверен ответ ИИ';
+    if (state.skipped) return LL.t('report.judge.subtitle_skipped');
+    if (state.unavailable) return LL.t('report.judge.subtitle_unavailable');
+    return LL.t('report.judge.subtitle_default');
   }
   function judgeSectionHtml(scores) {
     const md = judgeDetailsMarkdown(scores);
     if (!safeStr(md)) return '';
     const level = confidenceLevelLabel(scores);
     const titleHtml = level
-      ? `${LL.ui.term('confidence', 'Достоверность ответа')}: ${escapeHtml(level)}`
-      : LL.ui.term('confidence', 'Оценка ответа');
+      ? `${LL.ui.term('confidence', LL.t('report.judge.title_reliability'))}: ${escapeHtml(level)}`
+      : LL.ui.term('confidence', LL.t('report.judge.title_score'));
     return [
       '<details class="report-collapsible">',
-      `<summary><span>${titleHtml}</span><small class="report-collapsible-subtitle">${answerSubtitle(scores)}</small></summary>`,
+      `<summary><span>${titleHtml}</span><small class="report-collapsible-subtitle">${escapeHtml(answerSubtitle(scores))}</small></summary>`,
       `<div class="report-collapsible-body report-markdown-block">${markdownToSafeHtml(md)}</div>`,
       '</details>'
     ].join('');
   }
 
-  const SLA_CHECK_LABELS = {
-    target_rps: 'Целевой RPS',
-    error_rate: 'Доля ошибок, %',
-    p95_latency: 'P95 latency, мс',
-    p99_latency: 'P99 latency, мс',
-    cpu_usage: 'CPU, %',
-    memory_usage: 'Память, %',
-    recovery: 'Восстановление после всплеска, мин'
-  };
+  const SLA_CHECK_NAMES = ['target_rps', 'error_rate', 'p95_latency', 'p99_latency', 'cpu_usage', 'memory_usage', 'recovery'];
+  // Visible name of an SLA check (criterion and unit) in the UI language; '' for an unknown name.
+  function slaCheckLabel(name) {
+    const key = safeStr(name);
+    return SLA_CHECK_NAMES.indexOf(key) >= 0 ? LL.t(`report.sla_check.${key}`) : '';
+  }
   function formatNumber(value) {
     const n = Number(value);
     if (value === null || value === undefined || value === '' || !Number.isFinite(n)) return '—';
@@ -1506,62 +1570,92 @@
       percent: Math.round((actual / threshold) * 100)
     };
   }
+  // 3px bar "actual against the threshold" (the .fig-bar of the figures): fill in the check tone, tick at the threshold.
   function slaBarHtml(check) {
     const bar = slaBarModel(check);
     if (!bar) return '';
-    const title = `${bar.percent} % от порога${bar.higherBetter ? ' (больше — лучше)' : ''}`;
-    return `<div class="sla-bar ${bar.tone}${bar.higherBetter ? ' is-higher-better' : ''}" title="${escapeHtml(title)}" aria-hidden="true">`
-      + `<span class="sla-bar-fill" style="width:${bar.fill}%"></span><span class="sla-bar-mark" style="left:${bar.mark}%"></span></div>`;
+    const title = bar.higherBetter ? LL.t('report.sla.bar_title_higher', { percent: bar.percent }) : LL.t('report.sla.bar_title', { percent: bar.percent });
+    const tone = bar.tone === 'ok' ? '' : ` class="${bar.tone}"`;
+    return `<div class="fig-bar${bar.higherBetter ? ' is-higher-better' : ''}" title="${escapeHtml(title)}"><i${tone} style="width:${bar.fill}%"></i><b style="left:${bar.mark}%"></b></div>`;
   }
+  // Comparison sign of a threshold: the target RPS is a floor, every other check a ceiling.
+  function thresholdSign(name) {
+    return safeStr(name) === 'target_rps' ? '≥' : '≤';
+  }
+  // Query and series a check was computed on («LT: RPS sum by all groups · all»), '' when the report does not say.
+  function slaSourceText(check, window, table) {
+    const where = checkSource(check, window, table);
+    return [where.label, where.series].map(safeStr).filter(Boolean).join(' · ');
+  }
+  // Where the criteria were checked, for the caption of the SLA table: «ступень 5 · 15:54–15:58», the hold window
+  // or the spike windows (clock of the report, as the step intervals); '' when the report does not say.
+  function slaScopeText(finalRow) {
+    if (!finalRow) return '';
+    const parsed = parseJsonish(finalRow.parsed) || {};
+    const window = markerSlaWindow(finalRow);
+    const mode = markerMode(parsed, window);
+    if (mode === 'spike') return LL.t('report.sla.scope_spike');
+    const table = embeddedLoadStepTable(finalRow);
+    const steps = table ? table.steps.filter(isPlainObject) : [];
+    const offset = reportOffsetHours(steps);
+    const startMs = utcMoment(window.start || window.start_iso);
+    const endMs = utcMoment(window.end || window.end_iso);
+    const span = startMs !== null && endMs !== null ? clockAt(startMs, offset) + '–' + clockAt(endMs, offset) : '';
+    if (mode === 'hold') return span ? LL.t('report.sla.scope_hold', { span: span }) : LL.t('report.sla.scope_hold_only');
+    const chosen = table ? chosenSlaStep(linkSlaToSteps(table, finalRow).steps, window, markerChecks(finalRow)) : null;
+    const index = chosen ? safeStr(chosen.index) : '';
+    if (index) return span ? LL.t('report.sla.scope_step', { index: index, span: span }) : LL.t('report.sla.scope_step_only', { index: index });
+    return span ? LL.t('report.sla.scope_window', { span: span }) : '';
+  }
+  // SLA criteria without a box: ✓/✗ glyph, criterion with its query and series under it, threshold with the sign,
+  // actual and the bar; the summary stored with the report under the table.
   function renderSlaChecklist(finalRow) {
     const slaDetails = parseJsonish(finalRow.sla_details) || {};
     const checks = Array.isArray(slaDetails.checks) ? slaDetails.checks : [];
     if (!checks.length) {
+      const link = LL.html(`<a href="/settings">${escapeHtml(LL.t('report.sla.empty_link'))}</a>`);
       return [
-        '<div class="hero-label">SLA-критерии</div>',
-        '<div class="hero-empty">SLA-критерии для этого сервиса не заданы, поэтому вердикт определён оценкой ИИ. ',
-        'Задать пороги можно в <a href="/settings">настройках</a> (раздел «SLA-критерии»).</div>'
+        `<div class="lbl rep-sla-cap">${escapeHtml(LL.t('report.sla.title'))}</div>`,
+        `<div class="hero-empty">${LL.tHtml('report.sla.empty', { link: link })}</div>`
       ].join('');
     }
+    const window = markerSlaWindow(finalRow);
+    const source = markerTable(finalRow, null);
     const rows = checks.map((check) => {
       const name = safeStr(check && check.name);
-      const plainLabel = SLA_CHECK_LABELS[name] || name || '—';
+      const plainLabel = slaCheckLabel(name) || name || '—';
       const termKey = name === 'target_rps' ? 'target_rps' : (name === 'error_rate' ? 'error_rate' : (name.startsWith('p95') ? 'p95' : ''));
       const label = termKey ? LL.ui.term(termKey, plainLabel) : escapeHtml(plainLabel);
       const passed = check ? check.passed : null;
       const statusClass = passed === true ? 'ok' : (passed === false ? 'fail' : 'na');
       const statusMark = passed === true ? '✓' : (passed === false ? '✗' : '—');
-      const statusTitle = passed === true ? 'Порог соблюдён' : (passed === false ? 'Порог нарушен' : 'Нет данных для проверки');
+      const statusTitle = passed === true ? LL.t('report.sla.status_ok') : (passed === false ? LL.t('report.sla.status_fail') : LL.t('report.sla.status_na'));
+      // The stored message (report language) stays as the tooltip when the query names the source.
       const note = safeStr(check && check.message);
+      const where = isPlainObject(check) ? slaSourceText(check, window, source) : '';
+      const sub = where || note;
+      const threshold = formatNumber(check && check.threshold);
       return [
-        '<tr>',
-        `<td><span class="sla-status ${statusClass}" title="${escapeHtml(statusTitle)}">${statusMark}</span></td>`,
-        `<td>${label}${note ? `<div class="sla-check-note">${escapeHtml(note)}</div>` : ''}</td>`,
-        `<td class="num">${escapeHtml(formatNumber(check && check.threshold))}</td>`,
-        `<td class="num sla-actual">${escapeHtml(formatNumber(check && check.actual))}${slaBarHtml(check)}</td>`,
+        `<tr class="is-${statusClass}">`,
+        `<td class="g"><span class="rep-glyph ${statusClass}" role="img" title="${escapeHtml(statusTitle)}" aria-label="${escapeHtml(statusTitle)}">${statusMark}</span></td>`,
+        `<td class="name"${where && note ? ` title="${escapeHtml(note)}"` : ''}>${label}${sub ? `<span class="sub m">${escapeHtml(sub)}</span>` : ''}</td>`,
+        `<td class="n th">${escapeHtml(threshold === '—' ? threshold : `${thresholdSign(name)} ${threshold}`)}</td>`,
+        `<td class="n act">${escapeHtml(formatNumber(check && check.actual))}</td>`,
+        `<td class="n bar">${slaBarHtml(check)}</td>`,
         '</tr>'
       ].join('');
     }).join('');
     const summary = safeStr(slaDetails.summary);
+    const scope = slaScopeText(finalRow);
+    const stepNote = slaStepNote(finalRow);
+    const th = (key, cls) => `<th${cls ? ` class="${cls}"` : ''}><span class="visually-hidden">${escapeHtml(LL.t(key))}</span></th>`;
     return [
-      '<div class="hero-label">SLA-критерии</div>',
-      '<table class="sla-table"><thead><tr><th></th><th>Критерий</th><th class="num">Порог</th><th class="num">Факт</th></tr></thead>',
+      `<div class="lbl rep-sla-cap"${stepNote ? ` title="${escapeHtml(stepNote)}"` : ''}>${escapeHtml(LL.t('report.sla.title'))}${scope ? ` · ${escapeHtml(scope)}` : ''}</div>`,
+      '<table class="rep-sla-table">',
+      `<thead><tr>${th('report.sla.col_status')}${th('report.sla.col_criterion')}${th('report.sla.col_threshold', 'n')}${th('report.sla.col_actual', 'n')}${th('report.sla.col_bar', 'n')}</tr></thead>`,
       `<tbody>${rows}</tbody></table>`,
-      summary ? `<div class="hero-sub">${escapeHtml(summary)}</div>` : '',
-      slaChecklistNote(finalRow)
+      summary ? `<div class="hero-sub rep-sla-note">${escapeHtml(summary)}</div>` : ''
     ].join('');
-  }
-  function renderHeroMeta(entries) {
-    const items = entries
-      .filter((entry) => entry && safeStr(entry.value))
-      .map((entry) => [
-        '<div class="hero-meta-entry">',
-        `<span class="hero-label">${entry.labelHtml || escapeHtml(entry.label)}</span>`,
-        `<div class="hero-meta-value">${escapeHtml(entry.value)}</div>`,
-        entry.note ? `<div class="hero-meta-note">${escapeHtml(entry.note)}</div>` : '',
-        '</div>'
-      ].join(''));
-    return items.length ? `<div class="hero-meta">${items.join('')}</div>` : '';
   }
   function hhmmFromIso(value) {
     const match = String(value || '').match(/T(\d{2}:\d{2})/);
@@ -1585,10 +1679,12 @@
   }
   function hintFromCheck(checks, name) {
     const check = (checks || []).find((item) => item && item.name === name);
-    const message = safeStr(check && check.message);
-    const label = (message.match(/label='([^']*)'/) || message.match(/запрос «([^»]*)»/) || [])[1] || '';
-    const series = (message.match(/series='([^']*)'/) || message.match(/серия «([^»]*)»/) || [])[1] || '';
-    return { label: label, series: series, actual: check ? check.actual : null };
+    const hint = messageHint(safeStr(check && check.message));
+    return {
+      label: safeStr(check && check.query_label) || hint.label,
+      series: safeStr(check && check.series) || hint.series,
+      actual: check ? check.actual : null
+    };
   }
   function findStepSection(sections, label) {
     const target = safeStr(label).toLowerCase();
@@ -1735,9 +1831,9 @@
     return det && Array.isArray(det.checks) ? det.checks : [];
   }
   function slaStatusWord(passed) {
-    if (passed === true) return 'пройден';
-    if (passed === false) return 'не пройден';
-    return 'нет данных';
+    if (passed === true) return LL.t('report.sla.word_pass');
+    if (passed === false) return LL.t('report.sla.word_fail');
+    return LL.t('report.sla.word_na');
   }
   function slaStepSentence(chosen, checks, window, steps) {
     if (!chosen || !checks.length) return '';
@@ -1749,16 +1845,15 @@
     const levelText = Number.isFinite(level) ? formatNumber(level) : '';
     const stepRps = Number(chosen.rps);
     const differs = levelText && Number.isFinite(stepRps) && Math.abs(stepRps - level) > 1;
-    const head = 'SLA проверено на ступени ' + (chosen.index || '') + ' (' + stepInterval(chosen) + ')';
-    const windowBit = windowText
-      ? ', окно ' + windowText + (levelText ? ', RPS окна ' + levelText : '')
-      : '';
-    const meanBit = differs ? '. RPS в таблице — среднее всего интервала, пороги считаются по этому окну' : '';
-    return head + windowBit + meanBit + '. ' + slaChecksText(checks) + '.';
+    const params = { index: chosen.index || '', interval: stepInterval(chosen), window: windowText, level: levelText };
+    let head = LL.t('report.steps.sla_step', params);
+    if (windowText) head = levelText ? LL.t('report.steps.sla_step_window_level', params) : LL.t('report.steps.sla_step_window', params);
+    const meanBit = differs ? '. ' + LL.t('report.steps.sla_mean_note') : '';
+    return head + meanBit + '. ' + slaChecksText(checks) + '.';
   }
   function slaChecksText(checks) {
     return checks.map((check) => {
-      const label = SLA_CHECK_LABELS[safeStr(check && check.name)] || safeStr(check && check.name) || 'критерий';
+      const label = slaCheckLabel(check && check.name) || safeStr(check && check.name) || LL.t('report.steps.check_fallback');
       const actual = formatNumber(check && check.actual);
       return label + (actual === '—' ? '' : ' ' + actual) + ' — ' + slaStatusWord(check && check.passed);
     }).join('; ');
@@ -1773,9 +1868,12 @@
       const offset = reportOffsetHours(steps);
       const startMs = momentMs(window.start || window.start_iso);
       const endMs = momentMs(window.end || window.end_iso);
-      const span = startMs != null && endMs != null ? ' ' + clockAt(startMs, offset) + '–' + clockAt(endMs, offset) : '';
+      const span = startMs != null && endMs != null ? clockAt(startMs, offset) + '–' + clockAt(endMs, offset) : '';
       const level = Number(window.level);
-      const head = 'SLA проверено на окне удержания' + span + (Number.isFinite(level) ? ', средний RPS ' + formatNumber(level) : '');
+      const params = { span: span, level: Number.isFinite(level) ? formatNumber(level) : '' };
+      let head;
+      if (span) head = Number.isFinite(level) ? LL.t('report.steps.sla_hold_span_level', params) : LL.t('report.steps.sla_hold_span', params);
+      else head = Number.isFinite(level) ? LL.t('report.steps.sla_hold_level', params) : LL.t('report.steps.sla_hold');
       return { steps: steps, slaNote: checks.length ? head + '. ' + slaChecksText(checks) + '.' : head + '.' };
     }
     if (kind === 'spike') {
@@ -1783,7 +1881,7 @@
       steps.forEach((step) => { step.selected = false; });
       const covered = steps.find((step) => stepCovers(step, moment));
       if (covered) covered.selected = true;
-      const head = 'SLA проверено в окнах всплесков: по каждому порогу — худший всплеск';
+      const head = LL.t('report.steps.sla_spike');
       return { steps: steps, slaNote: checks.length ? head + '. ' + slaChecksText(checks) + '.' : head + '.' };
     }
     if (!steps.some((step) => step.selected)) {
@@ -1795,50 +1893,76 @@
     const chosen = steps.find((step) => step.selected) || null;
     return { steps: steps, slaNote: slaStepSentence(chosen, checks, window, steps) };
   }
-  function slaChecklistNote(finalRow) {
+  // The full «SLA проверено на ступени …» sentence (plain text), shown as the tooltip of the SLA caption.
+  function slaStepNote(finalRow) {
     const table = embeddedLoadStepTable(finalRow);
     if (!table) return '';
-    const linked = linkSlaToSteps(table, finalRow);
-    return linked.slaNote ? `<div class="hero-sub">${escapeHtml(linked.slaNote)}</div>` : '';
+    return safeStr(linkSlaToSteps(table, finalRow).slaNote);
   }
-  function renderLoadStepTableHtml(table) {
-    const rows = table.steps.map((step) => {
-      const classes = [];
-      if (step.selected) classes.push('is-selected');
-      if (step.stable === false) classes.push('is-unstable');
-      const badge = step.selected ? '<span class="step-badge">SLA</span>' : '';
-      let flagText = '';
-      if (step.after_drop === true) flagText = 'после просадки';
-      else if (step.dip === true) flagText = 'кратковременная просадка';
-      else if (step.stable === false) flagText = 'нестабильная';
-      const drop = flagText ? `<span class="step-flag">${flagText}</span>` : '';
-      // The interval shown in the row (plateau when known) is what the charts highlight on hover.
-      const range = stepRangeMs(step);
-      const rangeAttrs = range[0] !== null && range[1] !== null ? ` data-step-from="${range[0]}" data-step-to="${range[1]}"` : '';
-      return [
-        `<tr class="${classes.join(' ')}"${rangeAttrs}>`,
-        `<td>${escapeHtml(String(step.index || ''))}${badge}${drop}</td>`,
-        `<td>${escapeHtml(stepInterval(step))}</td>`,
-        `<td class="num">${escapeHtml(formatNumber(step.rps))}</td>`,
-        `<td class="num">${escapeHtml(formatNumber(step.latency_p95))}</td>`,
-        '</tr>'
-      ].join('');
-    }).join('');
-    const sourceBits = [];
-    if (safeStr(table.latency_query)) sourceBits.push('запрос «' + safeStr(table.latency_query) + '»');
-    if (safeStr(table.latency_series)) sourceBits.push('серия «' + safeStr(table.latency_series) + '»');
-    else if (safeStr(table.latency_query)) sourceBits.push('максимум по сериям запроса');
-    const source = sourceBits.length ? ' ' + escapeHtml(sourceBits.join(', ')) + '.' : '';
+  // One cell of the step row: «5 · 250 RPS» (SLA tag on the step the criteria were checked on) over «15:54–15:58 ·
+  // p95 462.67 мс»; a step after a drop is named so and drawn in the fail tone. The cell grows with the step length,
+  // so it sits under its step of the profile; hovering or focusing it highlights that interval on the charts.
+  function stepCellHtml(step) {
+    const classes = ['rep-step'];
+    if (step.selected) classes.push('is-sla');
+    if (step.after_drop === true) classes.push('is-bad');
+    else if (step.stable === false) classes.push('is-unstable');
+    const rps = formatNumber(step.rps);
+    const rpsText = rps === '—' ? '' : `${rps} RPS`;
+    const head = step.after_drop === true
+      ? [LL.t('report.steps.flag_after_drop'), rpsText].filter(Boolean).join(' · ')
+      : [safeStr(step.index), rpsText].filter(Boolean).join(' · ');
+    const p95 = finiteOrNull(step.latency_p95);
+    const sub = [stepInterval(step), p95 === null ? '' : LL.t('report.steps.cell_p95', { value: formatNumber(p95) })].filter(Boolean).join(' · ');
+    let flag = '';
+    if (step.after_drop !== true && step.dip === true) flag = LL.t('report.steps.flag_dip');
+    else if (step.after_drop !== true && step.stable === false) flag = LL.t('report.steps.flag_unstable');
+    // The interval shown in the cell (plateau when known) is what the charts highlight.
+    const range = stepRangeMs(step);
+    const rangeAttrs = range[0] !== null && range[1] !== null ? ` data-step-from="${range[0]}" data-step-to="${range[1]}" tabindex="0"` : '';
+    const indexAttr = step.index === null || step.index === undefined || step.index === '' ? '' : ` data-step-index="${escapeHtml(String(step.index))}"`;
+    const start = utcMoment(step.start_iso);
+    const end = utcMoment(step.end_iso);
+    const minutes = start !== null && end !== null && end > start ? Math.round((end - start) / 6000) / 10 : 1;
     return [
-      '<details class="report-collapsible">',
-      '<summary><span>Ступени теста</span><small class="report-collapsible-subtitle">RPS и время отклика</small></summary>',
-      '<div class="report-collapsible-body">',
-      '<div class="step-table-wrap"><table class="step-table">',
-      '<thead><tr><th>Ступень</th><th>Интервал</th><th class="num">RPS</th><th class="num">Время отклика, p95</th></tr></thead>',
-      `<tbody>${rows}</tbody></table></div>`,
-      `<p class="step-note">RPS — уровень ступени. Время отклика — p95 на плато, без хвоста после просадки.${source} Наведите на строку, чтобы подсветить ступень на графиках.</p>`,
-      table.slaNote ? `<p class="step-sla">${escapeHtml(table.slaNote)}</p>` : '',
-      '</div></details>'
+      `<div class="${classes.join(' ')}" role="listitem"${rangeAttrs}${indexAttr} style="flex-grow:${minutes}">`,
+      `<b>${escapeHtml(head || '—')}${step.selected ? '<span class="rep-step-tag">SLA</span>' : ''}</b>`,
+      `<span class="rep-step-sub">${escapeHtml(sub)}</span>`,
+      flag ? `<span class="rep-step-flag">${escapeHtml(flag)}</span>` : '',
+      '</div>'
+    ].join('');
+  }
+  // Row of steps under the load profile («Ход теста») and the note on where the numbers come from.
+  function renderLoadStepTableHtml(table) {
+    const cells = table.steps.map(stepCellHtml).join('');
+    const sourceBits = [];
+    if (safeStr(table.latency_query)) sourceBits.push(LL.t('report.steps.source_query', { query: safeStr(table.latency_query) }));
+    if (safeStr(table.latency_series)) sourceBits.push(LL.t('report.steps.source_series', { series: safeStr(table.latency_series) }));
+    else if (safeStr(table.latency_query)) sourceBits.push(LL.t('report.steps.source_max'));
+    const note = sourceBits.length ? LL.t('report.steps.note_source', { source: sourceBits.join(', ') }) : LL.t('report.steps.note');
+    return [
+      `<div class="rep-steprow" role="list" aria-label="${escapeHtml(LL.t('report.steps.title'))}">${cells}</div>`,
+      `<p class="rep-step-note">${escapeHtml(note)}</p>`
+    ].join('');
+  }
+  // «UTC+3», «UTC-5», «UTC+5:30» for an offset in hours.
+  function utcOffsetText(hours) {
+    const value = Number(hours);
+    if (!Number.isFinite(value)) return 'UTC';
+    const abs = Math.abs(value);
+    const whole = Math.floor(abs);
+    const minutes = Math.round((abs - whole) * 60);
+    return `UTC${value < 0 ? '-' : '+'}${whole}${minutes ? `:${String(minutes).padStart(2, '0')}` : ''}`;
+  }
+  // «Ход теста»: heading with the clock of the report, the profile host (LL.charts.stepProfile) and the step row.
+  function timelineHtml(table) {
+    return [
+      '<div class="rep-sec">',
+      `<h2>${escapeHtml(LL.t('report.timeline.title'))}</h2>`,
+      `<span class="lbl">${escapeHtml(LL.t('report.timeline.caption', { zone: utcOffsetText(reportOffsetHours(table.steps)) }))}</span>`,
+      '</div>',
+      '<div class="rep-profile" data-step-profile></div>',
+      renderLoadStepTableHtml(table)
     ].join('');
   }
   // ---- chart markers, SLA thresholds and series order ------------------------------------------------
@@ -1846,13 +1970,14 @@
   // on the Confluence PNGs; tests/test_report_markers.py runs both sides on the same rows. Only
   // deterministic data is used: the step table, the SLA window and the test-type payloads, never the
   // LLM text of peak_performance.max_time / drop_time.
+  // Check name -> [dictionary key of the threshold label ({value}), tone].
   const THRESHOLD_SPECS = {
-    target_rps: ['цель ≥ {} RPS', 'accent'],
-    p95_latency: ['p95 ≤ {} мс', 'fail'],
-    p99_latency: ['p99 ≤ {} мс', 'fail'],
-    error_rate: ['ошибки ≤ {} %', 'fail'],
-    cpu_usage: ['CPU ≤ {} %', 'fail'],
-    memory_usage: ['память ≤ {} %', 'fail']
+    target_rps: ['report.threshold.target_rps', 'accent'],
+    p95_latency: ['report.threshold.p95_latency', 'fail'],
+    p99_latency: ['report.threshold.p99_latency', 'fail'],
+    error_rate: ['report.threshold.error_rate', 'fail'],
+    cpu_usage: ['report.threshold.cpu_usage', 'fail'],
+    memory_usage: ['report.threshold.memory_usage', 'fail']
   };
   const DROP_MERGE_MS = 60000;
   function isPlainObject(value) { return !!value && typeof value === 'object' && !Array.isArray(value); }
@@ -1948,7 +2073,7 @@
     const chosen = chosenSlaStep(steps, window, checks);
     const kind = safeStr(window.kind).toLowerCase() || 'step';
     const hasWindow = Object.keys(window).length > 0;
-    const label = chosen && safeStr(chosen.index) ? `SLA: ступень ${safeStr(chosen.index)}` : 'SLA: окно';
+    const label = chosen && safeStr(chosen.index) ? LL.t('report.marker.sla_step', { index: safeStr(chosen.index) }) : LL.t('report.marker.sla_window');
     let band = null;
     if (hasWindow && kind === 'step') band = bandItem(window.start || window.start_iso, window.end || window.end_iso, label, 'accent', 'sla');
     if (!band && chosen) band = bandItem(chosen.plateau_start_iso || chosen.start_iso, chosen.plateau_end_iso || chosen.end_iso, label, 'accent', 'sla');
@@ -1969,7 +2094,7 @@
       const position = stepPosition(steps, chosen);
       const following = position >= 0 && position < steps.length - 1 ? steps[position + 1] : null;
       degradationMs = following ? utcMoment(following.start_iso) : utcMoment(window.end || window.end_iso);
-      if (degradationMs !== null) out.push(markerItem('line', degradationMs, null, `деградация ${clockAt(degradationMs, offset)}`, 'fail', 'degradation'));
+      if (degradationMs !== null) out.push(markerItem('line', degradationMs, null, LL.t('report.marker.degradation', { time: clockAt(degradationMs, offset) }), 'fail', 'degradation'));
     }
     let dropMs = saturation ? utcMoment(saturation.rps_drop_iso) : null;
     if (dropMs === null) {
@@ -1977,16 +2102,16 @@
       dropMs = afterDrop ? utcMoment(afterDrop.start_iso) : null;
     }
     if (dropMs !== null && (degradationMs === null || Math.abs(dropMs - degradationMs) > DROP_MERGE_MS)) {
-      out.push(markerItem('line', dropMs, null, `падение RPS ${clockAt(dropMs, offset)}`, 'fail', 'rps_drop'));
+      out.push(markerItem('line', dropMs, null, LL.t('report.marker.rps_drop', { time: clockAt(dropMs, offset) }), 'fail', 'rps_drop'));
     }
     return out;
   }
   function holdMarkers(parsed, window) {
     const stability = isPlainObject(parsed.stability_under_load) ? parsed.stability_under_load : {};
     const hold = isPlainObject(stability.hold) ? stability.hold : {};
-    let band = bandItem(hold.start_iso, hold.end_iso, 'окно удержания', 'accent', 'hold');
+    let band = bandItem(hold.start_iso, hold.end_iso, LL.t('report.marker.hold_window'), 'accent', 'hold');
     if (!band && safeStr(window.kind).toLowerCase() === 'hold') {
-      band = bandItem(window.start || window.start_iso, window.end || window.end_iso, 'окно удержания', 'accent', 'hold');
+      band = bandItem(window.start || window.start_iso, window.end || window.end_iso, LL.t('report.marker.hold_window'), 'accent', 'hold');
     }
     return band ? [band] : [];
   }
@@ -1995,12 +2120,12 @@
     const analysis = isPlainObject(parsed.spike_analysis) ? parsed.spike_analysis : {};
     (Array.isArray(analysis.spikes) ? analysis.spikes : []).forEach((spike, position) => {
       if (!isPlainObject(spike)) return;
-      const label = safeStr(spike.label) || `всплеск ${safeStr(spike.index) || position + 1}`;
+      const label = safeStr(spike.label) || LL.t('report.marker.spike_n', { index: safeStr(spike.index) || position + 1 });
       const band = bandItem(spike.start_iso, spike.end_iso, label, 'warn', 'spike');
       if (band) out.push(band);
     });
     if (!out.length && safeStr(window.kind).toLowerCase() === 'spike') {
-      const band = bandItem(window.start || window.start_iso, window.end || window.end_iso, safeStr(window.title) || 'всплеск', 'warn', 'spike');
+      const band = bandItem(window.start || window.start_iso, window.end || window.end_iso, safeStr(window.title) || LL.t('report.marker.spike'), 'warn', 'spike');
       if (band) out.push(band);
     }
     return out;
@@ -2016,9 +2141,14 @@
     const steps = (markerTable(finalRow, table).steps || []).filter(isPlainObject);
     return stepMarkers(parsed, window, markerChecks(finalRow), steps);
   }
+  // Query label and series named in the text of a check (reports saved before checks carried query_label and
+  // series): label='…' / series='…', or «запрос «…»» / «серия «…»» of a ru report and «query «…»» / «series «…»»
+  // of an en one (AI/report_markers.py parses the same).
+  const QUERY_HINT = /(?:запрос|query) «([^»]*)»/;
+  const SERIES_HINT = /(?:серия|series) «([^»]*)»/;
   function messageHint(message) {
-    const label = (message.match(/label='([^']*)'/) || message.match(/запрос «([^»]*)»/) || [])[1] || '';
-    const series = (message.match(/series='([^']*)'/) || message.match(/серия «([^»]*)»/) || [])[1] || '';
+    const label = (message.match(/label='([^']*)'/) || message.match(QUERY_HINT) || [])[1] || '';
+    const series = (message.match(/series='([^']*)'/) || message.match(SERIES_HINT) || [])[1] || '';
     return { label: label, series: series };
   }
   // Query label and series of a check: explicit fields, then the message, then the SLA window and the step table.
@@ -2054,7 +2184,7 @@
       if (!spec || value === null) return;
       const where = checkSource(check, window, source);
       if (!where.label) return;
-      out.push({ name: name, query_label: where.label, series: where.series, value: value, label: spec[0].replace('{}', formatNumber(value)), tone: spec[1] });
+      out.push({ name: name, query_label: where.label, series: where.series, value: value, label: LL.t(spec[0], { value: formatNumber(value) }), tone: spec[1] });
     });
     return out;
   }
@@ -2110,9 +2240,9 @@
     if (box) return box;
     const anchor = document.getElementById('rep-llm-tabs');
     if (!anchor || !anchor.parentNode) return null;
-    box = document.createElement('div');
+    box = document.createElement('section');
     box.id = 'reportSteps';
-    box.className = 'report-steps';
+    box.className = 'rep-timeline';
     box.hidden = true;
     anchor.parentNode.insertBefore(box, anchor);
     return box;
@@ -2135,19 +2265,42 @@
       return null;
     }
   }
-  // Hovering a row of the step table highlights that step on every chart of the report.
+  // Shades a step of «Ход теста» (null clears it).
+  function highlightProfile(stepIndex) {
+    const profile = reportState.profile;
+    if (profile && typeof profile.highlight === 'function') profile.highlight(stepIndex);
+  }
+  // Hovering (or focusing) a cell of the step row highlights that step on the load profile and on every chart of
+  // the report, in a neutral tone (the accent marks the SLA zone only).
   function bindStepHighlight(box) {
-    const rows = Array.from(box.querySelectorAll('tr[data-step-from]'));
-    const clear = () => highlightCharts(null);
-    rows.forEach((row) => {
-      const range = { t: Number(row.dataset.stepFrom), to: Number(row.dataset.stepTo), tone: 'accent' };
-      row.addEventListener('mouseenter', () => highlightCharts(range));
-      row.addEventListener('mouseleave', clear);
+    const cells = Array.from(box.querySelectorAll('[data-step-from]'));
+    const clear = () => { highlightCharts(null); highlightProfile(null); };
+    cells.forEach((cell) => {
+      const range = { t: Number(cell.dataset.stepFrom), to: Number(cell.dataset.stepTo), tone: 'muted' };
+      const show = () => { highlightCharts(range); highlightProfile(cell.dataset.stepIndex === undefined ? null : cell.dataset.stepIndex); };
+      cell.addEventListener('mouseenter', show);
+      cell.addEventListener('mouseleave', clear);
+      cell.addEventListener('focus', show);
+      cell.addEventListener('blur', clear);
     });
   }
+  // Resolves the step table, the chart markers and thresholds (charts read them, so this runs before they are
+  // drawn) and draws «Ход теста»: the load profile and the step row. Without steps the block stays hidden.
   async function renderLoadSteps(finalRow) {
     const box = stepsHost();
     const table = await resolveStepTable(finalRow);
+    reportState.stepTable = table;
+    try {
+      reportState.markers = reportMarkers(finalRow, table);
+      reportState.thresholds = slaThresholds(finalRow, table);
+    } catch (e) {
+      reportState.markers = [];
+      reportState.thresholds = [];
+    }
+    if (reportState.profile) {
+      reportState.profile.destroy();
+      reportState.profile = null;
+    }
     if (!box) return table;
     if (!table) {
       box.hidden = true;
@@ -2156,7 +2309,12 @@
     }
     const linked = linkSlaToSteps(table, finalRow);
     box.hidden = false;
-    box.innerHTML = renderLoadStepTableHtml(Object.assign({}, table, linked));
+    box.innerHTML = timelineHtml(Object.assign({}, table, linked));
+    const host = box.querySelector('[data-step-profile]');
+    if (host && LL.charts && typeof LL.charts.stepProfile === 'function') {
+      const target = finiteOrNull(checkNamed(markerChecks(finalRow), 'target_rps').threshold);
+      reportState.profile = LL.charts.stepProfile(host, { steps: linked.steps, markers: reportState.markers, target: target, height: 190 });
+    }
     bindStepHighlight(box);
     return table;
   }
@@ -2181,7 +2339,7 @@
       const st = parsed.stability_under_load || {};
       const hold = (st.hold && typeof st.hold === 'object') ? st.hold : {};
       return [
-        { label: 'Мин. интервал RPS', value: hold.min_bucket_rps != null ? formatNumber(hold.min_bucket_rps) : '', note: hold.drop_pct ? `−${formatNumber(hold.drop_pct)} % от среднего` : '' }
+        { label: LL.t('report.hero.min_interval'), value: hold.min_bucket_rps != null ? formatNumber(hold.min_bucket_rps) : '', note: hold.drop_pct ? LL.t('report.hero.drop_from_mean', { pct: formatNumber(hold.drop_pct) }) : '' }
       ];
     }
     if (mode === 'spike') return [];
@@ -2189,14 +2347,14 @@
       const sat = parsed.saturation || {};
       const resource = (sat.limiting_resource && typeof sat.limiting_resource === 'object') ? resourceText(sat.limiting_resource) : '';
       return [
-        { label: 'Характер деградации', value: safeStr(sat.failure_mode_title) || '—', note: safeStr(sat.degraded_step_label) ? 'с ' + safeStr(sat.degraded_step_label) : '' },
-        { label: 'Ограничивающий ресурс', labelHtml: LL.ui.term('limiting_resource', 'Ограничивающий ресурс'), value: resource || 'не определён' }
+        { label: LL.t('report.section.failure_mode'), value: failureModeTitle(sat) || '—', note: safeStr(sat.degraded_step_label) ? LL.t('report.hero.from_step', { step: safeStr(sat.degraded_step_label) }) : '' },
+        { label: LL.t('report.section.limiting_resource'), labelHtml: LL.ui.term('limiting_resource', LL.t('report.section.limiting_resource')), value: resource || LL.t('report.section.not_determined') }
       ];
     }
     if (!peakTableApplies('final', peak)) return [];
     return [
-      { label: 'Время пика', value: safeStr(peak.max_time) || '—' },
-      { label: 'Время деградации', value: safeStr(peak.drop_time) || '—' }
+      { label: LL.t('report.hero.peak_time'), value: safeStr(peak.max_time) || '—' },
+      { label: LL.t('report.section.drop_time'), value: safeStr(peak.drop_time) || '—' }
     ];
   }
   function kpiTone(passed) {
@@ -2204,12 +2362,27 @@
     if (passed === false) return 'fail';
     return '';
   }
-  function kpiThresholdNote(check, op, unit, words) {
-    if (!check || finiteOrNull(check.threshold) === null) return '';
+  // {limit: «порог ≤ 300 мс», state: «нарушен»}: `bound` renders the threshold text, `words` are the passed / failed
+  // states; null without a threshold.
+  function kpiThresholdParts(check, bound, words) {
+    if (!check || finiteOrNull(check.threshold) === null) return null;
     const state = check.passed === true ? words[0] : (check.passed === false ? words[1] : '');
-    return `${op} ${formatNumber(check.threshold)}${unit}${state ? ' · ' + state : ''}`;
+    return { limit: bound(formatNumber(check.threshold)), state: state };
   }
-  // heroKpis(finalRow): up to three number tiles {key, label, term, value, unit, note, tone} above the meta.
+  // «порог ≤ 300 мс · нарушен».
+  function kpiThresholdNote(check, bound, words) {
+    const parts = kpiThresholdParts(check, bound, words);
+    return parts ? `${parts.limit}${parts.state ? ' · ' + parts.state : ''}` : '';
+  }
+  // Figure extras of a tile: the threshold and its state apart (the state is set in bold) and the bar of the check.
+  function withFigure(item, check, parts) {
+    if (!item) return item;
+    if (parts) Object.assign(item, { limit: parts.limit, state: parts.state });
+    item.bar = check ? slaBarModel(check) : null;
+    return item;
+  }
+  // heroKpis(finalRow): up to three number tiles {key, label, term, value, unit, note, tone, limit?, state?, bar}
+  // drawn as the figures of the verdict block (limit and state split the note of a threshold, bar is slaBarModel).
   // Step tests: max RPS, p95 and errors with their SLA thresholds; soak, spike and stress take their own
   // numbers (the meta then skips them, see heroTypeEntries).
   function heroKpis(finalRow) {
@@ -2227,33 +2400,44 @@
       return { key: key, label: label, term: term, value: text, unit: text === '—' ? '' : unit, note: note || '', tone: tone || '' };
     };
     const textTile = (key, label, term, value, note, tone) => ({ key: key, label: label, term: term, value: value, unit: '', note: note || '', tone: tone || '' });
-    const latencyTile = latency ? tile('latency', latency.name === 'p99_latency' ? 'p99' : 'p95', latency.name === 'p99_latency' ? '' : 'p95', latency.actual, ' мс', kpiThresholdNote(latency, 'порог ≤', ' мс', ['соблюдён', 'нарушен']), kpiTone(latency.passed)) : null;
-    const errorTile = errors ? tile('errors', 'Ошибки', 'error_rate', errors.actual, ' %', kpiThresholdNote(errors, 'порог ≤', ' %', ['соблюдён', 'нарушен']), kpiTone(errors.passed)) : null;
-    const targetNote = kpiThresholdNote(target, 'цель ≥', ' RPS', ['достигнута', 'не достигнута']);
+    const limitWords = [LL.t('report.kpi.state_met'), LL.t('report.kpi.state_broken')];
+    const latencyBound = (value) => LL.t('report.kpi.limit_ms', { value: value });
+    const latencyNote = kpiThresholdNote(latency, latencyBound, limitWords);
+    const latencyTile = latency ? withFigure(tile('latency', latency.name === 'p99_latency' ? 'p99' : 'p95', latency.name === 'p99_latency' ? '' : 'p95', latency.actual, ' ' + LL.t('report.unit.ms'), latencyNote, kpiTone(latency.passed)), latency, kpiThresholdParts(latency, latencyBound, limitWords)) : null;
+    const errorBound = (value) => LL.t('report.kpi.limit_pct', { value: value });
+    const errorNote = kpiThresholdNote(errors, errorBound, limitWords);
+    const errorTile = errors ? withFigure(tile('errors', LL.t('report.kpi.errors'), 'error_rate', errors.actual, ' %', errorNote, kpiTone(errors.passed)), errors, kpiThresholdParts(errors, errorBound, limitWords)) : null;
+    const targetBound = (value) => LL.t('report.kpi.goal_rps', { value: value });
+    const targetWords = [LL.t('report.kpi.goal_reached'), LL.t('report.kpi.goal_missed')];
+    const targetNote = kpiThresholdNote(target, targetBound, targetWords);
     if (mode === 'spike') {
       const sa = parsed.spike_analysis || {};
       const spikes = Array.isArray(sa.spikes) ? sa.spikes : [];
       const worst = spikes.find((item) => item && item.index === sa.worst_spike_index) || spikes[0] || {};
       const notRecovered = spikes.filter((item) => item && item.recovered === false).length;
       const times = spikes.map((item) => Number(item && item.recovery_time_sec)).filter((n) => Number.isFinite(n));
-      const recovery = notRecovered ? `не восстановилось: ${notRecovered} из ${spikes.length}` : (times.length ? `${formatNumber(Math.max.apply(null, times))} с` : '—');
+      const recovery = notRecovered
+        ? LL.t('report.kpi.not_recovered', { count: notRecovered, total: spikes.length })
+        : (times.length ? LL.t('report.kpi.seconds', { value: formatNumber(Math.max.apply(null, times)) }) : '—');
       const recoveryCheck = byName('recovery');
-      const baseline = sa.baseline_rps != null ? `фон ${formatNumber(sa.baseline_rps)} RPS` : '';
+      const recoveryLimit = recoveryCheck && finiteOrNull(recoveryCheck.threshold) !== null ? LL.t('report.kpi.recovery_limit', { value: formatNumber(recoveryCheck.threshold) }) : '';
+      const baseline = sa.baseline_rps != null ? LL.t('report.kpi.baseline', { rps: formatNumber(sa.baseline_rps) }) : '';
       return [
         sa.detected
-          ? tile('spike', 'Всплеск', 'spike_window', sa.max_spike_rps, ' RPS', [baseline, `всплесков: ${spikes.length}`, targetNote].filter(Boolean).join(' · '), kpiTone(target && target.passed))
-          : textTile('spike', 'Всплеск', 'spike_window', 'не обнаружен', baseline, ''),
-        textTile('overshoot', 'Рост p95', 'overshoot', signed(worst.overshoot_p95_pct, ' %') || '—', 'худший всплеск', kpiTone(latency && latency.passed)),
-        textTile('recovery', 'Восстановление', 'recovery_time', recovery, recoveryCheck && finiteOrNull(recoveryCheck.threshold) !== null ? `предел ${formatNumber(recoveryCheck.threshold)} мин` : '', kpiTone(recoveryCheck && recoveryCheck.passed))
+          ? withFigure(tile('spike', LL.t('report.kpi.spike'), 'spike_window', sa.max_spike_rps, ' RPS', [baseline, LL.t('report.kpi.spikes_count', { count: spikes.length }), targetNote].filter(Boolean).join(' · '), kpiTone(target && target.passed)), target, null)
+          : textTile('spike', LL.t('report.kpi.spike'), 'spike_window', LL.t('report.section.spike_not_detected'), baseline, ''),
+        textTile('overshoot', LL.t('report.kpi.overshoot'), 'overshoot', signed(worst.overshoot_p95_pct, ' %') || '—', LL.t('report.kpi.worst_spike'), kpiTone(latency && latency.passed)),
+        withFigure(textTile('recovery', LL.t('report.kpi.recovery'), 'recovery_time', recovery, recoveryLimit, kpiTone(recoveryCheck && recoveryCheck.passed)), recoveryCheck, null)
       ];
     }
     if (mode === 'stability') {
       const st = parsed.stability_under_load || {};
       const hold = isPlainObject(st.hold) ? st.hold : {};
       const span = hold.start_iso ? `${hhmm(hold.start_iso)}–${hhmm(hold.end_iso)}` : '';
-      const goal = finiteOrNull(st.target_rps) !== null ? `цель ≥ ${formatNumber(st.target_rps)} RPS${target && target.passed === true ? ' · удержана' : (target && target.passed === false ? ' · не удержана' : '')}` : targetNote;
+      const held = target && target.passed === true ? LL.t('report.kpi.goal_held') : (target && target.passed === false ? LL.t('report.kpi.goal_not_held') : '');
+      const goal = finiteOrNull(st.target_rps) !== null ? LL.t('report.kpi.goal_rps', { value: formatNumber(st.target_rps) }) + (held ? ' · ' + held : '') : targetNote;
       return [
-        tile('rps', 'Средний RPS', 'hold_window', st.actual_rps, ' RPS', [goal, span].filter(Boolean).join(' · '), kpiTone(target && target.passed)),
+        withFigure(tile('rps', LL.t('report.kpi.mean_rps'), 'hold_window', st.actual_rps, ' RPS', [goal, span].filter(Boolean).join(' · '), kpiTone(target && target.passed)), target, null),
         latencyTile,
         errorTile
       ].filter(Boolean);
@@ -2262,7 +2446,7 @@
       const sat = parsed.saturation || {};
       const point = finiteOrNull(sat.saturation_rps) !== null ? sat.saturation_rps : peak.max_rps;
       return [
-        tile('rps', 'Точка насыщения', 'saturation_point', point, ' RPS', safeStr(sat.saturation_step_label), ''),
+        tile('rps', LL.t('report.kpi.saturation_point'), 'saturation_point', point, ' RPS', safeStr(sat.saturation_step_label), ''),
         latencyTile,
         errorTile
       ].filter(Boolean);
@@ -2271,83 +2455,255 @@
     const method = safeStr(peak.method);
     const rpsTerm = /stable/i.test(method) ? 'stable_max' : 'peak_max';
     const rpsTile = finiteOrNull(peakRps) !== null || target
-      ? tile('rps', 'Максимальный RPS', rpsTerm, peakRps, ' RPS', targetNote || (method ? `метод: ${method}` : ''), kpiTone(target && target.passed))
+      ? withFigure(tile('rps', LL.t('report.kpi.max_rps'), rpsTerm, peakRps, ' RPS', targetNote || (method ? LL.t('report.kpi.method', { method: method }) : ''), kpiTone(target && target.passed)), target, kpiThresholdParts(target, targetBound, targetWords))
       : null;
     return [rpsTile, latencyTile, errorTile].filter(Boolean);
   }
+  // Figures of the verdict block: value with its unit, «label · threshold <b>state</b>» and the bar against the
+  // threshold. A value that breaks its threshold takes the fail tone; text values (spike tests) are smaller.
   function renderHeroKpis(tiles) {
     if (!tiles.length) return '';
     const items = tiles.map((item) => {
       const label = item.term ? LL.ui.term(item.term, item.label) : escapeHtml(item.label);
-      const unit = item.unit ? `<span class="report-kpi-unit">${escapeHtml(item.unit)}</span>` : '';
-      const tone = item.tone ? ` is-${item.tone}` : '';
+      const unit = item.unit ? `<small>${escapeHtml(safeStr(item.unit))}</small>` : '';
+      const tone = item.tone ? ` ${item.tone}` : '';
+      let caption = label;
+      if (item.limit) caption += ` · ${escapeHtml(item.limit)}${item.state ? ` <b>${escapeHtml(item.state)}</b>` : ''}`;
+      else if (item.note) caption += ` · ${escapeHtml(item.note)}`;
+      const bar = item.bar;
+      const barHtml = bar
+        ? `<div class="fig-bar" aria-hidden="true"><i${bar.tone === 'ok' ? '' : ` class="${bar.tone}"`} style="width:${bar.fill}%"></i><b style="left:${bar.mark}%"></b></div>`
+        : '';
       return [
-        `<div class="report-kpi${tone}${item.unit ? '' : ' is-text'}" role="listitem">`,
-        `<div class="report-kpi-label">${label}</div>`,
-        `<div class="report-kpi-value">${escapeHtml(item.value)}${unit}</div>`,
-        item.note ? `<div class="report-kpi-note">${escapeHtml(item.note)}</div>` : '',
+        `<div class="fig rep-fig${item.unit ? '' : ' is-text'}" role="listitem" data-kpi="${escapeHtml(item.key)}">`,
+        `<div class="v${item.tone === 'fail' ? ' fail' : ''}">${escapeHtml(item.value)}${unit}</div>`,
+        `<div class="k${tone}">${caption}</div>`,
+        barHtml,
         '</div>'
       ].join('');
     });
-    return `<div class="report-kpis" role="list" aria-label="Ключевые показатели">${items.join('')}</div>`;
+    return `<div class="figs rep-figs" role="list" aria-label="${escapeHtml(LL.t('report.kpi.aria'))}">${items.join('')}</div>`;
+  }
+  // Language a report was built in: report_language of the final row (parsed, else sla_details); reports saved
+  // before the field are Russian.
+  function reportLanguageOf(finalRow) {
+    const parsed = parseJsonish(finalRow && finalRow.parsed) || {};
+    const sla = parseJsonish(finalRow && finalRow.sla_details) || {};
+    const lang = safeStr(parsed.report_language || sla.report_language).toLowerCase().slice(0, 2);
+    return lang === 'en' ? 'en' : 'ru';
+  }
+  // Texts stored with the report (AI findings, SLA messages and summaries, step labels) stay in its language;
+  // a badge says so when that is not the UI language. The language is named in the UI language ("Russian").
+  function reportLanguageBadge(finalRow) {
+    const lang = reportLanguageOf(finalRow);
+    if (lang === LL.locale) return '';
+    const name = lang === 'en' ? LL.t('common.lang_name.en') : LL.t('common.lang_name.ru');
+    const text = LL.t('report.language_badge', { language: name });
+    return `<span class="hero-report-language"><span class="pill na" data-report-language="${lang}" title="${escapeHtml(LL.t('report.language_badge_title'))}">${escapeHtml(text)}</span></span>`;
+  }
+  // ---- verdict sentence ----------------------------------------------------------------------------
+  // One plain-language sentence under the verdict word, built only from sla_details.checks (never from the model
+  // text): whether the target RPS was reached on the checked window, which thresholds were breached and by how much,
+  // the error rate and what had no data. HTML with the figures in bold, in the UI language like the rest of the
+  // verdict block; '' without checks. Keys are literal (tests/test_i18n.py checks every one exists).
+  const SUMMARY_NAMES = {
+    target_rps: 'report.summary.name.target_rps',
+    p95_latency: 'report.summary.name.p95_latency',
+    p99_latency: 'report.summary.name.p99_latency',
+    error_rate: 'report.summary.name.error_rate',
+    cpu_usage: 'report.summary.name.cpu_usage',
+    memory_usage: 'report.summary.name.memory_usage',
+    recovery: 'report.summary.name.recovery'
+  };
+  function summaryName(name) {
+    const key = SUMMARY_NAMES[safeStr(name)];
+    return key ? LL.t(key) : (slaCheckLabel(name) || safeStr(name) || LL.t('report.steps.check_fallback'));
+  }
+  // Unit of a check value in prose: «450 мс», «0.4 %», «249.3 RPS», «7 мин».
+  function checkUnit(name) {
+    const key = safeStr(name);
+    if (key === 'target_rps') return ' RPS';
+    if (key === 'p95_latency' || key === 'p99_latency') return ' ' + LL.t('report.unit.ms');
+    if (key === 'recovery') return ' ' + LL.t('report.unit.min');
+    if (key === 'error_rate' || key === 'cpu_usage' || key === 'memory_usage') return ' %';
+    return '';
+  }
+  function summaryFigure(value, name) {
+    return LL.html(`<b>${escapeHtml(formatNumber(value) + checkUnit(name))}</b>`);
+  }
+  function summaryNames(checks) {
+    return checks.map((check) => summaryName(check.name)).join(', ');
+  }
+  // Sentence start in upper case, unless it opens with markup or a metric name such as «p95».
+  function capitalizeHtml(html) {
+    const text = String(html || '');
+    return /^\p{Ll}\p{L}/u.test(text) ? text[0].toUpperCase() + text.slice(1) : text;
+  }
+  function verdictSummaryHtml(finalRow) {
+    if (!finalRow) return '';
+    const checks = markerChecks(finalRow).filter((check) => safeStr(check.name));
+    if (!checks.length) return '';
+    const mode = markerMode(parseJsonish(finalRow.parsed) || {}, markerSlaWindow(finalRow));
+    const target = checks.find((check) => safeStr(check.name) === 'target_rps') || null;
+    const others = checks.filter((check) => check !== target);
+    const failed = others.filter((check) => check.passed === false);
+    const unknown = others.filter((check) => check.passed !== true && check.passed !== false);
+    const met = others.filter((check) => check.passed === true);
+    const html = (key, params) => LL.html(LL.tHtml(key, params));
+    let head = null;
+    if (target && target.passed === true) {
+      head = html(mode === 'hold' ? 'report.summary.target_held' : (mode === 'spike' ? 'report.summary.target_spike' : 'report.summary.target_met'));
+    } else if (target && target.passed === false) {
+      const params = { actual: summaryFigure(target.actual, 'target_rps'), threshold: summaryFigure(target.threshold, 'target_rps') };
+      head = html(mode === 'hold' ? 'report.summary.target_not_held' : 'report.summary.target_missed', params);
+    } else if (target) {
+      head = html('report.summary.target_unknown');
+    }
+    let breach = null;
+    if (failed.length === 1) {
+      const check = failed[0];
+      const name = safeStr(check.name);
+      if (finiteOrNull(check.actual) === null || finiteOrNull(check.threshold) === null) {
+        breach = html('report.summary.breach_no_value', { name: summaryName(name) });
+      } else {
+        const params = { name: summaryName(name), actual: summaryFigure(check.actual, name), threshold: summaryFigure(check.threshold, name) };
+        breach = html(name === 'recovery' ? 'report.summary.breach_recovery' : 'report.summary.breach_one', params);
+      }
+    } else if (failed.length > 1) {
+      breach = html('report.summary.breach_many', { names: summaryNames(failed) });
+    }
+    let text = null;
+    if (head && breach) text = html(target.passed === true ? 'report.summary.but' : 'report.summary.and', { head: head, rest: breach });
+    else if (head) text = met.length ? html('report.summary.rest_met', { head: head }) : head;
+    else if (breach) text = LL.html(capitalizeHtml(breach.html));
+    else if (met.length) text = html('report.summary.all_met');
+    const errors = met.find((check) => safeStr(check.name) === 'error_rate' && finiteOrNull(check.actual) !== null);
+    if (text && errors) text = html('report.summary.with_errors', { text: text, value: summaryFigure(errors.actual, 'error_rate') });
+    if (unknown.length) {
+      text = text
+        ? html('report.summary.with_unknown', { text: text, names: summaryNames(unknown) })
+        : html('report.summary.only_unknown', { names: summaryNames(unknown) });
+    }
+    return text ? `${capitalizeHtml(text.html)}.` : '';
+  }
+
+  // ---- report head: meta line, verdict block ----------------------------------------------------------
+  const META_SEP = '<span class="sep" aria-hidden="true">·</span>';
+  // Mono meta line under the title: test type · service · date and window · duration · report time · AI usage ·
+  // report language (when it is not the UI language). heroHtml carries it; renderHero moves it under the title.
+  function reportMetaHtml(finalRow, allRows) {
+    const parsed = parseJsonish(finalRow.parsed) || {};
+    const testType = normalizedTestType(parsed, finalRow.test_type);
+    const typeTermKey = LL.GLOSSARY['test_type_' + testType] ? 'test_type_' + testType : 'step_profile';
+    const items = [LL.ui.term(typeTermKey, LL.testTypeLabel(finalRow.test_type))];
+    const service = safeStr(finalRow.service) || getServiceFromPath();
+    if (service) items.push(escapeHtml(service));
+    const startMs = Number(finalRow.start_ms);
+    const endMs = Number(finalRow.end_ms);
+    const zone = LL.timeZoneLabel();
+    const zoneShort = escapeHtml(zone.split(' ')[0]);
+    if (Number.isFinite(startMs) && Number.isFinite(endMs) && startMs > 0 && endMs >= startMs) {
+      const from = LL.formatDateTime(startMs).split(' ');
+      const to = LL.formatDateTime(endMs).split(' ');
+      const window = from[0] === to[0]
+        ? `${escapeHtml(from[0])} <b>${escapeHtml(from[1] + '–' + to[1])}</b>`
+        : `<b>${escapeHtml(from.join(' '))} — ${escapeHtml(to.join(' '))}</b>`;
+      items.push(`<span title="${escapeHtml(zone)}">${window} ${zoneShort}</span>`);
+      items.push(escapeHtml(LL.formatDuration(endMs - startMs)));
+    }
+    const created = momentMs(finalRow.created_at);
+    if (created !== null) {
+      const stamp = LL.formatDateTime(created).split(' ');
+      const sameDay = Number.isFinite(endMs) && LL.formatDateTime(endMs).split(' ')[0] === stamp[0];
+      items.push(escapeHtml(LL.t('report.meta.created', { time: sameDay ? stamp[1] : stamp.join(' ') })));
+    }
+    const usage = formatUsageLine(collectRunUsage(finalRow, allRows));
+    if (usage) items.push(`<span class="hero-usage">${escapeHtml(usage)}</span>`);
+    const badge = reportLanguageBadge(finalRow);
+    if (badge) items.push(badge);
+    return `<div class="rep-meta mono" data-report-meta role="group" aria-label="${escapeHtml(LL.t('report.meta.aria'))}">${items.join(META_SEP)}</div>`;
+  }
+  // Facts of the test type that are not figures (failure mode, limiting resource, peak and drop times …) in one line.
+  function heroFactsHtml(entries) {
+    const items = (entries || []).filter((entry) => entry && safeStr(entry.value)).map((entry) => [
+      '<span class="rep-fact">',
+      `<span class="rep-fact-k">${entry.labelHtml || escapeHtml(entry.label)}</span> `,
+      `<span class="rep-fact-v">${escapeHtml(entry.value)}</span>`,
+      entry.note ? ` <span class="rep-fact-n">${escapeHtml(entry.note)}</span>` : '',
+      '</span>'
+    ].join(''));
+    return items.length ? `<div class="rep-facts">${items.join(META_SEP)}</div>` : '';
+  }
+  // «Вердикт верен?» with the votes, then «Изменить вердикт» / «Вернуть автоматический», on one line under the SLA table.
+  function verdictLineHtml(finalRow) {
+    const manual = manualOf(finalRow);
+    const votes = renderVoteGroup('final', 'verdict', '', LL.t('report.feedback.agree_verdict'), LL.t('report.feedback.disagree_verdict'));
+    return [
+      '<div class="rep-verdict-line" data-min-role="engineer">',
+      votes ? `<span class="rep-verdict-q">${escapeHtml(LL.t('report.feedback.verdict_question'))}</span>${votes}` : '',
+      '<span class="rep-verdict-actions">',
+      `<button type="button" class="btn btn-sm" data-verdict-action="change">${escapeHtml(LL.t('report.verdict.change'))}</button>`,
+      manual ? `<button type="button" class="btn btn-sm" data-verdict-action="reset">${escapeHtml(LL.t('report.verdict.reset_button'))}</button>` : '',
+      '</span>',
+      '</div>'
+    ].join('');
+  }
+  // Markup of the report head of the final row: the meta line, then the verdict block — a rule in the verdict
+  // color, the verdict word, the manual tag and reason, one sentence on why, the figures; the SLA criteria with the
+  // verdict line on the right. renderHero puts it on the page.
+  function heroHtml(finalRow, allRows) {
+    if (!finalRow) return `<div class="rep-empty hero-empty">${escapeHtml(LL.t('report.hero.no_final'))}</div>`;
+    const parsed = parseJsonish(finalRow.parsed) || {};
+    const peak = (parsed.peak_performance && typeof parsed.peak_performance === 'object') ? parsed.peak_performance : {};
+    const manual = manualOf(finalRow);
+    const code = LL.verdictCode(finalRow.verdict);
+    const verdictTermKey = LL.verdictTermKey(code);
+    const tip = escapeHtml(LL.GLOSSARY[verdictTermKey] || '');
+    const summary = verdictSummaryHtml(finalRow);
+    const unverified = (function () {
+      const verification = (parsed.verification_summary && typeof parsed.verification_summary === 'object') ? parsed.verification_summary : null;
+      const unverifiedCount = verification ? Number(verification.unverified) : 0;
+      if (!verification || !(unverifiedCount > 0)) return '';
+      const note = verification.revised_by_model
+        ? LL.tn('report.hero.unverified', unverifiedCount)
+        : LL.tn('report.hero.unverified_no_revision', unverifiedCount);
+      return `<div class="hero-sub hero-unverified">${LL.ui.term('unverified', note)}</div>`;
+    })();
+    return [
+      reportMetaHtml(finalRow, allRows),
+      `<div class="rep-verdict tone-${LL.verdictClass(code)}" data-verdict="${code}">`,
+      '<div class="rep-verdict-main">',
+      `<div class="lbl rep-verdict-cap">${LL.ui.term('sla_first', LL.t('report.hero.verdict_title'))}</div>`,
+      '<div class="rep-verdict-row">',
+      `<abbr class="term rep-verdict-term" data-term="${verdictTermKey}" data-tip="${tip}" title="${tip}" tabindex="0"><span class="rep-verdict-word">${escapeHtml(LL.verdictLabel(code))}</span></abbr>`,
+      manual ? `<span class="verdict-manual-tag">${escapeHtml(LL.t('report.verdict.manual_tag'))}</span>` : '',
+      '</div>',
+      summary ? `<p class="rep-verdict-why">${summary}</p>` : '',
+      `<div class="hero-sub rep-verdict-source">${escapeHtml(verdictSourceText(finalRow))}</div>`,
+      manual && safeStr(manual.reason) ? `<div class="hero-sub hero-manual-reason">${escapeHtml(LL.t('report.verdict.reason_line', { reason: safeStr(manual.reason) }))}</div>` : '',
+      unverified,
+      renderHeroKpis(heroKpis(finalRow)),
+      heroFactsHtml(heroTypeEntries(parsed, peak)),
+      '</div>',
+      '<div class="rep-sla">',
+      renderSlaChecklist(finalRow),
+      verdictLineHtml(finalRow),
+      '</div>',
+      '</div>'
+    ].join('');
   }
   function renderHero(finalRow, allRows) {
     const hero = document.getElementById('reportHero');
     if (!hero) return;
-    if (!finalRow) {
-      hero.innerHTML = '<div class="hero-card hero-empty">Итоговый отчёт для этого запуска ещё не сформирован. Если генерация идёт, обновите страницу позже; статус задачи виден в архиве.</div>';
-      return;
+    hero.innerHTML = heroHtml(finalRow, allRows);
+    // The meta line sits under the title, in the slot that showed the test time while the report loaded.
+    const meta = hero.querySelector('[data-report-meta]');
+    const slot = document.getElementById('pageTimeRange');
+    if (meta && slot) {
+      slot.innerHTML = '';
+      slot.appendChild(meta);
     }
-    const effective = verdictTone(finalRow.verdict);
-    const parsed = parseJsonish(finalRow.parsed) || {};
-    const peak = (parsed.peak_performance && typeof parsed.peak_performance === 'object') ? parsed.peak_performance : {};
-    const service = safeStr(finalRow.service) || getServiceFromPath();
-    const startMs = Number(finalRow.start_ms);
-    const endMs = Number(finalRow.end_ms);
-    const period = (Number.isFinite(startMs) && Number.isFinite(endMs))
-      ? `${LL.formatDateTime(startMs)} — ${LL.formatDateTime(endMs)}`
-      : '';
-    const durationMin = (Number.isFinite(startMs) && Number.isFinite(endMs)) ? Math.round((endMs - startMs) / 60000) : null;
-    const manual = manualOf(finalRow);
-    const verdictSource = verdictSourceText(finalRow);
-    const verdictTermKey = { 'Успешно': 'verdict_success', 'Есть риски': 'verdict_risk', 'Провал': 'verdict_fail' }[effective.text] || 'verdict_na';
-    const testType = normalizedTestType(parsed, finalRow.test_type);
-    const typeTermKey = LL.GLOSSARY['test_type_' + testType] ? 'test_type_' + testType : 'step_profile';
-    hero.innerHTML = [
-      '<div class="hero-card">',
-      `<div class="hero-label">${LL.ui.term('sla_first', 'Вердикт по тесту')}</div>`,
-      `<div class="hero-verdict-row"><abbr class="term" data-term="${verdictTermKey}" data-tip="${escapeHtml(LL.GLOSSARY[verdictTermKey] || '')}" title="${escapeHtml(LL.GLOSSARY[verdictTermKey] || '')}" tabindex="0" style="text-decoration:none"><span class="report-verdict-pill ${effective.className}">${escapeHtml(effective.text)}</span></abbr>${manual ? '<span class="verdict-manual-tag">вручную</span>' : ''}</div>`,
-      `<div class="hero-sub">${escapeHtml(verdictSource)}</div>`,
-      manual && safeStr(manual.reason) ? `<div class="hero-sub hero-manual-reason">Причина: ${escapeHtml(safeStr(manual.reason))}</div>` : '',
-      '<div class="hero-verdict-actions" data-min-role="engineer">'
-        + '<button type="button" class="btn btn-sm" data-verdict-action="change">Изменить вердикт</button>'
-        + (manual ? '<button type="button" class="btn btn-sm" data-verdict-action="reset">Вернуть автоматический</button>' : '')
-        + '</div>',
-      (function () {
-        const verification = (parsed.verification_summary && typeof parsed.verification_summary === 'object') ? parsed.verification_summary : null;
-        const unverifiedCount = verification ? Number(verification.unverified) : 0;
-        if (!verification || !(unverifiedCount > 0)) return '';
-        const note = `${unverifiedCount} ${pluralFindings(unverifiedCount)} не подтверждены данными и не учтены в обосновании вердикта${verification.revised_by_model ? '' : ' (верификационный проход модели не выполнялся)'}.`;
-        return `<div class="hero-sub hero-unverified">${LL.ui.term('unverified', note)}</div>`;
-      })(),
-      (function () {
-        const usageLine = formatUsageLine(collectRunUsage(finalRow, allRows));
-        return usageLine ? `<div class="hero-sub hero-usage">${escapeHtml(usageLine)}</div>` : '';
-      })(),
-      renderHeroKpis(heroKpis(finalRow)),
-      renderHeroMeta([
-        { label: 'Сервис', value: service || '—' },
-        { label: 'Тип теста', labelHtml: LL.ui.term(typeTermKey, 'Тип теста'), value: LL.testTypeLabel(finalRow.test_type) },
-        { label: 'Период', value: period || '—', note: period ? `${durationMin} мин · ${LL.timeZoneLabel()}` : '' },
-        ...heroTypeEntries(parsed, peak)
-      ]),
-      (function () {
-        const votes = renderVoteGroup('final', 'verdict', '', 'Согласен с вердиктом', 'Не согласен');
-        return votes ? `<div class="hero-card-foot" data-min-role="engineer"><span class="hero-card-foot-label">Вердикт верен?</span>${votes}</div>` : '';
-      })(),
-      '</div>',
-      `<div class="hero-card">${renderSlaChecklist(finalRow)}</div>`
-    ].join('');
+    if (!finalRow) return;
     bindFeedbackVotes(hero);
     bindVerdictActions(hero);
   }
@@ -2369,7 +2725,7 @@
       renderHero(null);
       await renderLoadSteps(null);
       renderForecastLink();
-      box.textContent = 'Нет данных';
+      box.textContent = LL.t('report.page.no_data');
       return;
     }
     // Rows are ordered by created_at DESC: keep only the latest row per domain.
@@ -2393,36 +2749,29 @@
       const startStr = starts.length ? LL.formatDateTime(Math.min.apply(null, starts)) : '—';
       const endStr = ends.length ? LL.formatDateTime(Math.max.apply(null, ends)) : '—';
       const range = document.getElementById('pageTimeRange');
-      if (range) range.textContent = `Время теста: ${startStr} — ${endStr} · ${LL.timeZoneLabel()}`;
+      if (range) range.textContent = LL.t('report.page.time_range', { start: startStr, end: endStr, zone: LL.timeZoneLabel() });
     } catch (e) {}
     const finalRow = arr.find((x) => x.domain === 'final') || null;
     reportState.finalRow = finalRow;
     reportState.rows = arr;
     renderHero(finalRow, arr);
-    // Charts read the markers and thresholds, so the step table is resolved before they are drawn.
-    const stepTable = await renderLoadSteps(finalRow);
+    // Charts read the markers and thresholds, so the step table is resolved (and «Ход теста» drawn) before them.
+    await renderLoadSteps(finalRow);
     reportState.finalRow = finalRow;
-    reportState.stepTable = stepTable;
-    try {
-      reportState.markers = reportMarkers(finalRow, stepTable);
-      reportState.thresholds = slaThresholds(finalRow, stepTable);
-    } catch (e) {
-      reportState.markers = [];
-      reportState.thresholds = [];
-    }
     renderForecastLink();
     const domainsOrder = ['final', 'jvm', 'database', 'kafka', 'microservices', 'hard_resources', 'lt_framework', 'lt_generators', 'application_logs'];
     arr.sort((a, b) => domainsOrder.indexOf(a.domain) - domainsOrder.indexOf(b.domain));
-    const tabsNav = document.createElement('div'); tabsNav.className = 'tabs'; tabsNav.setAttribute('aria-label', 'Анализ по доменам');
+    const tabsNav = document.createElement('div'); tabsNav.className = 'tabs'; tabsNav.setAttribute('aria-label', LL.t('report.tabs.analysis_aria'));
     const tabsBody = document.createElement('div');
     const idBase = 'rep-llm-tab-';
     arr.forEach((x, idx) => {
       const btn = document.createElement('button'); btn.className = 'tab' + (idx === 0 ? ' active' : '');
       const dot = document.createElement('span');
       const verdictForTab = x.verdict || x.llm_verdict || '';
+      reportState.domainVerdicts[x.domain] = verdictForTab;
       dot.className = `tab-dot ${LL.verdictClass(verdictForTab)}`;
       dot.setAttribute('aria-hidden', 'true');
-      btn.title = `Вердикт: ${standardizeVerdict(verdictForTab)}`;
+      btn.title = LL.t('report.tabs.verdict_title', { verdict: LL.verdictLabel(verdictForTab) });
       btn.appendChild(dot);
       btn.appendChild(document.createTextNode(LL.domainTitleFor(x.domain, reportDomainTitles)));
       btn.dataset.target = idBase + idx;
@@ -2466,9 +2815,9 @@
       } else {
         html = markdownToSafeHtml(md);
       }
-      const aiBadge = '<div class="ai-badge" title="Текст ниже сгенерирован языковой моделью по агрегированным метрикам">Сгенерировано ИИ · сверяйте выводы с графиками</div>';
+      const aiBadge = `<div class="ai-badge" title="${escapeHtml(LL.t('report.ai_badge.title'))}">${escapeHtml(LL.t('report.ai_badge.text'))}</div>`;
       // Print shows every tab panel; the heading names the domain there (hidden on screen).
-      const printTitle = `<h3 class="report-print-title">Анализ: ${escapeHtml(LL.domainTitleFor(x.domain, reportDomainTitles))}</h3>`;
+      const printTitle = `<h3 class="report-print-title">${escapeHtml(LL.t('report.tabs.print_analysis', { domain: LL.domainTitleFor(x.domain, reportDomainTitles) }))}</h3>`;
       pane.innerHTML = `${printTitle}<div class="report-analysis-card">${aiBadge}${html}</div>`;
       tabsBody.appendChild(pane);
     });
@@ -2539,7 +2888,7 @@
     if (!data || !Array.isArray(data.points) || !data.points.length) {
       if (box) {
         box.classList.add('is-empty');
-        box.innerHTML = '<div class="report-chart-empty">Нет данных за время теста</div>';
+        box.innerHTML = `<div class="report-chart-empty">${escapeHtml(LL.t('report.charts.empty'))}</div>`;
       }
       if (legendHost) legendHost.remove();
       return null;
@@ -2578,19 +2927,23 @@
               autoSkipPadding: 16,
               callback(value) { return clockLabel(this.getLabelForValue(value)); }
             },
-            grid: { color: colors.grid }
+            // Instrument look: horizontal grid only, the time axis is a hairline (step starts are marker ticks).
+            grid: { color: colors.grid, display: false }
           },
-          y: { ticks: { color: colors.text }, grid: { color: colors.grid } }
+          y: { ticks: { color: colors.text }, grid: { color: colors.grid }, border: { display: false } }
         }
       },
       plugins: plugins
     });
     const shown = Math.min(built.datasets.length, MAX_VISIBLE_SERIES);
-    canvas.setAttribute('aria-label', `График «${ql}»: серий ${built.datasets.length}${built.datasets.length > shown ? `, показаны ${shown} с наибольшим средним` : ''}`);
+    const count = built.datasets.length;
+    canvas.setAttribute('aria-label', count > shown
+      ? LL.t('report.charts.aria_series_shown', { query: ql, count: count, shown: shown })
+      : LL.t('report.charts.aria_series', { query: ql, count: count }));
     reportState.charts.push(chart);
     if (group) group.charts.push(chart);
     if (legendHost && LL.charts && typeof LL.charts.legendChips === 'function') {
-      const chips = LL.charts.legendChips(chart, legendHost, { filename: `report-${domain}-${ql}`, maxVisible: MAX_VISIBLE_SERIES });
+      const chips = LL.charts.legendChips(chart, legendHost, { filename: `report-${domain}-${ql}`, maxVisible: MAX_VISIBLE_SERIES, separator: '' });
       if (group) group.chips.push(chips);
     }
     return chart;
@@ -2708,8 +3061,8 @@
       const updated = document.getElementById('engineerUpdated');
       const raw = String(j.content_html || '');
       const html = sanitizeOrEscape(raw, NOTE_PURIFY, raw);
-      ed.innerHTML = html || '<p style=\"color:#888\">Добавьте итоговый комментарий…</p>';
-      updated.textContent = j.created_at ? ('Обновлено: ' + j.created_at.replace('T', ' ').slice(0, 16)) : '';
+      ed.innerHTML = html || `<p class="rep-engineer-empty">${escapeHtml(LL.t('report.engineer.placeholder'))}</p>`;
+      updated.textContent = j.created_at ? LL.t('report.engineer.updated', { time: j.created_at.replace('T', ' ').slice(0, 16) }) : '';
     } catch (e) {}
   }
   function editorExec(cmd, val) {
@@ -2733,10 +3086,10 @@
         const selection = window.getSelection();
         const range = selection && selection.rangeCount ? selection.getRangeAt(0).cloneRange() : null;
         const url = await LL.ui.prompt({
-          title: 'Вставить ссылку',
-          label: 'Адрес',
+          title: LL.t('report.engineer.link_title'),
+          label: LL.t('report.engineer.link_label'),
           value: 'https://',
-          validate: (v) => (/^https?:\/\/\S+$/i.test(v.trim()) ? '' : 'Укажите адрес вида https://…')
+          validate: (v) => (/^https?:\/\/\S+$/i.test(v.trim()) ? '' : LL.t('report.engineer.link_invalid'))
         });
         if (!url) return;
         const editorEl = document.getElementById('engineerEditor');
@@ -2753,7 +3106,7 @@
         if (editor) editor.setAttribute('contenteditable', on ? 'true' : 'false');
         if (tb) tb.style.display = on ? '' : 'none';
         if (saveBtn) saveBtn.style.display = on ? '' : 'none';
-        if (editBtn) editBtn.textContent = on ? 'Завершить' : 'Редактировать';
+        if (editBtn) editBtn.textContent = on ? LL.t('report.engineer.finish') : LL.t('report.engineer.edit');
       } catch (e) {}
     }
     if (editBtn) {
@@ -2768,13 +3121,13 @@
         const run = getRunFromPath(); if (!run) return;
         const html = document.getElementById('engineerEditor').innerHTML;
         const st = document.getElementById('engineerStatus');
-        st.textContent = 'Сохранение…';
+        st.textContent = LL.t('report.status.saving');
         try {
           const resp = await fetch('/engineer_summary', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ run_name: run, content_html: html }) });
           const j = await resp.json();
-          if (resp.ok) { st.textContent = 'Сохранено'; setEngineerEditing(false); await engineerLoad(); setTimeout(() => { st.textContent = ''; }, 1500); }
-          else { st.textContent = j.error || 'Ошибка сохранения'; }
-        } catch (e) { st.textContent = 'Ошибка сохранения'; }
+          if (resp.ok) { st.textContent = LL.t('report.status.saved'); setEngineerEditing(false); await engineerLoad(); setTimeout(() => { st.textContent = ''; }, 1500); }
+          else { st.textContent = j.error || LL.t('report.status.save_failed'); }
+        } catch (e) { st.textContent = LL.t('report.status.save_failed'); }
       });
     }
   }
@@ -2787,30 +3140,37 @@
     pane.innerHTML = '';
     const printTitle = document.createElement('h3');
     printTitle.className = 'report-print-title';
-    printTitle.textContent = `Графики: ${LL.domainTitleFor(domain, reportDomainTitles)}`;
+    printTitle.textContent = LL.t('report.charts.print_title', { domain: LL.domainTitleFor(domain, reportDomainTitles) });
     pane.appendChild(printTitle);
-    const hint = document.createElement('p');
-    hint.className = 'report-chart-hint';
-    hint.textContent = 'Выделите участок графика мышью, чтобы увеличить его на всех графиках вкладки; двойной щелчок возвращает весь тест.';
-    pane.appendChild(hint);
     const group = { charts: [], chips: [], sync: null, zoom: null };
     reportState.groups[pane.id] = group;
     const jobs = queryLabels.map((ql, qi) => {
       const wrap = document.createElement('section');
       wrap.className = 'report-chart';
+      // Title row: the query in mono, the zoom hint on the right of the first chart of the tab.
+      const head = document.createElement('div');
+      head.className = 'report-chart-head';
       const title = document.createElement('h4');
       title.className = 'report-chart-title';
       title.textContent = ql;
+      head.appendChild(title);
+      if (qi === 0) {
+        const hint = document.createElement('span');
+        hint.className = 'report-chart-hint';
+        hint.textContent = LL.t('report.charts.zoom_hint_short');
+        hint.title = LL.t('report.charts.zoom_hint');
+        head.appendChild(hint);
+      }
       const canvasBox = document.createElement('div');
       canvasBox.className = 'report-chart-canvas';
       const cnv = document.createElement('canvas');
       cnv.id = `rep-chart-${domainIdx}-${qi}`;
       cnv.setAttribute('role', 'img');
-      cnv.setAttribute('aria-label', `График «${ql}»`);
+      cnv.setAttribute('aria-label', LL.t('report.charts.aria', { query: ql }));
       canvasBox.appendChild(cnv);
       const legend = document.createElement('div');
       legend.className = 'report-chart-legend';
-      wrap.appendChild(title);
+      wrap.appendChild(head);
       wrap.appendChild(canvasBox);
       wrap.appendChild(legend);
       pane.appendChild(wrap);
@@ -2823,7 +3183,7 @@
   async function reportsRenderDomains(schema) {
     const run = getRunFromPath(); if (!run) return;
     const root = document.getElementById('rep-domain-tabs'); if (!root) return;
-    root.innerHTML = 'Загрузка…';
+    root.innerHTML = escapeHtml(LL.t('report.charts.loading'));
     const domainsOrder = ['lt_framework', 'microservices', 'jvm', 'database', 'kafka', 'hard_resources', 'lt_generators'];
     const domains = Object.keys(schema || {}).sort((a, b) => {
       const ia = domainsOrder.indexOf(a); const ib = domainsOrder.indexOf(b);
@@ -2832,13 +3192,13 @@
     // Sticky bar: the domain tabs and, while the open tab is zoomed, «Сбросить масштаб».
     const bar = document.createElement('div'); bar.className = 'report-tabs-bar tabs-sticky';
     const sentinel = document.createElement('div'); sentinel.className = 'tabs-sticky-sentinel'; sentinel.setAttribute('aria-hidden', 'true');
-    const tabsNav = document.createElement('div'); tabsNav.className = 'tabs'; tabsNav.setAttribute('aria-label', 'Графики по доменам');
+    const tabsNav = document.createElement('div'); tabsNav.className = 'tabs'; tabsNav.setAttribute('aria-label', LL.t('report.charts.tabs_aria'));
     const reset = document.createElement('button');
     reset.type = 'button';
     reset.className = 'chart-zoom-reset';
     reset.hidden = true;
-    reset.title = 'Вернуть весь интервал теста на графиках вкладки (или двойной щелчок по графику)';
-    reset.innerHTML = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg><span>Сбросить масштаб</span>';
+    reset.title = LL.t('report.charts.reset_title');
+    reset.innerHTML = `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg><span>${escapeHtml(LL.t('report.charts.reset'))}</span>`;
     reset.addEventListener('click', () => {
       const group = reportState.groups[reportState.activePane];
       if (group && group.zoom) group.zoom.reset();
@@ -2851,15 +3211,29 @@
     domains.forEach((domain, di) => {
       const list = (schema[domain] || []).map((x) => x.query_label);
       const btn = document.createElement('button'); btn.className = 'tab' + (di === 0 ? ' active' : '');
-      btn.textContent = `${LL.domainTitleFor(domain, reportDomainTitles)} (${list.length})`; btn.dataset.target = idBase + di; tabsNav.appendChild(btn);
+      // Status square of the domain's analysis (when the report has one), the name, the chart count in mono.
+      const verdict = reportState.domainVerdicts[domain];
+      if (verdict) {
+        const dot = document.createElement('span');
+        dot.className = `tab-dot ${LL.verdictClass(verdict)}`;
+        dot.setAttribute('aria-hidden', 'true');
+        btn.appendChild(dot);
+        btn.title = LL.t('report.tabs.verdict_title', { verdict: LL.verdictLabel(verdict) });
+      }
+      btn.appendChild(document.createTextNode(LL.domainTitleFor(domain, reportDomainTitles)));
+      const count = document.createElement('span');
+      count.className = 'c';
+      count.textContent = String(list.length);
+      btn.appendChild(count);
+      btn.dataset.target = idBase + di; tabsNav.appendChild(btn);
       const pane = document.createElement('div'); pane.id = idBase + di; pane.className = 'tabpanel' + (di === 0 ? ' active' : '');
-      pane.innerHTML = '<div class="chart-pending">Графики загрузятся при открытии вкладки…</div>';
+      pane.innerHTML = `<div class="chart-pending">${escapeHtml(LL.t('report.charts.pending'))}</div>`;
       paneRenderers[pane.id] = () => renderDomainPane(run, domain, pane, list, di);
       tabsBody.appendChild(pane);
     });
     reportState.paneRenderers = paneRenderers;
     reportState.queryLabels = domains.reduce((all, domain) => all.concat((schema[domain] || []).map((x) => x.query_label)), []);
-    if (!domains.length) { root.innerHTML = '<div class="empty-state">Для этого запуска нет сохранённых метрик.</div>'; return; }
+    if (!domains.length) { root.innerHTML = `<div class="empty-state">${escapeHtml(LL.t('report.charts.no_metrics'))}</div>`; return; }
     root.innerHTML = ''; root.appendChild(sentinel); root.appendChild(bar); root.appendChild(tabsBody);
     LL.ui.tabs(tabsNav, {
       onChange: (target) => {
@@ -2886,6 +3260,28 @@
     slaBarModel: slaBarModel,
     heroKpis: heroKpis,
     heroTypeEntries: heroTypeEntries,
+    testTypeSection: testTypeSection,
+    // {group: {code: text}} in the current UI language (built on each read).
+    get STORED_TEXTS() { return storedTexts(); },
+    storedText: storedText,
+    reportLanguageOf: reportLanguageOf,
+    reportLanguageBadge: reportLanguageBadge,
+    heroHtml: heroHtml,
+    verdictSummaryHtml: verdictSummaryHtml,
+    reportMetaHtml: reportMetaHtml,
+    renderHeroKpis: renderHeroKpis,
+    slaScopeText: slaScopeText,
+    utcOffsetText: utcOffsetText,
+    timelineHtml: timelineHtml,
+    linkSlaToSteps: linkSlaToSteps,
+    renderLoadStepTableHtml: renderLoadStepTableHtml,
+    renderSlaChecklist: renderSlaChecklist,
+    renderStructuredReportHtml: renderStructuredReportHtml,
+    renderTrendsTable: renderTrendsTable,
+    judgeSectionHtml: judgeSectionHtml,
+    systemContextMarkdown: systemContextMarkdown,
+    invalidStructuredResponseMarkdown: invalidStructuredResponseMarkdown,
+    formatUsageLine: formatUsageLine,
     verdictSourceText: verdictSourceText,
     verdictHistoryHtml: verdictHistoryHtml,
     verdictDialogHtml: verdictDialogHtml,

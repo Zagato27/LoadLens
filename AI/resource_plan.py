@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """CPU plan of a load-test run: how many instances of each service a target load needs.
 
 The utilization law is fitted per service on stable load steps: CPU of one instance =

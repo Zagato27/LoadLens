@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Versioned URLs of the static files, so browsers may keep them for a year.
 
 ``static_url("js/ui.js")`` gives ``/static/js/ui.js?v=<first 10 hex digits of the sha1 of the file>``: a new

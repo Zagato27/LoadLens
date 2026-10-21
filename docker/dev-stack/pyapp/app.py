@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Small FastAPI app of the dev stack: Python runtime and HTTP metrics for the query packs."""
 
 import random

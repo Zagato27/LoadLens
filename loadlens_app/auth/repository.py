@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Storage interface for users, API tokens and the audit log, plus an in-memory implementation."""
 
 from __future__ import annotations

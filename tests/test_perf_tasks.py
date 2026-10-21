@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Report and publication jobs as Celery tasks (loadlens_app.tasks) and the choice of runner (loadlens_app.job_runner).
 
 The web process and the worker are two JobStore instances on one fake report_jobs table (``JobsTable`` from
@@ -227,7 +228,7 @@ def test_celery_mode_sends_the_report_to_the_reports_queue(web, broker, celery_m
     assert sent.kwargs == {
         "job_id": job.job_id, "start": 0, "end": 600_000, "service": "checkout", "project_area": "shop",
         "use_llm": False, "save_to_db": False, "web_only": True, "run_name": "nightly", "test_type": "step",
-        "run_tag": "nightly", "run_filter_packs": ["lt-k6-influxql"],
+        "run_tag": "nightly", "run_filter_packs": ["lt-k6-influxql"], "report_language": "ru",
     }
     row = table.rows[job.job_id]
     assert (row["runner"], row["status"], row["started_at"], row["owner"]) == ("celery", "running", None, "eng")

@@ -2,6 +2,7 @@ schema_version = 1
 id = "http-otel-legacy"
 version = 1
 title = "HTTP: OpenTelemetry (semconv до 1.23)"
+title_en = "HTTP: OpenTelemetry (semconv before 1.23)"
 category = "http"
 stack = ["opentelemetry", "java", "go", "python", "nodejs", "dotnet"]
 domain = "microservices"
@@ -10,23 +11,34 @@ description = """
 Экспериментальные HTTP-метрики OpenTelemetry до стабилизации: http_server_duration_milliseconds с \
 лейблами http_route и http_status_code. Время переводится в секунды.
 """
+description_en = """
+Experimental OpenTelemetry HTTP metrics from before stabilization: http_server_duration_milliseconds with the \
+http_route and http_status_code labels. Times are converted to seconds.
+"""
 requires_metrics = ["http_server_duration_milliseconds_count"]
 prompt_addendum = """
 Метрики OpenTelemetry HTTP (старые соглашения): http_server_duration — гистограмма входящих запросов по \
 http_route, http_method и http_status_code; в отчёте времена переведены в секунды.
 """
+prompt_addendum_en = """
+OpenTelemetry HTTP metrics (old conventions): http_server_duration is a histogram of incoming requests by \
+http_route, http_method and http_status_code; the report converts times to seconds.
+"""
 
 [variables.service_label]
 title = "Лейбл с именем сервиса"
+title_en = "Label with the service name"
 default = "job"
 pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
 
 [variables.matchers]
 title = "Дополнительные матчеры"
+title_en = "Extra matchers"
 default = ""
 
 [variables.window]
 title = "Окно rate()"
+title_en = "rate() window"
 default = "1m"
 pattern = '^[1-9][0-9]*[smh]$'
 
@@ -38,6 +50,7 @@ required = true
 query = 'sum by ({{service_label}}) (rate(http_server_duration_milliseconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}"]
 description = "Входящие запросы в секунду."
+description_en = "Incoming requests per second."
 
 [[queries]]
 label = "HTTP (OTel legacy): average request time (sec) by service"
@@ -46,6 +59,7 @@ unit = "seconds"
 query = 'sum by ({{service_label}}) (rate(http_server_duration_milliseconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}])) / sum by ({{service_label}}) (rate(http_server_duration_milliseconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}])) / 1000'
 keys = ["{{service_label}}"]
 description = "Среднее время обработки, с."
+description_en = "Average handling time, s."
 
 [[queries]]
 label = "HTTP (OTel legacy): p95 request time (sec) by service"
@@ -54,6 +68,7 @@ unit = "seconds"
 query = 'histogram_quantile(0.95, sum by (le, {{service_label}}) (rate(http_server_duration_milliseconds_bucket{ {{service_label}}!="", {{matchers}} }[{{window}}]))) / 1000'
 keys = ["{{service_label}}"]
 description = "p95 времени обработки, с."
+description_en = "p95 of the handling time, s."
 
 [[queries]]
 label = "HTTP (OTel legacy): 5xx error rate (%) by service"
@@ -62,6 +77,7 @@ unit = "percent"
 query = '100 * (sum by ({{service_label}}) (rate(http_server_duration_milliseconds_count{http_status_code=~"5..", {{service_label}}!="", {{matchers}} }[{{window}}])) or 0 * sum by ({{service_label}}) (rate(http_server_duration_milliseconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))) / sum by ({{service_label}}) (rate(http_server_duration_milliseconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}"]
 description = "Доля ответов 5xx, %."
+description_en = "Share of 5xx responses, %."
 
 [[queries]]
 label = "HTTP (OTel legacy): RPS by service & route (top 20)"
@@ -70,3 +86,4 @@ unit = "per_second"
 query = 'topk(20, sum by ({{service_label}}, http_route) (rate(http_server_duration_milliseconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}])))'
 keys = ["{{service_label}}", "http_route"]
 description = "Самые нагруженные маршруты."
+description_en = "Busiest routes."

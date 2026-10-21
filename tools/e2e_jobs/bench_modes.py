@@ -1,6 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
 """Scenario 9: endpoint latency while a report is built, in a thread of the web process versus in the worker.
 
-How to run (sandbox prepared as in docs/perf-baseline.md, "Этап 3"; nothing listening on 127.0.0.1:5070+N):
+How to run (sandbox prepared as in plans/perf-baseline.md, "Этап 3"; nothing listening on 127.0.0.1:5070+N):
 
     C:/Python312/python.exe -X utf8 tools/e2e_jobs/bench_modes.py --sandbox 6 --repeats 2
     C:/Python312/python.exe -X utf8 tools/e2e_jobs/bench_modes.py --sandbox 6 --repeats 2 --concurrency 4 --rounds 10
@@ -9,13 +10,13 @@ How to run (sandbox prepared as in docs/perf-baseline.md, "Этап 3"; nothing 
 For every repeat it runs ``tools/bench_endpoints.py --during-job`` twice, back to back: ``thread`` (server with
 LOADLENS_JOB_RUNNER=thread, no worker) and ``celery`` (server with LOADLENS_JOB_RUNNER=celery plus a solo
 worker), each with a freshly started server; the stubs stay up (LLM --delay 2, Prometheus defaults: 6 series,
-4 steps), as in the thread baseline of docs/perf-baseline.md. Between runs it pauses --pause-sec seconds and
+4 steps), as in the thread baseline of plans/perf-baseline.md. Between runs it pauses --pause-sec seconds and
 prints the TIME_WAIT count (the Werkzeug server closes every connection; ephemeral ports run short). The bench
 connects with blocking sockets (see BLOCKING_CONNECT; --timeout-connect runs it unchanged).
 
 The JSON of every run goes to --out (default %TEMP%/ll_e2e_jobs/bench-c<C>); the summary (also written as
 summary.md there) has, per mode, the median over the repeats of idle and during-job p50/p95, of the
-collection phase p50/p95 and of the job duration, and checks the criteria of docs/perf-plan.md 11.7: in
+collection phase p50/p95 and of the job duration, and checks the criteria of plans/perf-plan.md 11.7: in
 celery mode job p95 <= 1.3 x idle p95 for /dashboard_data, /runs, /jobs and /load_tests/active, and the job
 in the worker at most 10 % slower than in a thread. Exit code 0 when every run finished its job.
 """

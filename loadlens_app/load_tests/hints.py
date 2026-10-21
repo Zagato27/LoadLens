@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Where a load tool should write its metrics so the service's report sees them.
 
 The suggestion follows the source of the service's ``lt_framework`` domain and its installed query packs:
@@ -12,10 +13,12 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
+from .messages import t
 from .tools import public_url
 
 LT_DOMAIN = "lt_framework"
-NETWORK_NOTE = "Адреса указаны так, как их видит LoadLens: с генератора они могут быть другими."
+# The notes are rendered at once, in the language of the request that asks for the suggestion.
+NETWORK_NOTE = "lt.hints.network"
 
 
 @dataclass
@@ -72,7 +75,7 @@ def output_hint(cfg: dict, tool_id: str, installed_packs: list[str]) -> Hint:
     try:
         resolved = resolve_domain_source(cfg, LT_DOMAIN)
     except DataSourceConfigError as exc:
-        hint.notes.append(f"У домена «Нагрузка» не настроен источник: {exc}")
+        hint.notes.append(t("lt.hints.no_source", error=exc))
         return hint
     source = resolved.config if isinstance(resolved.config, dict) else {}
     kind = resolved.source_type
@@ -89,23 +92,20 @@ def output_hint(cfg: dict, tool_id: str, installed_packs: list[str]) -> Hint:
             else:
                 hint.env["K6_PROMETHEUS_RW_TREND_STATS"] = "p(95),p(99),avg"
             if not victoria:
-                hint.notes.append("Prometheus должен принимать remote write: флаг --web.enable-remote-write-receiver.")
+                hint.notes.append(t("lt.hints.prometheus_rw"))
         elif family == "gatling":
             host = _host(url) or "victoriametrics"
             hint.env["JAVA_OPTS"] = (
                 "-Dgatling.data.writers.0=console -Dgatling.data.writers.1=graphite "
                 f"-Dgatling.data.graphite.host={host} -Dgatling.data.graphite.port=2003"
             )
-            hint.notes.append("Порт 2003 — Graphite-приёмник VictoriaMetrics (-graphiteListenAddr); у Prometheus его нет.")
+            hint.notes.append(t("lt.hints.gatling_graphite_vm"))
             if "lt-gatling-graphite-victoriametrics-labels" in packs:
-                hint.notes.append(
-                    "Пакет с relabeling ждёт правил -relabelConfig в VictoriaMetrics (docs/load-tests.md); тег прогона — "
-                    "-Dgatling.core.outputDirectoryBaseName в шаблоне Gatling."
-                )
+                hint.notes.append(t("lt.hints.gatling_relabel"))
         elif family == "locust":
-            hint.notes.append("Метрики Locust собирает locust_exporter: добавьте его в scrape Prometheus, флаги запуска не нужны.")
+            hint.notes.append(t("lt.hints.locust_exporter"))
         elif family == "jmeter":
-            hint.notes.append("JMeter пишет в Prometheus только через плагин; встроенный Backend Listener пишет в InfluxDB.")
+            hint.notes.append(t("lt.hints.jmeter_prometheus"))
     elif kind == "grafana_proxy":
         influx_url, database = _grafana_influx(source)
         database = database or str(((source.get("influxdb") or {}) if isinstance(source.get("influxdb"), dict) else {}).get("database") or "k6")
@@ -113,21 +113,18 @@ def output_hint(cfg: dict, tool_id: str, installed_packs: list[str]) -> Hint:
         hint.target = f"{influx_url}/{database}"
         if family == "k6":
             hint.params = f"--out influxdb={influx_url}/{database}"
-            hint.notes.append("Если InfluxDB требует входа, задайте K6_INFLUXDB_USERNAME и K6_INFLUXDB_PASSWORD.")
+            hint.notes.append(t("lt.hints.influx_auth"))
         elif family == "jmeter":
-            hint.notes.append(
-                f"В Backend Listener (InfluxdbBackendListenerClient) укажите influxdbUrl={influx_url}/write?db={database} "
-                "и application=${__P(application,app)}: тогда LoadLens отделит прогон."
-            )
+            hint.notes.append(t("lt.hints.jmeter_influx", url=influx_url, database=database, property="${__P(application,app)}"))
         elif family == "gatling":
             host = _host(influx_url) or "influxdb"
             hint.env["JAVA_OPTS"] = (
                 "-Dgatling.data.writers.0=console -Dgatling.data.writers.1=graphite "
                 f"-Dgatling.data.graphite.host={host} -Dgatling.data.graphite.port=2003"
             )
-            hint.notes.append("InfluxDB принимает Graphite только с включённым graphite-входом и шаблоном gatling.*.")
+            hint.notes.append(t("lt.hints.influx_graphite"))
         elif family == "locust":
-            hint.notes.append("Для InfluxDB Locust нужен сторонний плагин (locust-plugins); встроенного вывода нет.")
+            hint.notes.append(t("lt.hints.locust_influx"))
     elif kind == "influxdb":
         influx = source.get("influxdb") if isinstance(source.get("influxdb"), dict) else {}
         url = public_url(str(influx.get("url") or "")).rstrip("/")
@@ -136,15 +133,15 @@ def output_hint(cfg: dict, tool_id: str, installed_packs: list[str]) -> Hint:
             hint.params = f"--out xk6-influxdb={url}"
             hint.env["K6_INFLUXDB_ORGANIZATION"] = str(influx.get("org") or "")
             hint.env["K6_INFLUXDB_BUCKET"] = str(cfg.get("domain_sources", {}).get(LT_DOMAIN, {}).get("bucket") or "k6")
-            hint.notes.append("Вывод в InfluxDB 2 есть в сборке k6 с расширением xk6-output-influxdb; токен задайте в K6_INFLUXDB_TOKEN.")
+            hint.notes.append(t("lt.hints.k6_influx2"))
         else:
-            hint.notes.append("Для InfluxDB 2 этот инструмент пишет через плагины; настройте их по документации инструмента.")
+            hint.notes.append(t("lt.hints.influx2_plugins"))
     else:
-        hint.notes.append(f"Источник типа {kind or 'не задан'}: подсказки нет.")
+        hint.notes.append(t("lt.hints.no_hint", kind=kind or t("lt.hints.kind_unset")))
     if not family:
-        hint.notes.append("Подсказки есть для k6, JMeter, Gatling и Locust.")
+        hint.notes.append(t("lt.hints.supported_tools"))
     if hint.target:
-        hint.notes.append(NETWORK_NOTE)
+        hint.notes.append(t(NETWORK_NOTE))
     return hint
 
 

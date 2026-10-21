@@ -1,24 +1,26 @@
 {% extends "base.html" %}
 {% set active_nav = 'forecasting' %}
-{% block title %}Прогнозирование{% endblock %}
+{% set i18n_ns = ['forecast'] %}
+{% block title %}{{ t('forecast.list.title') }}{% endblock %}
+{% block container_class %}forecast-page forecast-list-page{% endblock %}
 {% block content %}
   <div class="page-header">
     <div class="page-heading">
-      <h2>Прогнозирование</h2>
-      <p class="page-subtitle">Прогноз мощностей по модели USL строится для тестов на максимальную производительность, в данных которых есть ряд среднего времени отклика (и число VU для закрытой модели). Выберите отчёт.</p>
+      <h2>{{ t('forecast.list.title') }}</h2>
+      <p class="page-subtitle">{{ t('forecast.list.subtitle') }}</p>
     </div>
   </div>
   <div id="forecastHint" class="report-note" hidden></div>
-  <div class="table-wrap" style="margin-top:12px;">
-    <table class="data-table">
+  <div class="table-wrap">
+    <table class="data-table forecast-list">
       <thead>
         <tr>
-          <th>Отчёт</th>
-          <th>Сервис</th>
-          <th>Тип теста</th>
-          <th>Отчёт создан</th>
-          <th>Вердикт</th>
-          <th>Модель нагрузки</th>
+          <th>{{ t('forecast.list.col_report') }}</th>
+          <th>{{ t('forecast.list.col_service') }}</th>
+          <th>{{ t('forecast.list.col_test_type') }}</th>
+          <th>{{ t('forecast.list.col_created') }}</th>
+          <th>{{ t('forecast.list.col_verdict') }}</th>
+          <th>{{ t('forecast.list.col_load_model') }}</th>
         </tr>
       </thead>
       <tbody id="forecastRows"></tbody>

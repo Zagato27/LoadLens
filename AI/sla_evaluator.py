@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Программная оценка теста по SLA-критериям.
 
 Окно проверки и правила вердикта зависят от режима профиля теста (AI/test_profile.py):
@@ -5,34 +6,44 @@
 - capacity / stress (step, stress): окно — последняя ступень, где пороги latency/errors
   выполнены. target_rps — главный критерий: если достигнут (stable_max >= target_rps),
   тест успешен ДАЖЕ если система деградировала после этого; нарушения остальных порогов
-  на этой ступени дают «Есть риски».
+  на этой ступени дают ``risk``.
 - stability (soak): окно — окно удержания нагрузки без разгона (``lt_pack["hold_window"]``,
   иначе весь тест). target_rps — уровень, который нужно удерживать: средний RPS окна не ниже
-  target на 5 %, ни один интервал не ниже на 15 %. Любое нарушение primary-порога → «Провал»,
-  CPU/memory → «Есть риски».
+  target на 5 %, ни один интервал не ниже на 15 %. Любое нарушение primary-порога → ``fail``,
+  CPU/memory → ``risk``.
 - spike: окна — найденные всплески (``lt_pack["spike_profile"]``), по каждому порогу берётся
   худший всплеск. target_rps сравнивается с уровнем всплеска; отдельный критерий recovery —
-  возврат задержек к фону. target/recovery нарушены → «Провал», latency/errors в окне
-  всплеска или CPU/memory → «Есть риски». Без всплеска → «Недостаточно данных».
+  возврат задержек к фону. target/recovery нарушены → ``fail``, latency/errors в окне
+  всплеска или CPU/memory → ``risk``. Без всплеска → ``no_data``.
+
+The verdict is a code (AI/verdicts.py). The summary and the rationale are narrative written in the language
+of the report (``format_sla_summary``, ``format_sla_rationale``); the summary is rebuilt from its parts
+(``summary_parts``) when the pipeline adjusts the verdict, so its text is never patched. Check messages, window
+titles and the summary use the ``sla.*`` dictionary keys in the language of the run (``evaluate_sla(lang=...)``,
+else the current locale). Messages keep the ``запрос «…»`` / ``query «…»`` and ``серия «…»`` / ``series «…»``
+structure: readers of reports saved before ``query_label``/``series`` parse it.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, replace
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import pandas as pd
 
+from AI.i18n import get_locale, normalize_lang, t, with_locale
+from AI.report_texts import LocaleTable, text_lang
 from AI.stability import hold_check
 from AI.test_profile import MODES, mode_of
+from AI.verdicts import FAIL, NO_DATA, PASS, RISK, label as verdict_label, to_code
 
 logger = logging.getLogger(__name__)
 
 PRIMARY_SPECS: tuple[tuple[str, str, str, str], ...] = (
     ("error_rate", "max_error_rate_pct", "error_rate_query", "%"),
-    ("p95_latency", "max_p95_ms", "p95_query", "мс"),
-    ("p99_latency", "max_p99_ms", "p99_query", "мс"),
+    ("p95_latency", "max_p95_ms", "p95_query", "ms"),
+    ("p99_latency", "max_p99_ms", "p99_query", "ms"),
 )
 SECONDARY_SPECS: tuple[tuple[str, str, str, str], ...] = (
     ("cpu_usage", "max_cpu_pct", "cpu_query", "%"),
@@ -71,97 +82,160 @@ class StableWindow:
         return out
 
 
+def _unit_text(unit: str) -> str:
+    return t("report.unit.ms") if unit == "ms" else unit
+
+
 def _scope_text(window: Optional[StableWindow]) -> str:
     if window is None:
-        return "всего окна"
+        return t("sla.scope.whole")
+    level = f"{window.level:.0f}"
     if window.kind == "hold":
-        return f"окна удержания ≈{window.level:.0f} RPS"
+        return t("sla.scope.hold", level=level)
     if window.kind == "spike":
-        name = f" «{window.title}»" if window.title else ""
-        return f"окна всплеска{name} ≈{window.level:.0f} RPS"
-    return f"стабильной ступени ≈{window.level:.0f} RPS"
+        if window.title:
+            return t("sla.scope.spike_named", title=window.title, level=level)
+        return t("sla.scope.spike", level=level)
+    return t("sla.scope.step", level=level)
 
 
-def _empty_scope_text(window: StableWindow) -> str:
+def _empty_scope_text(window: StableWindow, query: str) -> str:
     if window.kind == "hold":
-        return "В окне удержания нет точек запроса"
+        return t("sla.check.empty_hold", query=query)
     if window.kind == "spike":
-        return "В окне всплеска нет точек запроса"
-    return "На стабильной ступени RPS нет точек запроса"
-
-SLA_CHECK_TITLES = {
-    "target_rps": "целевой RPS",
-    "error_rate": "доля ошибок",
-    "p95_latency": "p95 latency",
-    "p99_latency": "p99 latency",
-    "cpu_usage": "CPU",
-    "memory_usage": "память",
-    "recovery": "восстановление после всплеска",
-}
+        return t("sla.check.empty_spike", query=query)
+    return t("sla.check.empty_step", query=query)
 
 
-def _check_title(name: str) -> str:
+SLA_CHECK_NAMES = ("target_rps", "error_rate", "p95_latency", "p99_latency", "cpu_usage", "memory_usage", "recovery")
+# Names of the checks (sla.check_title.*) in the language of the report being built.
+SLA_CHECK_TITLES = LocaleTable(SLA_CHECK_NAMES, lambda name: t(f"sla.check_title.{name}"))
+
+
+def _check_title(name: str, lang: Optional[str] = None) -> str:
     key = str(name or "").strip()
-    return SLA_CHECK_TITLES.get(key, key or "критерий")
+    if key in SLA_CHECK_NAMES:
+        return t(f"sla.check_title.{key}", locale=lang)
+    return key or t("sla.check_title_fallback", locale=lang)
 
 
-def _format_check_line(check: Dict[str, Any]) -> str:
-    title = _check_title(str(check.get("name") or ""))
+def _format_check_line(check: Dict[str, Any], lang: Optional[str] = None) -> str:
+    title = _check_title(str(check.get("name") or ""), lang)
     message = str(check.get("message") or "").strip()
     if message:
         return f"- {title}: {message}"
     passed = check.get("passed")
-    actual = check.get("actual")
-    threshold = check.get("threshold")
+    actual = str(check.get("actual"))
+    threshold = str(check.get("threshold"))
     if passed is True:
-        return f"- {title}: порог соблюдён ({actual} при лимите {threshold})"
+        return t("sla.line.passed", locale=lang, title=title, actual=actual, threshold=threshold)
     if passed is False:
-        return f"- {title}: порог нарушен ({actual} при лимите {threshold})"
-    return f"- {title}: нет данных для проверки"
+        return t("sla.line.failed", locale=lang, title=title, actual=actual, threshold=threshold)
+    return t("sla.line.no_data", locale=lang, title=title)
 
 
-def format_sla_rationale(verdict: str, checks: List[Dict[str, Any]]) -> str:
-    """Human-readable explanation of why the SLA verdict was chosen."""
+# Codes of the adjustments a pipeline makes to the SLA verdict (``summary_parts["adjustments"]``).
+ADJUST_RESOURCES = "resources_are_risks"
+ADJUST_TREND = "adverse_trend"
+# Parts of the summary by mode: modes with a note of their own and the names of the summary lists.
+_MODE_NOTES = ("stability", "spike")
+_SUMMARY_LISTS = ("passed", "failed", "unknown")
+
+
+def _lang_of(lang: Any) -> str:
+    """Language of a narrative: an explicit ``lang`` (unknown codes: ru), else the current locale."""
+    return text_lang(lang) if lang else get_locale()
+
+
+def format_sla_rationale(verdict: str, checks: List[Dict[str, Any]], lang: Optional[str] = None) -> str:
+    """Human-readable explanation of why the SLA verdict (a code or an old label) was chosen, in ``lang``
+    (default: the current locale)."""
+    lang = _lang_of(lang)
+    code = to_code(verdict)
+    title = verdict_label(code, lang)
     rps = next((item for item in checks if item.get("name") == "target_rps"), None)
     failed = [item for item in checks if item.get("passed") is False]
-    failed_titles = ", ".join(_check_title(str(item.get("name") or "")) for item in failed)
-    if verdict == "Успешно":
+    failed_titles = ", ".join(_check_title(str(item.get("name") or ""), lang) for item in failed)
+
+    def head(key: str, **params: Any) -> str:
+        return t(f"sla.rationale.{key}", locale=lang, label=title, **params)
+
+    if code == PASS:
         if rps and rps.get("passed") is True and rps.get("actual") is not None:
-            head = (
-                f"Статус «Успешно»: целевой RPS достигнут "
-                f"({rps['actual']} ≥ {rps['threshold']}), вторичные пороги SLA не нарушены."
-            )
+            text = head("pass_target", actual=str(rps["actual"]), threshold=str(rps["threshold"]))
         else:
-            head = "Статус «Успешно»: проверяемые SLA-критерии соблюдены."
-    elif verdict == "Есть риски":
+            text = head("pass")
+    elif code == RISK:
         if rps and rps.get("passed") is True and failed:
-            head = (
-                f"Статус «Есть риски»: целевой RPS достигнут, "
-                f"но нарушены вторичные пороги ({failed_titles})."
-            )
+            text = head("risk_target", failed=failed_titles)
         elif failed:
-            head = (
-                f"Статус «Есть риски»: нарушены критерии {failed_titles}, "
-                "без однозначного провала по целевому RPS."
-            )
+            text = head("risk_failed", failed=failed_titles)
         else:
-            head = "Статус «Есть риски»: не все SLA-критерии удалось подтвердить числами."
-    elif verdict == "Провал":
+            text = head("risk")
+    elif code == FAIL:
         if rps and rps.get("passed") is False and rps.get("actual") is not None:
-            head = (
-                f"Статус «Провал»: целевой RPS не достигнут "
-                f"({rps['actual']} < {rps['threshold']})."
-            )
+            text = head("fail_target", actual=str(rps["actual"]), op="<", threshold=str(rps["threshold"]))
         elif failed:
-            head = f"Статус «Провал»: нарушены обязательные SLA-критерии ({failed_titles})."
+            text = head("fail_failed", failed=failed_titles)
         else:
-            head = "Статус «Провал»: по SLA целевой результат теста не подтверждён."
+            text = head("fail")
     else:
-        head = "Статус «Недостаточно данных»: не хватает метрик, чтобы проверить SLA."
-    lines = [_format_check_line(item) for item in checks]
+        text = head("no_data")
+    lines = [_format_check_line(item, lang) for item in checks]
     if not lines:
-        return head
-    return head + "\n" + "\n".join(lines)
+        return text
+    return text + "\n" + "\n".join(lines)
+
+
+def sla_summary_parts(verdict: Any, checks: List[Dict[str, Any]], test_mode: str, detected: bool = True) -> Dict[str, Any]:
+    """Parts of the SLA summary: the verdict code, check names by state, the mode and the adjustments."""
+    return {
+        "verdict": to_code(verdict),
+        "passed": [str(c.get("name")) for c in checks if c.get("passed") is True],
+        "failed": [str(c.get("name")) for c in checks if c.get("passed") is False],
+        "unknown": [str(c.get("name")) for c in checks if c.get("passed") is None],
+        "test_mode": str(test_mode or ""),
+        "spike_detected": bool(detected),
+        "adjustments": [],
+    }
+
+
+def summary_parts_from_checks(result: Mapping[str, Any]) -> Dict[str, Any]:
+    """``summary_parts`` of an SLA result, rebuilt from its checks when it has none (results built elsewhere)."""
+    parts = result.get("summary_parts")
+    if isinstance(parts, Mapping):
+        return {**parts, "adjustments": [dict(item) for item in parts.get("adjustments") or [] if isinstance(item, Mapping)]}
+    checks = [item for item in result.get("checks") or [] if isinstance(item, Mapping)]
+    return sla_summary_parts(result.get("verdict"), checks, str(result.get("test_mode") or ""))
+
+
+def _adjustment_text(item: Mapping[str, Any], lang: str, fail_label: str) -> str:
+    code = str(item.get("code") or "")
+    if code == ADJUST_RESOURCES:
+        return t("sla.summary.adjust_resources", locale=lang, mode=str(item.get("mode") or ""), fail=fail_label)
+    if code == ADJUST_TREND:
+        return t("sla.summary.adjust_trend", locale=lang, trends=", ".join(str(trend) for trend in item.get("trends") or []))
+    return str(item.get("text") or code)
+
+
+def format_sla_summary(parts: Mapping[str, Any], lang: Optional[str] = None) -> str:
+    """«SLA verdict: <label>. Пройдено: …; Нарушено: …; <mode note>; <adjustments>» in ``lang``
+    (default: the current locale)."""
+    lang = _lang_of(lang)
+    fail_label = verdict_label(FAIL, lang)
+    items: List[str] = []
+    for key in _SUMMARY_LISTS:
+        names = [str(name) for name in parts.get(key) or []]
+        if names:
+            items.append(t(f"sla.summary.{key}", locale=lang, names=", ".join(names)))
+    mode = str(parts.get("test_mode") or "")
+    if mode in _MODE_NOTES:
+        items.append(t(f"sla.summary.mode_{mode}", locale=lang, fail=fail_label))
+    if mode == "spike" and parts.get("spike_detected") is False:
+        items.append(t("sla.summary.no_spike", locale=lang))
+    items.extend(_adjustment_text(item, lang, fail_label) for item in parts.get("adjustments") or [] if isinstance(item, Mapping))
+    head = t("sla.summary.head", locale=lang, label=verdict_label(parts.get("verdict"), lang))
+    return head + " " + "; ".join(items)
 
 
 def _safe_float(val: Any) -> Optional[float]:
@@ -578,7 +652,7 @@ def _check_by_query_label(
             threshold=threshold,
             actual=None,
             passed=None,
-            message="Источник не задан: выберите запрос в настройках SLA",
+            message=t("sla.check.no_source"),
             category=category,
         )
     frame = _labeled_frame(labeled, query)
@@ -591,7 +665,7 @@ def _check_by_query_label(
             threshold=threshold,
             actual=None,
             passed=None,
-            message=f"Нет данных по запросу «{query}»",
+            message=t("sla.check.no_query_data", query=query),
             category=category,
             query_label=source_label,
         )
@@ -604,11 +678,7 @@ def _check_by_query_label(
     elif window is None:
         actual, series = _worst_series_p95(frame)
     if actual is None:
-        empty_message = (
-            f"{_empty_scope_text(window)} «{query}»"
-            if window is not None
-            else f"В запросе «{query}» нет чисел"
-        )
+        empty_message = _empty_scope_text(window, query) if window is not None else t("sla.check.no_numbers", query=query)
         return _make_check(
             name=name,
             threshold=threshold,
@@ -619,15 +689,15 @@ def _check_by_query_label(
             query_label=source_label,
         )
     passed = actual <= threshold
-    series_note = f", серия «{series}»" if series else ""
+    series_note = t("sla.check.series_note", series=series) if series else ""
     return _make_check(
         name=name,
         threshold=threshold,
         actual=round(actual, 3),
         passed=passed,
-        message=(
-            f"p95 {actual:.2f} {unit} {'≤' if passed else '>'} порог {threshold:g} {unit} "
-            f"({scope}, запрос «{query}»{series_note})"
+        message=t(
+            "sla.check.p95", actual=f"{actual:.2f}", unit=_unit_text(unit), op="≤" if passed else ">",
+            threshold=f"{threshold:g}", scope=scope, query=query, series_note=series_note,
         ),
         category=category,
         query_label=source_label,
@@ -685,20 +755,16 @@ def _capacity_target_check(
         passed = window.level >= target_rps
         degraded_note = ""
         if window.degraded_level is not None:
-            degraded_note = (
-                f"; на ступени ≈{window.degraded_level:.0f} RPS нарушены: "
-                f"{', '.join(window.degraded_checks)}"
-            )
+            degraded_note = t("sla.target.degraded", level=f"{window.degraded_level:.0f}", checks=", ".join(window.degraded_checks))
         return _make_check(
             name="target_rps",
             threshold=target_rps,
             actual=round(window.level, 2),
             passed=passed,
             severity="critical",
-            message=(
-                f"RPS {window.level:.1f} (stable_max (query: {window.label})) "
-                f"{'≥' if passed else '<'} целевой {target_rps:.0f}"
-                f"; label='{window.label}'; series='{window.series}'{degraded_note}"
+            message=t(
+                "sla.target.step", level=f"{window.level:.1f}", label=window.label, op="≥" if passed else "<",
+                target=f"{target_rps:.0f}", series=window.series, degraded=degraded_note,
             ),
             query_label=window.label,
             series=window.series,
@@ -715,7 +781,7 @@ def _capacity_target_check(
         reason = str(rps_pick.get("reason") or "")
         return _make_check(
             name="target_rps", threshold=target_rps, actual=None, passed=None, severity="critical",
-            message=f"Нет данных RPS из lt_framework (reason={reason or method})",
+            message=t("sla.target.no_rps", reason=reason or method),
         )
     passed = actual_rps >= target_rps
     source_label = rps_pick.get("source_label")
@@ -727,8 +793,7 @@ def _capacity_target_check(
         passed=passed,
         severity="critical",
         message=(
-            f"RPS {actual_rps:.1f} ({method}) "
-            f"{'≥' if passed else '<'} целевой {target_rps:.0f}"
+            t("sla.target.measured", actual=f"{actual_rps:.1f}", method=method, op="≥" if passed else "<", target=f"{target_rps:.0f}")
             + (f"; label='{source_label}'" if source_label else "")
             + (f"; series='{source_series}'" if source_series else "")
         ),
@@ -747,7 +812,7 @@ def _hold_window(lt_pack: Dict[str, Any]) -> tuple[Optional[Dict[str, Any]], Opt
     window = StableWindow(
         start=str(hold["start_utc"]), end=str(hold["end_utc"]), level=level,
         series=str(hold.get("series") or ""), label=str(hold.get("source_label") or ""),
-        kind="hold", title="окно удержания",
+        kind="hold", title=t("sla.window.hold"),
     )
     return hold, window
 
@@ -766,7 +831,7 @@ def _stability_checks(
             query = str(sla_config.get("max_performance_query") or "").strip()
             checks.append(_make_check(
                 name="target_rps", threshold=target_rps, actual=None, passed=None, severity="critical",
-                message=f"Нет данных RPS для окна удержания (запрос «{query or 'не выбран'}»)",
+                message=t("sla.target.hold_no_data", query=query or t("sla.target.query_not_chosen")),
                 query_label=query,
             ))
         else:
@@ -823,7 +888,7 @@ def _spike_windows(lt_pack: Dict[str, Any]) -> tuple[Dict[str, Any], List[Dict[s
         StableWindow(
             start=str(item["start_utc"]), end=str(item["end_utc"]), level=float(item.get("level_rps") or 0.0),
             series=str(profile.get("series") or ""), label=str(profile.get("source_label") or ""),
-            kind="spike", title=str(item.get("label") or f"всплеск {item.get('index')}"),
+            kind="spike", title=str(item.get("label") or t("sla.window.spike", index=str(item.get("index")))),
         )
         for item in spikes
     ]
@@ -837,7 +902,7 @@ def _recovery_check(profile: Dict[str, Any], spikes: List[Dict[str, Any]], laten
             return None
         return _make_check(
             name="recovery", threshold=limit, actual=None, passed=None, severity="critical",
-            message="Всплеск нагрузки не обнаружен: восстановление не оценивалось",
+            message=t("sla.recovery.no_spike"),
         )
     states = [item.get("recovered") for item in spikes]
     if all(state is None for state in states) and not latency_configured:
@@ -849,16 +914,16 @@ def _recovery_check(profile: Dict[str, Any], spikes: List[Dict[str, Any]], laten
     if not_recovered:
         passed: Optional[bool] = False
         message = (
-            f"Задержки не вернулись к фону (±{tolerance:g} %) за {limit:g} мин после: {', '.join(not_recovered)}"
+            t("sla.recovery.not_recovered_limit", tolerance=f"{tolerance:g}", limit=f"{limit:g}", spikes=", ".join(not_recovered))
             if tolerance is not None and limit is not None
-            else f"Задержки не вернулись к фону после: {', '.join(not_recovered)}"
+            else t("sla.recovery.not_recovered", spikes=", ".join(not_recovered))
         )
     elif all(state is True for state in states):
         passed = True
-        message = f"Задержки вернулись к фону за {actual:g} мин (худший всплеск), предел {limit:g} мин"
+        message = t("sla.recovery.recovered", actual=f"{actual:g}", limit=f"{limit:g}")
     else:
         passed = None
-        message = "Восстановление оценено не для всех всплесков: после всплеска нет точек задержки"
+        message = t("sla.recovery.partial")
     return _make_check(
         name="recovery", threshold=limit, actual=actual, passed=passed, severity="critical", message=message,
     )
@@ -879,16 +944,16 @@ def _spike_checks(
         if top is None:
             checks.append(_make_check(
                 name="target_rps", threshold=target_rps, actual=None, passed=None, severity="critical",
-                message=str(profile.get("reason") or "Всплеск нагрузки не обнаружен"),
+                message=str(profile.get("reason") or t("sla.spike.not_detected")),
             ))
         else:
             passed = top.level >= target_rps
             checks.append(_make_check(
                 name="target_rps", threshold=target_rps, actual=round(top.level, 2), passed=passed,
                 severity="critical",
-                message=(
-                    f"Уровень всплеска «{top.title}» {top.level:.1f} RPS "
-                    f"{'≥' if passed else '<'} целевой {target_rps:.0f}; label='{top.label}'"
+                message=t(
+                    "sla.target.spike", title=top.title, level=f"{top.level:.1f}", op="≥" if passed else "<",
+                    target=f"{target_rps:.0f}", label=top.label,
                 ),
                 query_label=top.label, series=top.series,
             ))
@@ -911,20 +976,20 @@ def _capacity_verdict(checks: List[Dict[str, Any]]) -> str:
     evaluable = [c for c in checks if c["passed"] is not None]
     rps_reached = rps_check["passed"] if rps_check else None
     if rps_reached is True:
-        return "Есть риски" if any(c["passed"] is False for c in others) else "Успешно"
+        return RISK if any(c["passed"] is False for c in others) else PASS
     if rps_reached is False:
-        return "Провал"
+        return FAIL
     if rps_check is not None:
         if all(c["passed"] is True for c in evaluable):
-            return "Есть риски"
+            return RISK
         if any(c["passed"] is False for c in evaluable):
-            return "Провал"
-        return "Недостаточно данных"
+            return FAIL
+        return NO_DATA
     if evaluable and all(c["passed"] is True for c in evaluable):
-        return "Успешно"
+        return PASS
     if any(c["passed"] is False for c in evaluable):
-        return "Провал"
-    return "Недостаточно данных"
+        return FAIL
+    return NO_DATA
 
 
 def _is_primary(check: Dict[str, Any]) -> bool:
@@ -932,7 +997,7 @@ def _is_primary(check: Dict[str, Any]) -> bool:
 
 
 def _verdict_for_mode(mode: str, checks: List[Dict[str, Any]], detected: bool = True) -> str:
-    """Deterministic verdict by the policy of the test-profile mode (see module docstring)."""
+    """Deterministic verdict code by the policy of the test-profile mode (see module docstring)."""
     if mode in {"capacity", "stress"}:
         return _capacity_verdict(checks)
     evaluable = [c for c in checks if c["passed"] is not None]
@@ -940,37 +1005,41 @@ def _verdict_for_mode(mode: str, checks: List[Dict[str, Any]], detected: bool = 
     all_passed = bool(evaluable) and all(c["passed"] is True for c in evaluable)
     if mode == "spike":
         if not detected:
-            return "Недостаточно данных"
+            return NO_DATA
         if any(c["name"] in {"target_rps", "recovery"} for c in failed):
-            return "Провал"
+            return FAIL
         if failed:
-            return "Есть риски"
-        return "Успешно" if all_passed else "Недостаточно данных"
+            return RISK
+        return PASS if all_passed else NO_DATA
     if any(_is_primary(c) for c in failed):
-        return "Провал"
+        return FAIL
     if failed:
-        return "Есть риски"
-    return "Успешно" if all_passed else "Недостаточно данных"
-
-
-MODE_SUMMARY_NOTES = {
-    "stability": (
-        "Режим stability: пороги проверены на окне удержания, target_rps — удержание среднего уровня; "
-        "CPU/memory трактуются как вторичные риски и сами по себе не переводят тест в «Провал»"
-    ),
-    "spike": (
-        "Режим spike: пороги проверены в окнах всплесков (худший всплеск), target_rps — уровень всплеска; "
-        "нарушение target_rps или recovery — «Провал», задержки и ошибки в окне всплеска — риски"
-    ),
-}
+        return RISK
+    return PASS if all_passed else NO_DATA
 
 
 def evaluate_sla(
     domain_data: Dict[str, Dict[str, Any]],
     sla_config: Dict[str, Any],
     test_profile: Optional[Dict[str, Any]] = None,
+    lang: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Оценивает результаты теста по SLA-критериям с учётом режима профиля теста."""
+    """Оценивает результаты теста по SLA-критериям с учётом режима профиля теста.
+
+    ``verdict`` is a code; check messages and ``summary`` are written in ``lang`` (default: the current locale)
+    and ``summary_parts`` lets the pipeline rebuild the summary.
+    """
+    lang = normalize_lang(lang) or get_locale()
+    with with_locale(lang):
+        return _evaluate_sla(domain_data, sla_config, test_profile, lang)
+
+
+def _evaluate_sla(
+    domain_data: Dict[str, Dict[str, Any]],
+    sla_config: Dict[str, Any],
+    test_profile: Optional[Dict[str, Any]],
+    lang: str,
+) -> Dict[str, Any]:
     sla_config = sla_config if isinstance(sla_config, dict) else {}
     test_mode = _test_mode_from_profile(test_profile or sla_config.get("test_profile"))
     if not sla_config or not any(
@@ -978,9 +1047,9 @@ def evaluate_sla(
         for k in ("target_rps", "max_error_rate_pct", "max_p95_ms", "max_p99_ms", "max_cpu_pct", "max_memory_pct")
     ):
         return {
-            "verdict": "Недостаточно данных",
+            "verdict": NO_DATA,
             "checks": [],
-            "summary": "SLA-критерии не заданы",
+            "summary": t("sla.summary.no_criteria"),
             "test_mode": test_mode,
         }
 
@@ -1007,39 +1076,26 @@ def evaluate_sla(
 
     if not checks:
         return {
-            "verdict": "Недостаточно данных",
+            "verdict": NO_DATA,
             "checks": [],
-            "summary": "Ни один SLA-критерий не удалось проверить (нет подходящих метрик)",
+            "summary": t("sla.summary.no_checks"),
             "test_mode": test_mode,
         }
 
     verdict = _verdict_for_mode(test_mode, checks, detected)
-
-    passed_names = [c["name"] for c in checks if c["passed"] is True]
-    failed_names = [c["name"] for c in checks if c["passed"] is False]
-    unknown_names = [c["name"] for c in checks if c["passed"] is None]
-    parts = []
-    if passed_names:
-        parts.append(f"Пройдено: {', '.join(passed_names)}")
-    if failed_names:
-        parts.append(f"Нарушено: {', '.join(failed_names)}")
-    if unknown_names:
-        parts.append(f"Нет данных: {', '.join(unknown_names)}")
-    if test_mode in MODE_SUMMARY_NOTES:
-        parts.append(MODE_SUMMARY_NOTES[test_mode])
-    if test_mode == "spike" and not detected:
-        parts.append("всплеск нагрузки не обнаружен")
-    summary = f"SLA verdict: {verdict}. " + "; ".join(parts)
+    parts = sla_summary_parts(verdict, checks, test_mode, detected)
+    summary = format_sla_summary(parts, lang)
 
     logger.info(
         "SLA evaluation: verdict=%s, mode=%s, checks=%d, passed=%d, failed=%d",
-        verdict, test_mode, len(checks), len(passed_names), len(failed_names)
+        verdict, test_mode, len(checks), len(parts["passed"]), len(parts["failed"])
     )
 
     return {
         "verdict": verdict,
         "checks": checks,
         "summary": summary,
+        "summary_parts": parts,
         "test_mode": test_mode,
         "stable_window": window.to_dict() if window is not None else None,
     }

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Who may call what: one table keyed by Flask endpoint ("blueprint.function").
 
 Keeping the rules in one place makes the access model reviewable at a glance. An endpoint missing
@@ -54,6 +55,9 @@ POLICY: dict[str, Rule] = {
     "static": PUBLIC,
     "appearance.logo": PUBLIC,
     "appearance.palette": PUBLIC,
+    # Version, license and third-party notices: constants only, also while the storage database is down.
+    "about.about": Rule(None, recovery_ok=True),
+    "about.third_party": Rule(None, recovery_ok=True),
     "auth.healthz": PUBLIC,
     "auth.login_page": PUBLIC,
     "auth.login_submit": PUBLIC,
@@ -83,6 +87,7 @@ POLICY: dict[str, Rule] = {
     "dashboard.get_services": _read(),
     "dashboard.dashboard_data": _read(),
     "dashboard.demo_seed": _write(A, "demo.seed", session_only=True),
+    "dashboard.demo_status_view": _read(),  # the dashboard banner of the demo stack
     "dashboard.llm_reports": _read(),
     "dashboard.llm_context": _read(),
     "dashboard.llm_feedback_get": _read(),

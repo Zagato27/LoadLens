@@ -1,0 +1,25 @@
+TASK: analysis of database metrics during a load test.
+
+DOMAIN DATA (sections that may be present):
+- Database query volume (query rate) by service/pod.
+- The 95th percentile of query execution time by service/pod.
+- If present — connections, errors, waits and other series included in the context.
+
+ANALYSIS FOCUS:
+1. Latency by step: at which step the p95 query time started to grow faster than the query volume
+   (anomalies.kind=elasticity, step_table.per_step). Proportional volume growth with a stable p95 is normal.
+2. Link between load and execution time: match the steps with query volume growth and the steps with p95 growth for
+   the same section/service. Name the step where the link first appeared.
+3. Unevenness between services/pods: if one database client has a noticeably higher p95 than the others at the same
+   step — a separate finding with both values.
+4. Drift within a step (anomalies.kind=drift) under unchanged load is a risk of accumulation (locks, a growing
+   connection queue); note it separately from growth between steps.
+5. If a baseline is given — compare p95 and the query volume with the previous run (delta_mean_pct) and state whether
+   it got worse/better and by how much.
+
+EVIDENCE REQUIREMENTS:
+- In every finding: service/pod (component), the step or interval by label, the p95 or volume value from step_table
+  or top_series, and, if an SLA is set, the threshold from the analysis guidance block.
+- Do not introduce metrics that are not in the context (connection pool, cache hit ratio, replica lag, etc.) if
+  the corresponding sections are absent.
+- Stick to the units given in the section name (seconds/milliseconds); do not convert without an explicit reason.

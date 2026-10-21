@@ -12,23 +12,36 @@ http_response_status_code после экспорта в Prometheus. Так пи
 Python, Node.js и .NET. Для старых имён (http_server_duration_milliseconds) используйте пакет \
 «HTTP: OpenTelemetry (semconv до 1.23)».
 """
+description_en = """
+Stable OpenTelemetry HTTP metrics: http_server_request_duration_seconds with the http_route and \
+http_response_status_code labels after export to Prometheus. Written by Java agent 2.x and the Go, Python, \
+Node.js and .NET instrumentations. For the old names (http_server_duration_milliseconds) use the "HTTP: \
+OpenTelemetry (semconv before 1.23)" pack.
+"""
 requires_metrics = ["http_server_request_duration_seconds_count"]
 prompt_addendum = """
 Метрики OpenTelemetry HTTP: http_server_request_duration_seconds — гистограмма входящих запросов по \
 http_route, http_request_method и http_response_status_code. Времена в секундах.
 """
+prompt_addendum_en = """
+OpenTelemetry HTTP metrics: http_server_request_duration_seconds is a histogram of incoming requests by \
+http_route, http_request_method and http_response_status_code. Times are in seconds.
+"""
 
 [variables.service_label]
 title = "Лейбл с именем сервиса"
+title_en = "Label with the service name"
 default = "job"
 pattern = '^[a-zA-Z_][a-zA-Z0-9_]*$'
 
 [variables.matchers]
 title = "Дополнительные матчеры"
+title_en = "Extra matchers"
 default = ""
 
 [variables.window]
 title = "Окно rate()"
+title_en = "rate() window"
 default = "1m"
 pattern = '^[1-9][0-9]*[smh]$'
 
@@ -40,6 +53,7 @@ required = true
 query = 'sum by ({{service_label}}) (rate(http_server_request_duration_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}"]
 description = "Входящие запросы в секунду."
+description_en = "Incoming requests per second."
 
 [[queries]]
 label = "HTTP (OTel): average request time (sec) by service"
@@ -48,6 +62,7 @@ unit = "seconds"
 query = 'sum by ({{service_label}}) (rate(http_server_request_duration_seconds_sum{ {{service_label}}!="", {{matchers}} }[{{window}}])) / sum by ({{service_label}}) (rate(http_server_request_duration_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}"]
 description = "Среднее время обработки, с."
+description_en = "Average handling time, s."
 
 [[queries]]
 label = "HTTP (OTel): p95 request time (sec) by service"
@@ -56,6 +71,7 @@ unit = "seconds"
 query = 'histogram_quantile(0.95, sum by (le, {{service_label}}) (rate(http_server_request_duration_seconds_bucket{ {{service_label}}!="", {{matchers}} }[{{window}}])))'
 keys = ["{{service_label}}"]
 description = "p95 времени обработки, с."
+description_en = "p95 of the handling time, s."
 
 [[queries]]
 label = "HTTP (OTel): 5xx error rate (%) by service"
@@ -64,6 +80,7 @@ unit = "percent"
 query = '100 * (sum by ({{service_label}}) (rate(http_server_request_duration_seconds_count{http_response_status_code=~"5..", {{service_label}}!="", {{matchers}} }[{{window}}])) or 0 * sum by ({{service_label}}) (rate(http_server_request_duration_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))) / sum by ({{service_label}}) (rate(http_server_request_duration_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}]))'
 keys = ["{{service_label}}"]
 description = "Доля ответов 5xx, %."
+description_en = "Share of 5xx responses, %."
 
 [[queries]]
 label = "HTTP (OTel): RPS by service & route (top 20)"
@@ -72,6 +89,7 @@ unit = "per_second"
 query = 'topk(20, sum by ({{service_label}}, http_route) (rate(http_server_request_duration_seconds_count{ {{service_label}}!="", {{matchers}} }[{{window}}])))'
 keys = ["{{service_label}}", "http_route"]
 description = "Самые нагруженные маршруты."
+description_en = "Busiest routes."
 
 [[queries]]
 label = "HTTP (OTel): p95 request time (sec) by service & route (top 20)"
@@ -80,3 +98,4 @@ unit = "seconds"
 query = 'topk(20, histogram_quantile(0.95, sum by (le, {{service_label}}, http_route) (rate(http_server_request_duration_seconds_bucket{ {{service_label}}!="", {{matchers}} }[{{window}}]))))'
 keys = ["{{service_label}}", "http_route"]
 description = "Самые медленные маршруты по p95."
+description_en = "Slowest routes by p95."

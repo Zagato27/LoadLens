@@ -1,114 +1,123 @@
 {% extends "base.html" %}
 {% set active_nav = 'launch' %}
-{% block title %}Прогон теста{% endblock %}
+{% set i18n_ns = ['run'] %}
+{% block title %}{{ t('run.title') }}{% endblock %}
 {% block head %}
 <script defer src="{{ url_for('static', filename='vendor/chart.umd.js') }}"></script>
 <style>
   .run-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
-  .run-head h2 { margin: 0 0 6px; }
-  .run-meta { color: var(--text-muted); font-size: 13px; line-height: 1.6; }
-  .run-message { margin-top: 6px; font-size: 14px; }
-  .run-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 16px 0 10px; }
-  .tile { border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev); padding: 10px 12px; }
-  .tile .label { font-size: 12px; color: var(--text-dim); }
-  .tile .value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 2px; }
-  .chart-card { border: 1px solid var(--border); border-radius: 12px; background: var(--bg-elev); padding: 12px 16px; }
+  .run-head h1 { margin: 0 0 8px; overflow-wrap: anywhere; }
+  .run-meta { color: var(--muted); font: 12px/1.6 var(--mono); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .run-message { margin-top: 6px; font-size: 13px; }
+  .run-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .run-actions .st { margin-right: 6px; }
+  /* Last readings: figures in mono, no tiles. */
+  .run-figs { margin: 22px 0 18px; }
+  .run-figs .fig .k { margin-top: 6px; }
+  /* Live charts: no boxes; a hairline over each chart, the title in plain text. */
+  .chart-card { min-width: 0; padding-top: 10px; border-top: 1px solid var(--line); }
   /* Chart.js sizes the canvas to its parent: the parent needs a height of its own. */
   .chart-box { position: relative; height: 280px; }
   .chart-box.small { height: 200px; }
-  .chart-title { font-size: 13px; color: var(--text-muted); margin-bottom: 6px; }
-  .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .chart-title { margin-bottom: 6px; font-size: 13px; font-weight: 500; }
+  .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 22px 32px; }
   .charts-grid .wide { grid-column: 1 / -1; }
   @media (max-width: 900px) { .charts-grid { grid-template-columns: 1fr; } }
-  .live-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 8px; }
-  .live-window { display: flex; gap: 6px; flex-wrap: wrap; }
-  .live-window .btn.active { border-color: var(--accent); color: var(--accent); }
-  .live-fresh { font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
-  .live-fresh.stale { color: var(--warn-fg); }
-  .live-note { font-size: 12px; color: var(--text-dim); margin-top: 6px; min-height: 16px; }
+  .live-head { display: flex; justify-content: space-between; align-items: center; gap: 10px 18px; flex-wrap: wrap; margin: 0 0 10px; }
+  .live-fresh { color: var(--dim); font: 12px var(--mono); font-variant-numeric: tabular-nums; }
+  .live-fresh.stale { color: var(--warn); }
+  .live-note { min-height: 16px; margin-top: 8px; color: var(--dim); font-size: 12px; }
   /* First read of a window: a spinner over every chart until its points arrive (or the read fails). */
   .charts-grid.is-loading .chart-box canvas { opacity: 0.15; }
-  .charts-grid.is-loading .chart-box::before { content: ''; position: absolute; left: 50%; top: 50%; width: 28px; height: 28px; margin: -24px 0 0 -14px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: live-spin 0.9s linear infinite; }
-  .charts-grid.is-loading .chart-box::after { content: 'Загружаем метрики…'; position: absolute; left: 0; right: 0; top: 50%; margin-top: 12px; text-align: center; font-size: 12px; color: var(--text-dim); }
+  .charts-grid.is-loading .chart-box::before { content: ''; position: absolute; left: 50%; top: 50%; width: 24px; height: 24px; margin: -22px 0 0 -12px; border: 2px solid var(--line-2); border-top-color: var(--muted); border-radius: 50%; animation: live-spin 0.9s linear infinite; }
+  .charts-grid.is-loading .chart-box::after { content: attr(data-loading-text); position: absolute; left: 0; right: 0; top: 50%; margin-top: 12px; text-align: center; font-size: 12px; color: var(--dim); }
   @keyframes live-spin { to { transform: rotate(360deg); } }
-  @media (prefers-reduced-motion: reduce) { .charts-grid.is-loading .chart-box::before { animation: none; border-top-color: var(--border); } }
-  .live-query { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
-  .live-query pre { white-space: pre-wrap; word-break: break-all; background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px; padding: 8px; margin: 6px 0 0; }
+  @media (prefers-reduced-motion: reduce) { .charts-grid.is-loading .chart-box::before { animation: none; border-top-color: var(--line-2); } }
+  .live-query { margin-top: 4px; color: var(--dim); font-size: 12px; }
+  .live-query pre { margin: 6px 0 0; padding: 0; color: var(--text); font: 12px/1.5 var(--mono); white-space: pre-wrap; word-break: break-all; }
+  /* Instances: table.grid; commands in borderless mono under the name. */
+  .run-section-title { margin: 30px 0 4px; }
   .inst-table td { vertical-align: top; }
-  .inst-table .msg { font-size: 12px; color: var(--text-muted); max-width: 360px; }
-  .inst-table details pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px; padding: 8px; margin: 6px 0 0; }
-  .inst-actions { display: flex; gap: 6px; flex-wrap: wrap; }
-  .log-card { border: 1px solid var(--border); border-radius: 12px; background: var(--bg-elev); padding: 12px 16px; margin-top: 16px; }
+  .inst-table td.inst-name strong { font-family: var(--mono); font-weight: 500; }
+  .inst-table .msg { max-width: 360px; color: var(--muted); font-size: 12px; }
+  .inst-table details summary { cursor: pointer; }
+  .inst-table details pre { margin: 6px 0 0; padding: 0; color: var(--text); font: 12px/1.5 var(--mono); white-space: pre-wrap; word-break: break-all; }
+  .inst-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  /* Log of an instance: a hairline section, the text in a framed scroll area. */
+  .log-card { margin-top: 26px; padding-top: 14px; border-top: 1px solid var(--line); }
   .log-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .log-card pre { white-space: pre-wrap; word-break: break-all; max-height: 420px; overflow: auto; background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-size: 12px; margin: 8px 0 0; }
+  .log-head strong { font-size: 15px; font-weight: 600; }
+  .log-follow { display: flex; gap: 6px; align-items: center; margin: 0; color: var(--muted); font-weight: 400; }
+  .log-follow input { width: auto; }
+  .log-card pre { max-height: 420px; margin: 10px 0 0; padding: 10px; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius-sm); font: 12px/1.5 var(--mono); white-space: pre-wrap; word-break: break-all; }
 </style>
 {% endblock %}
 {% block content %}
-  <nav class="breadcrumbs" aria-label="Навигация по разделу"><a href="/launch">Запуск теста</a><span class="sep" aria-hidden="true">›</span><span class="current" id="runCrumb" aria-current="page">Прогон</span></nav>
+  <nav class="breadcrumbs" aria-label="{{ t('run.crumbs_label') }}"><a href="/launch">{{ t('run.crumb_launch') }}</a><span class="sep" aria-hidden="true">›</span><span class="current" id="runCrumb" aria-current="page">{{ t('run.heading') }}</span></nav>
   <section id="runRoot" data-run-id="{{ run_id }}">
     <div class="run-head page-header">
       <div class="page-heading">
-        <h2 id="runTitle">Прогон</h2>
+        <h1 id="runTitle">{{ t('run.heading') }}</h1>
         <div class="run-meta" id="runMeta"></div>
         <div class="run-message" id="runMessage"></div>
       </div>
       <div class="run-actions page-actions">
         <span class="pill pill-lg na" id="runStatus">…</span>
-        <a class="btn btn-primary" id="reportLink" href="#" style="display:none">Открыть отчёт</a>
-        <a class="btn" id="jobLink" href="#" style="display:none">Задача отчёта</a>
-        <a class="btn" id="repeatLink" href="#">Повторить</a>
-        <button type="button" class="btn btn-danger" id="stopAll" style="display:none">Остановить прогон</button>
+        <a class="btn btn-primary" id="reportLink" href="#" style="display:none">{{ t('run.open_report') }}</a>
+        <a class="btn" id="jobLink" href="#" style="display:none">{{ t('run.report_job') }}</a>
+        <a class="btn" id="repeatLink" href="#">{{ t('run.repeat') }}</a>
+        <button type="button" class="btn btn-danger" id="stopAll" style="display:none">{{ t('run.stop_all') }}</button>
       </div>
     </div>
 
-    <div class="tiles" id="tiles">
-      <div class="tile"><div class="label">RPS</div><div class="value" id="tileRps">—</div></div>
-      <div class="tile"><div class="label">Ошибки, %</div><div class="value" id="tileErr">—</div></div>
-      <div class="tile"><div class="label">p95, мс</div><div class="value" id="tileP95">—</div></div>
-      <div class="tile"><div class="label">Пользователи</div><div class="value" id="tileVus">—</div></div>
+    {# Last readings of the live rows (launch_run.js fills the values). #}
+    <div class="figs sm run-figs" id="tiles">
+      <div class="fig"><div class="v" id="tileRps">—</div><div class="k">RPS</div></div>
+      <div class="fig"><div class="v" id="tileErr">—</div><div class="k">{{ t('run.tile.errors') }}</div></div>
+      <div class="fig"><div class="v" id="tileP95">—</div><div class="k">{{ t('run.tile.p95') }}</div></div>
+      <div class="fig"><div class="v" id="tileVus">—</div><div class="k">{{ t('run.tile.users') }}</div></div>
     </div>
     <div class="live-head">
-      <div class="live-window" id="liveWindow" role="group" aria-label="Окно графиков">
-        <button type="button" class="btn btn-sm active" data-window="0" aria-pressed="true">Весь прогон</button>
-        <button type="button" class="btn btn-sm" data-window="15" aria-pressed="false">15 мин</button>
-        <button type="button" class="btn btn-sm" data-window="30" aria-pressed="false">30 мин</button>
-        <button type="button" class="btn btn-sm" data-window="60" aria-pressed="false">60 мин</button>
+      <div class="live-window seg-group" id="liveWindow" role="group" aria-label="{{ t('run.window.label') }}">
+        <button type="button" class="seg-btn active" data-window="0" aria-pressed="true">{{ t('run.window.all') }}</button>
+        <button type="button" class="seg-btn" data-window="15" aria-pressed="false">{{ t('run.window.minutes', n=15) }}</button>
+        <button type="button" class="seg-btn" data-window="30" aria-pressed="false">{{ t('run.window.minutes', n=30) }}</button>
+        <button type="button" class="seg-btn" data-window="60" aria-pressed="false">{{ t('run.window.minutes', n=60) }}</button>
       </div>
       <span class="live-fresh" id="liveFresh" aria-live="polite"></span>
     </div>
     <div class="charts-grid is-loading" id="liveCharts" aria-busy="true">
       <div class="chart-card wide">
-        <div class="chart-title">RPS и доля ошибок</div>
-        <div class="chart-box"><canvas id="chartRps" aria-label="RPS и доля ошибок прогона"></canvas></div>
+        <div class="chart-title">{{ t('run.chart.rps_title') }}</div>
+        <div class="chart-box" data-loading-text="{{ t('run.chart.loading') }}"><canvas id="chartRps" aria-label="{{ t('run.chart.rps_aria') }}"></canvas></div>
       </div>
       <div class="chart-card">
-        <div class="chart-title">p95 времени ответа, мс</div>
-        <div class="chart-box small"><canvas id="chartP95" aria-label="p95 времени ответа прогона"></canvas></div>
+        <div class="chart-title">{{ t('run.chart.p95_title') }}</div>
+        <div class="chart-box small" data-loading-text="{{ t('run.chart.loading') }}"><canvas id="chartP95" aria-label="{{ t('run.chart.p95_aria') }}"></canvas></div>
       </div>
       <div class="chart-card">
-        <div class="chart-title">Пользователи</div>
-        <div class="chart-box small"><canvas id="chartVus" aria-label="Виртуальные пользователи прогона"></canvas></div>
+        <div class="chart-title">{{ t('run.chart.users_title') }}</div>
+        <div class="chart-box small" data-loading-text="{{ t('run.chart.loading') }}"><canvas id="chartVus" aria-label="{{ t('run.chart.users_aria') }}"></canvas></div>
       </div>
     </div>
     <div class="live-note" id="liveNote"></div>
-    <details class="live-query" id="liveQuery" hidden><summary>Запрос RPS</summary><pre id="liveQueryText"></pre></details>
+    <details class="live-query" id="liveQuery" hidden><summary>{{ t('run.live.rps_query') }}</summary><pre id="liveQueryText"></pre></details>
 
-    <h3 style="margin-top:20px">Инстансы</h3>
-    <div class="report-table-shell">
-      <table class="data-table inst-table">
-        <thead><tr><th>Инстанс</th><th>Генератор и инструмент</th><th>Статус</th><th>Время</th><th></th></tr></thead>
+    <h2 class="run-section-title">{{ t('run.instances.title') }}</h2>
+    <div class="table-wrap">
+      <table class="grid data-table inst-table">
+        <thead><tr><th>{{ t('run.instances.col_instance') }}</th><th>{{ t('run.instances.col_where') }}</th><th>{{ t('run.instances.col_status') }}</th><th>{{ t('run.instances.col_time') }}</th><th></th></tr></thead>
         <tbody id="instancesBody"></tbody>
       </table>
     </div>
 
     <section class="log-card" id="logCard" style="display:none">
       <div class="log-head">
-        <strong id="logTitle">Журнал</strong>
+        <strong id="logTitle">{{ t('run.log.title') }}</strong>
         <span class="run-actions">
-          <label class="dim" style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" id="logFollow" checked style="width:auto" /> обновлять</label>
-          <button type="button" class="btn btn-sm" id="logRefresh">Обновить</button>
-          <button type="button" class="btn btn-sm btn-ghost" id="logClose">Закрыть</button>
+          <label class="log-follow"><input type="checkbox" id="logFollow" checked /> {{ t('run.log.follow') }}</label>
+          <button type="button" class="btn btn-sm" id="logRefresh">{{ t('run.log.refresh') }}</button>
+          <button type="button" class="btn btn-sm btn-ghost" id="logClose">{{ t('run.log.close') }}</button>
         </span>
       </div>
       <pre id="logText"></pre>

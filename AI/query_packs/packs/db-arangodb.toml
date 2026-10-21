@@ -1,0 +1,212 @@
+schema_version = 1
+id = "db-arangodb"
+version = 1
+title = "ArangoDB: /_admin/metrics/v2"
+category = "database"
+stack = ["arangodb"]
+domain = "database"
+language = "promql"
+verified = true
+description = """
+Встроенные метрики ArangoDB 3.8+ с эндпойнта /_admin/metrics/v2 (экспортер не нужен, в кластере — с каждого \
+координатора и DB-сервера): HTTP-запросы и их среднее время, AQL-запросы, медленные запросы, соединения, \
+очередь и потоки планировщика, транзакции, память и CPU процесса, остановки записи RocksDB. Ряды делятся по \
+серверу и его роли (SINGLE, COORDINATOR, DBSERVER).
+"""
+description_en = """
+Built-in metrics of ArangoDB 3.8+ from the /_admin/metrics/v2 endpoint (no exporter needed; in a cluster, from \
+every coordinator and DB server): HTTP requests and their average time, AQL queries, slow queries, connections, \
+the scheduler queue and threads, transactions, process memory and CPU, RocksDB write stalls. Series are split by \
+server and its role (SINGLE, COORDINATOR, DBSERVER).
+"""
+requires_metrics = [
+    "arangodb_http_request_statistics_total_requests_total",
+    "arangodb_client_connection_statistics_client_connections",
+    "arangodb_aql_all_query_total",
+]
+prompt_addendum = """
+Метрики ArangoDB: запрос сначала ждёт в очереди планировщика, потом его выполняет рабочий поток. Рост длины \
+очереди и времени выборки из очереди низкого приоритета при занятых почти всех потоках означает, что сервер \
+насыщен и время ответа растёт из-за ожидания, а не из-за самих запросов; при переполнении очереди сервер \
+отвечает 503. Рост прерванных транзакций при конкурентной записи — конфликты записи (ошибка 1200), клиенты \
+повторяют запросы. Остановки записи RocksDB означают, что компакция не успевает за потоком записи. Медленными \
+AQL-запросы считаются начиная с --query.slow-threshold (по умолчанию 10 с). В кластере координаторы разбирают \
+AQL и держат соединения клиентов, DB-серверы хранят данные: сравнивайте серверы одной роли.
+"""
+prompt_addendum_en = """
+ArangoDB metrics: a request first waits in the scheduler queue, then a worker thread runs it. A growing queue \
+and a growing low priority dequeue time with nearly all threads busy mean the server is saturated and response \
+time grows from waiting, not from the requests themselves; with a full queue the server answers 503. More \
+aborted transactions under concurrent writes are write-write conflicts (error 1200), and clients retry. RocksDB \
+write stalls mean compaction cannot keep up with the write flow. AQL queries count as slow from \
+--query.slow-threshold (10 s by default). In a cluster coordinators parse AQL and hold client connections while \
+DB servers store the data: compare servers of the same role.
+"""
+
+[variables.matchers]
+title = "Дополнительные матчеры"
+title_en = "Extra matchers"
+default = ""
+help = "Например job=\"arangodb\" или role=\"COORDINATOR\"."
+help_en = "For example job=\"arangodb\" or role=\"COORDINATOR\"."
+
+[variables.window]
+title = "Окно rate()"
+title_en = "rate() window"
+default = "2m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[[queries]]
+label = "DB (ArangoDB): HTTP requests per second by (server, role)"
+role = "db.queries_rate"
+unit = "per_second"
+required = true
+query = 'label_replace(sum by (instance, role) (rate(arangodb_http_request_statistics_total_requests_total{ {{matchers}} }[{{window}}])), "server", "$1", "instance", "(.*)")'
+keys = ["server", "role"]
+description = "Все HTTP-запросы к серверу в секунду, включая AQL и операции с документами."
+description_en = "All HTTP requests to the server per second, AQL and document operations included."
+
+[[queries]]
+label = "DB (ArangoDB): AQL queries per second by (server, role)"
+role = "db.queries_rate"
+unit = "per_second"
+query = 'label_replace(sum by (instance, role) (rate(arangodb_aql_all_query_total{ {{matchers}} }[{{window}}])), "server", "$1", "instance", "(.*)")'
+keys = ["server", "role"]
+description = "Завершённые AQL-запросы в секунду."
+description_en = "Finished AQL queries per second."
+
+[[queries]]
+label = "DB (ArangoDB): average request time (sec) by (server, role)"
+role = "db.query_avg"
+unit = "seconds"
+query = 'label_replace(sum by (instance, role) (rate(arangodb_client_connection_statistics_total_time_sum{ {{matchers}} }[{{window}}])) / sum by (instance, role) (rate(arangodb_client_connection_statistics_total_time_count{ {{matchers}} }[{{window}}])), "server", "$1", "instance", "(.*)")'
+keys = ["server", "role"]
+description = "Среднее полное время ответа на HTTP-запрос: очередь, выполнение и ввод-вывод, с."
+description_en = "Average full time to answer an HTTP request: queue, execution and I/O, s."
+
+[[queries]]
+label = "DB (ArangoDB): average AQL query time (sec) by (server, role)"
+role = "db.query_avg"
+unit = "seconds"
+query = 'label_replace(sum by (instance, role) (rate(arangodb_aql_query_time_sum{ {{matchers}} }[{{window}}])) / sum by (instance, role) (rate(arangodb_aql_query_time_count{ {{matchers}} }[{{window}}])), "server", "$1", "instance", "(.*)")'
+keys = ["server", "role"]
+description = "Среднее время выполнения AQL-запроса, с."
+description_en = "Average AQL query execution time, s."
+
+[[queries]]
+label = "DB (ArangoDB): AQL query time p95 (sec) by (server, role)"
+role = "db.query_p95"
+unit = "seconds"
+query = 'label_replace(histogram_quantile(0.95, sum by (instance, role, le) (rate(arangodb_aql_query_time_bucket{ {{matchers}} }[{{window}}]))), "server", "$1", "instance", "(.*)")'
+keys = ["server", "role"]
+description = "95-й перцентиль времени AQL-запроса, с."
+description_en = "95th percentile of the AQL query time, s."
+
+[[queries]]
+label = "DB (ArangoDB): slow AQL queries per second by (server, role)"
+role = "db.slow_queries"
+unit = "per_second"
+query = 'label_replace(sum by (instance, role) (rate(arangodb_aql_slow_query_time_count{ {{matchers}} }[{{window}}])), "server", "$1", "instance", "(.*)")'
+keys = ["server", "role"]
+description = "AQL-запросы дольше --query.slow-threshold в секунду."
+description_en = "AQL queries longer than --query.slow-threshold per second."
+
+[[queries]]
+label = "DB (ArangoDB): client connections by (server, role)"
+role = "db.connections"
+unit = "count"
+required = true
+query = 'label_replace(sum by (instance, role) (arangodb_client_connection_statistics_client_connections{ {{matchers}} }), "server", "$1", "instance", "(.*)")'
+keys = ["server", "role"]
+description = "Открытые клиентские соединения."
+description_en = "Open client connections."
+
+[[queries]]
+label = "DB (ArangoDB): scheduler queue length by (server, role)"
+role = "db.queue_length"
+unit = "count"
+query = 'label_replace(sum by (instance, role) (arangodb_scheduler_queue_length{ {{matchers}} }), "server", "$1", "instance", "(.*)")'
+keys = ["server", "role"]
+description = "Задачи, которые ждут свободного потока планировщика."
+description_en = "Tasks waiting for a free scheduler thread."
+
+[[queries]]
+label = "DB (ArangoDB): low priority queue dequeue time (sec) by (server, role)"
+role = "db.queue_wait"
+unit = "seconds"
+query = 'label_replace(max by (instance, role) (arangodb_scheduler_low_prio_queue_last_dequeue_time{ {{matchers}} }) / 1000, "server", "$1", "instance", "(.*)")'
+keys = ["server", "role"]
+description = "Сколько последний клиентский запрос ждал в очереди низкого приоритета, с (ArangoDB отдаёт миллисекунды)."
+description_en = "How long the last client request waited in the low priority queue, s (ArangoDB reports milliseconds)."
+
+[[queries]]
+label = "DB (ArangoDB): busy scheduler threads by (server, role)"
+role = "db.threads_running"
+unit = "count"
+query = 'label_replace(sum by (instance, role) (arangodb_scheduler_num_working_threads{ {{matchers}} }), "server", "$1", "instance", "(.*)")'
+keys = ["server", "role"]
+description = "Потоки планировщика, которые сейчас выполняют задачи."
+description_en = "Scheduler threads running tasks right now."
+
+[[queries]]
+label = "DB (ArangoDB): requests dropped by a full queue per second by (server, role)"
+role = "db.rejected"
+unit = "per_second"
+query = 'label_replace(sum by (instance, role) (rate(arangodb_scheduler_queue_full_failures_total{ {{matchers}} }[{{window}}])), "server", "$1", "instance", "(.*)")'
+keys = ["server", "role"]
+description = "Задачи, не попавшие в переполненную очередь (клиент получает 503)."
+description_en = "Tasks rejected by a full queue (the client gets 503)."
+
+[[queries]]
+label = "DB (ArangoDB): committed transactions per second by (server, role)"
+role = "db.tps"
+unit = "per_second"
+query = 'label_replace(sum by (instance, role) (rate(arangodb_transactions_committed_total{ {{matchers}} }[{{window}}])), "server", "$1", "instance", "(.*)")'
+keys = ["server", "role"]
+description = "Зафиксированные транзакции в секунду, включая неявные транзакции отдельных операций."
+description_en = "Committed transactions per second, implicit transactions of single operations included."
+
+[[queries]]
+label = "DB (ArangoDB): aborted transactions per second by (server, role)"
+role = "db.tx_aborted"
+unit = "per_second"
+query = 'label_replace(sum by (instance, role) (rate(arangodb_transactions_aborted_total{ {{matchers}} }[{{window}}])), "server", "$1", "instance", "(.*)")'
+keys = ["server", "role"]
+description = "Прерванные транзакции в секунду: конфликты записи, ошибки и таймауты."
+description_en = "Aborted transactions per second: write conflicts, errors and timeouts."
+
+[[queries]]
+label = "DB (ArangoDB): process CPU (% of cores) by (server, role)"
+role = "db.cpu_pct"
+unit = "percent"
+query = 'label_replace(100 * (sum by (instance, role) (rate(arangodb_process_statistics_user_time{ {{matchers}} }[{{window}}])) + sum by (instance, role) (rate(arangodb_process_statistics_system_time{ {{matchers}} }[{{window}}]))) / ((min by (instance, role) (arangodb_server_statistics_effective_cpu_cores{ {{matchers}} }) < min by (instance, role) (arangodb_server_statistics_cpu_cores{ {{matchers}} })) or min by (instance, role) (arangodb_server_statistics_cpu_cores{ {{matchers}} })), "server", "$1", "instance", "(.*)")'
+keys = ["server", "role"]
+description = "CPU процесса arangod от ядер сервера, %: меньшее из лимита контейнера и числа ядер (или ARANGODB_OVERRIDE_DETECTED_NUMBER_OF_CORES)."
+description_en = "CPU of the arangod process out of the server cores, %: the smaller of the container limit and the core count (or ARANGODB_OVERRIDE_DETECTED_NUMBER_OF_CORES)."
+
+[[queries]]
+label = "DB (ArangoDB): resident memory (bytes) by (server, role)"
+role = "db.memory_used"
+unit = "bytes"
+query = 'label_replace(sum by (instance, role) (arangodb_process_statistics_resident_set_size{ {{matchers}} }), "server", "$1", "instance", "(.*)")'
+keys = ["server", "role"]
+description = "Резидентная память процесса arangod."
+description_en = "Resident memory of the arangod process."
+
+[[queries]]
+label = "DB (ArangoDB): resident memory (% of server memory) by (server, role)"
+role = "db.memory_pct"
+unit = "percent"
+query = 'label_replace(100 * max by (instance, role) (arangodb_process_statistics_resident_set_size{ {{matchers}} }) / ((min by (instance, role) (arangodb_server_statistics_effective_physical_memory{ {{matchers}} }) < min by (instance, role) (arangodb_server_statistics_physical_memory{ {{matchers}} })) or min by (instance, role) (arangodb_server_statistics_physical_memory{ {{matchers}} })), "server", "$1", "instance", "(.*)")'
+keys = ["server", "role"]
+description = "Доля резидентной памяти, %: от меньшего из лимита контейнера и памяти сервера (или ARANGODB_OVERRIDE_DETECTED_TOTAL_MEMORY)."
+description_en = "Resident memory share, %: of the smaller of the container limit and the server memory (or ARANGODB_OVERRIDE_DETECTED_TOTAL_MEMORY)."
+
+[[queries]]
+label = "DB (ArangoDB): RocksDB write stalls and stops per second by (server, role)"
+role = "db.write_stalls"
+unit = "per_second"
+query = 'label_replace(sum by (instance, role) (rate(arangodb_rocksdb_write_stalls_total{ {{matchers}} }[{{window}}])) + sum by (instance, role) (rate(arangodb_rocksdb_write_stops_total{ {{matchers}} }[{{window}}])), "server", "$1", "instance", "(.*)")'
+keys = ["server", "role"]
+description = "Переходы RocksDB в замедленную или остановленную запись в секунду."
+description_en = "RocksDB transitions to slowed or stopped writes per second."

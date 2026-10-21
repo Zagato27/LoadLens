@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """System context from a document: text extraction, the model's answer, merging and the endpoint."""
 
 import io
@@ -143,6 +144,31 @@ def test_answer_is_shaped_to_the_context_schema():
     with pytest.raises(ci.ContextImportError) as raised:
         ci.parse_answer("Не могу помочь с этим документом.")
     assert raised.value.status_code == 502
+
+
+def test_empty_number_fields_of_the_provider_fall_back_to_defaults(monkeypatch):
+    """The settings form saves an empty number field as null; the Anthropic call must not fail on int(None)."""
+    sent = {}
+
+    class Answer:
+        ok = True
+
+        def json(self):
+            return {"content": [{"type": "text", "text": json.dumps(MODEL_ANSWER, ensure_ascii=False)}], "stop_reason": "end_turn"}
+
+    def post(url, **kwargs):
+        sent.update(kwargs, url=url)
+        return Answer()
+
+    monkeypatch.setattr(providers.requests, "post", post)
+    settings = {
+        "model": "claude-test", "api_key": "k", "request_timeout_sec": None, "max_tokens_cap": None,
+        "context_window_tokens": None, "generation": {"temperature": None, "max_tokens": None},
+    }
+    draft = ci.ask_model(DOC_TEXT, {"provider": "anthropic", "anthropic": settings})
+    assert draft["system"]["name"] == "Checkout"
+    assert sent["timeout"] == 120
+    assert sent["json"]["max_tokens"] == 1200 and sent["json"]["temperature"] == 0.2
 
 
 def test_fill_keeps_what_is_there_and_adds_what_is_new():

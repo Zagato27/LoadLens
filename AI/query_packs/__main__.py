@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Command line for the pack catalog.
 
     python -m AI.query_packs list
@@ -15,6 +16,8 @@ import re
 import sys
 from pathlib import Path
 from typing import Any
+
+from AI.i18n import with_locale
 
 from .blocks import merge_pack
 from .catalog import Catalog, load_catalog
@@ -110,6 +113,12 @@ def write_example(path: Path = EXAMPLE_PATH) -> None:
 
 
 def docs_markdown(catalog: Catalog | None = None) -> str:
+    # docs/query-packs.md is Russian; role, unit and category titles otherwise follow the current locale.
+    with with_locale("ru"):
+        return _docs_markdown(catalog)
+
+
+def _docs_markdown(catalog: Catalog | None = None) -> str:
     catalog = catalog or load_catalog()
     out = [
         "# Пакеты запросов",
