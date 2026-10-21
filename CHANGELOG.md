@@ -8,35 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
-### Added
-
-- **Runs API.** `GET /runs?include=sla` adds `sla` to every run: `passed`, `total`, `p95_ms` and `p95_passed` from the
-  SLA checks of its final report, `null` without evaluated checks. Without `include` the response is unchanged.
-- **Dashboard API.** `GET /dashboard_data` returns `last_run.checks` (the SLA checks with `name`, `title`,
-  `threshold`, `actual`, `passed`) and `last_run.profile` (the load profile: `steps`, `window`, `markers`, `target`;
-  `null` without a step table).
-
-### Changed
-
-- **Interface look.** A top bar with text navigation replaces the sidebar: the sections on the left, the project
-  area, search (Ctrl+K), the View menu and the user menu on the right, the version next to the logo. Below 1024 px
-  the navigation opens from the menu button.
-- **Fonts.** Golos Text for text and JetBrains Mono for figures, dates, identifiers and chart axes replace Inter and
-  Montserrat; both are bundled under the SIL Open Font License.
-- **Themes.** The light and the dark theme are equal, and without a saved choice the theme follows the system. The
-  light theme is a paper-like page with status colors picked for contrast.
-- **Report.** The first screen says it in plain words: the verdict, one sentence with the figures that explains it,
-  three key figures with a bar against their thresholds and the SLA criteria; query and series names move to small
-  print. The "Test timeline" draws the steps as a staircase with the SLA window, the target RPS and the degradation
-  line, with the row of steps below it.
-- **Dashboard.** A status line under the title replaces the KPI tiles; the latest run shows its figures against the
-  SLA thresholds, a square per SLA criterion and its load profile.
-- **Archive.** New SLA (criteria met out of those evaluated) and p95 columns; a p95 over its threshold is red.
-- **Tables, forms and statuses.** Tables and charts sit on the page without cards, separated by hairlines; forms and
-  settings are flat; a status is a colored square with colored text instead of a pill. The accent color marks only
-  the logo, the focus, the SLA band and the target marks on charts.
-
-## [1.0.0] - unreleased
+## [1.0.0] - 2026-10-21
 
 First public release, Apache License 2.0. LoadLens turns the metrics of a load test into a report with an SLA
 verdict, an AI analysis that is checked against the data, and a Confluence page, and it can start the test itself.
@@ -82,9 +54,16 @@ verdict, an AI analysis that is checked against the data, and a Confluence page,
 - **Localization.** Russian and English interface; each user picks the interface language in the browser, the
   language of reports and prompts is a setting of the installation. Reports, prompts, SLA texts, Confluence pages
   and API messages are translated.
-- **Appearance.** Dark and light themes, a configurable accent color, no external CDNs.
+- **Interface.** An instrument-style layout: a top bar with text navigation, tables and charts on the page
+  without cards, statuses as a colored square with text. The report opens with the verdict, one sentence with
+  the figures behind it, key figures against their thresholds and a test timeline with the SLA window; the
+  dashboard shows a status line, the latest run against its SLA and its load profile; the archive has SLA and
+  p95 columns. Golos Text and JetBrains Mono fonts, equal light and dark themes that follow the system, a
+  configurable accent color, no external CDNs.
 - **About.** `GET /about` with the version, build and license, an "About" section in the settings with the
   third-party notices, and the version next to the logo.
+- **API.** The same JSON API as the web UI with API tokens; `GET /runs?include=sla` adds the SLA result of every
+  run, `GET /dashboard_data` returns the SLA checks and the load profile of the latest run.
 
 [Unreleased]: https://github.com/Zagato27/LoadLens/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/Zagato27/LoadLens/releases/tag/v1.0.0
