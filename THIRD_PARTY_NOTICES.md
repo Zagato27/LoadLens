@@ -266,12 +266,12 @@ license file (`pip show -f <package>` lists it).
 | numpy | 1.26.4 | BSD-3-Clause | https://numpy.org/ |
 | tabulate | 0.10.0 | MIT | https://github.com/astanin/python-tabulate |
 | matplotlib | 3.10.9 | Matplotlib License (PSF-based) | https://matplotlib.org/ |
-| pillow | 12.3.0 | MIT-CMU | https://python-pillow.github.io/ |
+| pillow | 13.0.0 | MIT-CMU | https://python-pillow.github.io/ |
 | celery | 5.4.0 | BSD-3-Clause | https://docs.celeryq.dev/ |
 | atlassian-python-api | 3.41.21 | Apache-2.0 | https://github.com/atlassian-api/atlassian-python-api |
 | beautifulsoup4 | 4.15.0 | MIT | https://www.crummy.com/software/BeautifulSoup/ |
 | pydantic | 2.14.0 | MIT | https://docs.pydantic.dev/ |
-| pypdf | 6.7.0 | BSD-3-Clause | https://pypdf.readthedocs.io/ |
+| pypdf | 6.21.1 | BSD-3-Clause | https://pypdf.readthedocs.io/ |
 | python-docx | 1.2.0 | MIT | https://github.com/python-openxml/python-docx |
 | langchain-core | 1.6.8 | MIT | https://github.com/langchain-ai/langchain |
 | langchain-gigachat | 0.5.1 | MIT | https://github.com/ai-forever/langchain-gigachat |

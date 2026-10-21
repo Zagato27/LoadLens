@@ -294,7 +294,8 @@ def _shift_logo(accent: str) -> bytes:
     hsv[..., 1] = np.where(colored, _scaled_saturation(hsv[..., 1], source[1], target[1]), hsv[..., 1])
     pixels[..., :3] = np.round(np.clip(hsv_to_rgb(hsv), 0, 1) * 255)
     buffer = io.BytesIO()
-    Image.fromarray(pixels.astype(np.uint8), "RGBA").save(buffer, format="PNG")
+    # The (H, W, 4) uint8 shape already means RGBA; the mode argument of fromarray is gone in Pillow 13.
+    Image.fromarray(pixels.astype(np.uint8)).save(buffer, format="PNG")
     return buffer.getvalue()
 
 
