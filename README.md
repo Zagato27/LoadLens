@@ -10,11 +10,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Zagato27/LoadTestingAutoReports/actions/workflows/tests.yml"><img alt="Tests" src="https://github.com/Zagato27/LoadTestingAutoReports/actions/workflows/tests.yml/badge.svg" /></a>
-  <a href="https://github.com/Zagato27/LoadTestingAutoReports/releases"><img alt="Release" src="https://img.shields.io/github/v/release/Zagato27/LoadTestingAutoReports?include_prereleases" /></a>
+  <a href="https://github.com/Zagato27/LoadLens/actions/workflows/tests.yml"><img alt="Tests" src="https://github.com/Zagato27/LoadLens/actions/workflows/tests.yml/badge.svg" /></a>
+  <a href="https://github.com/Zagato27/LoadLens/releases"><img alt="Release" src="https://img.shields.io/github/v/release/Zagato27/LoadLens?include_prereleases" /></a>
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" /></a>
   <img alt="Python 3.12" src="https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white" />
-  <a href="https://github.com/Zagato27/LoadTestingAutoReports/pkgs/container/loadlens"><img alt="Docker image" src="https://img.shields.io/badge/docker-ghcr.io-2496ED?logo=docker&logoColor=white" /></a>
+  <a href="https://github.com/Zagato27/LoadLens/pkgs/container/loadlens"><img alt="Docker image" src="https://img.shields.io/badge/docker-ghcr.io-2496ED?logo=docker&logoColor=white" /></a>
 </p>
 
 <p align="center"><a href="README.ru.md">Русская версия</a></p>

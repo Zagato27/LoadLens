@@ -13,7 +13,7 @@ import platform
 __version__ = "1.0.0"
 
 # The repository is to be renamed to "loadlens" by the owner: change this one constant then.
-SOURCE_URL = "https://github.com/Zagato27/LoadTestingAutoReports"
+SOURCE_URL = "https://github.com/Zagato27/LoadLens"
 DOCS_URL = SOURCE_URL + "/blob/main/README.md"
 LICENSE = "Apache-2.0"
 

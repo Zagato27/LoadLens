@@ -86,5 +86,5 @@ verdict, an AI analysis that is checked against the data, and a Confluence page,
 - **About.** `GET /about` with the version, build and license, an "About" section in the settings with the
   third-party notices, and the version next to the logo.
 
-[Unreleased]: https://github.com/Zagato27/LoadTestingAutoReports/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/Zagato27/LoadTestingAutoReports/releases/tag/v1.0.0
+[Unreleased]: https://github.com/Zagato27/LoadLens/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/Zagato27/LoadLens/releases/tag/v1.0.0

@@ -2,8 +2,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Ask a question or share a setup
-    url: https://github.com/Zagato27/LoadTestingAutoReports/discussions
+    url: https://github.com/Zagato27/LoadLens/discussions
     about: GitHub Discussions for questions, ideas and the stacks LoadLens runs with.
   - name: Report a security vulnerability
-    url: https://github.com/Zagato27/LoadTestingAutoReports/security/advisories/new
+    url: https://github.com/Zagato27/LoadLens/security/advisories/new
     about: Private vulnerability reporting; see SECURITY.md. Please do not open a public issue.

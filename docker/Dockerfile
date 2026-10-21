@@ -9,7 +9,7 @@ ARG LOADLENS_BUILD=""
 ENV LOADLENS_BUILD=$LOADLENS_BUILD
 LABEL org.opencontainers.image.title="LoadLens" \
       org.opencontainers.image.description="Load test reports with SLA verdicts, verified AI analysis, forecasting and Confluence export" \
-      org.opencontainers.image.source="https://github.com/Zagato27/LoadTestingAutoReports" \
+      org.opencontainers.image.source="https://github.com/Zagato27/LoadLens" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="$LOADLENS_VERSION"
 
