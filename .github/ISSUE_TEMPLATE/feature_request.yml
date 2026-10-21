@@ -1,0 +1,41 @@
+name: Feature request
+description: A query pack, an integration, a report element or a workflow LoadLens should have
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Not sure whether it fits, or want to discuss an approach first? Open a Discussion instead; it is easy to turn into an issue later.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What you are trying to do and what stops you today. A concrete test, stack or report is better than a general wish.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What LoadLens should do. For a query pack, name the exporter or tool, the metric names and where the metrics are stored.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Workarounds, other tools, why they are not enough.
+  - type: input
+    id: stack
+    attributes:
+      label: Your stack
+      placeholder: "Gatling → Graphite → VictoriaMetrics, Spring Boot on Kubernetes, Confluence Server"
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues, the roadmap in README.md and the Discussions
+          required: true
+        - label: I can test a change against my stack and report back

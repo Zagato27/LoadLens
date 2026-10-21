@@ -1,3 +1,5 @@
+> English: [docs/deployment.md](../docs/deployment.md) (production deployment) and [docs/getting-started.md](../docs/getting-started.md) (demo and first steps).
+
 ## Развертывание в Docker (приложение + TimescaleDB)
 
 Ниже — исчерпывающая инструкция: какие файлы добавлены, что в них писать, и как поднять всё в Docker на Windows (PowerShell) и Linux/macOS.
@@ -14,6 +16,28 @@
 - `settings.example.py` — обезличенный пример `settings.py`. Скопируйте и заполните.
 - `.gitignore` — добавлены правила для игнорирования действующих конфигов (`settings.py`, `settings_runtime.json`, `docker/.env` и прочих `.env`).
 - `.dockerignore` — исключает из образа секреты и действующие конфиги (`settings.py`, `metrics_config.py`, `settings_runtime*.json`, `metrics_config_runtime.json`, все `.env`, `AI/GigaChat/`), временные файлы, артефакты и служебные директории. Конфиги монтируются в контейнеры при запуске.
+
+### 0) Демо за пять минут
+
+Чтобы посмотреть LoadLens без ключей API, Grafana, Prometheus и ручной настройки, есть отдельный стек `docker/docker-compose.demo.yml`. Одна команда из корня репозитория:
+
+```bash
+docker compose -f docker/docker-compose.demo.yml --env-file docker/demo.env --profile demo up --build
+```
+
+Откройте `http://localhost:5000` и войдите как `admin` / `loadlens-demo` (значения из `docker/demo.env`). Через минуту-две на дашборде появятся два прогона сервиса `demo-checkout`: синтетический `demo-checkout-step` и `demo-checkout-step-2`, который собран штатным конвейером отчётов по заглушкам Prometheus и модели. Архив, сравнение и прогноз мощностей заполнены; на дашборде висит баннер «Demo data». Остановить и удалить данные демо:
+
+```bash
+docker compose -f docker/docker-compose.demo.yml --env-file docker/demo.env --profile demo down -v
+```
+
+Что внутри и чем демо отличается от рабочей установки:
+
+- Сервисы: `timescaledb` (порт наружу не публикуется), `llm-stub` (`tools/stubs/llm_stub.py --lang en`, OpenAI-совместимая заглушка модели), `prom-stub` (`tools/stubs/prom_stub.py`, синтетические ряды на любой PromQL-запрос) и `app` из того же образа, что и в продакшне. Отчёты выполняются потоком внутри `app` (`LOADLENS_JOB_RUNNER=thread`), поэтому Redis и воркер демо не нужны.
+- `settings.demo.py` монтируется в контейнер как `/app/settings.py`, а `metrics_config.example.py` — как `/app/metrics_config.py`. Ваши `settings.py`, `docker/.env` и рантайм-файлы демо не читает и не меняет: у стека своё имя проекта `loadlens-demo`, свои контейнеры `loadlens_demo_*` и свой volume. `settings_runtime.json` демо пишет внутри контейнера.
+- `--env-file docker/demo.env` обязателен: без него `docker compose` прочитал бы `docker/.env` рабочей установки. Все значения в `demo.env` — демонстрационные (пароль базы, администратор, ключ сессий); порт меняется переменной `APP_PORT`, скорость ответов заглушки — `DEMO_LLM_DELAY_SEC`.
+- `LOADLENS_DEMO_SEED=1` в compose-файле включает автосев при старте `app`: демо-прогон записывается один раз, второй отчёт ставится в очередь один раз; повторные старты контейнера ничего не дублируют. Удалённый из архива `demo-checkout-step-2` пересобирается при следующем старте. В рабочем compose-файле переменная не задана, и автосев не работает.
+- Сквозная проверка демо выполняется в CI (`.github/workflows/demo.yml`): по изменениям `docker/**`, `settings.demo.py`, `tools/stubs/**`, `loadlens_app/demo_data.py` и раз в неделю.
 
 ### 1) Подготовка конфигов
 

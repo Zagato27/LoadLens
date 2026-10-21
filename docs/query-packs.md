@@ -622,6 +622,37 @@ HTTP-гистограмма, которую Go-сервисы обычно ре�
 
 ## Базы данных
 
+### ArangoDB: /_admin/metrics/v2
+
+`db-arangodb` v1 · домен «Базы данных» · PromQL · проверен на стенде `docker/dev-stack`
+
+Встроенные метрики ArangoDB 3.8+ с эндпойнта /_admin/metrics/v2 (экспортер не нужен, в кластере — с каждого координатора и DB-сервера): HTTP-запросы и их среднее время, AQL-запросы, медленные запросы, соединения, очередь и потоки планировщика, транзакции, память и CPU процесса, остановки записи RocksDB. Ряды делятся по серверу и его роли (SINGLE, COORDINATOR, DBSERVER).
+
+| Переменная | По умолчанию | Описание |
+|---|---|---|
+| `matchers` | пусто | Дополнительные матчеры. Например job="arangodb" или role="COORDINATOR" |
+| `window` | `2m` | Окно rate() |
+
+| Запрос | Роль | Единица | SLA |
+|---|---|---|---|
+| DB (ArangoDB): HTTP requests per second by (server, role) | Запросы или команды в секунду (обязательный) | в секунду |  |
+| DB (ArangoDB): AQL queries per second by (server, role) | Запросы или команды в секунду | в секунду |  |
+| DB (ArangoDB): average request time (sec) by (server, role) | Среднее время запроса или команды | с |  |
+| DB (ArangoDB): average AQL query time (sec) by (server, role) | Среднее время запроса или команды | с |  |
+| DB (ArangoDB): AQL query time p95 (sec) by (server, role) | 95-й перцентиль времени запроса | с |  |
+| DB (ArangoDB): slow AQL queries per second by (server, role) | Медленные запросы в секунду | в секунду |  |
+| DB (ArangoDB): client connections by (server, role) | Соединения (обязательный) | шт. |  |
+| DB (ArangoDB): scheduler queue length by (server, role) | Запросы в очереди сервера | шт. |  |
+| DB (ArangoDB): low priority queue dequeue time (sec) by (server, role) | Ожидание в очереди сервера | с |  |
+| DB (ArangoDB): busy scheduler threads by (server, role) | Выполняющиеся запросы | шт. |  |
+| DB (ArangoDB): requests dropped by a full queue per second by (server, role) | Отклонённые сервером запросы в секунду | в секунду |  |
+| DB (ArangoDB): committed transactions per second by (server, role) | Транзакции в секунду | в секунду |  |
+| DB (ArangoDB): aborted transactions per second by (server, role) | Прерванные транзакции в секунду | в секунду |  |
+| DB (ArangoDB): process CPU (% of cores) by (server, role) | CPU процесса СУБД | % |  |
+| DB (ArangoDB): resident memory (bytes) by (server, role) | Память СУБД | байты |  |
+| DB (ArangoDB): resident memory (% of server memory) by (server, role) | Память СУБД, % от лимита | % |  |
+| DB (ArangoDB): RocksDB write stalls and stops per second by (server, role) | Остановки записи в секунду | в секунду |  |
+
 ### MongoDB: Percona mongodb_exporter
 
 `db-mongodb-exporter` v1 · домен «Базы данных» · PromQL

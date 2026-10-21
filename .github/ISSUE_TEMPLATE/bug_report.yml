@@ -1,0 +1,68 @@
+name: Bug report
+description: Something works differently from what the documentation says
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please remove secrets, tokens, passwords and internal hostnames from everything you paste.
+        Security problems go through private vulnerability reporting instead (see SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: LoadLens version
+      description: "`GET /about` or Settings → About, for example `1.0.0 (build 2026-10-19-0320474)`."
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How LoadLens runs
+      options:
+        - Docker Compose (docker/docker-compose.yml)
+        - Demo stack (docker/docker-compose.demo.yml)
+        - Image from ghcr.io
+        - Source checkout (python app.py)
+        - Other (say which below)
+    validations:
+      required: true
+  - type: input
+    id: stack
+    attributes:
+      label: Data sources and load tool
+      description: "Metric store (Prometheus, VictoriaMetrics, InfluxDB 1.x/2.x, Grafana proxy), load tool, query packs, LLM provider."
+      placeholder: "Prometheus via Grafana, k6 remote write, lt-k6-prometheus-rw, OpenAI-compatible"
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you saw, what you expected. Page or API endpoint, test type, run name.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Settings → Queries → Add from pack …
+        2. New report with …
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and screenshots
+      description: "`docker compose logs app` (and `celery_worker` for report jobs), the browser console, the job error text. Secrets removed."
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I removed secrets, tokens and internal hostnames from the report
+          required: true
+        - label: I searched the existing issues and the documentation
+          required: true

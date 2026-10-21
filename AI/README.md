@@ -5,7 +5,7 @@
 ## Возможности
 - Домены анализа: JVM, базы данных, Kafka, микросервисы, инфраструктурные ресурсы; опционально — `lt_framework` (метрики инструмента нагрузки), `lt_generators` (ресурсы генераторов нагрузки) и `application_logs` (агрегированные ERROR‑логи из OpenSearch, включается `logs_source.enabled`).
 - Контекст‑пакеты: резюме по сериям (средние/минимумы/максимумы/последние значения, время пиков, окна аномалий).
-- Двухпроходный вывод: k кандидатов → приведение к строгому JSON → выбор лучшего по G-Eval-lite judge и верификации на данных.
+- Двухпроходный вывод: k кандидатов → приведение к строгому JSON → выбор лучшего по G-Eval-lite judge (упрощённая схема по мотивам статьи Liu et al., 2023, «G-Eval: NLG Evaluation using GPT-4 with Better Human Alignment», https://arxiv.org/abs/2303.16634) и верификации на данных.
 - Вычисление “пиковой производительности” (peak_performance) в итоговом JSON при наличии соответствующих метрик; в остальных доменах `peak_performance` вырезается.
 - Профиль типа теста (`AI/test_profile.py`): единый источник алиасов step/soak/spike/stress, режима анализа (`capacity | stability | spike | stress`), применимости peak_performance, детектора ступеней и прогноза. Его используют SLA, промпты (`AI/prompt_assembly.py`), прогноз, baseline и рендеринг.
 - Детерминированный анализ по типу теста: `AI/stability.py` (окно удержания и тренды soak), `AI/spike.py` (окна всплесков, overshoot, восстановление), `AI/saturation.py` (точка насыщения stress). Секции для Confluence строит `AI/report_sections.py`, web-страница повторяет их в `static/js/reports.js`.
@@ -26,7 +26,7 @@
 1) Сбор данных за интервал (PromQL/Flux/InfluxQL; напрямую или через Grafana‑proxy).  
 2) Построение `context pack` по каждому домену.  
 3) Генерация нескольких кандидатов ответов LLM и приведение к строгому JSON.  
-4) Оценка кандидатов G-Eval-lite judge (`AI/prompts/judge_prompt.txt` + `AI/prompts/judge_rubrics/*.txt`) и проверкой на данных; выбор лучшего.  
+4) Оценка кандидатов G-Eval-lite judge (`AI/prompts/<lang>/judge_prompt.txt` + `AI/prompts/<lang>/judge_rubrics/*.txt`) и проверкой на данных; выбор лучшего: сначала ответ на языке отчёта (`language_match`), затем по баллу.  
 5) Возврат: доменные текстовые блоки, общий итог, разобранные структуры (`*_parsed`) и метрики качества (`scores`).
 
 Основная функция: `AI.pipeline.uploadFromLLM(start_ts, end_ts, ...)` (есть прокси в `AI.main.uploadFromLLM`).
@@ -41,7 +41,24 @@
 - `queries` — список запросов/разметки серий для каждого домена (PromQL/Flux/InfluxQL).
 GigaChat подключается через `langchain_gigachat` с mTLS (`cert_file`/`key_file`) или `api_key`; отдельный CLI `opensearch_error_report.py` строит markdown‑отчёт по ERROR‑логам тем же агрегатором, что и домен `application_logs`.
 Для точечных изменений без перезапуска предназначен `settings_runtime.json` (в т.ч. по проектным областям: `per_area[<service>]`).  
-Тексты промптов лежат в `AI/prompts/*.txt`, judge-рубрики — в `AI/prompts/judge_rubrics/*.txt`; `context_import_prompt.txt` переносит документ в `system_context` (`loadlens_app/context_import.py`, в интерфейсе не редактируется); всё это также может переопределяться через рантайм‑конфиг.
+Тексты промптов лежат в `AI/prompts/<lang>/*.txt` (`ru`, `en`), judge-рубрики — в `AI/prompts/<lang>/judge_rubrics/*.txt`; `context_import_prompt.txt` переносит документ в `system_context` (`loadlens_app/context_import.py`, в интерфейсе не редактируется). Доменные промпты и итоговый можно переопределить в настройках (раздел «Промпты»); подробности — в разделе «Языки промптов».
+
+## Языки промптов
+- Язык отчёта и промптов — глобальная настройка `appearance.language` (`ru` по умолчанию; в интерфейсе — «Настройки → Оформление», в мастере настройки — первый шаг). Язык интерфейса от неё не зависит: его выбирает браузер (cookie `loadlens.lang`). Язык отчёта фиксируется при постановке задачи (`dashboard.start_report_job` → `tasks.report_task(report_language=…)` → `update_page.update_report` → `run_meta["report_language"]` → `uploadFromLLM(report_language=…)`), потому что у воркера Celery свой снимок настроек. Задачи из очереди без этого аргумента строят отчёт на `ru`.
+- Весь прогон идёт внутри `AI.i18n.with_locale(report_language)`; работа в пулах потоков отправляется через `contextvars.copy_context().run`, поэтому промпты кандидатов, критика, судьи и верификационного прохода, системный промпт по умолчанию и детерминированные тексты (`AI.i18n.t()`) — на одном языке. Итоговый JSON хранит `report_language` (`final_parsed` и `sla_details`); у старых отчётов поля нет, это значит `ru`.
+- Папки `AI/prompts/ru/` и `AI/prompts/en/` содержат одинаковые имена файлов: доменные `*_prompt.txt`, `overall_prompt.txt`, `_context_guide.txt`, `_response_format.txt`, `verify_prompt.txt`, `critic_prompt.txt`, `judge_prompt.txt`, `judge_safe_prompt.txt` (форма судьи без рубрики), `judge_rubrics/*.txt`, `profiles/{step,soak,spike,stress,none}.txt` (профиль теста в ориентирах), `_no_sla.txt`, `_system.txt` и `_system_json.txt` (системный промпт по умолчанию и его JSON-часть), `forecast_limit_prompt.txt`, `context_import_prompt.txt`.
+- Короткие строки склейки (заголовки и строки блока ориентиров, справка о системе, ноты поправок вердикта, запасное обоснование, системные промпты судьи, GigaChat structured, разбора прогноза и импорта контекста, разделители документа) — в `AI/prompts/<lang>/_strings.json`: плоский JSON, одинаковые ключи в обоих языках, параметры `{name}`.
+- Загрузчик — `AI/prompt_store.py`: `load_prompt(name, lang)` (кэш по языку и имени; нет файла языка — берётся `ru` и один раз пишется warning; нет и `ru` — `PromptMissing`), `text(key, lang, **params)`, `default_prompts(lang)`, `effective_override(text, name)`, `detect_language(text)`. `lang=None` — текущая локаль, то есть язык отчёта внутри прогона.
+- Вердикт LLM возвращает кодом `pass | risk | fail | no_data` на любом языке; обоснование начинается с подписи: «Статус «Есть риски»: …» в `ru`, `Status "Risks found": …` в `en`. `evidence_items.threshold` — число с единицей или `null`. Разбор терпим: `AI.verdicts.to_code` принимает и коды, и подписи обоих языков.
+- Переопределения: пустой текст и копия стандартного текста любого языка переопределением не считаются (и в `/prompts`, и при запуске), поэтому стандартный промпт грузится на языке прогона. `/prompts` отдаёт `language`, `sources` (`default | area | service`) и `override_language`; `/prompts/defaults?lang=ru|en` — стандартные тексты нужного языка. Переопределение на другом языке допустимо: формат ответа на языке прогона идёт после текста пользователя.
+- Разбор прогноза идёт на языке отчёта, который он объясняет (хеш входов включает текст промпта, у старых отчётов он прежний); импорт контекста — на глобальном языке в момент импорта.
+- Perplexity: `llm.perplexity.language_preference` передаётся, только если задан; если он отличается от языка прогона, пишется один warning на прогон. GigaChat ориентирован на русский: кандидаты не на языке отчёта отсекает `language_match` (доля слов нужной письменности в свободном тексте ответа, первый ключ выбора кандидата).
+
+Как держать `ru` и `en` в согласии:
+1. Меняя промпт, правьте файл в обеих папках; структура, плейсхолдеры (`{answer_*}`, `{system_context_brief}`, `{{CANDIDATE}}`, `{{DOMAIN_KEY}}`, `{{JUDGE_RUBRIC}}`, `{{DATA_CONTEXT}}`, `{{CANDIDATES_JSON}}`), ключи JSON, коды и критерии рубрик (блок Evaluation Form) должны совпадать. Английский пишется естественным языком, а не дословным переводом.
+2. Новую строку склейки добавляйте в `_strings.json` обоих языков (канонический формат: `json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True)` + перевод строки).
+3. `tests/test_prompt_store.py` проверяет одинаковые имена файлов, плейсхолдеры, ключи JSON, критерии рубрик, паритет `_strings.json`, отсутствие кириллицы в `en` и запасной `ru`; `tests/test_i18n_prompts.py` — что все вызовы LLM прогона идут на одном языке. Заглушка `tools/stubs/llm_stub.py --lang auto|ru|en` отвечает на языке системного промпта.
+4. Качество en проверяйте вручную на сохранённых прогонах: метрики `AI/eval.py` (`report_language`, `language_match`, доли verified) для ru и en.
 
 ## Judge Layer
 - Judge использует компактную form-filling схему: `scores[].rubric` плюс совместимые поля `factual`, `completeness`, `specificity`, `overall`.
@@ -53,7 +70,7 @@ GigaChat подключается через `langchain_gigachat` с mTLS (`cert
 
 ## Формат результата (строгая часть)
 Каждый домен и итоговый блок возвращают объект со следующими полями:
-- `verdict` — один из: «Успешно», «Есть риски», «Провал», «Недостаточно данных»;
+- `verdict` — код: `pass | risk | fail | no_data` (подписи «Успешно», «Есть риски», «Провал», «Недостаточно данных» / Passed, Risks found, Failed, Insufficient data — в `AI/verdicts.py`); старые отчёты с русскими подписями переводятся в коды при чтении;
 - `verdict_rationale?` — краткое объяснение, почему вынесен именно этот вердикт; рекомендуется формат: короткий вывод + 2-4 ключевых фактора;
 - `confidence` — уверенность модели в диапазоне [0..1];
 - `findings` — список строк или объектов `{summary, severity, component, evidence}`;
@@ -62,7 +79,8 @@ GigaChat подключается через `langchain_gigachat` с mTLS (`cert
 - `peak_performance?` — необязательный блок `{max_rps, max_time, drop_time, method}` при наличии входных метрик общего RPS; для soak и spike — `{not_applicable: true, reason}`.
 
 Итоговый блок дополнительно содержит поля, которые пайплайн вычисляет сам, а не модель:
-- `test_profile` — профиль типа теста (`test_type`, `normalized_test_type`, `mode`, `label_ru`, `focus`, …);
+- `report_language` — язык отчёта (`ru`/`en`; нет поля — `ru`);
+- `test_profile` — профиль типа теста (`test_type`, `normalized_test_type`, `mode`, `label`, `focus` на языке отчёта, …); поле `label_ru` больше не пишется — подпись типа берётся по `normalized_test_type`, у старых отчётов `label_ru` читается запасным вариантом;
 - `deterministic_sla` — программная проверка SLA (`verdict`, `checks[]`, `stable_window` с `kind`: ступень, `hold` или `spike`);
 - `stability_under_load` (soak) — `target_rps`, `actual_rps`, `hold` (окно удержания, минимальный интервал), `trends[]`, `flagged_trends[]`;
 - `spike_analysis` (spike) — `detected`, `baseline_rps`, `spikes[]` с `pre`/`during`, `overshoot_p95_pct`, `recovered`, `recovery_time_sec`;

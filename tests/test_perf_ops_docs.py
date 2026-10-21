@@ -1,10 +1,11 @@
-"""The background job documentation matches the code (docs/perf-plan.md, wave B, agent B6).
+# SPDX-License-Identifier: Apache-2.0
+"""The background job documentation matches the code (plans/perf-plan.md, wave B, agent B6).
 
 Offline: reads the documentation, the compose files and the Python sources; imports the job modules only
 to read their defaults, messages and registered task names. Nothing connects to a broker or a database.
 
 - Every ``LOADLENS_JOB_*`` / ``LOADLENS_REPORT_*`` variable named in the documentation is read by the code,
-  and every one the code reads is documented (docs/jobs-runner.md, README.md, docker/env.example) and
+  and every one the code reads is documented (docs/jobs-runner.md, README.ru.md, docker/env.example) and
   passed to both the app and the worker by docker-compose.yml.
 - The defaults in the table of docs/jobs-runner.md, in docker-compose.yml and in docker/env.example are
   the defaults of the code.
@@ -30,7 +31,8 @@ from loadlens_app import jobs, tasks  # noqa: E402
 yaml = pytest.importorskip("yaml")
 
 JOBS_DOC = ROOT_DIR / "docs" / "jobs-runner.md"
-README = ROOT_DIR / "README.md"
+# The full Russian README (the English README.md is a short front page that links docs/ instead).
+README = ROOT_DIR / "README.ru.md"
 DOCKER_SETUP = ROOT_DIR / "docker" / "DOCKER_SETUP.md"
 ENV_EXAMPLE = ROOT_DIR / "docker" / "env.example"
 COMPOSE = ROOT_DIR / "docker" / "docker-compose.yml"
