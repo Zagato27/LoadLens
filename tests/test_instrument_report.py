@@ -277,7 +277,8 @@ def test_template_header_and_sections():
     assert '<nav id="reportBreadcrumbs" class="breadcrumbs rep-crumbs"' in template
     assert '<section id="reportSteps" class="rep-timeline" hidden></section>' in template
     assert template.index('id="reportHero"') < template.index('id="reportSteps"') < template.index('id="rep-llm-tabs"')
-    assert (REPO / "templates/reports.html").read_bytes().count(b"\r\n") == template.count("\n")  # CRLF kept
+    # Line endings are not mixed: CRLF in a Windows checkout with core.autocrlf, LF in a Linux checkout (CI).
+    assert (REPO / "templates/reports.html").read_bytes().count(b"\r\n") in (0, template.count("\n"))
 
 
 def test_reports_js_draws_the_profile_and_keeps_tokens():

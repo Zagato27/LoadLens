@@ -2057,6 +2057,11 @@ def _patch_projects_db(monkeypatch, conn):
 
 
 def test_projects_overview_shows_reports_readiness_and_overrides(client, monkeypatch):
+    # Readiness resolves SLA references against the global queries: a reference to a missing label is replaced by
+    # the role query of the settings in use. Pin the global queries so "LT RPS" exists whatever settings.py holds.
+    monkeypatch.setitem(core.CONFIG, "queries", {
+        "lt_framework": {"labels": ["LT RPS"], "promql_queries": ["sum(rate(requests_total[1m]))"], "label_keys_list": [[]]},
+    })
     _write_project_runtime({
         "alpha": {
             "title": "Альфа",

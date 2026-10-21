@@ -8,7 +8,6 @@ labels) are translated by their own modules; these tests check the prompts and t
 
 import hashlib
 import importlib.util
-import itertools
 import json
 import logging
 import re
@@ -90,7 +89,6 @@ def _run_pipeline(monkeypatch, lang):
     monkeypatch.setattr(pipeline_module, "fetch_and_aggregate_with_label_keys", fetch)
 
     lock = threading.Lock()
-    numbers = itertools.count()
     spy_calls, provider_calls = [], []
     main_thread = threading.get_ident()
     real_ask = providers.ask_llm_with_text_data
@@ -100,11 +98,16 @@ def _run_pipeline(monkeypatch, lang):
             spy_calls.append({"prompt": user_prompt, "locale": get_locale(), "system": kwargs.get("system_prompt")})
         return real_ask(user_prompt, data_context, *args, **kwargs)
 
+    # The fake provider must not depend on the order of calls: candidates run in pool threads, and a call counter
+    # shared across threads made the critic and the verification pass appear only on some machines. Exactly one
+    # analysis answer rambles (whichever comes first; the critic turns it into JSON) and every other analysis
+    # answer carries an unverified number, so the chosen candidates have one and the verification pass runs.
+    rambled = {"done": False}
+
     def provider_call(provider, messages, pcfg, system_text):
         user = messages[-1]["content"]
         body = {"messages": [{"role": "system", "content": system_text}, {"role": "user", "content": user}]}
         with lock:
-            number = next(numbers)
             # "in_pool": the call ran in a worker thread, so get_locale() proves the ContextVar crossed the pool.
             # The number of distinct threads is not asserted: an executor reuses an idle thread when the previous
             # call finished before the next submit, which happens under load (the fake provider answers at once).
@@ -114,7 +117,9 @@ def _run_pipeline(monkeypatch, lang):
         content, kind, _domain = STUB.answer_text(body)
         critic = user.startswith(("You act as a strict report validator", "Вы выступаете как строгий валидатор"))
         if kind == "analysis" and not critic and "unverified_findings" not in user:
-            if number % 3 == 0:
+            with lock:
+                ramble, rambled["done"] = not rambled["done"], True
+            if ramble:
                 return "the model rambles instead of JSON"  # the critic turns it into JSON
             if "designated_peak_performance" in user:
                 answer = json.loads(content)
