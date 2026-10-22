@@ -379,6 +379,9 @@ CONFIG = {
     # Для Prometheus используйте promql_queries + label_keys_list.
     # Для InfluxDB (Flux) используйте flux_queries + label_tag_keys_list. Плейсхолдеры: {bucket}, {start}, {end} (ISO8601 UTC).
     # Для InfluxDB (InfluxQL) используйте influxql_queries + label_tag_keys_list. Плейсхолдеры: $timeFilter, $__interval, а также $Group/$Tag/$URL/$Measurement.
+    # Строка может читать свой источник вместо привязки домена: "sources": {"<подпись>": {"source": "<id источника>"}};
+    # null возвращает строку к привязке домена. Строки одного домена могут быть на разных языках, если каждый
+    # язык читается из источника, который его выполняет (k6 в InfluxDB и Gatling в VictoriaMetrics).
     "queries": {
         "lt_framework": {
             "labels": [

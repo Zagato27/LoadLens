@@ -13,6 +13,7 @@ from typing import Any, Mapping
 
 from flask import Blueprint, g, jsonify, request
 
+from AI.data_sources import domain_binding
 from AI.i18n import t
 from AI.query_packs import DerivedRowError, add_summed_rps
 from loadlens_app.blueprints.config_api import has_own_section, scope_view, store_section
@@ -121,7 +122,7 @@ def apply_query_pack():
     g.audit_extra = {
         "pack": result.pack.id,
         "version": str(result.pack.version),
-        "domain": result.pack.domain,
+        "domain": result.domain,
         "mode": result.mode,
         "added": str(len(result.plan["added"])),
         "updated": str(len(result.plan["updated"])),
@@ -143,7 +144,7 @@ def summed_rps():
     area, service = _scope(body)
     state = _state(area, service)
     try:
-        block, label, parts = add_summed_rps(state.queries.get(LT_DOMAIN))
+        block, label, parts = add_summed_rps(state.queries.get(LT_DOMAIN), domain_binding(state.effective_cfg, LT_DOMAIN))
     except DerivedRowError as exc:
         raise PackRequestError(str(exc)) from exc
     queries = copy.deepcopy(state.queries)

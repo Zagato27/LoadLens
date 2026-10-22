@@ -48,6 +48,33 @@ def _deep_merge_dicts(base: dict, override: dict) -> dict:
     return out
 
 
+# Sections the settings pages save whole. Their value in settings_runtime.json replaces the one of settings.py:
+# merged field by field, a binding switched to Prometheus kept the Grafana datasource of settings.py (and failed
+# the next save), and a source or a binding deleted on the page came back after a restart.
+RUNTIME_WHOLE_SECTIONS = ("data_sources", "domain_sources")
+RUNTIME_WHOLE_AREA_SECTIONS = ("domain_sources",)
+
+
+def overlay_runtime(base: dict, runtime: dict) -> dict:
+    """``base`` (settings.py) with settings_runtime.json applied: key by key, except the sections saved whole
+    (``RUNTIME_WHOLE_SECTIONS``, and ``RUNTIME_WHOLE_AREA_SECTIONS`` of every ``per_area`` entry), which replace."""
+    merged = _deep_merge_dicts(base, runtime)
+    for key in RUNTIME_WHOLE_SECTIONS:
+        if isinstance(runtime.get(key), dict):
+            merged[key] = copy.deepcopy(runtime[key])
+    areas = runtime.get("per_area")
+    merged_areas = merged.get("per_area")
+    if isinstance(areas, dict) and isinstance(merged_areas, dict):
+        for name, entry in areas.items():
+            target = merged_areas.get(name)
+            if not isinstance(entry, dict) or not isinstance(target, dict):
+                continue
+            for key in RUNTIME_WHOLE_AREA_SECTIONS:
+                if isinstance(entry.get(key), dict):
+                    target[key] = copy.deepcopy(entry[key])
+    return merged
+
+
 def _clean_text(value) -> str:
     return value.strip() if isinstance(value, str) else ""
 
@@ -183,7 +210,7 @@ try:
     if CONFIG_RUNTIME_PATH.exists():
         with CONFIG_RUNTIME_PATH.open("r", encoding="utf-8") as f:
             _rt = json.load(f)
-        CONFIG.update(_deep_merge_dicts(CONFIG, _rt))
+        CONFIG.update(overlay_runtime(CONFIG, _rt))
 except Exception:
     pass
 

@@ -958,3 +958,47 @@ Node resources from node_exporter: CPU and memory in percent (the source of the 
 | Nodes: Network receive (bytes/s) by node | Network: receive | bytes/s |  |
 | Nodes: Network transmit (bytes/s) by node | Network: transmit | bytes/s |  |
 | Nodes: Filesystem used (%) by node | File system fill | % |  |
+
+### Windows component hosts: windows_exporter (database, Kafka, runtime)
+
+`host-windows-exporter` v1 · domain of your choice: "Databases", "Kafka", "JVM and runtime", "Microservices" · up to 10 installations per domain · PromQL
+
+Resources of the Windows servers a component of the section runs on (SQL Server, for example): CPU, memory, processor queue per core, disk utilization and fill, network from prometheus-community/windows_exporter land in the section of the chosen domain. The domain is picked at install time; one domain takes up to 10 installations told apart by the host title. The node CPU and memory SLA does not read these series. A node is named by the instance address without the port.
+
+| Variable | Default | Description |
+|---|---|---|
+| `host_title` | `Windows host` | Host title. Start of the series labels, for example "SQL Server". Different titles are different installations of the pack in the domain |
+| `matchers` | empty | Host matchers. Only the hosts of this component, for example job="windows", instance=~"sql-.*" |
+| `window` | `2m` | rate() window |
+
+| Query | Role | Unit | SLA |
+|---|---|---|---|
+| Windows host: CPU usage (%) by node | Component host CPU (required) | % |  |
+| Windows host: Memory usage (%) by node | Component host memory (required) | % |  |
+| Windows host: processor queue per core by node | Component host load1 per core | ratio |  |
+| Windows host: Disk utilization of the busiest volume (%) by node | Component host disk utilization | % |  |
+| Windows host: Network receive (bytes/s) by node | Component host network: receive | bytes/s |  |
+| Windows host: Network transmit (bytes/s) by node | Component host network: transmit | bytes/s |  |
+| Windows host: Disk used (%) by node | Component host file system fill | % |  |
+
+### Component hosts: node_exporter (database, Kafka, runtime)
+
+`host-node-exporter` v1 · domain of your choice: "Databases", "Kafka", "JVM and runtime", "Microservices" · up to 10 installations per domain · PromQL
+
+Resources of the hosts a component of the section runs on: a database server, a Kafka broker, the VM of a service. CPU, memory, load per core, disk, network and file system fill from node_exporter land in the section of the chosen domain next to the metrics of the component itself. The domain is picked at install time; one domain takes up to 10 installations (primary and replica, broker groups) told apart by the host title. The node CPU and memory SLA does not read these series: it stays on the node_exporter pack in "Node resources".
+
+| Variable | Default | Description |
+|---|---|---|
+| `host_title` | `Host` | Host title. Start of the series labels, for example "DB host" or "Kafka brokers". Different titles are different installations of the pack in the domain |
+| `matchers` | `job=~".*node.*"` | Host matchers. Only the hosts of this component, for example instance=~"db-.*". Exclude them from the matchers of the node_exporter pack in "Node resources" so the host is not reported twice |
+| `window` | `2m` | rate() window |
+
+| Query | Role | Unit | SLA |
+|---|---|---|---|
+| Host: CPU usage (%) by node | Component host CPU (required) | % |  |
+| Host: Memory usage (%) by node | Component host memory (required) | % |  |
+| Host: load1 per core by node | Component host load1 per core | ratio |  |
+| Host: Disk utilization of the busiest device (%) by node | Component host disk utilization | % |  |
+| Host: Network receive (bytes/s) by node | Component host network: receive | bytes/s |  |
+| Host: Network transmit (bytes/s) by node | Component host network: transmit | bytes/s |  |
+| Host: Filesystem used (%) by node | Component host file system fill | % |  |

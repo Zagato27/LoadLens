@@ -169,11 +169,11 @@ Browser session only; a token with the administrator role is refused.
 | `POST /config/test_connection` | Tests a connection with the form values |
 | `GET /config/grafana_datasources?source=<id>` | Data sources of a Grafana connection |
 | `POST /config/llm_models` | Models of the provider |
-| `POST /config/query_preview` | Runs one metric query |
+| `POST /config/query_preview` | Runs one metric query: `domain`, `lang`, `query`, `label_keys`, `start?`, `end?`, `label?` (the row: its saved source applies), `binding?` (an unsaved source of the row; `null` for the domain binding) |
 | `POST /config/system_context/import` | Multipart `file`, `area?`, `service?`, `mode` (`fill`, `replace`), `current?`; or JSON with `text` or `confluence_url`. Returns `context`, `changes`, `source`, `warnings`, `provider`; nothing is saved |
-| `GET /config/query_packs?area=&service=` | The pack catalogue with compatibility and installed versions |
-| `POST /config/query_packs/detect` | Metric names found at the sources and the share of needed metrics per pack and bundle |
-| `POST /config/query_packs/preview`, `.../check`, `.../apply` | Body: `pack_id`, `variables`, `include_indexes`, `mode` (`merge`, `replace`), `fill_sla`, `overwrite_sla`, `area?`, `service?`; `check` also takes `start` and `end`. `apply` returns `previous` for undo |
+| `GET /config/query_packs?area=&service=` | The pack catalogue with compatibility and installed versions; a pack lists `domains`, `max_instances` and `targets` (compatibility and `instances` per domain; an installation carries its `binding` and `source`) |
+| `POST /config/query_packs/detect` | Metric names found at the sources and the share of needed metrics per pack and bundle; `sources` are the extra sources read (catalogue Prometheus sources, sources of rows), and a pack that fits one of them better has `alternative` with its `binding` |
+| `POST /config/query_packs/preview`, `.../check`, `.../apply` | Body: `pack_id`, `domain` (required for a pack whose domain is picked), `variables`, `include_indexes`, `binding` (the source of the pack rows; `null` for the domain binding, absent to keep the rows' sources), `mode` (`merge`, `replace`), `fill_sla`, `overwrite_sla`, `area?`, `service?`; `check` also takes `start` and `end`. `apply` returns `previous` for undo and `instance` of a multi-installation pack |
 | `POST /config/query_packs/summed_rps` | `area?`, `service?`, `use_for_sla?`: the row that sums the total RPS of several tools |
 
 ## Projects, prompts and services

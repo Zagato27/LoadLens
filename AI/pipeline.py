@@ -8,7 +8,7 @@ import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, List, Dict, Optional
+from typing import Any, Callable, List, Dict, Optional, Sequence
 from urllib.parse import quote, urlsplit
 
 import requests
@@ -47,7 +47,13 @@ from AI.db_store import (
     save_llm_results,
     _connect as _db_connect,
 )
-from AI.data_sources import ResolvedSource, domain_query_language, resolve_domain_source
+from AI.data_sources import (
+    QUERY_KEY_FIELDS,
+    QUERY_LANG_FIELDS,
+    ResolvedSource,
+    SourceGroup,
+    domain_source_groups,
+)
 from AI.opensearch_logs import APPLICATION_LOGS_DOMAIN, collect_application_logs
 from AI.query_packs import block_roles, domain_titles, prompt_addenda, resolve_sla_refs, series_annotations
 from AI.sla_evaluator import (
@@ -2578,7 +2584,63 @@ def _stack_notes(block: Any) -> List[tuple[str, str]]:
         return []
 
 
+def _group_block(qcfg: dict, rows: Sequence[int], language: str) -> dict:
+    """The rows of one source group as a block of their own: labels, queries and series keys of the language."""
+    qkey, kkey = QUERY_LANG_FIELDS[language], QUERY_KEY_FIELDS[language]
+
+    def pick(key: str, blank: Any) -> list:
+        values = qcfg.get(key) if isinstance(qcfg.get(key), list) else []
+        return [values[index] if index < len(values) else blank for index in rows]
+
+    return {
+        "labels": pick("labels", ""),
+        qkey: pick(qkey, ""),
+        kkey: [list(keys) if isinstance(keys, list) else [] for keys in pick(kkey, [])],
+    }
+
+
 def _collect_domain_frames(
+    groups: Sequence[SourceGroup],
+    qcfg: dict,
+    start_ts: float,
+    end_ts: float,
+    step: str,
+    resample: str,
+) -> List[pd.DataFrame]:
+    """Frames of every row of the domain in the order of ``labels``.
+
+    Each group (rows of one source in one language) runs on its own: a source that fails leaves its
+    rows empty and the other rows of the domain are still collected.
+    """
+    labels = qcfg.get("labels") if isinstance(qcfg.get("labels"), list) else []
+    frames: List[pd.DataFrame] = [pd.DataFrame() for _ in labels]
+    for group in groups:
+        sub = _group_block(qcfg, group.rows, group.language)
+        if len(groups) > 1 or group.overridden:
+            logger.info(
+                "%s: %d rows from source %s (%s)%s",
+                group.resolved.domain, len(group.rows), group.resolved.source_id, group.language,
+                " by row override" if group.overridden else "",
+            )
+        if group.mixed:
+            logger.warning(
+                "%s: rows with queries in several languages run in %s: %s",
+                group.resolved.domain, group.language, [sub["labels"][group.rows.index(index)] for index in group.mixed],
+            )
+        try:
+            dfs = _collect_source_frames(group.resolved, sub, group.language, start_ts, end_ts, step, resample)
+        except Exception as exc:
+            logger.error(
+                "%s: rows %s from source %s failed: %s", group.resolved.domain, sub["labels"], group.resolved.source_id, exc
+            )
+            continue
+        for index, frame in zip(group.rows, dfs):
+            if index < len(frames):
+                frames[index] = frame
+    return frames
+
+
+def _collect_source_frames(
     resolved: ResolvedSource,
     qcfg: dict,
     language: str,
@@ -2587,7 +2649,7 @@ def _collect_domain_frames(
     step: str,
     resample: str,
 ) -> List[pd.DataFrame]:
-    """Runs one domain's queries in the language ``domain_query_language`` selected."""
+    """Runs the queries of ``qcfg`` (the rows of one source group) in ``language``."""
     source = resolved.config
     if language == "promql":
         return fetch_and_aggregate_with_label_keys(
@@ -2643,23 +2705,21 @@ def _collect_domain_frames(
     )
 
 
-def _prepare_metric_domains(cfg: dict, queries: dict, collect_keys: List[str]) -> Dict[str, tuple]:
-    """Resolves a source per enabled domain before collection starts.
+def _prepare_metric_domains(cfg: dict, queries: dict, collect_keys: List[str]) -> Dict[str, List[SourceGroup]]:
+    """Resolves the sources of every enabled domain before collection starts: one group per source and language.
 
-    A broken binding fails the report here. A domain with no queries stays empty.
+    A broken binding (of the domain or of a row) fails the report here. A domain with no queries stays empty.
     """
-    prepared: Dict[str, tuple] = {}
+    prepared: Dict[str, List[SourceGroup]] = {}
     for key in collect_keys:
         if key == APPLICATION_LOGS_DOMAIN:
             continue
         qcfg = queries.get(key)
         if not isinstance(qcfg, dict):
             continue
-        resolved = resolve_domain_source(cfg, key)
-        language = domain_query_language(resolved, qcfg)
-        if language is None:
-            continue
-        prepared[key] = (resolved, language)
+        groups = domain_source_groups(cfg, key, qcfg)
+        if groups:
+            prepared[key] = groups
     return prepared
 
 
@@ -2907,13 +2967,12 @@ def _upload_from_llm(
                     resample_interval=resample,
                 )
                 continue
-            prepared = metric_sources.get(key)
-            if prepared is None:
+            groups = metric_sources.get(key)
+            if not groups:
                 domain_data[key] = _empty_domain_payload(key)
                 continue
-            resolved, language = prepared
             qcfg = queries.get(key) or {}
-            dfs = _collect_domain_frames(resolved, qcfg, language, start_ts, end_ts, step, resample)
+            dfs = _collect_domain_frames(groups, qcfg, start_ts, end_ts, step, resample)
             labeled = label_dataframes(dfs, qcfg.get("labels", []))
             markdown = dataframes_to_markdown(labeled)
             # Packs are built in a second pass, once load steps are known from lt_framework.

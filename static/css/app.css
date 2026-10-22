@@ -1578,10 +1578,15 @@ table.forecast-list { margin-top: 16px; }
 .binding-actions { padding-top: 3px; }
 .binding-row .conn-result { grid-column: 1 / -1; margin-top: 0; }
 .binding-row select, .binding-row input[type="text"], .sla-row select, .sla-row input[type="number"], .prompt-toolbar select, .services-table td input[type="text"] { height: 30px; }
+/* The source of one query row or of a pack's rows: the same editor as a domain binding, in a field. */
+.q-source-editor { display: grid; grid-template-columns: minmax(200px, 1fr) minmax(240px, 1.6fr); gap: 8px 14px; align-items: start; }
+.q-source-editor select, .q-source-editor input[type="text"] { height: 30px; }
+.pack-vars .q-source-editor { grid-template-columns: 1fr; }
 @media (max-width: 900px) {
   .binding-row { grid-template-columns: 1fr; }
   .binding-head { display: none; }
   .binding-domain { padding-top: 0; }
+  .q-source-editor { grid-template-columns: 1fr; }
 }
 /* System context: groups of fields, the import from a document as a banner with a bar on the left. */
 .ctx-group { margin: 10px 0; }

@@ -19,9 +19,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   `python -m AI.query_packs docs --lang en docs/query-packs.en.md`; the English docs link to it.
 - **Link check.** `.github/workflows/links.yml` checks the external links of every markdown file with lychee on
   documentation changes and weekly.
+- **A source per query row.** A row of any domain can read another source than the domain binding
+  (`queries.<domain>.sources`): two Prometheus servers, two Grafana data sources, node_exporter of the database hosts
+  in an infrastructure Prometheus. The row editor and the pack card have a "Source" field; checks, reports, live
+  charts and load tool hints follow it; a catalogue source that a row reads cannot be removed
+  ([docs/data-sources.md](docs/data-sources.md#a-source-per-query-row)).
+- **Several query languages in one domain.** k6 in InfluxDB behind Grafana and Gatling in VictoriaMetrics fill one
+  "Load testing tool" section: every row runs its own language, the report collects a domain in groups per source
+  and language, and a source that fails leaves only its own rows empty. The row editor has a language field and marks
+  rows with texts in two languages.
+- **Hosts of a component.** The packs `host-node-exporter` and `host-windows-exporter` put the CPU, memory, disk and
+  network of database, broker or service hosts into the section of the domain picked at install time, up to 10
+  installations per domain told apart by the host title. Their `host.*` roles fill no SLA field.
+- **Pack detection reads more sources.** "Detect from sources" also reads the direct Prometheus sources of the
+  catalogue and the sources rows already read, and offers "Read from it" when a pack's metrics are found there.
+
+### Changed
+
+- **A source runs one language, not a domain.** A pack in another language merges into a domain when its rows read
+  another source; "Replace only" became "Language conflict" and appears only when rows in another language read the
+  same source.
 
 ### Fixed
 
+- Saved data sources and domain bindings replace those of `settings.py` instead of being merged into them field by
+  field. Before, a binding switched to a direct Prometheus kept the Grafana datasource of `settings.py`, so the next
+  save of the bindings card failed with "field datasource_uid is not used for type prometheus", and a source or a
+  binding deleted on the page came back after a restart.
 - The time axis and the tooltip of the report charts follow the clock of the report, like the step row and the
   markers; in a browser outside the report's time zone the ticks no longer disagree with the marker labels.
 - The AI analysis of a run is saved when a PromQL query divides by zero. `+Inf`, `-Inf` and `NaN` samples are

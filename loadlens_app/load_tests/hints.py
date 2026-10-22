@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Where a load tool should write its metrics so the service's report sees them.
 
-The suggestion follows the source of the service's ``lt_framework`` domain and its installed query packs:
+The suggestion follows the source of the service's ``lt_framework`` domain (or the source the rows of the
+tool's pack read, when they override it) and its installed query packs:
 k6 remote write for Prometheus or VictoriaMetrics, k6 InfluxDB output for InfluxQL behind Grafana, the
 Graphite writer of Gatling. Addresses are those LoadLens knows; a generator in another network may need
 different ones. Credentials of the source are never put into a suggestion: the engineer adds them.
@@ -67,13 +68,36 @@ def _host(url: str) -> str:
         return ""
 
 
+def _tool_source(cfg: dict, family: str):
+    """Source of the tool's rows: the override of a row of one of its packs, else the domain binding."""
+    from AI.data_sources import resolve_binding, resolve_domain_source, row_overrides
+    from AI.query_packs import installed_packs, load_catalog, render_pack
+
+    block = (cfg.get("queries") or {}).get(LT_DOMAIN) if isinstance(cfg.get("queries"), dict) else None
+    overrides = row_overrides(block)
+    if family and overrides:
+        catalog = load_catalog()
+        for entry in installed_packs(block):
+            pack = catalog.pack(entry["id"])
+            if pack is None or not pack.id.startswith(f"lt-{family}-"):
+                continue
+            try:
+                rendered = render_pack(pack, {k: v for k, v in entry["variables"].items() if k in pack.variables})
+            except ValueError:
+                continue
+            for query in rendered.queries:
+                if query.label in overrides:
+                    return resolve_binding(cfg, LT_DOMAIN, overrides[query.label], query.label)
+    return resolve_domain_source(cfg, LT_DOMAIN)
+
+
 def output_hint(cfg: dict, tool_id: str, installed_packs: list[str]) -> Hint:
-    from AI.data_sources import DataSourceConfigError, resolve_domain_source
+    from AI.data_sources import DataSourceConfigError
 
     family = _family(tool_id)
     hint = Hint()
     try:
-        resolved = resolve_domain_source(cfg, LT_DOMAIN)
+        resolved = _tool_source(cfg, family)
     except DataSourceConfigError as exc:
         hint.notes.append(t("lt.hints.no_source", error=exc))
         return hint
@@ -132,7 +156,7 @@ def output_hint(cfg: dict, tool_id: str, installed_packs: list[str]) -> Hint:
         if family == "k6":
             hint.params = f"--out xk6-influxdb={url}"
             hint.env["K6_INFLUXDB_ORGANIZATION"] = str(influx.get("org") or "")
-            hint.env["K6_INFLUXDB_BUCKET"] = str(cfg.get("domain_sources", {}).get(LT_DOMAIN, {}).get("bucket") or "k6")
+            hint.env["K6_INFLUXDB_BUCKET"] = str(influx.get("bucket") or "k6")
             hint.notes.append(t("lt.hints.k6_influx2"))
         else:
             hint.notes.append(t("lt.hints.influx2_plugins"))

@@ -65,6 +65,7 @@ OTHER_VALUES = {
     "root_prefix": "perf_gatling",
     "window_sec": "60",
     "testid": "release-2.*",
+    "host_title": "DB primary (pg-1)",
 }
 
 

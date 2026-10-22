@@ -12,7 +12,13 @@ from typing import Any
 import pandas as pd
 import requests
 
-from AI.data_sources import DataSourceConfigError, resolve_domain_source, source_accepts_language
+from AI.data_sources import (
+    DataSourceConfigError,
+    resolve_binding,
+    resolve_domain_source,
+    resolve_row_source,
+    source_accepts_language,
+)
 from AI.i18n import get_locale, t
 from AI.pipeline import (
     _convert_pd_offset_to_influx_interval,
@@ -96,10 +102,13 @@ def preview_metric_query(
     label_keys: list[str] | None = None,
     start_ts: float | None = None,
     end_ts: float | None = None,
+    label: str | None = None,
+    binding: dict[str, Any] | None = None,
 ) -> QueryPreview:
     """Executes one query. HTTP and query errors stay in ``message``.
 
-    Without ``start_ts``/``end_ts`` the window is the last 15 minutes.
+    Without ``start_ts``/``end_ts`` the window is the last 15 minutes. The source is ``binding`` (an
+    unsaved override from the form), else the saved override of the row ``label``, else the domain binding.
     """
     text = str(query or "").strip()
     if not text:
@@ -112,7 +121,7 @@ def preview_metric_query(
         return QueryPreview(ok=False, message=t("server.preview.language_required"), code=CODE_MISSING_LANGUAGE)
 
     try:
-        source = _source_for_domain(cfg, domain_name)
+        source = _source_for(cfg, domain_name, label, binding)
     except DataSourceConfigError as exc:
         return QueryPreview(ok=False, message=str(exc), code=CODE_SOURCE_CONFIG)
     rejected = _language_rejection(str(source.get("type") or "").lower(), language)
@@ -186,10 +195,14 @@ def fetch_points(
     end_ts: float,
     step: str,
     label_keys: list[str] | None = None,
+    label: str | None = None,
 ) -> Points:
-    """Series of one query as ``{name: [(unix seconds, value), ...]}``; raises on source and query errors."""
+    """Series of one query as ``{name: [(unix seconds, value), ...]}``; raises on source and query errors.
+
+    ``label`` names the row: its source override applies when the block has one.
+    """
     language = str(lang or "").strip().lower()
-    source = _source_for_domain(cfg, domain)
+    source = _source_for(cfg, domain, label, None)
     rejected = _language_rejection(str(source.get("type") or "").lower(), language)
     if rejected:
         raise ValueError(rejected)
@@ -269,6 +282,18 @@ def _language_rejection(source_type: str, language: str) -> str:
 def _source_for_domain(cfg: dict[str, Any], domain: str) -> dict[str, Any]:
     """Legacy-shaped connection for ``domain`` from the catalog and bindings."""
     config = resolve_domain_source(cfg, domain).config
+    return config if isinstance(config, dict) else {}
+
+
+def _source_for(cfg: dict[str, Any], domain: str, label: str | None, binding: dict[str, Any] | None) -> dict[str, Any]:
+    """Connection of one row: the given binding, else the row's saved override, else the domain binding."""
+    if isinstance(binding, dict) and str(binding.get("source") or "").strip():
+        config = resolve_binding(cfg, domain, binding, str(label or "") or "?").config
+    elif label:
+        queries = cfg.get("queries") if isinstance(cfg.get("queries"), dict) else {}
+        config = resolve_row_source(cfg, domain, queries.get(domain), str(label)).config
+    else:
+        return _source_for_domain(cfg, domain)
     return config if isinstance(config, dict) else {}
 
 

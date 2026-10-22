@@ -61,13 +61,45 @@ A project area replaces the whole `domain_sources` object; the catalogue stays g
 Domain binding" shows the effective binding of the open scope. The lists of sources and bindings are also what the
 wizard's "Domain binding" step edits.
 
+### A source per query row
+
+The binding of a domain is the default of its rows. A row can read another source: two Prometheus servers, two
+Grafana data sources, k6 in InfluxDB and Gatling in VictoriaMetrics in one `lt_framework`, node_exporter of the
+database hosts in an infrastructure Prometheus. Open the row in "Settings → Queries" and pick its "Source"; a query
+pack takes the source for all its rows in the "Source" field of the pack card. The row is then checked, collected
+and drawn on the live charts from that source; the rest of the domain keeps the binding. The domain tab and the
+"Domain binding" card show how many rows read a source of their own.
+
+```python
+"queries": {
+    "database": {
+        "labels": ["DB: TPS", "DB host: CPU usage (%) by node"],
+        "promql_queries": ["...", "..."],
+        "label_keys_list": [["datname"], ["node"]],
+        "sources": {"DB host: CPU usage (%) by node": {"source": "prom_infra"}},
+    },
+}
+```
+
+`sources` maps a row label to a binding of the same shape as a `domain_sources` entry. `null` means "the domain
+binding": a service or an area writes it to return a row that a wider scope reads elsewhere. Saving the queries
+checks every row source against the catalogue and the language of the row, and stores every field of the binding.
+A source that a row of any scope reads cannot be removed from the catalogue.
+
+A source runs one language: a direct Prometheus runs PromQL, a direct InfluxDB runs Flux, a Grafana data source runs
+the language of its type. A domain may hold rows in several languages as long as each language is read from a source
+that runs it. The report collects a domain in groups, one per source and language; a source that does not answer
+leaves only its own rows empty.
+
 ## Queries, labels, roles and units
 
 `queries.<domain>` holds parallel lists: `labels` (the series names shown in the report and used as identifiers of
-the stored series), the queries in one language (`promql_queries`, `influxql_queries` or `flux_queries`) and the
-label keys that name a series (`label_keys_list` for PromQL, `label_tag_keys_list` for InfluxQL and Flux). Two
-service keys are written by the packs: `roles` maps a label to its role (`lt.rps_total`, `lt.p95_total`,
-`node.cpu_pct`, `runtime.cpu`, ...) and `packs` records the installed packs with their versions and variables.
+the stored series), the queries (`promql_queries`, `influxql_queries`, `flux_queries`) and the label keys that name a
+series (`label_keys_list` for PromQL, `label_tag_keys_list` for InfluxQL and Flux). A row runs in the language whose
+list holds its text; a row with texts in several languages runs the one its source accepts (InfluxQL, then PromQL,
+then Flux for Grafana), and saving warns about it. Two service keys are written by the packs: `roles` maps a label to
+its role (`lt.rps_total`, `lt.p95_total`, `node.cpu_pct`, `runtime.cpu`, ...) and `packs` records the installed packs
+with their versions and variables. `sources` holds the rows that read their own source (see above).
 Flux queries use the placeholders `{bucket}`, `{start}` and `{end}`; InfluxQL queries use `$timeFilter` and
 `$__interval` as in Grafana.
 
@@ -101,7 +133,19 @@ that tells the model what the stack's metrics mean. Bundles group packs for a st
 
 Beyond the bundles there are packs for JVM (OpenTelemetry agent 1.x and 2.x), HTTP (Django, Flask, OpenTelemetry
 before and after semconv 1.23, NGINX ingress, Istio), MySQL, MongoDB, Redis, ArangoDB, PgBouncer, Kafka clients
-(Micrometer), windows_exporter, container CPU and memory, Locust, Yandex.Tank and the load generators; 41 packs in total.
+(Micrometer), windows_exporter, container CPU and memory, Locust, Yandex.Tank, the load generators and the component
+hosts; 43 packs in total.
+
+### Hosts of a component
+
+`host-node-exporter` and `host-windows-exporter` put the resources of the hosts a component runs on (a database
+server, a Kafka broker, the VM of a service) into that component's section: CPU, memory, load per core, disk, network
+and file system fill next to the TPS or the consumer lag. The domain is picked in the pack card ("Database", "Kafka",
+"JVM" or "Microservices"). One domain takes up to 10 installations of the pack, told apart by the "Host title"
+variable that starts every label ("DB primary", "DB replica", "Kafka brokers"): applying with a new title adds an
+installation, applying with an existing one updates it. The roles of these rows (`host.cpu_pct`, `host.mem_pct`, ...)
+fill no SLA field: the node CPU and memory SLA and the forecast keep reading `node.*` of "Node resources". Limit the
+matchers of `node-exporter` to the application nodes, or the database host is reported in both sections.
 
 Applying a pack ("Settings → Queries → Add from a pack"; the wizard opens the same dialog):
 
@@ -118,8 +162,9 @@ Applying a pack ("Settings → Queries → Add from a pack"; the wizard opens th
 Rules of application:
 
 - "Add and update" leaves foreign queries alone and updates the pack's own queries in place (same labels, so the
-  series history is kept). "Replace all queries of the domain" is for a domain that currently runs another language:
-  a domain runs one language at a time.
+  series history is kept). The "Source" of the pack card decides which source the pack rows read; by default the
+  domain binding. A pack in another language than the rows reading the same source shows "Language conflict": pick
+  another source for the pack, or "Replace all queries of the domain".
 - SLA references switch to the pack's queries by default; untick "Replace existing references with the pack's
   queries" to keep yours. A reference to a query that disappears is always replaced.
 - Load tool packs report latencies in milliseconds and set `latency_unit = "ms"` only when every latency reference
@@ -174,10 +219,19 @@ command-line report.
   (`--enable-feature=native-histograms`) and does not keep the classic `_bucket`, `_count`, `_sum` series. Set
   `scrape_classic_histograms: true` (Prometheus 2.x) or `always_scrape_classic_histograms: true` (3.x) in the scrape
   config.
-- **"Replace only" or "Incompatible" next to a pack.** The domain already runs queries in another language, or its
-  source does not accept the pack's language. Change the binding or apply the pack with replacement.
+- **"Language conflict" or "Incompatible" next to a pack.** Rows in another language already read the source the
+  pack would read, or the source does not accept the pack's language. Pick another source in the pack card, change
+  the binding or apply the pack with replacement.
+- **"Source X is in use: queries of the area …, domain …, row …" when saving the catalogue.** A query row reads the
+  source. Return the row to the domain binding (or delete it) in that scope first.
+- **A row shows "Two languages".** The row has texts in several languages, left from an earlier language of the
+  domain. Open the row and press "Keep only …".
+- **The database host is in both "Node resources" and "Database".** The matchers of `node-exporter` also match the
+  database host; exclude it there (for example `instance!~"db-.*"`).
 - **"Detect from sources" reports an error for a domain.** The message names the source and its answer. A Grafana
-  binding needs a selected data source, and the Grafana user needs the permission to read data sources.
+  binding needs a selected data source, and the Grafana user needs the permission to read data sources. Detection
+  also reads the direct Prometheus sources of the catalogue and the sources rows already read; a pack whose metrics
+  are found there gets "Found in …" and a "Read from it" button that sets the pack's source.
 - **"The source answered 404" when checking a query.** The message names the failing query. If the data source is
   not found, pick it from the list in the domain binding so that the uid is stored.
 - **VictoriaMetrics returns nothing for the last seconds.** It hides the latest 30 s by default

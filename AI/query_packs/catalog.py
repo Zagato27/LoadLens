@@ -77,6 +77,10 @@ def load_catalog_from(packs_dir: Path, bundles_file: Path) -> Catalog:
             missing = [pack_id for pack_id in bundle.packs if pack_id not in packs]
             if missing:
                 raise PackCatalogError(f"{bundles_file.name}: bundle {bundle.id} names unknown packs {missing}")
+            # A bundle installs every pack into its own domain; a pack whose domain is picked by the user cannot.
+            picked = [pack_id for pack_id in bundle.packs if packs[pack_id].domains]
+            if picked:
+                raise PackCatalogError(f"{bundles_file.name}: bundle {bundle.id} names packs with a domain to pick {picked}")
             if bundle.id in bundles:
                 raise PackCatalogError(f"{bundles_file.name}: bundle {bundle.id} is repeated")
             bundles[bundle.id] = bundle
@@ -89,10 +93,11 @@ def _check_label_collisions(packs: dict[str, QueryPack]) -> None:
     owners: dict[tuple[str, str], str] = {}
     for pack in packs.values():
         for query in render_pack(pack).queries:
-            key = (pack.domain, query.label)
-            if key in owners:
-                raise PackCatalogError(f"{pack.id}: label «{query.label}» is also used by {owners[key]}")
-            owners[key] = pack.id
+            for domain in pack.target_domains:
+                key = (domain, query.label)
+                if key in owners:
+                    raise PackCatalogError(f"{pack.id}: label «{query.label}» is also used by {owners[key]}")
+                owners[key] = pack.id
 
 
 @lru_cache(maxsize=1)

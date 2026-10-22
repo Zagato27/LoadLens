@@ -20,7 +20,9 @@ from .blocks import (
     block_labels,
     block_roles,
     filled_languages,
+    installed_instances,
     installed_packs,
+    instance_key,
     labels_for_role,
     merge_conflict,
     merge_pack,
@@ -32,6 +34,7 @@ from .blocks import (
     resolve_sla_refs,
     run_filter_variables,
     series_annotations,
+    set_row_sources,
     sla_update,
     strip_live_rows,
     domain_title,
@@ -41,10 +44,23 @@ from .blocks import (
 from .catalog import Catalog, PackCatalogError, load_catalog
 from .models import CATEGORY_TITLES, LANGUAGE_TITLES, Bundle, QueryPack, localized
 from .render import PackRenderError, RenderedPack, RenderedQuery, render_pack, resolve_variables
-from .roles import LIVE_ONLY_ROLES, READINESS_SLA_FIELDS, ROLES, SLA_FIELDS, UNIT_TITLES, Role, role_for_sla_field, unit_title
+from .roles import (
+    HOST_DOMAINS,
+    LIVE_ONLY_ROLES,
+    READINESS_SLA_FIELDS,
+    ROLES,
+    SLA_FIELDS,
+    UNIT_TITLES,
+    Role,
+    role_fits,
+    role_for_sla_field,
+    unit_title,
+)
 
 __all__ = [
     "DERIVED_KEY",
+    "HOST_DOMAINS",
+    "role_fits",
     "DerivedRowError",
     "SUMMED_RPS_LABEL",
     "add_summed_rps",
@@ -73,7 +89,9 @@ __all__ = [
     "block_labels",
     "block_roles",
     "filled_languages",
+    "installed_instances",
     "installed_packs",
+    "instance_key",
     "labels_for_role",
     "load_catalog",
     "localized",
@@ -91,6 +109,7 @@ __all__ = [
     "unit_title",
     "run_filter_variables",
     "series_annotations",
+    "set_row_sources",
     "sla_update",
     "domain_title",
     "domain_titles",

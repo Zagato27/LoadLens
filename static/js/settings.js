@@ -40,6 +40,8 @@
     checkOk: {},
     domainLang: {},
     domainLangPicker: {},
+    // Language picked for an empty query row (its text decides once it has one), by domain:index.
+    rowLangDraft: {},
     openSources: {},
     sourceChecks: {},
     bindingChecks: {},
@@ -1732,8 +1734,31 @@
       next = { status: 'error', items: [], message: e.message };
     }
     state.grafanaDatasources[sourceId] = next;
+    refreshBindingViews();
+  }
+  // Every view with a binding editor waits for the list of Grafana datasources. Editors of a query row or of
+  // the pack card are drawn again in place: the text typed into the rest of the form stays.
+  const liveBindingEditors = new Map();
+  function mountBindingEditor(ctx) {
+    const editor = makeEl('div', 'q-source-editor');
+    editor.dataset.bindingEditor = ctx.id;
+    liveBindingEditors.set(ctx.id, { editor, ctx });
+    ctx.rerender = () => redrawBindingEditor(ctx.id);
+    editor.append(bindingSourceSelect(ctx), bindingParams(ctx));
+    return editor;
+  }
+  function redrawBindingEditor(id) {
+    const item = liveBindingEditors.get(id);
+    if (!item || !item.editor.isConnected) {
+      liveBindingEditors.delete(id);
+      return;
+    }
+    item.editor.replaceChildren(bindingSourceSelect(item.ctx), bindingParams(item.ctx));
+  }
+  function refreshBindingViews() {
     const card = CONNECTION_CARDS.find((item) => item.id === 'domain_sources');
     if (card) renderBindingsBody(card);
+    Array.from(liveBindingEditors.keys()).forEach(redrawBindingEditor);
   }
   function findDatasource(items, binding) {
     const uid = String(binding.datasource_uid || '');
@@ -1752,39 +1777,60 @@
     renderBindingsBody(card);
     updateCardDirty(card);
   }
-  function setBindingSource(card, domain, sourceId) {
-    const model = state.models[card.id];
-    if (sourceId) model[domain] = { source: sourceId };
-    else delete model[domain];
-    delete state.bindingChecks[domain];
-    commitBindings(card);
+  // ---- binding editor ------------------------------------------------------------------------------
+  // The domain bindings card, a query row and the pack card edit a binding the same way. ctx:
+  //   id, title       ids of the inputs and the name in aria labels
+  //   own             the binding is set here (else the inherited one is described by inheritNote)
+  //   get()/set(b)    read the binding, replace it (null: inherit)
+  //   setField(f, v)  change one text field without re-rendering
+  //   rerender()      draw the editor again (a datasource list arrived)
+  //   emptyLabel      the first option of the source list; language: list only sources that run it
+  function cardBindingCtx(card, row, model) {
+    return {
+      id: `bf-${row.id}`,
+      title: row.title,
+      own: row.id === 'default' || hasOwn(model, row.id),
+      get: () => (isPlainObject(model[row.id]) ? model[row.id] : {}),
+      set: (binding) => {
+        if (binding) model[row.id] = binding;
+        else delete model[row.id];
+        delete state.bindingChecks[row.id];
+        commitBindings(card);
+      },
+      setField: (field, value) => {
+        if (!isPlainObject(model[row.id])) model[row.id] = {};
+        const text = String(value || '').trim();
+        if (text) model[row.id][field] = text;
+        else delete model[row.id][field];
+        setJson(state.editors[`ed_${card.id}`], model);
+        updateCardDirty(card);
+      },
+      rerender: () => renderBindingsBody(card),
+      emptyLabel: row.id === 'default' ? LL.t('settings.binding.pick_source') : LL.t('settings.binding.as_default'),
+      inheritNote: row.id === 'default' ? '' : LL.t('settings.binding.as_default_summary', { summary: bindingSummary(model.default) })
+    };
   }
-  function chooseDatasource(card, domain, ds) {
-    const model = state.models[card.id];
-    const binding = { source: String((model[domain] || {}).source || '') };
+  function withDatasource(sourceId, ds) {
+    const binding = { source: String(sourceId || '') };
     if (ds) {
       binding.datasource_uid = ds.uid;
       binding.datasource_name = ds.name;
       if (ds.mode === 'influxql' && ds.database) binding.database = ds.database;
       if (ds.mode === 'flux' && ds.bucket) binding.bucket = ds.bucket;
     }
-    model[domain] = binding;
-    delete state.bindingChecks[domain];
-    commitBindings(card);
+    return binding;
   }
-  function setBindingField(card, domain, field, value) {
-    const model = state.models[card.id];
-    if (!isPlainObject(model[domain])) model[domain] = {};
-    const text = String(value || '').trim();
-    if (text) model[domain][field] = text;
-    else delete model[domain][field];
-    setJson(state.editors[`ed_${card.id}`], model);
-    updateCardDirty(card);
+  // Whether a source of this type runs queries in the language (Grafana runs whatever its datasource does).
+  function sourceRunsLanguage(type, language) {
+    if (!language) return true;
+    if (type === 'prometheus') return language === 'promql';
+    if (type === 'influxdb') return language === 'flux';
+    return true;
   }
-  function bindingField(card, domain, field, value) {
+  function bindingField(ctx, field, value) {
     const meta = BINDING_FIELDS[field];
     const wrap = makeEl('div', 'binding-field');
-    const id = `bf-${domain}-${field}`;
+    const id = `${ctx.id}-${field}`;
     const label = makeEl('label', '', meta.label);
     label.htmlFor = id;
     const input = makeEl('input');
@@ -1792,18 +1838,18 @@
     input.id = id;
     input.value = value || '';
     input.placeholder = meta.placeholder;
-    input.addEventListener('change', () => setBindingField(card, domain, field, input.value));
+    input.addEventListener('change', () => ctx.setField(field, input.value));
     wrap.append(label, input);
     return wrap;
   }
-  function bindingFieldGrid(card, domain, binding, fields) {
+  function bindingFieldGrid(ctx, binding, fields) {
     const grid = makeEl('div', 'binding-extra');
-    fields.forEach((field) => grid.appendChild(bindingField(card, domain, field, binding[field])));
+    fields.forEach((field) => grid.appendChild(bindingField(ctx, field, binding[field])));
     return grid;
   }
-  function datasourceSelect(card, row, binding, items) {
+  function datasourceSelect(ctx, binding, items) {
     const select = makeEl('select');
-    select.setAttribute('aria-label', LL.t('settings.binding.ds_aria', { domain: row.title }));
+    select.setAttribute('aria-label', LL.t('settings.binding.ds_aria', { domain: ctx.title }));
     const current = findDatasource(items, binding);
     const placeholder = makeEl('option', '', LL.t('settings.binding.ds_pick'));
     placeholder.value = '';
@@ -1829,7 +1875,7 @@
     select.value = current ? current.uid : (stored ? '__missing__' : '');
     select.addEventListener('change', () => {
       if (select.value === '__missing__') return;
-      chooseDatasource(card, row.id, items.find((ds) => ds.uid === select.value) || null);
+      ctx.set(withDatasource(binding.source, items.find((ds) => ds.uid === select.value) || null));
     });
     return { select, current };
   }
@@ -1840,7 +1886,7 @@
     ['database', 'bucket'].forEach((field) => { if (binding[field] && !fields.includes(field)) fields.push(field); });
     return fields;
   }
-  function grafanaParams(card, row, binding, sourceId, box) {
+  function grafanaParams(ctx, binding, sourceId, box) {
     const list = datasourceList(sourceId);
     if (list.status === 'loading') {
       box.appendChild(makeEl('div', 'binding-note', LL.t('settings.binding.ds_loading')));
@@ -1850,44 +1896,45 @@
       const note = makeEl('div', 'binding-error');
       note.append(makeEl('span', '', LL.t('settings.binding.ds_unavailable', { error: list.message })), makeBtn(LL.t('settings.action.retry'), () => {
         delete state.grafanaDatasources[sourceId];
-        renderBindingsBody(card);
+        ctx.rerender();
       }, 'btn btn-sm'));
-      box.append(note, bindingFieldGrid(card, row.id, binding, ['datasource_name', 'datasource_uid', 'database', 'bucket']));
+      box.append(note, bindingFieldGrid(ctx, binding, ['datasource_name', 'datasource_uid', 'database', 'bucket']));
       return;
     }
     if (!list.items.length) box.appendChild(makeEl('div', 'binding-error', LL.t('settings.binding.ds_none')));
-    const { select, current } = datasourceSelect(card, row, binding, list.items);
+    const { select, current } = datasourceSelect(ctx, binding, list.items);
     box.appendChild(select);
     const extra = grafanaExtraFields(binding, current);
-    if (extra.length) box.appendChild(bindingFieldGrid(card, row.id, binding, extra));
+    if (extra.length) box.appendChild(bindingFieldGrid(ctx, binding, extra));
   }
-  function bindingParams(card, row, model) {
+  function bindingParams(ctx) {
     const box = makeEl('div', 'binding-params');
-    if (row.id !== 'default' && !hasOwn(model, row.id)) {
-      box.appendChild(makeEl('div', 'binding-note', LL.t('settings.binding.as_default_summary', { summary: bindingSummary(model.default) })));
+    if (!ctx.own) {
+      if (ctx.inheritNote) box.appendChild(makeEl('div', 'binding-note', ctx.inheritNote));
       return box;
     }
-    const binding = isPlainObject(model[row.id]) ? model[row.id] : {};
+    const binding = ctx.get();
     const sourceId = String(binding.source || '');
     const entry = sourceId ? savedSource(sourceId) : null;
     if (!sourceId) box.appendChild(makeEl('div', 'binding-note', LL.t('settings.binding.pick_source')));
     else if (!entry) box.appendChild(makeEl('div', 'binding-error', LL.t('settings.binding.source_not_saved')));
     else if (entry.type === 'prometheus') box.appendChild(makeEl('div', 'binding-note', LL.t('settings.binding.prometheus_direct')));
-    else if (entry.type === 'influxdb') box.appendChild(bindingFieldGrid(card, row.id, binding, ['bucket']));
-    else grafanaParams(card, row, binding, sourceId, box);
+    else if (entry.type === 'influxdb') box.appendChild(bindingFieldGrid(ctx, binding, ['bucket']));
+    else grafanaParams(ctx, binding, sourceId, box);
     return box;
   }
-  function bindingSourceSelect(card, row, model) {
-    const own = row.id === 'default' || hasOwn(model, row.id);
-    const current = own && isPlainObject(model[row.id]) ? String(model[row.id].source || '') : '';
+  function bindingSourceSelect(ctx) {
+    const current = ctx.own ? String(ctx.get().source || '') : '';
     const select = makeEl('select');
-    select.setAttribute('aria-label', LL.t('settings.binding.source_aria', { domain: row.title }));
-    const first = makeEl('option', '', row.id === 'default' ? LL.t('settings.binding.pick_source') : LL.t('settings.binding.as_default'));
+    select.id = `${ctx.id}-source`;
+    select.setAttribute('aria-label', LL.t('settings.binding.source_aria', { domain: ctx.title }));
+    const first = makeEl('option', '', ctx.emptyLabel);
     first.value = '';
     select.appendChild(first);
     const catalog = savedCatalog();
     Object.keys(catalog).forEach((id) => {
       const entry = isPlainObject(catalog[id]) ? catalog[id] : {};
+      if (id !== current && !sourceRunsLanguage(String(entry.type || ''), ctx.language)) return;
       const title = String(entry.title || id);
       const typeLabel = sourceTypeLabel(entry.type);
       const option = makeEl('option', '', title.toLowerCase().includes(typeLabel.toLowerCase()) ? title : `${title} · ${typeLabel}`);
@@ -1900,21 +1947,32 @@
       select.appendChild(missing);
     }
     select.value = current;
-    select.addEventListener('change', () => setBindingSource(card, row.id, select.value));
+    select.addEventListener('change', () => ctx.set(select.value ? { source: select.value } : null));
     const cell = makeEl('div', 'binding-source');
     cell.appendChild(select);
     return cell;
   }
+  // Rows of a domain's queries (the area scope the bindings card edits) that read a source of their own.
+  function rowOverrideCount(domain) {
+    const queries = isPlainObject(state.config.queries) ? state.config.queries : {};
+    const block = isPlainObject(queries[domain]) ? queries[domain] : {};
+    const labels = Array.isArray(block.labels) ? block.labels : [];
+    const sources = isPlainObject(block.sources) ? block.sources : {};
+    return labels.filter((label) => isPlainObject(sources[label]) && sources[label].source).length;
+  }
   function bindingRow(card, row, model) {
+    const ctx = cardBindingCtx(card, row, model);
     const wrap = makeEl('div', 'binding-row');
     const domain = makeEl('div', 'binding-domain');
     domain.appendChild(makeEl('div', '', row.title));
     if (row.note) domain.appendChild(makeEl('div', 'dim', row.note));
+    const overridden = row.id === 'default' ? 0 : rowOverrideCount(row.id);
+    if (overridden) domain.appendChild(makeEl('div', 'dim', LL.t('settings.binding.rows_override', { n: overridden })));
     const result = makeEl('div', 'conn-result');
     result.setAttribute('role', 'status');
     const actions = makeEl('div', 'binding-actions');
     actions.appendChild(makeBtn(LL.t('settings.action.check'), () => runCheck(card, { domain: row.id }, result, 'bindingChecks', row.id), 'btn btn-sm'));
-    wrap.append(domain, bindingSourceSelect(card, row, model), bindingParams(card, row, model), actions, result);
+    wrap.append(domain, bindingSourceSelect(ctx), bindingParams(ctx), actions, result);
     restoreCheck('bindingChecks', row.id, result);
     return wrap;
   }
@@ -2705,25 +2763,84 @@
     });
     return count;
   }
-  function editQueryBlock(domain, mutate) {
+  // ``spec``: the language whose arrays the edit writes (default: the language of new rows).
+  function editQueryBlock(domain, mutate, rowSpec) {
     const queries = clone(queriesModel());
     const block = Object.assign({}, isPlainObject(queries[domain]) ? queries[domain] : {});
-    const spec = currentQuerySpec(domain);
+    const spec = rowSpec || currentQuerySpec(domain);
     const count = alignQueryBlock(block, spec);
     mutate(block, spec, count);
     queries[domain] = block;
     commitStructured('queries', queries, 'ed_queries', 'queriesSaveBtn', 'queries', state.queriesScope ? LL.t('settings.dirty.queries_scoped', { scope: state.queriesScope }) : LL.t('settings.menu.queries'));
   }
-  function queryRows(block, spec) {
+  // Languages with a query text in the row, in the order Grafana prefers them (as the server picks).
+  function rowLanguages(block, index) {
+    return LT_QUERY_PRIORITY.filter((lang) => {
+      const values = block[QUERY_LANG[lang].query];
+      return Array.isArray(values) && index < values.length && String(values[index] || '').trim();
+    });
+  }
+  function sourceTypeOf(binding) {
+    const entry = binding && binding.source ? savedSource(binding.source) : null;
+    return String((entry && entry.type) || '').toLowerCase();
+  }
+  // Language a row runs in: its text decides (the one its source runs when there are several); an empty row
+  // takes the language picked for it, else the one its source runs, else the language of new rows.
+  function rowLang(domain, block, index, label) {
+    const type = sourceTypeOf(rowSource(domain, label) || domainBindingOf(domain));
+    const present = rowLanguages(block, index);
+    if (present.length) return present.find((lang) => sourceRunsLanguage(type, lang)) || present[0];
+    const draft = state.rowLangDraft[`${domain}:${index}`];
+    if (draft) return draft;
+    // A row with a direct source of its own runs that source's language; otherwise the language of new rows.
+    const ownType = sourceTypeOf(rowSource(domain, label));
+    if (ownType === 'prometheus') return 'promql';
+    if (ownType === 'influxdb') return 'flux';
+    return activeQueryLang(domain, block);
+  }
+  function queryRows(block, domain) {
     const labels = Array.isArray(block.labels) ? block.labels : [];
-    const queries = Array.isArray(block[spec.query]) ? block[spec.query] : [];
-    const keys = Array.isArray(block[spec.keys]) ? block[spec.keys] : [];
-    const count = Math.max(labels.length, queries.length, keys.length);
+    const count = queryRowCount(block);
     const rows = [];
     for (let i = 0; i < count; i += 1) {
-      rows.push({ index: i, label: String(labels[i] || ''), query: String(queries[i] || ''), keys: Array.isArray(keys[i]) ? keys[i].map(String) : [] });
+      const label = String(labels[i] || '');
+      const lang = rowLang(domain, block, i, label);
+      const spec = QUERY_LANG[lang];
+      const queries = Array.isArray(block[spec.query]) ? block[spec.query] : [];
+      const keys = Array.isArray(block[spec.keys]) ? block[spec.keys] : [];
+      rows.push({
+        index: i,
+        label,
+        lang,
+        spec,
+        langs: rowLanguages(block, i),
+        query: String(queries[i] || ''),
+        keys: Array.isArray(keys[i]) ? keys[i].map(String) : []
+      });
     }
     return rows;
+  }
+  // Moves the row's text to another language and clears the other languages of the row. ``current`` holds
+  // what the editor fields show ({text, keys}): typing that has not left the field yet is not in the model.
+  function setRowLanguage(domain, row, lang, current) {
+    const spec = QUERY_LANG[lang];
+    state.rowLangDraft[`${domain}:${row.index}`] = lang;
+    editQueryBlock(domain, (block) => {
+      const texts = Array.isArray(block[row.spec.query]) ? block[row.spec.query] : [];
+      const keyLists = Array.isArray(block[row.spec.keys]) ? block[row.spec.keys] : [];
+      const text = current ? String(current.text || '') : String(texts[row.index] || '');
+      const keys = current ? current.keys.slice() : (Array.isArray(keyLists[row.index]) ? keyLists[row.index].slice() : []);
+      Object.values(QUERY_LANG).forEach((other) => {
+        if (Array.isArray(block[other.query]) && row.index < block[other.query].length) block[other.query][row.index] = '';
+      });
+      block[spec.query][row.index] = text;
+      block[spec.keys][row.index] = keys;
+    }, spec);
+    renderQueryList();
+  }
+  // Languages picked for empty rows follow positions: a removed or moved row would hand its pick to another row.
+  function clearRowLangDrafts(domain) {
+    Object.keys(state.rowLangDraft).forEach((key) => { if (key.startsWith(`${domain}:`)) delete state.rowLangDraft[key]; });
   }
 
   function renderQueriesForm() {
@@ -2734,6 +2851,7 @@
     host.innerHTML = '';
     host.appendChild(queryDomainTabs(domain));
     host.appendChild(queryLangBar(domain, queryBlock(domain)));
+    host.appendChild(domainSourceLine(domain));
     host.appendChild(previewWindowBar());
     const search = makeEl('input');
     search.type = 'search';
@@ -2759,6 +2877,15 @@
     renderQueryList();
   }
 
+  // Which source the domain reads, and how many rows read one of their own.
+  function domainSourceLine(domain) {
+    const block = queryBlock(domain);
+    const labels = Array.isArray(block.labels) ? block.labels : [];
+    const own = labels.filter((label) => rowSource(domain, label)).length;
+    const parts = [LL.t('settings.queries.domain_source', { summary: bindingSummary(domainBindingOf(domain)) })];
+    if (own) parts.push(LL.t('settings.queries.rows_own_source', { n: own }));
+    return makeEl('p', 'dim', parts.join(' '));
+  }
   function queryDomainTabs(active) {
     const tabs = makeEl('div', 'struct-tabs');
     QUERY_DOMAINS.forEach((name) => {
@@ -2773,14 +2900,17 @@
     return tabs;
   }
 
+  // Language of new rows. Every row keeps its own language: a domain may read several sources.
   function queryLangBar(domain, block) {
     const lang = activeQueryLang(domain, block);
     const bar = makeEl('div', 'struct-toolbar');
-    const switcher = savedSourceType(domain) === 'grafana_proxy' || filledLangs(block).length > 1 || state.domainLangPicker[domain];
+    const ownSources = Object.values(isPlainObject(block.sources) ? block.sources : {}).some((value) => isPlainObject(value) && value.source);
+    const switcher = savedSourceType(domain) === 'grafana_proxy' || filledLangs(block).length > 1 || ownSources || state.domainLangPicker[domain];
     if (!switcher) {
       bar.appendChild(makeEl('span', 'pill na', LL.t('settings.queries.lang', { lang: QUERY_LANG[lang].label })));
       return bar;
     }
+    bar.appendChild(makeEl('span', 'dim', LL.t('settings.queries.new_rows_lang')));
     LT_QUERY_PRIORITY.forEach((name) => {
       bar.appendChild(makeBtn(QUERY_LANG[name].label, () => {
         state.domainLang[domain] = name;
@@ -2796,16 +2926,15 @@
     const list = $('queryList');
     if (!list) return;
     const domain = state.queryDomain;
-    const spec = currentQuerySpec(domain);
     const needle = String(state.querySearch || '').trim().toLowerCase();
-    const rows = queryRows(queryBlock(domain), spec)
+    const rows = queryRows(queryBlock(domain), domain)
       .filter((row) => !needle || row.label.toLowerCase().includes(needle) || row.query.toLowerCase().includes(needle));
     list.innerHTML = '';
     if (!rows.length) {
       list.appendChild(makeEl('p', 'dim', needle ? LL.t('settings.queries.not_found') : LL.t('settings.queries.empty')));
       return;
     }
-    rows.forEach((row) => list.appendChild(queryItem(domain, spec, row)));
+    rows.forEach((row) => list.appendChild(queryItem(domain, row.spec, row)));
   }
 
   function queryItem(domain, spec, row) {
@@ -2832,6 +2961,13 @@
     }
     const used = slaLabelsUsing(row.label);
     if (used.length) head.appendChild(makeEl('span', 'pill na', `SLA: ${slaUsageText(used)}`));
+    const own = rowSource(domain, row.label);
+    if (own) {
+      const sourcePill = makeEl('span', 'pill warn', LL.t('settings.queries.source_pill', { source: bindingSummary(own) }));
+      sourcePill.title = LL.t('settings.queries.source_pill_title');
+      head.appendChild(sourcePill);
+    }
+    if (row.langs.length > 1) head.appendChild(makeEl('span', 'pill error', LL.t('settings.queries.two_langs_pill')));
     head.appendChild(makeEl('span', 'q-item-caret', open ? '▾' : '▸'));
     item.appendChild(head);
     if (open) item.appendChild(queryEditor(domain, spec, row));
@@ -2865,10 +3001,55 @@
     bar.append(makeEl('span', 'dim', LL.t('settings.queries.window')), start, makeEl('span', 'dim', '—'), end);
     return bar;
   }
-  function queryLangName(domain) {
-    return activeQueryLang(domain, queryBlock(domain));
+  // The source a row reads when it is not the domain binding (from the unsaved model of the section).
+  function rowSource(domain, label) {
+    const sources = isPlainObject(queryBlock(domain).sources) ? queryBlock(domain).sources : {};
+    const own = sources[label];
+    return isPlainObject(own) && own.source ? own : null;
   }
-  async function runQueryPreview(domain, queryInput, keysInput, result) {
+  // Binding the domain reads in the open scope: its own entry, else the default one.
+  function domainBindingOf(domain) {
+    const bindings = isPlainObject(state.config.domain_sources) ? state.config.domain_sources : {};
+    return isPlainObject(bindings[domain]) ? bindings[domain] : (isPlainObject(bindings.default) ? bindings.default : null);
+  }
+  function setRowSource(block, label, binding) {
+    const sources = isPlainObject(block.sources) ? Object.assign({}, block.sources) : {};
+    if (binding) sources[label] = binding;
+    // An explicit null keeps an override of the wider scope from coming back (the scopes are merged).
+    else if (hasOwn(sources, label)) sources[label] = null;
+    if (Object.keys(sources).length) block.sources = sources;
+    else delete block.sources;
+  }
+  function rowSourceCtx(domain, row, language) {
+    const own = rowSource(domain, row.label);
+    const edit = (mutate) => editQueryBlock(domain, (block) => mutate(block));
+    return {
+      id: `rs-${domain}-${row.index}`,
+      title: row.label || LL.t('settings.queries.untitled'),
+      own: !!own,
+      get: () => own || {},
+      set: (binding) => { edit((block) => setRowSource(block, row.label, binding)); renderQueryList(); },
+      setField: (field, value) => edit((block) => {
+        const current = isPlainObject(block.sources) && isPlainObject(block.sources[row.label]) ? Object.assign({}, block.sources[row.label]) : {};
+        const text = String(value || '').trim();
+        if (text) current[field] = text; else delete current[field];
+        setRowSource(block, row.label, current);
+      }),
+      rerender: () => {},
+      emptyLabel: LL.t('settings.queries.source_domain', { summary: bindingSummary(domainBindingOf(domain)) }),
+      inheritNote: LL.t('settings.queries.source_domain_note'),
+      language
+    };
+  }
+  function rowSourceField(domain, row, language) {
+    const ctx = rowSourceCtx(domain, row, language);
+    const wrap = makeEl('div', 'ctx-field q-source');
+    const label = makeEl('label', '', LL.t('settings.queries.field_source'));
+    label.htmlFor = `${ctx.id}-source`;
+    wrap.append(label, mountBindingEditor(ctx), makeEl('div', 'dim', LL.t('settings.queries.source_hint')));
+    return wrap;
+  }
+  async function runQueryPreview(domain, queryInput, keysInput, result, label, lang) {
     const query = String(queryInput.value || '').trim();
     result.className = 'conn-result pending';
     result.textContent = LL.t('settings.check.running');
@@ -2879,9 +3060,12 @@
     }
     const body = {
       domain: domain,
-      lang: queryLangName(domain),
+      lang: lang,
       query: query,
-      label_keys: splitList(keysInput.value)
+      label_keys: splitList(keysInput.value),
+      label: label || '',
+      // The source the form shows for the row (null: the domain binding), saved or not.
+      binding: rowSource(domain, label)
     };
     if (state.area) body.area = state.area;
     if (state.queriesScope) body.service = state.queriesScope;
@@ -2909,11 +3093,13 @@
       renameSlaLabel(row.label, nameInput.value);
       editQueryBlock(domain, (block) => {
         block.labels[row.index] = nameInput.value;
-        // The role belongs to the row, so it follows the new name.
-        if (isPlainObject(block.roles) && Object.prototype.hasOwnProperty.call(block.roles, row.label)) {
-          block.roles[nameInput.value] = block.roles[row.label];
-          delete block.roles[row.label];
-        }
+        // The role and the source belong to the row, so they follow the new name.
+        ['roles', 'sources'].forEach((key) => {
+          if (isPlainObject(block[key]) && Object.prototype.hasOwnProperty.call(block[key], row.label)) {
+            block[key][nameInput.value] = block[key][row.label];
+            delete block[key][row.label];
+          }
+        });
       });
       renderQueriesForm();
     });
@@ -2921,20 +3107,32 @@
     const queryInput = query.querySelector('textarea');
     queryInput.rows = Math.min(14, Math.max(4, row.query.split('\n').length + 1));
     queryInput.addEventListener('change', () => {
-      editQueryBlock(domain, (block, active) => { block[active.query][row.index] = queryInput.value; });
+      editQueryBlock(domain, (block) => { block[spec.query][row.index] = queryInput.value; }, spec);
     });
     const keys = textField(LL.t('settings.queries.field_keys'), row.keys.join(', '), () => {});
     const keysInput = keys.querySelector('input');
     keysInput.addEventListener('change', () => {
-      editQueryBlock(domain, (block, active) => { block[active.keys][row.index] = splitList(keysInput.value); });
+      editQueryBlock(domain, (block) => { block[spec.keys][row.index] = splitList(keysInput.value); }, spec);
     });
-    body.append(name, query, keys);
+    const language = selectField(LL.t('settings.queries.row_lang'), row.lang, LT_QUERY_PRIORITY.map((lang) => [lang, QUERY_LANG[lang].label]), (lang) => {
+      if (lang !== row.lang) setRowLanguage(domain, row, lang, { text: queryInput.value, keys: splitList(keysInput.value) });
+    });
+    body.append(name, language, query, keys);
+    if (row.langs.length > 1) {
+      const mixed = makeEl('p', 'pack-note error', LL.t('settings.queries.two_langs', { langs: row.langs.map((lang) => QUERY_LANG[lang].label).join(', '), lang: spec.label }));
+      mixed.appendChild(document.createTextNode(' '));
+      mixed.appendChild(makeBtn(LL.t('settings.queries.keep_lang', { lang: spec.label }), () => setRowLanguage(domain, row, row.lang, { text: queryInput.value, keys: splitList(keysInput.value) }), 'btn btn-sm'));
+      body.appendChild(mixed);
+    }
     if (spec.keys === 'label_tag_keys_list') body.appendChild(makeEl('p', 'help', LL.t('settings.queries.keys_shared')));
+    const type = sourceTypeOf(rowSource(domain, row.label) || domainBindingOf(domain));
+    if (type && !sourceRunsLanguage(type, row.lang)) body.appendChild(makeEl('p', 'pack-note error', LL.t('settings.queries.source_lang_mismatch', { lang: spec.label })));
+    body.appendChild(rowSourceField(domain, row, row.query.trim() ? row.lang : ''));
     const preview = makeEl('div', 'conn-result');
     const check = makeBtn(LL.t('settings.action.check'), async () => {
       check.disabled = true;
       try {
-        await runQueryPreview(domain, queryInput, keysInput, preview);
+        await runQueryPreview(domain, queryInput, keysInput, preview, row.label, row.lang);
       } catch (e) {
         preview.className = 'conn-result error';
         preview.textContent = e.message || LL.t('settings.check.error');
@@ -2974,7 +3172,9 @@
     editQueryBlock(domain, (block) => {
       QUERY_PARALLEL_KEYS.forEach((key) => { if (Array.isArray(block[key]) && index < block[key].length) block[key].splice(index, 1); });
       if (isPlainObject(block.roles)) delete block.roles[label];
+      if (isPlainObject(block.sources)) delete block.sources[label];
     });
+    clearRowLangDrafts(domain);
     state.queryOpen = null;
     renderQueriesForm();
   }
@@ -2991,6 +3191,7 @@
         list[target] = tmp;
       });
     });
+    clearRowLangDrafts(domain);
     state.queryOpen = `${domain}:${target}`;
     renderQueryList();
   }
@@ -3049,28 +3250,92 @@
     const roles = (packUi.catalog && packUi.catalog.roles) || {};
     return (roles[role] && roles[role].title) || role;
   }
-  function packForm(pack) {
-    if (!packUi.forms[pack.id]) {
-      const saved = (pack.installed && pack.installed.variables) || {};
-      // An installed pack keeps the user's selection: present rows plus queries added by newer versions.
-      const selected = pack.installed && Array.isArray(pack.installed.selected_indexes) ? new Set(pack.installed.selected_indexes) : null;
-      packUi.forms[pack.id] = {
-        variables: Object.fromEntries(pack.variables.map((v) => [v.name, saved[v.name] !== undefined ? saved[v.name] : v.default])),
-        include: pack.queries.map((_, index) => (selected ? selected.has(index) : true)),
-        mode: pack.compatibility.status === 'replace_only' ? 'replace' : 'merge',
-        fillSla: true,
-        overwriteSla: true,
-        check: null,
-        preview: null
-      };
+  // Compatibility and installations of the pack in one domain (a host pack is installed into the domain picked).
+  function packTarget(pack, domain) {
+    const targets = isPlainObject(pack.targets) ? pack.targets : {};
+    const target = targets[domain] || targets[pack.domain];
+    return target || { compatibility: pack.compatibility, installed: pack.installed, instances: pack.installed ? [pack.installed] : [] };
+  }
+  function packDomains(pack) {
+    return Array.isArray(pack.domains) && pack.domains.length ? pack.domains : [pack.domain];
+  }
+  // Domain the pack card works in: the one picked in the card, else the tab the dialog came from.
+  function packDomain(pack) {
+    const domains = packDomains(pack);
+    const view = packUi.view || {};
+    if (view.domain && domains.includes(view.domain)) return view.domain;
+    const back = view.back || {};
+    if (back.domain && domains.includes(back.domain)) return back.domain;
+    return domains[0];
+  }
+  function packInstances(pack, domain) {
+    const target = packTarget(pack, domain);
+    return Array.isArray(target.instances) ? target.instances : (target.installed ? [target.installed] : []);
+  }
+  // A title for a new installation that no installation of the domain uses yet: «Host», «Host 2», …
+  function freeInstanceTitle(base, taken) {
+    if (!taken.includes(base)) return base;
+    for (let n = 2; n <= 99; n += 1) {
+      const name = `${base} ${n}`;
+      if (!taken.includes(name)) return name;
     }
-    return packUi.forms[pack.id];
+    return base;
+  }
+  function packFormFor(pack, domain, installed) {
+    const saved = (installed && installed.variables) || {};
+    // An installed pack keeps the user's selection: present rows plus queries added by newer versions.
+    const selected = installed && Array.isArray(installed.selected_indexes) ? new Set(installed.selected_indexes) : null;
+    const variables = Object.fromEntries(pack.variables.map((v) => [v.name, saved[v.name] !== undefined ? saved[v.name] : v.default]));
+    if (!installed && pack.instance_variable && variables[pack.instance_variable] !== undefined) {
+      const taken = packInstances(pack, domain).map((item) => item.instance);
+      variables[pack.instance_variable] = freeInstanceTitle(variables[pack.instance_variable], taken);
+    }
+    return {
+      variables,
+      include: pack.queries.map((_, index) => (selected ? selected.has(index) : true)),
+      // A language conflict is solved by another source for the pack as well, so merging stays the default.
+      mode: 'merge',
+      fillSla: true,
+      overwriteSla: true,
+      check: null,
+      preview: null,
+      instance: installed ? String(installed.instance || '') : '',
+      // The source the pack rows read: the one the installation reads, else the domain binding (null).
+      binding: installed && isPlainObject(installed.binding) && installed.binding.source ? Object.assign({}, installed.binding) : null
+    };
+  }
+  const BINDING_TEXT_FIELDS = ['source', 'datasource_uid', 'datasource_name', 'database', 'bucket'];
+  function sameBinding(a, b) {
+    return BINDING_TEXT_FIELDS.every((field) => String((a || {})[field] || '').trim() === String((b || {})[field] || '').trim());
+  }
+  function packOwnSource(form) {
+    return isPlainObject(form.binding) && form.binding.source ? form.binding : null;
+  }
+  function packForm(pack) {
+    const domain = packDomain(pack);
+    const key = `${pack.id}|${domain}`;
+    if (!packUi.forms[key]) {
+      const instances = packInstances(pack, domain);
+      const wanted = (packUi.view || {}).instance;
+      let installed = null;
+      if (wanted !== undefined && wanted !== null) installed = instances.find((item) => item.instance === wanted) || null;
+      // A multi-instance pack opens on a new installation while there is room for one.
+      else if (!(pack.max_instances > 1) || instances.length >= pack.max_instances) installed = instances[0] || null;
+      packUi.forms[key] = packFormFor(pack, domain, installed);
+    }
+    return packUi.forms[key];
   }
   function includedIndexes(form) {
     return form.include.map((on, index) => (on ? index : -1)).filter((index) => index >= 0);
   }
   function packRequest(pack, form, extra) {
-    return Object.assign({ pack_id: pack.id, variables: form.variables, include_indexes: includedIndexes(form) }, packScope(), extra || {});
+    return Object.assign({
+      pack_id: pack.id,
+      domain: packDomain(pack),
+      variables: form.variables,
+      include_indexes: includedIndexes(form),
+      binding: packOwnSource(form)
+    }, packScope(), extra || {});
   }
   async function postPack(path, body) {
     const resp = await fetch(`/config/query_packs/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -3083,18 +3348,23 @@
     if (state.area && state.queriesScope) parts.push(LL.t('settings.packs.scope_service', { service: state.queriesScope }));
     return makeEl('p', 'help', LL.t('settings.packs.scope_line', { scope: parts.join(', ') }));
   }
-  function packPills(pack) {
+  function packPills(pack, domain) {
+    const target = packTarget(pack, domain || packDomains(pack)[0]);
     const wrap = makeEl('span', 'pack-pills');
     wrap.appendChild(makeEl('span', 'pill na', pack.language_title));
-    const compat = PACK_COMPAT[pack.compatibility.status] || PACK_COMPAT.incompatible;
+    const compat = PACK_COMPAT[target.compatibility.status] || PACK_COMPAT.incompatible;
     const pill = makeEl('span', `pill ${compat.cls}`, compat.text);
-    if (pack.compatibility.reason) pill.title = pack.compatibility.reason;
+    if (target.compatibility.reason) pill.title = target.compatibility.reason;
     wrap.appendChild(pill);
-    if (pack.installed) {
-      const outdated = pack.installed.outdated;
+    const instances = packInstances(pack, domain || packDomains(pack)[0]);
+    if (pack.max_instances > 1 && instances.length) {
+      const outdated = instances.some((item) => item.outdated);
+      wrap.appendChild(makeEl('span', `pill ${outdated ? 'warn' : 'ok'}`, LL.t('settings.packs.installed_count', { n: instances.length, max: pack.max_instances })));
+    } else if (target.installed) {
+      const outdated = target.installed.outdated;
       wrap.appendChild(makeEl('span', `pill ${outdated ? 'warn' : 'ok'}`, outdated
-        ? LL.t('settings.packs.installed_outdated', { installed: pack.installed.version, latest: pack.version })
-        : LL.t('settings.packs.installed', { version: pack.installed.version })));
+        ? LL.t('settings.packs.installed_outdated', { installed: target.installed.version, latest: pack.version })
+        : LL.t('settings.packs.installed', { version: target.installed.version })));
     }
     if (pack.verified) {
       const verified = makeEl('span', 'pill done', LL.t('settings.packs.verified'));
@@ -3110,18 +3380,28 @@
   function packDetection(pack) {
     const det = packUi.detection;
     if (!det) return null;
-    const domainInfo = (det.domains || {})[pack.domain] || {};
     const item = (det.packs || {})[pack.id];
-    if (domainInfo.error || !item || !(item.found.length + item.missing.length)) return null;
+    if (!item || !(item.found.length + item.missing.length)) return null;
+    // A pack whose domain is picked is scored against the best of its domains' sources.
+    const domainInfo = (det.domains || {})[item.domain || pack.domain] || {};
+    // Another source that holds the metrics counts even when the domain's own source did not answer.
+    if (domainInfo.error && !item.alternative) return null;
     return item;
   }
   function packScore(pack) {
     const item = packDetection(pack);
-    return item ? item.score : -1;
+    if (!item) return -1;
+    return Math.max(item.score, item.alternative ? item.alternative.score : -1);
   }
   function detectionPill(pack) {
     const item = packDetection(pack);
     if (!item) return null;
+    const alt = item.alternative;
+    if (alt && alt.score > item.score) {
+      const pill = makeEl('span', `pill ${alt.score >= 1 ? 'ok' : 'warn'}`, LL.t('settings.packs.detect.found_in', { source: alt.title }));
+      if (alt.missing.length) pill.title = LL.t('settings.packs.detect.missing', { list: alt.missing.join(', ') });
+      return pill;
+    }
     const total = item.found.length + item.missing.length;
     let pill;
     if (item.score >= 1) pill = makeEl('span', 'pill ok', LL.t('settings.packs.detect.found_all'));
@@ -3159,6 +3439,8 @@
       Object.entries(packUi.detection.domains || {}).forEach(([domain, info]) => {
         if (info.error) wrap.appendChild(makeEl('p', 'pack-note warn', `${LL.domainTitle(domain)}: ${info.error}`));
       });
+      const extra = Object.values(packUi.detection.sources || {}).filter((info) => !info.error).map((info) => info.title);
+      if (extra.length) wrap.appendChild(makeEl('p', 'dim', LL.t('settings.packs.detect.extra_sources', { list: extra.join(', ') })));
     }
     return wrap;
   }
@@ -3169,7 +3451,7 @@
     return makeEl('span', `pill ${tone}`, LL.t('settings.packs.bundle_match', { matched: det.matched, total: det.total }));
   }
 
-  async function openPackDialog(domain, packId) {
+  async function openPackDialog(domain, packId, instance) {
     if (state.dirty.has('queries:queries') || state.dirty.has('sla:model')) {
       ui.toast(LL.t('settings.packs.unsaved_first'), { tone: 'warn', timeout: 8000 });
       return;
@@ -3180,7 +3462,7 @@
     // The wizard starts from scratch, so it reads the sources right away to suggest a bundle.
     packUi.autoDetect = !!state.wizard;
     packUi.view = packId
-      ? { name: 'pack', packId, back: { name: 'list', domain: domain || '' } }
+      ? { name: 'pack', packId, domain: domain || '', instance, back: { name: 'list', domain: domain || '' } }
       : { name: 'list', domain: domain || '' };
     await ui.dialog({
       title: LL.t('settings.packs.title'),
@@ -3247,7 +3529,7 @@
         host.appendChild(row);
       });
     }
-    const packs = (catalog.packs || []).filter((p) => !domain || p.domain === domain);
+    const packs = (catalog.packs || []).filter((p) => !domain || packDomains(p).includes(domain));
     Object.entries(catalog.categories || {}).forEach(([category, title]) => {
       const items = packs.filter((p) => p.category === category).sort((a, b) => packScore(b) - packScore(a));
       if (!items.length) return;
@@ -3257,13 +3539,18 @@
     if (!packs.length) host.appendChild(makeEl('p', 'dim', LL.t('settings.packs.none_for_domain')));
     return host;
   }
+  function packDomainText(pack) {
+    if (!pack.domain_picked) return LL.domainTitle(pack.domain);
+    return LL.t('settings.packs.domains_choice', { list: packDomains(pack).map((d) => LL.domainTitle(d)).join(', ') });
+  }
   function packRow(pack, back) {
+    const domain = back && back.domain && packDomains(pack).includes(back.domain) ? back.domain : packDomains(pack)[0];
     const row = makeEl('div', 'pack-row');
     const main = makeEl('div', 'pack-row-main');
     const head = makeEl('div', 'pack-row-title');
-    head.append(makeEl('strong', '', pack.title), packPills(pack));
-    main.append(head, makeEl('div', 'dim', `${LL.domainTitle(pack.domain)} · ${LL.t('settings.packs.query_count', { n: pack.queries.length })}`), makeEl('div', 'pack-row-desc', pack.description));
-    row.append(main, makeBtn(LL.t('settings.packs.open'), () => showPackView({ name: 'pack', packId: pack.id, back }), 'btn btn-sm'));
+    head.append(makeEl('strong', '', pack.title), packPills(pack, domain));
+    main.append(head, makeEl('div', 'dim', `${packDomainText(pack)} · ${LL.t('settings.packs.query_count', { n: pack.queries.length })}`), makeEl('div', 'pack-row-desc', pack.description));
+    row.append(main, makeBtn(LL.t('settings.packs.open'), () => showPackView({ name: 'pack', packId: pack.id, domain, back }), 'btn btn-sm'));
     return row;
   }
   function bundleCard(bundle) {
@@ -3286,33 +3573,132 @@
     return wrap;
   }
 
+  // Domain of a pack whose domain is picked at install time (resources of a database or broker host).
+  function packDomainPicker(pack, domain) {
+    const field = selectField(LL.t('settings.packs.domain_label'), domain, packDomains(pack).map((d) => [d, LL.domainTitle(d)]), (value) => {
+      packUi.view = Object.assign({}, packUi.view, { domain: value, instance: undefined });
+      renderPackDialog(false);
+    });
+    field.appendChild(makeEl('div', 'dim', LL.t('settings.packs.domain_pick_hint')));
+    return field;
+  }
+  // Installation of a multi-instance pack: a new one, or one of those in the domain (to update it).
+  function packInstancePicker(pack, domain, form) {
+    const instances = packInstances(pack, domain);
+    const full = instances.length >= pack.max_instances;
+    const options = [['__new__', LL.t('settings.packs.instance_new')]].concat(instances.map((item) => [item.instance, LL.t('settings.packs.instance_option', { name: item.instance, version: item.version })]));
+    const field = selectField(LL.t('settings.packs.instance_label'), form.instance || '__new__', options, (value) => {
+      const installed = value === '__new__' ? null : instances.find((item) => item.instance === value) || null;
+      packUi.forms[`${pack.id}|${domain}`] = packFormFor(pack, domain, installed);
+      renderPackDialog(false);
+    });
+    const newOption = field.querySelector('option[value="__new__"]');
+    if (newOption && full) newOption.disabled = true;
+    field.appendChild(makeEl('div', 'dim', LL.t('settings.packs.instances_count', { n: instances.length, max: pack.max_instances })));
+    return field;
+  }
+  // What applying does with the typed instance title: a new installation or an update of an existing one.
+  function packInstanceNote(pack, domain, form) {
+    const title = String(form.variables[pack.instance_variable] || '').trim();
+    const instances = packInstances(pack, domain);
+    const variable = pack.variables.find((v) => v.name === pack.instance_variable);
+    const field = variable ? variable.title : pack.instance_variable;
+    if (instances.some((item) => item.instance === title)) return { tone: '', text: LL.t('settings.packs.instance_updates', { name: title, field }) };
+    if (instances.length >= pack.max_instances) return { tone: 'error', text: LL.t('settings.packs.instances_full', { max: pack.max_instances, field }) };
+    return { tone: '', text: LL.t('settings.packs.instance_adds', { name: title, n: instances.length + 1, max: pack.max_instances, field }) };
+  }
+
+  // The source the pack rows read: the domain binding, or another source of the catalog that runs the pack language.
+  function packSourceField(pack, domain, form) {
+    const own = packOwnSource(form);
+    const changed = () => { form.check = null; form.preview = null; form.previewError = ''; };
+    const ctx = {
+      id: `ps-${pack.id}`,
+      title: pack.title,
+      own: !!own,
+      get: () => own || {},
+      set: (binding) => { form.binding = binding; changed(); renderPackDialog(false); },
+      setField: (field, value) => {
+        const next = Object.assign({}, form.binding || {});
+        const text = String(value || '').trim();
+        if (text) next[field] = text; else delete next[field];
+        form.binding = next;
+        changed();
+      },
+      rerender: () => {},
+      emptyLabel: LL.t('settings.packs.source_domain', { summary: bindingSummary(domainBindingOf(domain)) }),
+      inheritNote: '',
+      language: pack.language
+    };
+    const wrap = makeEl('div', 'ctx-field q-source');
+    const label = makeEl('label', '', LL.t('settings.packs.source_label'));
+    label.htmlFor = `${ctx.id}-source`;
+    wrap.append(label, mountBindingEditor(ctx), makeEl('div', 'dim', LL.t('settings.packs.source_hint')));
+    return wrap;
+  }
+
   function packCard(pack) {
+    const domain = packDomain(pack);
+    const target = packTarget(pack, domain);
     const form = packForm(pack);
     const host = makeEl('div', 'pack-browser');
     const back = packUi.view.back || { name: 'list', domain: pack.domain };
     host.appendChild(makeBtn(back.name === 'bundle' ? LL.t('settings.packs.back_to_bundle') : LL.t('settings.packs.back_to_list'), () => showPackView(back), 'btn btn-sm'));
     const title = makeEl('div', 'pack-row-title');
-    title.append(makeEl('h4', 'pack-group', pack.title), packPills(pack));
+    title.append(makeEl('h4', 'pack-group', pack.title), packPills(pack, domain));
     host.appendChild(title);
     host.appendChild(makeEl('p', 'help', pack.description));
-    host.appendChild(makeEl('p', 'dim', LL.t('settings.packs.domain_metrics', { domain: LL.domainTitle(pack.domain), metrics: pack.requires_metrics.join(', ') || '—' })));
+    host.appendChild(makeEl('p', 'dim', LL.t('settings.packs.domain_metrics', { domain: LL.domainTitle(domain), metrics: pack.requires_metrics.join(', ') || '—' })));
+    const pickers = makeEl('div', 'pack-vars');
+    if (pack.domain_picked) pickers.appendChild(packDomainPicker(pack, domain));
+    if (pack.max_instances > 1) pickers.appendChild(packInstancePicker(pack, domain, form));
+    pickers.appendChild(packSourceField(pack, domain, form));
+    host.appendChild(pickers);
     const detected = packDetection(pack);
     if (detected) {
       const parts = [];
       if (detected.found.length) parts.push(LL.t('settings.packs.detect.found_list', { list: detected.found.join(', ') }));
       if (detected.missing.length) parts.push(LL.t('settings.packs.detect.missing_list', { list: detected.missing.join(', ') }));
       host.appendChild(makeEl('p', `pack-note ${detected.score >= 1 ? '' : 'warn'}`, LL.t('settings.packs.detect.source_has', { details: parts.join('; ') })));
+      const alt = detected.alternative;
+      if (alt) {
+        const note = makeEl('p', `pack-note ${alt.score >= 1 ? '' : 'warn'}`, LL.t('settings.packs.detect.alternative', { source: alt.title, found: alt.found.length, total: alt.found.length + alt.missing.length }));
+        if (!sameBinding(packOwnSource(form), alt.binding)) {
+          note.appendChild(document.createTextNode(' '));
+          note.appendChild(makeBtn(LL.t('settings.packs.detect.use_source'), () => {
+            form.binding = Object.assign({}, alt.binding);
+            form.check = null;
+            form.preview = null; form.previewError = '';
+            renderPackDialog(false);
+          }, 'btn btn-sm'));
+        }
+        host.appendChild(note);
+      }
     }
-    if (pack.compatibility.reason) host.appendChild(makeEl('p', `pack-note ${pack.compatibility.status === 'incompatible' ? 'error' : 'warn'}`, pack.compatibility.reason));
-    if (pack.installed && pack.installed.outdated) {
-      host.appendChild(makeEl('p', 'pack-note warn', LL.t('settings.packs.outdated_note', { installed: pack.installed.version, latest: pack.version, count: pack.installed.new_queries })));
-    } else if (pack.installed) {
+    // With a source of its own the pack does not depend on the domain binding.
+    const ownSource = packOwnSource(form);
+    if (target.compatibility.reason && !ownSource) {
+      host.appendChild(makeEl('p', `pack-note ${target.compatibility.status === 'incompatible' ? 'error' : 'warn'}`, target.compatibility.reason));
+    }
+    const installed = pack.max_instances > 1
+      ? packInstances(pack, domain).find((item) => item.instance === form.instance) || null
+      : target.installed;
+    if (installed && installed.outdated) {
+      host.appendChild(makeEl('p', 'pack-note warn', LL.t('settings.packs.outdated_note', { installed: installed.version, latest: pack.version, count: installed.new_queries })));
+    } else if (installed) {
       host.appendChild(makeEl('p', 'help', LL.t('settings.packs.installed_note')));
     }
     host.appendChild(scopeLine());
-    const incompatible = pack.compatibility.status === 'incompatible';
+    const incompatible = !ownSource && target.compatibility.status === 'incompatible';
+    const instanceNote = makeEl('p', 'pack-note');
+    const renderInstanceNote = () => {
+      if (!(pack.max_instances > 1)) return;
+      const note = packInstanceNote(pack, domain, form);
+      instanceNote.className = `pack-note ${note.tone}`.trim();
+      instanceNote.textContent = note.text;
+    };
 
-    const invalidate = () => { form.check = null; form.preview = null; renderQueries(); renderPlan(); };
+    const invalidate = () => { form.check = null; form.preview = null; form.previewError = ''; renderQueries(); renderPlan(); renderInstanceNote(); };
     if (pack.variables.length) {
       host.appendChild(makeEl('h4', 'pack-group', LL.t('settings.packs.variables')));
       const grid = makeEl('div', 'pack-vars');
@@ -3325,6 +3711,10 @@
         grid.appendChild(field);
       });
       host.appendChild(grid);
+    }
+    if (pack.max_instances > 1) {
+      host.appendChild(instanceNote);
+      renderInstanceNote();
     }
 
     host.appendChild(makeEl('h4', 'pack-group', LL.t('settings.packs.queries_heading')));
@@ -3351,7 +3741,7 @@
     const keepBtn = makeBtn(LL.t('settings.packs.keep_with_data'), () => {
       if (!form.check) return;
       Object.entries(form.check.byIndex).forEach(([index, result]) => { if (result && !result.ok && !pack.queries[index].required) form.include[index] = false; });
-      form.preview = null;
+      form.preview = null; form.previewError = '';
       renderQueries();
       renderPlan();
     }, 'btn');
@@ -3378,7 +3768,7 @@
         box.type = 'checkbox';
         box.checked = !!form.include[index];
         box.setAttribute('aria-label', LL.t('settings.packs.apply_query_aria', { name: query.label }));
-        box.addEventListener('change', () => { form.include[index] = box.checked; form.preview = null; renderPlan(); });
+        box.addEventListener('change', () => { form.include[index] = box.checked; form.preview = null; form.previewError = ''; renderPlan(); });
         pick.appendChild(box);
         const main = makeEl('td');
         main.appendChild(makeEl('div', 'q-item-title', (result && result.label) || (shown && shown.label) || query.label));
@@ -3409,11 +3799,11 @@
     options.appendChild(selectField(LL.t('settings.packs.mode_label'), form.mode, [
       ['merge', LL.t('settings.packs.mode_merge')],
       ['replace', LL.t('settings.packs.mode_replace')]
-    ], (value) => { form.mode = value; form.preview = null; renderPlan(); }));
+    ], (value) => { form.mode = value; form.preview = null; form.previewError = ''; renderPlan(); }));
     if (pack.sla_fields.length) {
       const sla = makeEl('div', 'ctx-field');
-      sla.appendChild(checkboxField(LL.t('settings.packs.fill_sla', { fields: pack.sla_fields.map((f) => SLA_QUERY_TITLES[f] || f).join(', ') }), form.fillSla, (on) => { form.fillSla = on; form.preview = null; renderPlan(); }));
-      sla.appendChild(checkboxField(LL.t('settings.packs.overwrite_sla'), form.overwriteSla, (on) => { form.overwriteSla = on; form.preview = null; renderPlan(); }));
+      sla.appendChild(checkboxField(LL.t('settings.packs.fill_sla', { fields: pack.sla_fields.map((f) => SLA_QUERY_TITLES[f] || f).join(', ') }), form.fillSla, (on) => { form.fillSla = on; form.preview = null; form.previewError = ''; renderPlan(); }));
+      sla.appendChild(checkboxField(LL.t('settings.packs.overwrite_sla'), form.overwriteSla, (on) => { form.overwriteSla = on; form.preview = null; form.previewError = ''; renderPlan(); }));
       sla.appendChild(makeEl('div', 'field-hint', LL.t('settings.packs.dead_refs_note')));
       options.appendChild(sla);
     }
@@ -3493,8 +3883,13 @@
       const resp = await postPack('apply', packRequest(pack, form, form.applyOptions()));
       await refreshQueriesAndSla();
       offerPackUndo(resp, scope, pack.title);
-      form.preview = null;
+      form.preview = null; form.previewError = '';
       await loadPackCatalog();
+      if (pack.max_instances > 1) {
+        // The card reopens on the installation just applied.
+        delete packUi.forms[`${pack.id}|${packDomain(pack)}`];
+        packUi.view = Object.assign({}, packUi.view, { instance: resp.instance || '' });
+      }
       renderPackDialog(false);
     } catch (e) {
       ui.toast(LL.t('settings.packs.apply_failed', { error: e.message }), { tone: 'error' });
@@ -3589,15 +3984,28 @@
     const entries = Array.isArray(queryBlock(domain).packs) ? queryBlock(domain).packs : [];
     if (!entries.length) return null;
     const line = makeEl('div', 'pack-installed');
+    // An installation of a multi-instance pack is named by its instance variable (the host title).
+    const instanceOf = (entry, meta) => {
+      if (!meta || !(meta.max_instances > 1) || !meta.instance_variable) return '';
+      const variables = isPlainObject(entry.variables) ? entry.variables : {};
+      const variable = (meta.variables || []).find((v) => v.name === meta.instance_variable);
+      return String(variables[meta.instance_variable] !== undefined ? variables[meta.instance_variable] : (variable ? variable.default : '')).trim();
+    };
     const titles = entries.map((entry) => {
       const meta = findPack(entry.id);
-      return `${meta ? meta.title : entry.id} v${entry.version}`;
+      const instance = instanceOf(entry, meta);
+      const title = meta ? meta.title : entry.id;
+      return instance ? LL.t('settings.packs.installed_instance_item', { title, name: instance, version: entry.version }) : `${title} v${entry.version}`;
     });
     line.appendChild(makeEl('span', 'dim', LL.t('settings.packs.installed_line', { list: titles.join('; ') })));
     entries.forEach((entry) => {
       const meta = findPack(entry.id);
       if (!meta || !(entry.version < meta.version)) return;
-      line.appendChild(makeBtn(LL.t('settings.packs.update_to', { title: meta.title, version: meta.version }), () => openPackDialog(domain, entry.id), 'btn btn-sm'));
+      const instance = instanceOf(entry, meta);
+      const text = instance
+        ? LL.t('settings.packs.update_instance_to', { title: meta.title, name: instance, version: meta.version })
+        : LL.t('settings.packs.update_to', { title: meta.title, version: meta.version });
+      line.appendChild(makeBtn(text, () => openPackDialog(domain, entry.id, instance || undefined), 'btn btn-sm'));
     });
     return line;
   }

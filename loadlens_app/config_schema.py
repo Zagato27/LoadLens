@@ -191,6 +191,13 @@ def _validate_pack_keys(domain: str, block: dict) -> None:
     if roles is not None:
         if not isinstance(roles, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in roles.items()):
             raise QueryConfigError(t("server.config.roles_object", domain=domain))
+    sources = block.get("sources")
+    if sources is not None:
+        # {label: binding or null}; whether the binding fits the catalog is checked when the section is saved.
+        if not isinstance(sources, dict) or not all(
+            isinstance(label, str) and (value is None or isinstance(value, dict)) for label, value in sources.items()
+        ):
+            raise QueryConfigError(t("server.config.sources_object", domain=domain))
     derived = block.get("derived")
     if derived is not None:
         if not isinstance(derived, dict) or not all(

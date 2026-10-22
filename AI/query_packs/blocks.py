@@ -6,6 +6,8 @@ Packs add two optional keys that the collection code ignores:
 
   ``roles``  {label: role} — what a series means; survives as long as the label exists
   ``packs``  [{"id", "version", "variables"}] — installed packs, enough to re-render their metadata
+
+``sources`` {label: binding | None} — rows that read another source than the domain (see AI.data_sources).
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import copy
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Literal, Mapping, Optional
 
+from AI.data_sources import SOURCES_KEY, binding_identity, normalize_binding, row_languages, row_overrides
 from AI.i18n import t
 
 from .catalog import Catalog, load_catalog
@@ -86,6 +89,32 @@ def installed_packs(block: Optional[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def instance_key(pack: QueryPack, variables: Optional[Mapping[str, Any]] = None) -> str:
+    """Value of the pack's instance variable ("" for a pack installed once per domain)."""
+    name = pack.instance_variable
+    if not name or name not in pack.variables:
+        return ""
+    value = (variables or {}).get(name)
+    if value is None:
+        value = pack.variables[name].default
+    return str(value).strip()
+
+
+def installed_instances(block: Optional[Mapping[str, Any]], pack: QueryPack) -> list[dict[str, Any]]:
+    """Installed entries of ``pack`` in the block, each with its ``instance`` key."""
+    return [
+        {**entry, "instance": instance_key(pack, entry["variables"])}
+        for entry in installed_packs(block)
+        if entry["id"] == pack.id
+    ]
+
+
+def _same_installation(entry: Mapping[str, Any], pack: QueryPack, variables: Mapping[str, Any]) -> bool:
+    if entry.get("id") != pack.id:
+        return False
+    return instance_key(pack, entry.get("variables") or {}) == instance_key(pack, variables)
+
+
 def _rendered_installed(block: Mapping[str, Any], catalog: Catalog) -> list[RenderedPack]:
     rendered = []
     for entry in installed_packs(block):
@@ -146,10 +175,13 @@ def prompt_addenda(block: Optional[Mapping[str, Any]], catalog: Optional[Catalog
         return []
     labels = set(block_labels(block))
     out = []
+    seen: set[str] = set()
     for rendered in _rendered_installed(block, catalog or load_catalog()):
         pack = rendered.pack
         text = localized(pack, "prompt_addendum").strip()
-        if text and any(query.label in labels for query in rendered.queries):
+        # Instances of one pack (two database hosts) share the note.
+        if text and pack.id not in seen and any(query.label in labels for query in rendered.queries):
+            seen.add(pack.id)
             out.append((localized(pack, "title"), text))
     return out
 
@@ -287,7 +319,10 @@ def refresh_derived(block: dict[str, Any]) -> dict[str, Any]:
     return block
 
 
-def add_summed_rps(block: Optional[Mapping[str, Any]]) -> tuple[dict[str, Any], str, list[str]]:
+def add_summed_rps(
+    block: Optional[Mapping[str, Any]],
+    domain: Optional[Mapping[str, Any]] = None,
+) -> tuple[dict[str, Any], str, list[str]]:
     """Copy of the block with a row summing the RPS of every load tool; (block, label, component labels).
 
     For a complex run (k6 for REST and Gatling for Kafka writing to one PromQL source) the steps and SLA
@@ -295,13 +330,20 @@ def add_summed_rps(block: Optional[Mapping[str, Any]]) -> tuple[dict[str, Any], 
     """
     if not isinstance(block, Mapping):
         raise DerivedRowError(t("packs.error.domain_empty"))
-    if filled_languages(block) != ["promql"]:
-        raise DerivedRowError(t("packs.error.summed_promql_only"))
     current = _aligned(block, ("labels", "promql_queries", "label_keys_list"))
     derived = derived_rows(current)
-    parts = [label for label in labels_for_role(current, SUMMED_ROLE) if label not in derived]
-    if len(parts) < 2:
+    candidates = [label for label in labels_for_role(current, SUMMED_ROLE) if label not in derived]
+    if len(candidates) < 2:
         raise DerivedRowError(t("packs.error.summed_needs_two", role=ROLES[SUMMED_ROLE].title))
+    # The sum is one PromQL query: its parts are PromQL rows that read one source.
+    texts = _rows(current, "promql_queries", "label_keys_list")
+    parts = [label for label in candidates if texts[label][0].strip()]
+    if len(parts) < 2:
+        raise DerivedRowError(t("packs.error.summed_promql_only"))
+    overrides = row_overrides(current)
+    # ``domain`` is the domain binding: a part whose own binding equals it reads the same source.
+    if len({_source_identity(overrides.get(label), domain) for label in parts}) > 1:
+        raise DerivedRowError(t("packs.error.summed_one_source"))
     labels = current["labels"]
     if SUMMED_RPS_LABEL not in labels:
         for key in PARALLEL_KEYS:
@@ -310,16 +352,51 @@ def add_summed_rps(block: Optional[Mapping[str, Any]]) -> tuple[dict[str, Any], 
         current["labels"][-1] = SUMMED_RPS_LABEL
     index = current["labels"].index(SUMMED_RPS_LABEL)
     current["label_keys_list"][index] = ["series"]
+    # The row runs PromQL: a text of another language left in it from earlier is dropped.
+    for lang, (other_key, _keys) in LANG_FIELDS.items():
+        if lang != "promql" and isinstance(current.get(other_key), list) and index < len(current[other_key]):
+            current[other_key][index] = ""
     derived[SUMMED_RPS_LABEL] = {"kind": "sum", "of": parts}
     current[DERIVED_KEY] = derived
+    # The sum reads the source of its parts.
+    set_row_sources(current, [SUMMED_RPS_LABEL], overrides.get(parts[0]))
     refresh_derived(current)
     return current, SUMMED_RPS_LABEL, parts
 
 
+def set_row_sources(block: dict[str, Any], labels: Iterable[str], binding: Optional[Mapping[str, Any]]) -> dict[str, Any]:
+    """Points the rows ``labels`` at ``binding``; ``None`` returns them to the domain binding. Mutates ``block``.
+
+    A row returned to the domain binding keeps an explicit ``None`` only when it had an entry: the entry
+    may come from a wider scope, and ``None`` keeps it from coming back when the scopes are merged.
+    """
+    current = block.get(SOURCES_KEY)
+    sources = dict(current) if isinstance(current, Mapping) else {}
+    for label in labels:
+        if binding is None:
+            if label in sources:
+                sources[label] = None
+        else:
+            sources[label] = normalize_binding(binding)
+    if sources:
+        block[SOURCES_KEY] = sources
+    else:
+        block.pop(SOURCES_KEY, None)
+    return block
+
+
 def prune_block(block: dict[str, Any], catalog: Optional[Catalog] = None) -> dict[str, Any]:
-    """Drops roles of deleted rows and packs none of whose rows are left. Mutates and returns ``block``."""
+    """Drops roles and sources of deleted rows and packs none of whose rows are left. Mutates and returns ``block``."""
     if not isinstance(block, dict):
         return block
+    if SOURCES_KEY in block:
+        labels = set(block_labels(block))
+        raw = block.get(SOURCES_KEY)
+        kept = {str(label): value for label, value in raw.items() if str(label) in labels} if isinstance(raw, Mapping) else {}
+        if kept:
+            block[SOURCES_KEY] = kept
+        else:
+            block.pop(SOURCES_KEY, None)
     if DERIVED_KEY in block:
         labels = set(block_labels(block))
         kept = {label: meta for label, meta in derived_rows(block).items()
@@ -403,9 +480,41 @@ def _aligned(block: Mapping[str, Any], required: Iterable[str]) -> dict[str, Any
     return out
 
 
-def merge_conflict(block: Optional[Mapping[str, Any]], language: str) -> Optional[str]:
-    """Why a pack in ``language`` cannot be merged into the block (it runs one language per domain)."""
-    present = [lang for lang in filled_languages(block) if lang != language]
+def _source_identity(binding: Optional[Mapping[str, Any]], domain: Optional[Mapping[str, Any]]) -> tuple:
+    """What a row reads: its own binding, else the domain binding (``()`` when that is unknown)."""
+    if binding:
+        return binding_identity(binding)
+    return binding_identity(domain) if domain else ()
+
+
+def merge_conflict(
+    block: Optional[Mapping[str, Any]],
+    language: str,
+    binding: Optional[Mapping[str, Any]] = None,
+    exclude: Iterable[str] = (),
+    domain: Optional[Mapping[str, Any]] = None,
+) -> Optional[str]:
+    """Why rows in ``language`` cannot read the source ``binding`` (``None``: the domain binding) in the block.
+
+    One source runs one language (a Grafana datasource is Prometheus or InfluxDB): rows in another
+    language that read the same source would fail. Rows with another source do not count, nor the rows
+    ``exclude`` names (the ones a pack is about to rewrite). ``domain`` is the domain binding: a row whose
+    own binding equals it reads the same source as the rows without one.
+    """
+    if not isinstance(block, Mapping):
+        return None
+    overrides = row_overrides(block)
+    target = _source_identity(binding, domain)
+    skip = set(exclude)
+    present: list[str] = []
+    for index, label in enumerate(block_labels(block)):
+        if label in skip:
+            continue
+        if _source_identity(overrides.get(label), domain) != target:
+            continue
+        for lang in row_languages(block, index):
+            if lang != language and lang not in present:
+                present.append(lang)
     if not present:
         return None
     names = ", ".join(lang_title(lang) for lang in present)
@@ -420,11 +529,15 @@ def merge_pack(
     block: Optional[Mapping[str, Any]],
     rendered: RenderedPack,
     mode: MergeMode = "merge",
+    source: Optional[Mapping[str, Any]] = None,
+    domain: Optional[Mapping[str, Any]] = None,
 ) -> tuple[dict[str, Any], MergePlan]:
     """Block with the rendered queries applied.
 
     ``merge`` keeps foreign rows and updates rows whose label the pack owns in place, so stored
-    series keep their history. ``replace`` leaves only the pack rows.
+    series keep their history. Rows of other languages stay: a domain may read several sources.
+    It refuses only when rows of another language read the same source as the pack rows
+    (``source``; ``None`` is the domain binding). ``replace`` leaves only the pack rows.
     """
     language = rendered.pack.language
     qkey, kkey = LANG_FIELDS[language]
@@ -441,8 +554,14 @@ def merge_pack(
         plan.removed = [label for label in old_rows if label not in rendered.by_label()]
         packs: list[dict[str, Any]] = []
         roles: dict[str, str] = {}
+        # Rows the pack rewrites keep the source they read.
+        old_sources = current.get(SOURCES_KEY)
+        if isinstance(old_sources, Mapping):
+            kept_sources = {label: copy.deepcopy(value) for label, value in old_sources.items() if label in rendered.by_label()}
+            if kept_sources:
+                out[SOURCES_KEY] = kept_sources
     else:
-        conflict = merge_conflict(current, language)
+        conflict = merge_conflict(current, language, source, exclude=rendered.by_label(), domain=domain)
         if conflict:
             raise BlockConflictError(conflict)
         out = _aligned(current, ("labels", qkey, kkey))
@@ -459,7 +578,12 @@ def merge_pack(
                 positions[query.label] = index
             out[qkey][index] = query.query
             out[kkey][index] = list(query.keys)
-        packs = [entry for entry in installed_packs(current) if entry["id"] != rendered.pack.id]
+            # A row runs one language: the pack's text replaces a text of another language in the row.
+            for lang, (other_key, _keys) in LANG_FIELDS.items():
+                if lang != language and isinstance(out.get(other_key), list) and index < len(out[other_key]):
+                    out[other_key][index] = ""
+        # The same installation is replaced; other instances of a multi-instance pack stay.
+        packs = [entry for entry in installed_packs(current) if not _same_installation(entry, rendered.pack, rendered.variables)]
         roles = block_roles(current)
     for query in rendered.queries:
         if query.role:
@@ -690,7 +814,9 @@ __all__ = [
     "block_labels",
     "block_roles",
     "filled_languages",
+    "installed_instances",
     "installed_packs",
+    "instance_key",
     "labels_for_role",
     "lang_title",
     "merge_conflict",
@@ -703,6 +829,7 @@ __all__ = [
     "resolve_sla_refs",
     "run_filter_variables",
     "series_annotations",
+    "set_row_sources",
     "sla_update",
     "update_selection",
     "domain_title",

@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from AI.data_sources import BINDING_DOMAINS
 from AI.i18n import DEFAULT, get_locale, normalize_lang, t
 
-from .roles import ROLES, SLA_FIELDS, SLA_VALUE_CHOICES, UNITS, LocalizedTitles
+from .roles import HOST_DOMAINS, ROLES, SLA_FIELDS, SLA_VALUE_CHOICES, UNITS, LocalizedTitles, role_fits
 
 PACK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,63}$")
 VAR_NAME_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
@@ -101,6 +101,8 @@ class PackQuery(BaseModel):
 
 
 RUN_TAG_VARIABLE = "run_tag"
+# Installations of one pack in one domain told apart by ``instance_variable`` (database primary and replica).
+MAX_INSTANCES = 10
 
 
 class RunFilter(BaseModel):
@@ -129,7 +131,13 @@ class QueryPack(BaseModel):
     title_en: str = ""
     category: Category
     stack: list[str] = Field(default_factory=list)
-    domain: str
+    # One domain, or ``domains`` the user picks from at install time (resources of a database or broker host).
+    domain: str = ""
+    domains: list[str] = Field(default_factory=list)
+    # How many times the pack may be installed in one domain; each installation has its own value of
+    # ``instance_variable``, which every label uses, so the rows of two installations never collide.
+    max_instances: int = Field(default=1, ge=1, le=MAX_INSTANCES)
+    instance_variable: str = ""
     language: Language
     description: str
     description_en: str = ""
@@ -161,12 +169,54 @@ class QueryPack(BaseModel):
     @field_validator("domain")
     @classmethod
     def _known_domain(cls, value: str) -> str:
-        if value not in BINDING_DOMAINS:
+        if value and value not in BINDING_DOMAINS:
             raise ValueError(f"unknown domain «{value}»")
         return value
 
+    @field_validator("domains")
+    @classmethod
+    def _host_domains(cls, value: list[str]) -> list[str]:
+        for name in value:
+            if name not in HOST_DOMAINS:
+                raise ValueError(f"domain «{name}» cannot be chosen at install time; allowed: {', '.join(HOST_DOMAINS)}")
+        if len(set(value)) != len(value):
+            raise ValueError("domains repeat")
+        return value
+
+    @property
+    def target_domains(self) -> tuple[str, ...]:
+        """Domains the pack installs into: its ``domain``, or the ``domains`` picked from at install time."""
+        return tuple(self.domains) if self.domains else (self.domain,)
+
+    @property
+    def multi_instance(self) -> bool:
+        return self.max_instances > 1
+
+    def _check_targets(self) -> None:
+        if bool(self.domain) == bool(self.domains):
+            raise ValueError("set either domain or domains")
+        if self.domains:
+            if len(self.domains) < 2:
+                raise ValueError("domains needs two domains or more; use domain for one")
+            if self.sla or self.run_filter is not None or self.domain_title or self.domain_title_en:
+                raise ValueError("a pack with domains cannot set sla, run_filter or domain_title")
+        if self.max_instances > 1:
+            var = self.instance_variable
+            if var not in self.variables:
+                raise ValueError("instance_variable must name a variable of the pack")
+            if re.fullmatch(self.variables[var].pattern, ""):
+                raise ValueError(f"instance variable «{var}» must not accept an empty value")
+            if self.sla or self.run_filter is not None:
+                raise ValueError("a pack with several instances cannot set sla or run_filter")
+            for query in self.queries:
+                if var not in template_names(query.label):
+                    raise ValueError(f"{query.label}: the label must use {{{{{var}}}}}, it tells the instances apart")
+        elif self.instance_variable:
+            raise ValueError("instance_variable needs max_instances above 1")
+
     @model_validator(mode="after")
     def _consistent(self) -> "QueryPack":
+        self._check_targets()
         for name in self.variables:
             if not VAR_NAME_RE.fullmatch(name):
                 raise ValueError(f"variable name «{name}» must be lowercase snake_case")
@@ -182,8 +232,11 @@ class QueryPack(BaseModel):
                 role = ROLES.get(query.role)
                 if role is None:
                     raise ValueError(f"{query.label}: unknown role «{query.role}»")
-                if role.domain != self.domain:
+                wrong = [domain for domain in self.target_domains if not role_fits(role, domain)]
+                if wrong and role.domain is not None:
                     raise ValueError(f"{query.label}: role {query.role} belongs to domain {role.domain}")
+                if wrong:
+                    raise ValueError(f"{query.label}: role {query.role} fits {', '.join(HOST_DOMAINS)}, not {wrong[0]}")
                 if role.unit != query.unit:
                     raise ValueError(f"{query.label}: role {query.role} is in {role.unit}, query says {query.unit}")
             for text in (query.label, query.query, *query.keys):

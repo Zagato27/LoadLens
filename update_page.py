@@ -23,6 +23,7 @@ from AI.i18n import t, with_locale
 from AI.i18n import LocalizedError, msg
 from AI.main import uploadFromLLM
 from AI.prompt_store import DOMAIN_PROMPT_FILES, effective_override, resolve_lang
+from AI.data_sources import own_row_sources
 from AI.query_packs import apply_run_filter, strip_live_rows
 from AI.verdicts import normalize_report
 from confluence_manager.update_confluence_template import (
@@ -39,6 +40,7 @@ from loadlens_app.core import (
     _active_system_context as _core_active_system_context,
     _normalize_system_context,
     _resolve_services_for_area,
+    overlay_runtime,
 )
 from metrics_config import METRICS_CONFIG  # Базовая конфигурация метрик
 from settings import CONFIG  # Импорт базовой конфигурации
@@ -531,7 +533,7 @@ def refresh_runtime_config() -> bool:
     runtime = _load_settings_runtime_data()
     if not runtime:
         return False
-    CONFIG.update(_deep_merge_dicts(CONFIG, runtime))
+    CONFIG.update(overlay_runtime(CONFIG, runtime))
     return True
 
 
@@ -634,7 +636,14 @@ def _effective_config_for_scope(area_name: str, service_name: str | None = None)
         base = (CONFIG.get(key) or {}) if isinstance(CONFIG.get(key), dict) else (CONFIG.get(key) if key == 'queries' else {})
         over_area = (area.get(key) or {}) if isinstance(area.get(key), dict) else {}
         over_service = (service_entry.get(key) or {}) if key in _SERVICE_CONFIG_OVERRIDES and isinstance(service_entry.get(key), dict) else {}
-        eff[key] = _deep_merge_dicts(_deep_merge_dicts(base, over_area), over_service)
+        merged = _deep_merge_dicts(base, over_area)
+        if key == "queries":
+            # Rows a narrower scope lists read only the sources it set for them.
+            own_row_sources(merged, over_area)
+        merged = _deep_merge_dicts(merged, over_service)
+        if key == "queries":
+            own_row_sources(merged, over_service)
+        eff[key] = merged
     # The catalog is global. An area that sets domain_sources replaces the global bindings entirely.
     eff["data_sources"] = copy.deepcopy(CONFIG.get("data_sources") or {})
     area_bindings = area.get("domain_sources")

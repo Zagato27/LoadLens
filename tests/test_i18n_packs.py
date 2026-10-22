@@ -178,14 +178,14 @@ def test_render_and_merge_messages_follow_the_locale():
                             render_pack(CATALOG.packs["lt-k6-influxql"]))
     assert str(bad_value.value) == '"Label with the service name": the value "a b" does not fit this field'
     assert str(unknown.value) == "Unknown pack variables: nope"
-    assert conflict == "the domain already has Flux queries, and a domain runs one language"
+    assert conflict == "rows in Flux already read this source, and a source runs one language"
     assert str(empty.value) == "The domain has no queries"
     assert str(single.value) == 'At least two queries with the "Total test RPS" role from different tools are needed'
     assert update.warnings and not CYRILLIC.search(" ".join(update.warnings)) and "latency_unit" in update.warnings[0]
     with with_locale("ru"):
         with pytest.raises(DerivedRowError) as ru_single:
             add_summed_rps(one_tool)
-        assert merge_conflict(flux, "promql") == "в домене уже есть запросы Flux, а домен выполняет один язык"
+        assert merge_conflict(flux, "promql") == "этот источник уже читают строки на Flux, а источник выполняет один язык"
     assert str(ru_single.value) == "Нужны хотя бы два запроса с ролью «Общий RPS теста» от разных инструментов"
 
 
@@ -296,8 +296,8 @@ def test_replace_only_reason_in_english(env, monkeypatch):
     use_locale(env.client, "en")
     compat = _pack(env.client.get("/config/query_packs").get_json(), "jvm-micrometer")["compatibility"]
     assert compat["status"] == "replace_only"
-    assert compat["reason"] == ("The domain already has InfluxQL queries, and a domain runs one language: "
-                                "the pack can only be applied by replacing the domain queries")
+    assert compat["reason"] == ("Rows in InfluxQL already read this source, and a source runs one language: "
+                                "pick another source for the pack or replace the domain queries")
 
 
 def test_preview_in_english_has_no_russian(env):

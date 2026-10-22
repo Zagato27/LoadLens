@@ -15,7 +15,15 @@ from psycopg2 import sql
 from AI.db_store import _ensure_llm_reports_table, effective_verdict_sql, manual_verdicts_cte, manual_verdicts_ready
 from AI.pipeline import _has_meaningful_system_context
 from AI.verdicts import to_code
-from AI.query_packs import READINESS_SLA_FIELDS, installed_packs, load_catalog, localized, missing_sla_references, resolve_sla_refs
+from AI.query_packs import (
+    READINESS_SLA_FIELDS,
+    installed_packs,
+    instance_key,
+    load_catalog,
+    localized,
+    missing_sla_references,
+    resolve_sla_refs,
+)
 from AI.i18n import t as translate
 from loadlens_app.errors import log_failure, with_error_id
 from loadlens_app.core import (
@@ -216,6 +224,8 @@ def _installed_query_packs(queries: dict) -> list[dict]:
                 "id": entry["id"],
                 "version": entry["version"],
                 "title": localized(pack, "title") if pack else entry["id"],
+                # The installation of a pack installed several times in the domain (the host title).
+                "instance": instance_key(pack, entry["variables"]) if pack else "",
                 "outdated": bool(pack and entry["version"] < pack.version),
             })
     return out

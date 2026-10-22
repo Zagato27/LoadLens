@@ -18,7 +18,7 @@ from urllib.parse import quote
 import pandas as pd
 import requests
 
-from AI.data_sources import DataSourceConfigError, ResolvedSource, resolve_domain_source
+from AI.data_sources import DataSourceConfigError, ResolvedSource, resolve_binding, resolve_domain_source
 from AI.i18n import get_locale, t, with_locale
 from AI.pipeline import (
     _PROXY_CLOSED,
@@ -171,8 +171,16 @@ def _error_text(exc: Exception) -> str:
     return str(exc).strip() or exc.__class__.__name__
 
 
-def discover(cfg: Mapping[str, Any], domains: Iterable[str]) -> dict[str, DomainNames]:
-    """Names per domain; a domain without a binding or with an unreachable source gets ``error``."""
+def discover(
+    cfg: Mapping[str, Any],
+    domains: Iterable[str],
+    extra: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, DomainNames]:
+    """Names per domain; a domain without a binding or with an unreachable source gets ``error``.
+
+    ``extra`` adds bindings by key (a source of the catalog, the source of a row): their names come back
+    under the same key, so a pack can be matched with a source no domain is bound to.
+    """
     resolved: dict[str, ResolvedSource] = {}
     out: dict[str, DomainNames] = {}
     for domain in domains:
@@ -180,6 +188,11 @@ def discover(cfg: Mapping[str, Any], domains: Iterable[str]) -> dict[str, Domain
             resolved[domain] = resolve_domain_source(dict(cfg), domain)
         except DataSourceConfigError as exc:
             out[domain] = DomainNames(domain, "", "", error=str(exc))
+    for key, binding in (extra or {}).items():
+        try:
+            resolved[key] = resolve_binding(cfg, key, binding)
+        except DataSourceConfigError as exc:
+            out[key] = DomainNames(key, "", "", error=str(exc))
     unique: dict[tuple, ResolvedSource] = {}
     for item in resolved.values():
         unique.setdefault(_key(item), item)

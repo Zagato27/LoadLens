@@ -11,6 +11,7 @@
   "api.compare.previous": "предыдущий прогон",
   "api.compare.previous_success": "предыдущий успешный прогон",
   "api.config.auth_readonly": "Раздел auth не меняется через API: задайте его в settings.py или переменных окружения",
+  "api.config.binding_object": "Источник строки должен быть объектом привязки или null",
   "api.config.check_unavailable": "Проверка недоступна для раздела «{section}». Допустимо: {allowed}",
   "api.config.domain_required": "Укажите домен",
   "api.config.file_too_large": "Файл больше {mb} МБ",

@@ -66,6 +66,7 @@ class RenderedPack:
             "pack_id": self.pack.id,
             "version": self.pack.version,
             "domain": self.pack.domain,
+            "domains": list(self.pack.target_domains),
             "language": self.pack.language,
             "variables": dict(self.variables),
             "queries": [query.to_dict() for query in self.queries],

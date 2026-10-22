@@ -1,0 +1,124 @@
+schema_version = 1
+id = "host-node-exporter"
+version = 1
+title = "Хосты компонента: node_exporter (БД, Kafka, рантайм)"
+title_en = "Component hosts: node_exporter (database, Kafka, runtime)"
+category = "infrastructure"
+stack = ["linux", "vm", "kubernetes"]
+domains = ["database", "kafka", "jvm", "microservices"]
+max_instances = 10
+instance_variable = "host_title"
+language = "promql"
+description = """
+Ресурсы хостов, на которых работает компонент раздела: сервер БД, брокер Kafka, VM сервиса. CPU, память, \
+load на ядро, диск, сеть и заполнение файловых систем из node_exporter попадают в раздел выбранного домена \
+рядом с метриками самого компонента. Домен выбирается при установке; в одном домене до 10 установок \
+(primary и replica, группы брокеров), их различает название хостов. SLA по CPU и памяти узлов эти ряды не \
+читает: оно остаётся на пакете node_exporter в «Ресурсах узлов».
+"""
+description_en = """
+Resources of the hosts a component of the section runs on: a database server, a Kafka broker, the VM of a \
+service. CPU, memory, load per core, disk, network and file system fill from node_exporter land in the section \
+of the chosen domain next to the metrics of the component itself. The domain is picked at install time; one \
+domain takes up to 10 installations (primary and replica, broker groups) told apart by the host title. The node \
+CPU and memory SLA does not read these series: it stays on the node_exporter pack in "Node resources".
+"""
+requires_metrics = ["node_cpu_seconds_total", "node_memory_MemAvailable_bytes", "node_uname_info"]
+prompt_addendum = """
+Ресурсы хостов компонента из node_exporter (подписи начинаются с названия хостов, например «DB host»): \
+CPU % — доля не-idle времени всех ядер, память % — 1 − MemAvailable/MemTotal, load1 на ядро выше 1 — очередь \
+на CPU, загрузка диска близко к 100 % — диск насыщен. Это хосты компонента этого раздела, а не узлы \
+приложения: их насыщение объясняет задержки и ошибки самого компонента.
+"""
+prompt_addendum_en = """
+Resources of the component hosts from node_exporter (labels start with the host title, for example "DB host"): \
+CPU % is the non-idle share of all cores, memory % is 1 − MemAvailable/MemTotal, load1 per core above 1 means \
+a CPU queue, disk utilization close to 100 % means a saturated disk. These are the hosts of this section's \
+component, not the application nodes: their saturation explains the latency and errors of the component itself.
+"""
+
+[variables.host_title]
+title = "Название хостов"
+title_en = "Host title"
+default = "Host"
+pattern = '^\w[\w .()/-]{0,31}$'
+help = "Начало подписей рядов, например «DB host» или «Kafka brokers». Разные названия — разные установки пакета в домене."
+help_en = 'Start of the series labels, for example "DB host" or "Kafka brokers". Different titles are different installations of the pack in the domain.'
+
+[variables.matchers]
+title = "Матчеры хостов"
+title_en = "Host matchers"
+default = 'job=~".*node.*"'
+help = "Только хосты этого компонента, например instance=~\"db-.*\". Исключите их из матчеров пакета node_exporter в «Ресурсах узлов», чтобы хост не попал в отчёт дважды."
+help_en = 'Only the hosts of this component, for example instance=~"db-.*". Exclude them from the matchers of the node_exporter pack in "Node resources" so the host is not reported twice.'
+
+[variables.window]
+title = "Окно rate()"
+title_en = "rate() window"
+default = "2m"
+pattern = '^[1-9][0-9]*[smh]$'
+
+[[queries]]
+label = "{{host_title}}: CPU usage (%) by node"
+role = "host.cpu_pct"
+unit = "percent"
+required = true
+query = 'label_replace(100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle", {{matchers}} }[{{window}}]))) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
+keys = ["node"]
+description = "CPU хоста, %."
+description_en = "Host CPU, %."
+
+[[queries]]
+label = "{{host_title}}: Memory usage (%) by node"
+role = "host.mem_pct"
+unit = "percent"
+required = true
+query = 'label_replace(100 * (1 - max by (instance) (node_memory_MemAvailable_bytes{ {{matchers}} }) / max by (instance) (node_memory_MemTotal_bytes{ {{matchers}} })) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
+keys = ["node"]
+description = "Память хоста без учёта кэша страниц, %."
+description_en = "Host memory without the page cache, %."
+
+[[queries]]
+label = "{{host_title}}: load1 per core by node"
+role = "host.load_per_core"
+unit = "ratio"
+query = 'label_replace(max by (instance) (node_load1{ {{matchers}} }) / count by (instance) (node_cpu_seconds_total{mode="idle", {{matchers}} }) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
+keys = ["node"]
+description = "Средняя длина очереди на CPU за минуту, на одно ядро."
+description_en = "Average CPU queue length over a minute, per core."
+
+[[queries]]
+label = "{{host_title}}: Disk utilization of the busiest device (%) by node"
+role = "host.disk_util_pct"
+unit = "percent"
+query = 'label_replace(100 * max by (instance) (rate(node_disk_io_time_seconds_total{device!~"(loop|ram|fd|sr|dm-).*", {{matchers}} }[{{window}}])) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
+keys = ["node"]
+description = "Доля времени с активным I/O самого занятого диска хоста, %."
+description_en = "Share of time with active I/O of the busiest disk of the host, %."
+
+[[queries]]
+label = "{{host_title}}: Network receive (bytes/s) by node"
+role = "host.net_rx"
+unit = "bytes_per_second"
+query = 'label_replace(sum by (instance) (rate(node_network_receive_bytes_total{device!~"lo|veth.*|docker.*|cali.*|flannel.*|cni.*|virbr.*|br-.*|vxlan.*|tunl.*", {{matchers}} }[{{window}}])) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
+keys = ["node"]
+description = "Входящий трафик физических интерфейсов."
+description_en = "Incoming traffic of physical interfaces."
+
+[[queries]]
+label = "{{host_title}}: Network transmit (bytes/s) by node"
+role = "host.net_tx"
+unit = "bytes_per_second"
+query = 'label_replace(sum by (instance) (rate(node_network_transmit_bytes_total{device!~"lo|veth.*|docker.*|cali.*|flannel.*|cni.*|virbr.*|br-.*|vxlan.*|tunl.*", {{matchers}} }[{{window}}])) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
+keys = ["node"]
+description = "Исходящий трафик физических интерфейсов."
+description_en = "Outgoing traffic of physical interfaces."
+
+[[queries]]
+label = "{{host_title}}: Filesystem used (%) by node"
+role = "host.fs_used_pct"
+unit = "percent"
+query = 'label_replace(100 * max by (instance) (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|ramfs|fuse.*", {{matchers}} } / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|ramfs|fuse.*", {{matchers}} }) * on (instance) group_left (nodename) max by (instance, nodename) (node_uname_info{ {{matchers}} }), "node", "$1", "nodename", "(.*)")'
+keys = ["node"]
+description = "Заполнение самой занятой файловой системы хоста, %."
+description_en = "Fill of the fullest file system of the host, %."

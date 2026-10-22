@@ -59,7 +59,7 @@
   function packsChip(packs) {
     if (!Array.isArray(packs) || !packs.length) return '';
     const outdated = packs.filter((p) => p.outdated).length;
-    const names = packs.map((p) => p.title).join(', ');
+    const names = packs.map((p) => (p.instance ? `${p.title} (${p.instance})` : p.title)).join(', ');
     const text = outdated
       ? LL.t('projects.packs.with_updates', { count: packs.length, outdated })
       : LL.t('projects.packs.count', { count: packs.length });

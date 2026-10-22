@@ -64,8 +64,10 @@ UNIT_TITLES: Mapping[str, str] = LocalizedTitles(UNITS, unit_title)
 
 @dataclass(frozen=True)
 class Role:
+    """``domain`` is ``None`` for roles that fit every domain of ``HOST_DOMAINS`` (resources of a host)."""
+
     name: str
-    domain: str
+    domain: Optional[str]
     unit: str
     single_series: bool = False
     sla_field: Optional[str] = None
@@ -82,6 +84,15 @@ def _roles(*items: Role) -> dict[str, Role]:
 
 LT, JVM, MS, DB, KAFKA, HR = "lt_framework", "jvm", "microservices", "database", "kafka", "hard_resources"
 GEN = "lt_generators"
+# Domains whose section may show the resources of the hosts it runs on (node_exporter on a database or a
+# broker host). Node resources of the system under test stay in hard_resources: they feed the SLA and the
+# forecast; host resources of a component are findings of that component's section.
+HOST_DOMAINS: tuple[str, ...] = (DB, KAFKA, JVM, MS)
+
+
+def role_fits(role: Role, domain: str) -> bool:
+    """Whether a query of ``role`` may live in ``domain``."""
+    return domain in HOST_DOMAINS if role.domain is None else role.domain == domain
 
 ROLES: dict[str, Role] = _roles(
     # ---- load tool (lt_framework); latencies are milliseconds, the unit of the SLA thresholds ----
@@ -205,6 +216,15 @@ ROLES: dict[str, Role] = _roles(
     Role("k8s.replicas_desired", HR, "count"),
     Role("k8s.hpa_replicas", HR, "count"),
     Role("k8s.oom_killed", HR, "count"),
+    # ---- resources of the hosts a component runs on, in that component's section; keyed by ``node``.
+    # No SLA field: the node CPU and memory SLA reads node.* of hard_resources only.
+    Role("host.cpu_pct", None, "percent"),
+    Role("host.mem_pct", None, "percent"),
+    Role("host.load_per_core", None, "ratio"),
+    Role("host.disk_util_pct", None, "percent"),
+    Role("host.net_rx", None, "bytes_per_second"),
+    Role("host.net_tx", None, "bytes_per_second"),
+    Role("host.fs_used_pct", None, "percent"),
 )
 
 # SLA fields a pack may fill, in the order the UI shows them.
@@ -232,6 +252,7 @@ def role_for_sla_field(field: str) -> Optional[Role]:
 
 
 __all__ = [
+    "HOST_DOMAINS",
     "LocalizedTitles",
     "READINESS_SLA_FIELDS",
     "ROLES",
@@ -241,6 +262,7 @@ __all__ = [
     "UNITS",
     "UNIT_TITLES",
     "Unit",
+    "role_fits",
     "role_for_sla_field",
     "unit_title",
 ]

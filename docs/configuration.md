@@ -19,7 +19,7 @@ and `.dockerignore` and are mounted into the containers at run time.
 | File | Role |
 |---|---|
 | `settings.py` | The base configuration, read at start by the application and the worker |
-| `settings_runtime.json` | Everything saved from the settings page: sections, project areas (`per_area`), prompts. Deep-merged over `settings.py`; applied without a restart (the worker re-reads it before every job) |
+| `settings_runtime.json` | Everything saved from the settings page: sections, project areas (`per_area`), prompts. Deep-merged over `settings.py`, except `data_sources` and `domain_sources` (also those of an area): the page saves them whole, so their value here replaces the one of `settings.py`. Applied without a restart (the worker re-reads it before every job) |
 | `metrics_config.py`, `metrics_config_runtime.json` | Grafana panels, Loki queries and Confluence page ids of the legacy template report, per area and service; the second file is written by "Settings → Visualizations" |
 | Environment variables | Authentication, the job runner, migrations, caches and the Docker image; they win over `settings.py` |
 
@@ -35,7 +35,7 @@ save; `POST /config` answers with `warnings` for unknown keys.
 |---|---|
 | `data_sources` | The catalogue of connections (`prometheus`, `grafana_proxy`, `influxdb`): address, authentication, TLS. Shared by all areas. See [data-sources.md](data-sources.md) |
 | `domain_sources` | Which source each domain reads: `default` and per-domain entries (`jvm`, `database`, `kafka`, `microservices`, `hard_resources`, `lt_framework`, `lt_generators`); `datasource_uid` or `datasource_name` for Grafana, `database` for InfluxQL, `bucket` for Flux |
-| `queries` | PromQL, InfluxQL or Flux queries per domain with their labels and series keys; the service keys `roles`, `packs` and the optional domain title are written by the query packs |
+| `queries` | PromQL, InfluxQL or Flux queries per domain with their labels and series keys; the service keys `roles`, `packs` and the optional domain title are written by the query packs; `sources` maps a row to a source of its own ([data-sources.md](data-sources.md#a-source-per-query-row)) |
 | `sla` | Thresholds, the assigned RPS query, the step detector and the series of the capacity forecast |
 | `llm` | Provider, models, token limits, parallelism and self-consistency of the AI analysis. See [ai-analysis.md](ai-analysis.md) |
 | `default_params` | Sampling step of the queries and the resampling interval before the analysis |

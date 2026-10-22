@@ -13,7 +13,7 @@ import math
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, NamedTuple, Optional
 
 from AI.i18n import get_locale
 
@@ -107,39 +107,64 @@ def _scope_config(run: RunRecord) -> dict:
     return _effective_config_for_scope(run.project_area or run.service, run.service)
 
 
-def _block_rows(queries: dict, roles: tuple[str, ...]) -> tuple[str, dict[str, tuple[str, str, list[str]]]]:
-    """(language, {role: (label, query, keys)}) of the lt_framework block."""
-    from AI.query_packs import filled_languages, labels_for_role
-    from AI.query_packs.blocks import LANG_FIELDS
+class LiveRow(NamedTuple):
+    """One query row of the lt_framework block: its own language and, when set, its own source."""
+
+    label: str
+    text: str
+    keys: list[str]
+    lang: str = ""
+    override: bool = False
+
+
+def _block_rows(queries: dict, roles: tuple[str, ...], cfg: Optional[dict] = None) -> tuple[str, dict[str, LiveRow]]:
+    """(language of the first row found, {role: row}) of the lt_framework block.
+
+    Every row carries its own language: the rows of one domain may come from tools that write to
+    different stores (k6 in InfluxDB, Gatling in VictoriaMetrics). A row with texts in several languages
+    runs the one its source accepts, as in the report (``cfg`` gives the sources).
+    """
+    from AI.data_sources import (
+        QUERY_KEY_FIELDS,
+        QUERY_LANG_FIELDS,
+        domain_binding,
+        pick_row_language,
+        row_languages,
+        row_overrides,
+    )
+    from AI.query_packs import derived_rows, labels_for_role
 
     block = queries.get(LT_DOMAIN) if isinstance(queries, dict) else None
     if not isinstance(block, dict):
         return "", {}
-    languages = filled_languages(block)
-    if not languages:
-        return "", {}
-    lang = languages[0]
-    qkey, kkey = LANG_FIELDS[lang]
     labels = list(block.get("labels") or [])
-    texts = list(block.get(qkey) or [])
-    keys = list(block.get(kkey) or [])
-    from AI.query_packs import derived_rows
+    overrides = row_overrides(block)
+    catalog = (cfg or {}).get("data_sources") if isinstance((cfg or {}).get("data_sources"), dict) else {}
 
-    rows: dict[str, tuple[str, str, list[str]]] = {}
+    def source_type(label: str) -> str:
+        binding = overrides.get(label) or (domain_binding(cfg, LT_DOMAIN) if cfg else None)
+        entry = catalog.get(str((binding or {}).get("source") or "")) if binding else None
+        return str(entry.get("type") or "") if isinstance(entry, dict) else ""
     summed = [label for label in derived_rows(block) if label in labels]
+    rows: dict[str, LiveRow] = {}
     for role in roles:
         candidates = labels_for_role(block, role)
-        if role == "lt.rps_total" and summed and lang == "promql":
+        if role == "lt.rps_total" and summed:
             # A complex run: the sum of every tool's RPS is the load, not the first tool alone.
             candidates = summed + candidates
         for label in candidates:
             index = labels.index(label)
-            text = str(texts[index] if index < len(texts) else "").strip()
-            if text:
-                row_keys = keys[index] if index < len(keys) and isinstance(keys[index], list) else []
-                rows[role] = (label, text, [str(k) for k in row_keys])
-                break
-    return lang, rows
+            present = row_languages(block, index)
+            if not present:
+                continue
+            lang = pick_row_language(source_type(label), present)
+            texts = block.get(QUERY_LANG_FIELDS[lang]) or []
+            keys = block.get(QUERY_KEY_FIELDS[lang]) or []
+            row_keys = keys[index] if index < len(keys) and isinstance(keys[index], list) else []
+            rows[role] = LiveRow(label, str(texts[index]).strip(), [str(k) for k in row_keys], lang, label in overrides)
+            break
+    first = next(iter(rows.values()), None)
+    return (first.lang if first else ""), rows
 
 
 def _combine(series: dict[str, list[tuple[float, float]]], summed: bool) -> list[tuple[float, float]]:
@@ -187,11 +212,18 @@ def _run_all(jobs: Iterable[Callable[[], Any]]) -> list[Any]:
         return list(pool.map(call, pending))
 
 
-def _fetch(cfg: dict, lang: str, row: tuple[str, str, list[str]], start: float, end: float, step: int, summed: bool):
+def _row_points(cfg: dict, lang: str, row: LiveRow, start: float, end: float, step: int):
     from loadlens_app.query_preview import fetch_points
 
-    label, text, keys = row
-    series = fetch_points(cfg, domain=LT_DOMAIN, lang=lang, query=text, start_ts=start, end_ts=end, step=f"{step}s", label_keys=keys)
+    extra = {"label": row.label} if row.override else {}
+    return fetch_points(
+        cfg, domain=LT_DOMAIN, lang=row.lang or lang, query=row.text, start_ts=start, end_ts=end, step=f"{step}s",
+        label_keys=row.keys, **extra,
+    )
+
+
+def _fetch(cfg: dict, lang: str, row: LiveRow, start: float, end: float, step: int, summed: bool):
+    series = _row_points(cfg, lang, row, start, end, step)
     return _downsample(_combine(series, summed), step)
 
 
@@ -256,14 +288,11 @@ def _points(points: list[tuple[float, float]]) -> list[list[float]]:
     return [[int(ts * 1000), round(value, 4)] for ts, value in points]
 
 
-def _instance_series(run: RunRecord, cfg: dict, lang: str, row: tuple[str, str, list[str]], start: float, end: float,
+def _instance_series(run: RunRecord, cfg: dict, lang: str, row: LiveRow, start: float, end: float,
                      step: int) -> list[dict[str, Any]]:
     """RPS of every instance by its ``lt_instance`` tag; series without the tag are not instances of this run."""
-    from loadlens_app.query_preview import fetch_points
-
-    label, text, keys = row
     names = {inst.tag: inst.name for inst in run.instances}
-    series = fetch_points(cfg, domain=LT_DOMAIN, lang=lang, query=text, start_ts=start, end_ts=end, step=f"{step}s", label_keys=keys)
+    series = _row_points(cfg, lang, row, start, end, step)
     out = []
     for key, points in sorted(series.items()):
         tag = key.split("=", 1)[1] if "=" in key else key
@@ -302,13 +331,13 @@ def live_snapshot(run: RunRecord, tools: dict[str, ToolTemplate], now: Optional[
     filtered = bool(packs) and mode != "plain"
     wanted = tuple(role for role in roles if role in LIVE_ROLES) or LIVE_ROLES
     roles = wanted + ((INSTANCE_ROLE,) if with_instances else ())
-    lang, rows = _block_rows(_filtered(cfg, run, packs) if filtered else (cfg.get("queries") or {}), roles)
+    lang, rows = _block_rows(_filtered(cfg, run, packs) if filtered else (cfg.get("queries") or {}), roles, cfg)
     if not any(role in rows for role in wanted):
         return {**base, "message": t("lt.live.no_queries")}
 
     def read(rows_: dict, lang_: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
         """Reads every live row at once: each is one HTTP query to the source, and the page waits for all."""
-        jobs: list[tuple[str, tuple[str, str, list[str]], Callable[[], Any]]] = []
+        jobs: list[tuple[str, LiveRow, Callable[[], Any]]] = []
         for role in wanted:
             row = rows_.get(role)
             if row is not None:
@@ -337,7 +366,7 @@ def live_snapshot(run: RunRecord, tools: dict[str, ToolTemplate], now: Optional[
     both_empty = False
     # A full read decides whether the tool tagged this run; reads of new points keep that choice.
     if filtered and not since and not mode and rps is not None and not rps["points"]:
-        plain_lang, plain_rows = _block_rows(cfg.get("queries") or {}, roles)
+        plain_lang, plain_rows = _block_rows(cfg.get("queries") or {}, roles, cfg)
         plain = plain_rows.get("lt.rps_total")
         try:
             plain_points = _fetch(cfg, plain_lang, plain, fetch_start, end, step, True) if plain else []
@@ -428,11 +457,11 @@ def report_filter(run: RunRecord, tools: dict[str, ToolTemplate], start: float, 
         return packs, ""
     try:
         step = choose_step(start, end)
-        lang, rows = _block_rows(_filtered(cfg, run, packs), ("lt.rps_total",))
+        lang, rows = _block_rows(_filtered(cfg, run, packs), ("lt.rps_total",), cfg)
         row = rows.get("lt.rps_total")
         if row is None or _fetch(cfg, lang, row, start, end, step, True):
             return packs, ""
-        _, plain_rows = _block_rows(cfg.get("queries") or {}, ("lt.rps_total",))
+        _, plain_rows = _block_rows(cfg.get("queries") or {}, ("lt.rps_total",), cfg)
         plain = plain_rows.get("lt.rps_total")
         if plain is not None and _fetch(cfg, lang, plain, start, end, step, True):
             return [], msg("lt.live.unfiltered_report")
@@ -457,7 +486,7 @@ def rps_bounds(run: RunRecord, start: float, end: float, packs: list[str]) -> Op
     try:
         cfg = _scope_config(run)
         queries = _filtered(cfg, run, packs) if packs else (cfg.get("queries") or {})
-        lang, rows = _block_rows(queries, ("lt.rps_total",))
+        lang, rows = _block_rows(queries, ("lt.rps_total",), cfg)
         row = rows.get("lt.rps_total")
         if row is None:
             return None
@@ -577,7 +606,7 @@ def load_windows(area: str, service: str, hours: Any = WINDOWS_DEFAULT_HOURS, no
     except Exception as exc:
         out.update(ok=False, message=t("lt.live.settings_unreadable_short"), detail=str(exc)[:300])
         return out
-    lang, rows = _block_rows(cfg.get("queries") or {}, ("lt.rps_total",))
+    lang, rows = _block_rows(cfg.get("queries") or {}, ("lt.rps_total",), cfg)
     row = rows.get("lt.rps_total")
     if row is None:
         out.update(ok=False, message=t("lt.live.no_rps_query"))

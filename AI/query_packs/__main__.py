@@ -46,6 +46,9 @@ DOCS_TEXT: dict[str, dict[str, Any]] = {
         "bundles": "Наборы",
         "bundle_columns": "| Набор | Пакеты |",
         "domain": "домен «{domain}»",
+        "domains_pick": "домен на выбор: {domains}",
+        "quote": "«{name}»",
+        "instances": " · до {n} установок в одном домене",
         "verified": " · проверен на стенде `docker/dev-stack`",
         "variable_columns": "| Переменная | По умолчанию | Описание |",
         "empty": "пусто",
@@ -88,6 +91,9 @@ DOCS_TEXT: dict[str, dict[str, Any]] = {
         "bundles": "Bundles",
         "bundle_columns": "| Bundle | Packs |",
         "domain": "domain \"{domain}\"",
+        "domains_pick": "domain of your choice: {domains}",
+        "quote": "\"{name}\"",
+        "instances": " · up to {n} installations per domain",
         "verified": " · verified on `docker/dev-stack`",
         "variable_columns": "| Variable | Default | Description |",
         "empty": "empty",
@@ -216,7 +222,13 @@ def _docs_markdown(catalog: Catalog, lang: str) -> str:
         out += ["", f"## {title}"]
         for pack in packs:
             rendered = render_pack(pack)
-            domain = text["domain"].format(domain=text["domains"].get(pack.domain, pack.domain))
+            names = [text["domains"].get(name, name) for name in pack.target_domains]
+            if pack.domains:
+                domain = text["domains_pick"].format(domains=", ".join(text["quote"].format(name=name) for name in names))
+            else:
+                domain = text["domain"].format(domain=names[0])
+            if pack.multi_instance:
+                domain += text["instances"].format(n=pack.max_instances)
             out += [
                 "",
                 f"### {localized(pack, 'title', lang)}",
@@ -273,7 +285,7 @@ def main(argv: list[str] | None = None) -> int:
     catalog = load_catalog()
     if args.command == "list":
         for pack in catalog.packs.values():
-            print(f"{pack.id:28} v{pack.version}  {pack.domain:15} {pack.language:9} {pack.title}")
+            print(f"{pack.id:28} v{pack.version}  {','.join(pack.target_domains):15} {pack.language:9} {pack.title}")
         for bundle in catalog.bundles.values():
             print(f"bundle {bundle.id}: {', '.join(bundle.packs)}")
     elif args.command == "render":

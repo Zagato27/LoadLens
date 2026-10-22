@@ -15,8 +15,13 @@ from AI.data_sources import (
     DEFAULT_BINDING,
     DataSourceConfigError,
     binding_errors,
-    domain_query_language,
+    domain_rows_language,
+    mixed_language_warnings,
+    normalize_binding,
+    normalize_row_sources,
+    own_row_sources,
     resolve_domain_source,
+    row_source_messages,
     validate_data_sources,
     validate_domain_sources,
 )
@@ -398,6 +403,11 @@ def update_config():
             return jsonify({"error": str(exc)}), 400
         # Roles of deleted rows and packs with no rows left are dropped, not reported as errors.
         payload = prune_queries(copy.deepcopy(payload))
+        # Rows that read another source must name a source of the catalog with the fields its type uses.
+        problems = row_source_messages(payload, _config_node("data_sources"))
+        if problems:
+            return jsonify({"error": "; ".join(problems)}), 400
+        payload = normalize_row_sources(payload)
     if section == "sla":
         try:
             validate_sla(payload)
@@ -431,6 +441,9 @@ def update_config():
         # Only what differs from the built-in templates is stored, so later default fixes still apply.
         payload = tools_overrides(payload)
     warnings = warnings_for(section, payload)
+    if section == "queries":
+        bindings = _area_section(area, "domain_sources") if area else _config_node("domain_sources")
+        warnings.extend(mixed_language_warnings(payload, {"data_sources": _config_node("data_sources"), "domain_sources": bindings}))
     if section == "appearance":
         # The accent and the language are saved by separate controls (and API clients may send one key):
         # a payload changes only the keys it carries.
@@ -497,7 +510,9 @@ def scope_view(section: str, area: str, service: str) -> dict:
     if section in SERVICE_SCOPED_SECTIONS and area and service:
         own = _service_entry(area, service).get(section)
         if isinstance(own, dict):
-            return _deep_merge_dicts(base, copy.deepcopy(own))
+            merged = _deep_merge_dicts(base, copy.deepcopy(own))
+            # As in the reports: rows the service lists read only the sources the service set for them.
+            return own_row_sources(merged, own) if section == "queries" else merged
     return base
 
 
@@ -540,9 +555,35 @@ def _reject_data_sources(payload: dict):
         return jsonify({"error": str(exc)}), 400
     global_bindings, area_bindings = _stored_bindings()
     errors = binding_errors(payload, global_bindings, area_bindings)
+    # Query rows of every scope that read a source of their own.
+    for place, queries in _stored_query_scopes():
+        errors.extend(row_source_messages(queries, payload, place=place, missing_kind="used"))
     if errors:
         return jsonify({"error": "; ".join(errors)}), 400
     return None
+
+
+def _stored_query_scopes() -> list[tuple[str, dict]]:
+    """Saved ``queries`` of every scope with its place in messages: global, each area, each service."""
+    runtime = _load_settings_runtime_data()
+    scopes: list[tuple[str, dict]] = []
+    global_queries = CONFIG.get("queries") if isinstance(CONFIG.get("queries"), dict) else {}
+    scopes.append((translate("server.data_sources.place.global_queries"), global_queries))
+    file_areas = runtime.get("per_area") if isinstance(runtime.get("per_area"), dict) else {}
+    config_areas = CONFIG.get("per_area") if isinstance(CONFIG.get("per_area"), dict) else {}
+    for name in sorted(set(file_areas) | set(config_areas)):
+        file_entry = file_areas.get(name) if isinstance(file_areas.get(name), dict) else {}
+        config_entry = config_areas.get(name) if isinstance(config_areas.get(name), dict) else {}
+        area_queries = file_entry.get("queries") if isinstance(file_entry.get("queries"), dict) else config_entry.get("queries")
+        if isinstance(area_queries, dict):
+            scopes.append((translate("server.data_sources.place.area_queries", area=name), area_queries))
+        services = file_entry.get("services") if isinstance(file_entry.get("services"), dict) else {}
+        for service_id in sorted(services):
+            entry = services.get(service_id)
+            queries = entry.get("queries") if isinstance(entry, dict) else None
+            if isinstance(queries, dict):
+                scopes.append((translate("server.data_sources.place.service_queries", area=name, service=service_id), queries))
+    return scopes
 
 
 def _reject_domain_sources(payload: dict):
@@ -581,7 +622,8 @@ def _check_domain_binding(payload: dict, domain: str, area: str):
     block = queries.get(domain) if isinstance(queries, dict) and domain != DEFAULT_BINDING else None
     qcfg = block if isinstance(block, dict) else {}
     try:
-        language = domain_query_language(resolved, qcfg) if qcfg else None
+        # Only rows without a source of their own read this binding.
+        language = domain_rows_language(resolved, qcfg) if qcfg else None
     except DataSourceConfigError as exc:
         return jsonify({"error": str(exc)}), 400
     return jsonify(check_resolved_source(resolved, language).to_dict()), 200
@@ -690,14 +732,30 @@ def query_preview():
         end_ts = parse_preview_ts(data.get("end"))
     except ValueError:
         return jsonify({"ok": False, "message": translate("api.common.bad_window")}), 400
+    domain = str(data.get("domain") or "")
+    label = str(data.get("label") or "").strip()
+    # An unsaved source of the row from the form; null means the domain binding, absent means the saved row.
+    binding = data.get("binding")
+    if "binding" in data and binding is not None:
+        if not isinstance(binding, dict):
+            return jsonify({"ok": False, "message": translate("api.config.binding_object")}), 400
+        problems = row_source_messages(
+            {domain: {"labels": [label or "?"], "sources": {label or "?": binding}}}, _config_node("data_sources")
+        )
+        if problems:
+            return jsonify({"ok": False, "message": problems[0]}), 400
+        binding = normalize_binding(binding)
     result = preview_metric_query(
         cfg,
-        domain=str(data.get("domain") or ""),
+        domain=domain,
         lang=str(data.get("lang") or ""),
         query=str(data.get("query") or ""),
         label_keys=[str(item) for item in label_keys],
         start_ts=start_ts,
         end_ts=end_ts,
+        # With an explicit null binding the saved override of the row is ignored as well.
+        label=None if ("binding" in data and not isinstance(binding, dict)) else (label or None),
+        binding=binding if isinstance(binding, dict) else None,
     )
     # The request itself is wrong (no query, unknown domain or language): 400; source answers are 200.
     return jsonify(result.to_dict()), (400 if result.code in INPUT_ERROR_CODES else 200)

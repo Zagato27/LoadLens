@@ -11,6 +11,7 @@
   "api.compare.previous": "previous run",
   "api.compare.previous_success": "previous successful run",
   "api.config.auth_readonly": "The auth section cannot be changed through the API: set it in settings.py or in environment variables",
+  "api.config.binding_object": "The source of a row must be a binding object or null",
   "api.config.check_unavailable": "Checks are not available for section \"{section}\". Allowed: {allowed}",
   "api.config.domain_required": "Specify a domain",
   "api.config.file_too_large": "The file is larger than {mb} MB",
