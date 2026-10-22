@@ -1,9 +1,7 @@
 TASK: analysis of cluster resource utilization (CPU, memory, disk) during a load test.
 
-DOMAIN DATA (sections that may be present):
-- CPU by node, in percent.
-- Memory by node, in percent of the total.
-- Disk by PVC (persistentvolumeclaim), in percent.
+DOMAIN DATA: the configured queries of the domain, their meaning and units are listed in the "DOMAIN METRICS"
+block above; the context sections (sections[]) have the same names as the queries.
 
 ANALYSIS FOCUS:
 1. CPU by step: on which nodes utilization grows in proportion to the load, on which it grows faster

@@ -21,7 +21,8 @@ are in [AI/README.md](../AI/README.md).
 1. **Collect.** For the test window the queries of every domain run against its source (PromQL, InfluxQL or Flux,
    directly or through Grafana), the series are stored in TimescaleDB and resampled to `default_params.resample_interval`.
 2. **Context packs.** Each domain gets a summary per series: averages, minimums, maximums, last values, the time of
-   the peaks and anomaly windows; the `meaning`, `unit` and `description` of a query pack travel with the series.
+   the peaks and anomaly windows; the `meaning`, `unit` and `description` of a query travel with the series (from
+   its pack, or from the role and the note set in "Settings → Queries").
    Domains: JVM and runtime, databases, Kafka, microservices, node resources, load tool, and optionally load
    generators and application logs.
 3. **Deterministic analysis.** Step detection on the assigned RPS series, the SLA check, and the analysis of the test
@@ -118,9 +119,18 @@ Prompt files live in `AI/prompts/ru/` and `AI/prompts/en/` with identical names:
 | `forecast_limit_prompt.txt`, `context_import_prompt.txt` | Explanation of the forecast limit; import of a document into the system context (not editable in the UI) |
 | `_strings.json` | Short glue strings (headings of the guidance block, verdict notes, fallback rationale, document separators), the same keys in both languages |
 
+The guidance block that precedes a domain prompt is built from the settings: the SLA, the rules of the system
+context, the **domain metrics**, the `prompt_addendum` notes of the installed packs and the test profile. The domain
+metrics list every configured query of the domain with its meaning, unit, series keys and note, and mark the queries
+that returned no data in the run, so the domain prompt files do not list the metrics themselves. A query added by
+hand gets its meaning and unit from the role picked in its row editor ("Settings → Queries") and a note for the model
+from the "Note for the AI analysis" field; the note replaces the description of a pack query with the same name. A
+query without a role is listed as "meaning not set", and the model is told not to guess its unit.
+
 The loader `AI/prompt_store.py` caches by language and name; when a file is missing in one language it falls back to
 `ru` with one warning. Overrides from "Settings → Prompts" apply per area and per service; an empty text or a copy of
-the default of either language is not an override. An override written in another language is allowed (the editor
+the default of either language is not an override, and neither is a stored copy of an earlier default
+(`PREVIOUS_DEFAULTS`: the domain prompts before the domain metrics replaced their lists of sections). An override written in another language is allowed (the editor
 warns and offers the default of the report language); the response format in the report language is appended after
 the user's text. `GET /prompts` returns `language`, `sources` (`default`, `area`, `service`) and
 `override_language`; `GET /prompts/defaults?lang=ru|en` returns the defaults; `GET /prompts/history` the versions.

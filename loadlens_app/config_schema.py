@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from AI.i18n import t
+from AI.query_packs.blocks import DESCRIPTION_MAX_CHARS
 from loadlens_app.appearance import AppearanceError, parse_accent, parse_language, parse_language_switch
 
 SETTINGS_PATH = Path(__file__).resolve().parent.parent / "settings.py"
@@ -180,9 +181,10 @@ def validate_queries(payload: dict) -> None:
 
 
 def _validate_pack_keys(domain: str, block: dict) -> None:
-    """Shape of the keys query packs add: ``roles`` {label: role} and ``packs`` [{id, version, variables}].
+    """Shape of the keys query packs and the settings page add: ``roles`` {label: role}, ``descriptions``
+    {label: text}, ``sources``, ``derived`` and ``packs`` [{id, version, variables}].
 
-    Roles of labels that no longer exist are allowed here and dropped on save.
+    Roles and descriptions of labels that no longer exist are allowed here and dropped on save.
     """
     title = block.get("title")
     if title is not None and (not isinstance(title, str) or len(title) > 60):
@@ -191,6 +193,13 @@ def _validate_pack_keys(domain: str, block: dict) -> None:
     if roles is not None:
         if not isinstance(roles, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in roles.items()):
             raise QueryConfigError(t("server.config.roles_object", domain=domain))
+    descriptions = block.get("descriptions")
+    if descriptions is not None:
+        if not isinstance(descriptions, dict) or not all(
+            isinstance(label, str) and isinstance(text, str) and len(text.strip()) <= DESCRIPTION_MAX_CHARS
+            for label, text in descriptions.items()
+        ):
+            raise QueryConfigError(t("server.config.descriptions_object", domain=domain, limit=DESCRIPTION_MAX_CHARS))
     sources = block.get("sources")
     if sources is not None:
         # {label: binding or null}; whether the binding fits the catalog is checked when the section is saved.

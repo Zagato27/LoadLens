@@ -1,9 +1,7 @@
 TASK: analysis of Kafka metrics during a load test.
 
-DOMAIN DATA (sections that may be present):
-- kafka_consumer_fetch_rate — consumer fetch rate by client_id.
-- kafka_consumergroup_lag — consumer group lag by topic and consumergroup.
-- Application gauge metrics of queues/repositories (for example, KafkaRequest), if they are configured.
+DOMAIN DATA: the configured queries of the domain, their meaning and units are listed in the "DOMAIN METRICS"
+block above; the context sections (sections[]) have the same names as the queries.
 
 ANALYSIS FOCUS:
 1. Lag by step: whether lag grows from step to step and returns to its initial level within a step.

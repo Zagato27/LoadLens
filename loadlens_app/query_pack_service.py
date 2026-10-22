@@ -32,7 +32,9 @@ from AI.data_sources import (
 from AI.i18n import get_locale, t, with_locale
 from AI.query_packs import (
     CATEGORY_TITLES,
+    HOST_DOMAINS,
     LANGUAGE_TITLES,
+    LIVE_ONLY_ROLES,
     ROLES,
     UNIT_TITLES,
     BlockConflictError,
@@ -318,9 +320,17 @@ def catalog_view(state: ScopeState) -> dict[str, Any]:
         "bundles": [_bundle_view(bundle) for bundle in catalog.bundles.values()],
         "categories": dict(CATEGORY_TITLES),
         "roles": {
-            name: {"title": role.title, "unit": UNIT_TITLES.get(role.unit, role.unit), "domain": role.domain, "sla_field": role.sla_field}
+            name: {
+                "title": role.title,
+                "unit": UNIT_TITLES.get(role.unit, role.unit),
+                "domain": role.domain,
+                "sla_field": role.sla_field,
+                "live_only": name in LIVE_ONLY_ROLES,
+            }
             for name, role in ROLES.items()
         },
+        # Domains where roles without a domain (resources of a host) fit, as AI.query_packs.role_fits decides.
+        "host_domains": list(HOST_DOMAINS),
     }
 
 

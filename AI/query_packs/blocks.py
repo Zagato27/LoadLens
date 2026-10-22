@@ -7,6 +7,9 @@ Packs add two optional keys that the collection code ignores:
   ``roles``  {label: role} — what a series means; survives as long as the label exists
   ``packs``  [{"id", "version", "variables"}] — installed packs, enough to re-render their metadata
 
+The settings page may also write ``descriptions`` {label: text} — what a row means, written by the user for
+the model; it wins over the description of the pack query with the same label.
+
 ``sources`` {label: binding | None} — rows that read another source than the domain (see AI.data_sources).
 """
 
@@ -16,13 +19,20 @@ import copy
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Literal, Mapping, Optional
 
-from AI.data_sources import SOURCES_KEY, binding_identity, normalize_binding, row_languages, row_overrides
+from AI.data_sources import (
+    QUERY_KEY_FIELDS,
+    SOURCES_KEY,
+    binding_identity,
+    normalize_binding,
+    row_languages,
+    row_overrides,
+)
 from AI.i18n import t
 
 from .catalog import Catalog, load_catalog
 from .models import TEMPLATE_RE, QueryPack, localized
 from .render import PackRenderError, RenderedPack, RenderedQuery, render_pack, resolve_variables
-from .roles import LIVE_ONLY_ROLES, ROLES, SLA_FIELDS, UNIT_TITLES
+from .roles import LIVE_ONLY_ROLES, ROLES, SLA_FIELDS, UNIT_TITLES, Role
 
 LANG_FIELDS: dict[str, tuple[str, str]] = {
     "promql": ("promql_queries", "label_keys_list"),
@@ -34,6 +44,8 @@ PARALLEL_KEYS: tuple[str, ...] = (
 )
 ROLES_KEY = "roles"
 PACKS_KEY = "packs"
+DESCRIPTIONS_KEY = "descriptions"
+DESCRIPTION_MAX_CHARS = 500
 LATENCY_SLA_FIELDS: frozenset[str] = frozenset({"p95_query", "p99_query", "mean_latency_query"})
 LOAD_MODEL_SLA_FIELDS: frozenset[str] = frozenset({"vus_query", "mean_latency_query"})
 MergeMode = Literal["merge", "replace"]
@@ -70,6 +82,21 @@ def block_roles(block: Optional[Mapping[str, Any]]) -> dict[str, str]:
         return {}
     labels = set(block_labels(block))
     return {str(label): str(role) for label, role in raw.items() if str(label) in labels and isinstance(role, str)}
+
+
+def block_descriptions(block: Optional[Mapping[str, Any]]) -> dict[str, str]:
+    """{label: description} the user wrote for the model, restricted to labels that still exist in the block."""
+    if not isinstance(block, Mapping):
+        return {}
+    raw = block.get(DESCRIPTIONS_KEY)
+    if not isinstance(raw, Mapping):
+        return {}
+    labels = set(block_labels(block))
+    return {
+        str(label): text.strip()
+        for label, text in raw.items()
+        if str(label) in labels and isinstance(text, str) and text.strip()
+    }
 
 
 def labels_for_role(block: Optional[Mapping[str, Any]], role: str) -> list[str]:
@@ -142,6 +169,34 @@ def query_meta(block: Optional[Mapping[str, Any]], catalog: Optional[Catalog] = 
     return meta
 
 
+@dataclass(frozen=True)
+class _RowNote:
+    """What the block says about one row: its role, unit and description, pack or hand-written."""
+
+    label: str
+    index: int
+    role: Optional[Role]
+    unit: str
+    description: str
+    from_pack: bool
+
+
+def _row_notes(block: Mapping[str, Any], catalog: Optional[Catalog]) -> list[_RowNote]:
+    """One note per row in block order. The unit of a pack query wins over the unit of the role (it is the
+    unit the query returns); a hand-written description wins over the pack's."""
+    meta = query_meta(block, catalog)
+    roles = block_roles(block)
+    descriptions = block_descriptions(block)
+    notes: list[_RowNote] = []
+    for index, label in enumerate(block_labels(block)):
+        role = ROLES.get(roles.get(label, ""))
+        query = meta.get(label)
+        unit = query.unit if query is not None and query.unit else (role.unit if role is not None else "")
+        description = descriptions.get(label) or (query.text() if query is not None and query.description else "")
+        notes.append(_RowNote(label, index, role, unit, description, query is not None))
+    return notes
+
+
 def series_annotations(block: Optional[Mapping[str, Any]], catalog: Optional[Catalog] = None) -> dict[str, dict[str, str]]:
     """{label: {"meaning", "unit", "description"}} for the analysis context of the domain.
 
@@ -150,22 +205,52 @@ def series_annotations(block: Optional[Mapping[str, Any]], catalog: Optional[Cat
     """
     if not isinstance(block, Mapping):
         return {}
-    meta = query_meta(block, catalog)
-    roles = block_roles(block)
     out: dict[str, dict[str, str]] = {}
-    for label in block_labels(block):
+    for note in _row_notes(block, catalog):
         item: dict[str, str] = {}
-        role = ROLES.get(roles.get(label, ""))
-        query = meta.get(label)
-        if role is not None:
-            item["meaning"] = role.title
-        unit = query.unit if query is not None else (role.unit if role is not None else "")
-        if unit:
-            item["unit"] = UNIT_TITLES.get(unit, unit)
-        if query is not None and query.description:
-            item["description"] = query.text()
+        if note.role is not None:
+            item["meaning"] = note.role.title
+        if note.unit:
+            item["unit"] = UNIT_TITLES.get(note.unit, note.unit)
+        if note.description:
+            item["description"] = note.description
         if item:
-            out[label] = item
+            out[note.label] = item
+    return out
+
+
+def _row_keys(block: Mapping[str, Any], index: int) -> list[str]:
+    """Series keys of the row in the first language it has a query text in."""
+    for lang in row_languages(block, index):
+        values = _list(block, QUERY_KEY_FIELDS[lang])
+        keys = values[index] if index < len(values) else []
+        return [str(key) for key in keys if str(key or "").strip()] if isinstance(keys, list) else []
+    return []
+
+
+def series_inventory(block: Optional[Mapping[str, Any]], catalog: Optional[Catalog] = None) -> list[dict[str, Any]]:
+    """Every row of the block that has a query, as the model should know it, in block order.
+
+    Items: ``label``, ``role`` (name, "" when none), ``meaning`` (role title), ``unit`` (code) and
+    ``unit_title``, ``keys`` (series keys), ``description`` and ``origin`` (``pack`` for a row an installed
+    pack renders, ``custom`` for a row added by hand). Text in the current locale.
+    """
+    if not isinstance(block, Mapping):
+        return []
+    out: list[dict[str, Any]] = []
+    for note in _row_notes(block, catalog):
+        if not note.label or not row_languages(block, note.index):
+            continue
+        out.append({
+            "label": note.label,
+            "role": note.role.name if note.role is not None else "",
+            "meaning": note.role.title if note.role is not None else "",
+            "unit": note.unit,
+            "unit_title": UNIT_TITLES.get(note.unit, note.unit) if note.unit else "",
+            "keys": _row_keys(block, note.index),
+            "description": note.description,
+            "origin": "pack" if note.from_pack else "custom",
+        })
     return out
 
 
@@ -281,6 +366,12 @@ def strip_live_rows(queries: Optional[Mapping[str, Any]]) -> dict[str, Any]:
             block[ROLES_KEY] = kept_roles
         else:
             block.pop(ROLES_KEY, None)
+        if DESCRIPTIONS_KEY in block:
+            kept_notes = {label: text for label, text in block_descriptions(block).items() if label not in drop}
+            if kept_notes:
+                block[DESCRIPTIONS_KEY] = kept_notes
+            else:
+                block.pop(DESCRIPTIONS_KEY, None)
     return out
 
 
@@ -386,7 +477,10 @@ def set_row_sources(block: dict[str, Any], labels: Iterable[str], binding: Optio
 
 
 def prune_block(block: dict[str, Any], catalog: Optional[Catalog] = None) -> dict[str, Any]:
-    """Drops roles and sources of deleted rows and packs none of whose rows are left. Mutates and returns ``block``."""
+    """Drops roles, descriptions and sources of deleted rows and packs none of whose rows are left.
+
+    Mutates and returns ``block``.
+    """
     if not isinstance(block, dict):
         return block
     if SOURCES_KEY in block:
@@ -412,6 +506,12 @@ def prune_block(block: dict[str, Any], catalog: Optional[Catalog] = None) -> dic
             block[ROLES_KEY] = roles
         else:
             block.pop(ROLES_KEY, None)
+    if DESCRIPTIONS_KEY in block:
+        descriptions = block_descriptions(block)
+        if descriptions:
+            block[DESCRIPTIONS_KEY] = descriptions
+        else:
+            block.pop(DESCRIPTIONS_KEY, None)
     if PACKS_KEY in block:
         labels = set(block_labels(block))
         known = catalog or load_catalog()
@@ -554,12 +654,15 @@ def merge_pack(
         plan.removed = [label for label in old_rows if label not in rendered.by_label()]
         packs: list[dict[str, Any]] = []
         roles: dict[str, str] = {}
-        # Rows the pack rewrites keep the source they read.
+        # Rows the pack rewrites keep the source they read and the description the user wrote for them.
         old_sources = current.get(SOURCES_KEY)
         if isinstance(old_sources, Mapping):
             kept_sources = {label: copy.deepcopy(value) for label, value in old_sources.items() if label in rendered.by_label()}
             if kept_sources:
                 out[SOURCES_KEY] = kept_sources
+        kept_notes = {label: text for label, text in block_descriptions(current).items() if label in rendered.by_label()}
+        if kept_notes:
+            out[DESCRIPTIONS_KEY] = kept_notes
     else:
         conflict = merge_conflict(current, language, source, exclude=rendered.by_label(), domain=domain)
         if conflict:
@@ -809,8 +912,11 @@ __all__ = [
     "PACKS_KEY",
     "PARALLEL_KEYS",
     "ROLES_KEY",
+    "DESCRIPTIONS_KEY",
+    "DESCRIPTION_MAX_CHARS",
     "SlaUpdate",
     "apply_run_filter",
+    "block_descriptions",
     "block_labels",
     "block_roles",
     "filled_languages",
@@ -829,6 +935,7 @@ __all__ = [
     "resolve_sla_refs",
     "run_filter_variables",
     "series_annotations",
+    "series_inventory",
     "set_row_sources",
     "sla_update",
     "update_selection",

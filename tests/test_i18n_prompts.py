@@ -163,6 +163,10 @@ def test_en_run_sends_english_prompts_in_every_llm_call(monkeypatch):
         assert not CYRILLIC.search(_prompt_part(prompt)), CYRILLIC.findall(_prompt_part(prompt))[:20]
     analysis = [p for p in prompts if p.startswith("HOW TO READ THE CONTEXT")]
     assert len(analysis) >= 3 and all("ANALYSIS GUIDANCE" in p and "RESPONSE FORMAT (all text fields in English" in p for p in analysis)
+    # Domain prompts list the configured queries of their domain; rows added by hand have no role.
+    assert any('DOMAIN METRICS' in p and '- "Heap" — meaning not set; unit not set' in p for p in analysis)
+    assert any(f'- "{RPS_LABEL}" — meaning not set' in p and f'- "{P95_LABEL}" —' in p for p in analysis)
+    assert not any("sections that may be present" in p for p in analysis)
     scores = result["scores"]
     assert scores["jvm"]["language_match"] == pytest.approx(1.0) and scores["final"]["language_match"] >= 0.5
 
@@ -175,6 +179,8 @@ def test_ru_run_keeps_russian_prompts_everywhere(monkeypatch):
     assert all(CYRILLIC.search(call["system"]) for call in provider_calls)
     analysis = [call["prompt"] for call in spy_calls if call["prompt"].startswith("КАК ЧИТАТЬ КОНТЕКСТ")]
     assert analysis and all("ОРИЕНТИРЫ АНАЛИЗА" in p for p in analysis)
+    assert any("МЕТРИКИ ДОМЕНА" in p and "- «Heap» — смысл не задан; единица не задана" in p for p in analysis)
+    assert not any("какие секции могут присутствовать" in p for p in analysis)
 
 
 def test_a_missing_en_prompt_falls_back_to_ru_and_the_run_completes(monkeypatch, tmp_path, caplog):

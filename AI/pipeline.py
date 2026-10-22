@@ -55,7 +55,14 @@ from AI.data_sources import (
     domain_source_groups,
 )
 from AI.opensearch_logs import APPLICATION_LOGS_DOMAIN, collect_application_logs
-from AI.query_packs import block_roles, domain_titles, prompt_addenda, resolve_sla_refs, series_annotations
+from AI.query_packs import (
+    block_roles,
+    domain_titles,
+    prompt_addenda,
+    resolve_sla_refs,
+    series_annotations,
+    series_inventory,
+)
 from AI.sla_evaluator import (
     ADJUST_RESOURCES,
     ADJUST_TREND,
@@ -2584,6 +2591,15 @@ def _stack_notes(block: Any) -> List[tuple[str, str]]:
         return []
 
 
+def _metric_inventory(block: Any) -> List[Dict[str, Any]]:
+    """Configured queries of the domain (label, meaning, unit, series keys, description) for the domain prompt."""
+    try:
+        return series_inventory(block)
+    except Exception:
+        logger.warning("The query list of the domain is unavailable for the prompt", exc_info=True)
+        return []
+
+
 def _group_block(qcfg: dict, rows: Sequence[int], language: str) -> dict:
     """The rows of one source group as a block of their own: labels, queries and series keys of the language."""
     qkey, kkey = QUERY_LANG_FIELDS[language], QUERY_KEY_FIELDS[language]
@@ -3206,12 +3222,16 @@ def _upload_from_llm(
     analysis_guidance = build_analysis_guidance(sla_early, active_system_context, profile.test_type or run_test_type, lang=lang)
 
     def _domain_prompt(base_text: str, domain: str) -> str:
+        # Application logs have no query block: their prompt describes the shape of the log context.
+        block = queries.get(domain) if domain != APPLICATION_LOGS_DOMAIN else None
         return assemble_prompt(
             _augment_prompt_with_system_context(base_text, system_context_brief, lang),
             context_guide,
             build_analysis_guidance(
                 sla_early, active_system_context, profile.test_type or run_test_type, domain=domain,
                 stack_notes=_stack_notes(queries.get(domain)), lang=lang,
+                metrics=_metric_inventory(block) if block is not None else None,
+                labels_with_data=_labels_with_data((domain_data.get(domain) or {}).get("labeled") or []),
             ),
             response_format,
         )

@@ -1,10 +1,9 @@
 TASK: analysis of the load testing tool metrics (lt_framework) — load, checks, response time.
 
-DOMAIN DATA (sections that may be present):
-- RPS by group/transaction (group/name) and total RPS.
-- checks — check counters by group/check. Checks can be both successful and unsuccessful: look at the series
-  name (for example, "passed/failed", "rate of successful checks"); do not treat every check as an error.
-- p95 response time by group/transaction.
+DOMAIN DATA: the configured queries of the domain, their meaning and units are listed in the "DOMAIN METRICS"
+block above; the context sections (sections[]) have the same names as the queries.
+- Checks can be both successful and unsuccessful: look at the series name (for example, "passed/failed",
+  "rate of successful checks"); do not treat every check as an error.
 
 ANALYSIS FOCUS:
 1. Load profile: confirm from load_steps and the RPS section how the load changed (step levels, stability).

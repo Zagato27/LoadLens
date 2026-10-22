@@ -100,6 +100,11 @@ list holds its text; a row with texts in several languages runs the one its sour
 then Flux for Grafana), and saving warns about it. Two service keys are written by the packs: `roles` maps a label to
 its role (`lt.rps_total`, `lt.p95_total`, `node.cpu_pct`, `runtime.cpu`, ...) and `packs` records the installed packs
 with their versions and variables. `sources` holds the rows that read their own source (see above).
+
+The row editor also sets the **role** of a hand-written query (the roles of its domain, plus the host roles in the
+database, Kafka, JVM and microservices sections) and a **note for the AI analysis** (`descriptions`, up to 500
+characters). Both go into the domain prompt next to the query name; a role with an SLA field also fills an empty SLA
+reference, like a pack role. Reinstalling a pack restores the roles of its own rows and keeps the notes.
 Flux queries use the placeholders `{bucket}`, `{start}` and `{end}`; InfluxQL queries use `$timeFilter` and
 `$__interval` as in Grafana.
 

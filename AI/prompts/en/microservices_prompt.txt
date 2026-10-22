@@ -1,8 +1,7 @@
 TASK: analysis of microservice metrics during a load test.
 
-DOMAIN DATA (sections that may be present):
-- Mean request processing time by microservice (rate(sum)/rate(count)).
-- Requests per second by microservice and total RPS.
+DOMAIN DATA: the configured queries of the domain, their meaning and units are listed in the "DOMAIN METRICS"
+block above; the context sections (sections[]) have the same names as the queries.
 - aux_resources: process CPU and heap from the JVM domain for matching by time.
 
 ANALYSIS FOCUS:

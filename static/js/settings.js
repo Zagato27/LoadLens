@@ -3085,6 +3085,79 @@
       result.appendChild(names);
     }
   }
+  // Max length of a row description; the server checks the same limit (AI.query_packs.blocks.DESCRIPTION_MAX_CHARS).
+  const QUERY_NOTE_MAX = 500;
+  // Roles a row of the domain may take: the roles of the domain, then (in a component domain) the host roles
+  // (AI.query_packs.role_fits), each group by title. Live-chart roles are for packs only and are listed when set.
+  function roleOptions(catalog, domain, current) {
+    catalog = catalog || {};
+    const roles = isPlainObject(catalog.roles) ? catalog.roles : {};
+    const hostDomains = Array.isArray(catalog.host_domains) ? catalog.host_domains : [];
+    const own = [];
+    const host = [];
+    Object.keys(roles).forEach((name) => {
+      const role = roles[name] || {};
+      const fits = role.domain === domain || (role.domain == null && hostDomains.includes(domain));
+      if (name !== current && (!fits || role.live_only)) return;
+      (role.domain == null ? host : own).push([name, `${role.title} (${role.unit})`]);
+    });
+    const byTitle = (a, b) => a[1].localeCompare(b[1]);
+    return [['', LL.t('settings.queries.role_none')]].concat(own.sort(byTitle), host.sort(byTitle));
+  }
+  // First row of the block with this SLA role when several rows share it ('' otherwise): an empty SLA reference
+  // takes the first one (AI.query_packs.resolve_sla_refs).
+  function sharedRoleLabel(catalog, block, role) {
+    const info = ((catalog && catalog.roles) || {})[role];
+    if (!role || !info || !info.sla_field) return '';
+    const roles = isPlainObject(block && block.roles) ? block.roles : {};
+    const same = ((block && block.labels) || []).filter((other) => other && roles[other] === role);
+    return same.length > 1 ? same[0] : '';
+  }
+  function setRowKey(domain, key, label, value) {
+    editQueryBlock(domain, (block) => {
+      const next = isPlainObject(block[key]) ? Object.assign({}, block[key]) : {};
+      if (value) next[label] = value; else delete next[label];
+      if (Object.keys(next).length) block[key] = next; else delete block[key];
+    });
+  }
+  function rowRoleField(domain, row) {
+    const roles = isPlainObject(queryBlock(domain).roles) ? queryBlock(domain).roles : {};
+    const current = row.label ? String(roles[row.label] || '') : '';
+    const field = selectField(LL.t('settings.queries.field_role'), current, roleOptions(packUi.catalog, domain, current), (role) => {
+      setRowKey(domain, 'roles', row.label, role);
+      renderQueryList();
+    });
+    const select = field.querySelector('select');
+    select.disabled = !row.label;
+    field.appendChild(makeEl('div', 'dim', row.label ? LL.t('settings.queries.role_hint') : LL.t('settings.queries.name_first')));
+    const first = row.label ? sharedRoleLabel(packUi.catalog, queryBlock(domain), current) : '';
+    if (first) field.appendChild(makeEl('p', 'pack-note warn', LL.t('settings.queries.role_taken', { label: first })));
+    return field;
+  }
+  // Description of the pack query with this label (the catalog renders the packs with their default variables).
+  function packQueryDescription(label) {
+    const packs = (packUi.catalog && packUi.catalog.packs) || [];
+    for (const pack of packs) {
+      const query = (pack.queries || []).find((item) => item.label === label);
+      if (query && query.description) return String(query.description);
+    }
+    return '';
+  }
+  function rowDescriptionField(domain, row) {
+    const notes = isPlainObject(queryBlock(domain).descriptions) ? queryBlock(domain).descriptions : {};
+    const field = textField(LL.t('settings.queries.field_description'), row.label ? notes[row.label] || '' : '', () => {}, true);
+    field.classList.add('q-note');
+    const input = field.querySelector('textarea');
+    input.rows = 2;
+    input.maxLength = QUERY_NOTE_MAX;
+    input.disabled = !row.label;
+    const fromPack = row.label ? packQueryDescription(row.label) : '';
+    input.placeholder = fromPack || LL.t('settings.queries.description_placeholder');
+    input.addEventListener('change', () => setRowKey(domain, 'descriptions', row.label, input.value.trim()));
+    const hint = fromPack ? 'settings.queries.description_hint_pack' : 'settings.queries.description_hint';
+    field.appendChild(makeEl('div', 'dim', LL.t(hint, { max: QUERY_NOTE_MAX })));
+    return field;
+  }
   function queryEditor(domain, spec, row) {
     const body = makeEl('div', 'q-item-body');
     const name = textField(LL.t('settings.queries.field_name'), row.label, () => {});
@@ -3093,8 +3166,8 @@
       renameSlaLabel(row.label, nameInput.value);
       editQueryBlock(domain, (block) => {
         block.labels[row.index] = nameInput.value;
-        // The role and the source belong to the row, so they follow the new name.
-        ['roles', 'sources'].forEach((key) => {
+        // The role, the description and the source belong to the row, so they follow the new name.
+        ['roles', 'descriptions', 'sources'].forEach((key) => {
           if (isPlainObject(block[key]) && Object.prototype.hasOwnProperty.call(block[key], row.label)) {
             block[key][nameInput.value] = block[key][row.label];
             delete block[key][row.label];
@@ -3117,7 +3190,7 @@
     const language = selectField(LL.t('settings.queries.row_lang'), row.lang, LT_QUERY_PRIORITY.map((lang) => [lang, QUERY_LANG[lang].label]), (lang) => {
       if (lang !== row.lang) setRowLanguage(domain, row, lang, { text: queryInput.value, keys: splitList(keysInput.value) });
     });
-    body.append(name, language, query, keys);
+    body.append(name, language, query, keys, rowRoleField(domain, row), rowDescriptionField(domain, row));
     if (row.langs.length > 1) {
       const mixed = makeEl('p', 'pack-note error', LL.t('settings.queries.two_langs', { langs: row.langs.map((lang) => QUERY_LANG[lang].label).join(', '), lang: spec.label }));
       mixed.appendChild(document.createTextNode(' '));
@@ -3172,6 +3245,7 @@
     editQueryBlock(domain, (block) => {
       QUERY_PARALLEL_KEYS.forEach((key) => { if (Array.isArray(block[key]) && index < block[key].length) block[key].splice(index, 1); });
       if (isPlainObject(block.roles)) delete block.roles[label];
+      if (isPlainObject(block.descriptions)) delete block.descriptions[label];
       if (isPlainObject(block.sources)) delete block.sources[label];
     });
     clearRowLangDrafts(domain);
@@ -4781,7 +4855,7 @@
     _internals: {
       schemaTexts, sourceSummary, generatorSummary, generatorStatus, toolSummary, toolBadge, hostKeyMessage,
       queryOptions, deadRefText, contextGroupSummary, slaUsageText, CONTEXT_GROUPS, promptLanguageNote, WIZARD_STEPS,
-      aboutMarkdown
+      aboutMarkdown, roleOptions, sharedRoleLabel, QUERY_NOTE_MAX
     }
   };
 

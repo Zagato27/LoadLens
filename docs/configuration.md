@@ -35,7 +35,7 @@ save; `POST /config` answers with `warnings` for unknown keys.
 |---|---|
 | `data_sources` | The catalogue of connections (`prometheus`, `grafana_proxy`, `influxdb`): address, authentication, TLS. Shared by all areas. See [data-sources.md](data-sources.md) |
 | `domain_sources` | Which source each domain reads: `default` and per-domain entries (`jvm`, `database`, `kafka`, `microservices`, `hard_resources`, `lt_framework`, `lt_generators`); `datasource_uid` or `datasource_name` for Grafana, `database` for InfluxQL, `bucket` for Flux |
-| `queries` | PromQL, InfluxQL or Flux queries per domain with their labels and series keys; the service keys `roles`, `packs` and the optional domain title are written by the query packs; `sources` maps a row to a source of its own ([data-sources.md](data-sources.md#a-source-per-query-row)) |
+| `queries` | PromQL, InfluxQL or Flux queries per domain with their labels and series keys; the service keys `roles`, `packs` and the optional domain title are written by the query packs (a role can also be picked in the row editor); `descriptions` maps a row to a note for the AI analysis (up to 500 characters); `sources` maps a row to a source of its own ([data-sources.md](data-sources.md#a-source-per-query-row)) |
 | `sla` | Thresholds, the assigned RPS query, the step detector and the series of the capacity forecast |
 | `llm` | Provider, models, token limits, parallelism and self-consistency of the AI analysis. See [ai-analysis.md](ai-analysis.md) |
 | `default_params` | Sampling step of the queries and the resampling interval before the analysis |

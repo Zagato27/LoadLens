@@ -15,6 +15,7 @@ No Flask here: ``AI/`` never imports ``loadlens_app``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -45,6 +46,41 @@ DOMAIN_PROMPT_FILES: Dict[str, str] = {
     "critic": "critic_prompt.txt",
 }
 TEST_PROFILES = ("step", "soak", "spike", "stress", "none")
+
+# SHA-256 of the comparable text (``_comparable``) of earlier defaults, ru and en. The settings page may store the
+# default text it showed; such a copy of an earlier default is no override either, so the run reads the current
+# file. 2026-10: the domain prompts lost their hand-written «DOMAIN DATA» section lists (the guidance block
+# «DOMAIN METRICS» lists the configured queries instead).
+PREVIOUS_DEFAULTS: Dict[str, frozenset] = {
+    "database_prompt.txt": frozenset({
+        "88927f2016cbc8769936f87ec6c9c496bedea53456be6968e3093f2681adfb69",
+        "6544191eeb5dfc46e879416cc4c4d362352b4d87c9947748c5e41902a4d48612",
+    }),
+    "jvm_prompt.txt": frozenset({
+        "c4daf0df0416aa9b4e2f813622ac9d18c144e800b8f1ec9d4d7a08b0f7bf05e9",
+        "8f6c295c810c78aabb4e93837f00b5acadd3c62565507c25e55475ff2d52bde7",
+    }),
+    "kafka_prompt.txt": frozenset({
+        "32c041e402d66baf250e12a88d25fb70c9d9b36daf9d04ab7a6426551b21ed6b",
+        "4088efca77464d07af1e08fc583ace0c6c9273e3efeba0484218512ea0ba97f6",
+    }),
+    "microservices_prompt.txt": frozenset({
+        "e85cb53061fc81f36276759976cd4e1bf5c9b38263c4b83e70ee24c522670b42",
+        "9c881c17e91b99ecddd1e56be552a4bfe19707ff60d60ac6d7de5982ec5d1878",
+    }),
+    "hard_resources_prompt.txt": frozenset({
+        "46cf968cf59c18124fef3a376df47e140be39e53246bed8e948eeee71060b34f",
+        "94b47b573ccdf7fc87fdbbc3d93682e195c25933b66971d4ddf08e756246917a",
+    }),
+    "lt_framework_prompt.txt": frozenset({
+        "109027fe86caa81e45042be0dfadb986e63bd488b2b9ea27b08aa012fcc0a5cc",
+        "a3ade5f278c85f229098f3bccf933c37075331d3d03f7992b417770a545218fb",
+    }),
+    "lt_generators_prompt.txt": frozenset({
+        "de2b4d8aaf1a2f37db3a275e7169a8513e9e0edeb8ee4aa0a5903baab9a59a55",
+        "baa5c5253cd98d4954f7cf8a94b7fc1a92fde19b3ea7826e0145e23affad4f2b",
+    }),
+}
 
 # Words of a script: letters only, so identifiers with digits or underscores do not count (see _words).
 _CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
@@ -224,7 +260,8 @@ def _comparable(value: str) -> str:
 
 
 def is_default_text(value: Any, name: str) -> bool:
-    """``value`` is the default text of prompt ``name`` (domain key or file name) in any language."""
+    """``value`` is the default text of prompt ``name`` (domain key or file name) in any language, current or
+    earlier (``PREVIOUS_DEFAULTS``)."""
     fname = DOMAIN_PROMPT_FILES.get(name, name)
     probe = _comparable(value)
     for code in SUPPORTED:
@@ -232,7 +269,8 @@ def is_default_text(value: Any, name: str) -> bool:
             continue
         if _comparable(load_prompt(fname, code)) == probe:
             return True
-    return False
+    previous = PREVIOUS_DEFAULTS.get(fname)
+    return bool(previous) and hashlib.sha256(probe.encode("utf-8")).hexdigest() in previous
 
 
 def effective_override(value: Any, name: str) -> Optional[str]:
@@ -290,6 +328,7 @@ def detect_language(value: Any) -> Optional[str]:
 
 __all__ = [
     "DOMAIN_PROMPT_FILES",
+    "PREVIOUS_DEFAULTS",
     "PROMPTS_ROOT",
     "PromptMissing",
     "SUPPORTED",

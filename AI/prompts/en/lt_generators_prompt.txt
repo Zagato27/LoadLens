@@ -1,12 +1,8 @@
 TASK: check whether the load generators became the bottleneck of the test. These are the machines that ran the load
 testing tool (k6, JMeter, Gatling, Locust), not the system under test.
 
-DOMAIN DATA (sections that may be present):
-- Generator CPU by host (node), in percent.
-- Generator memory, in percent of the total.
-- load1 per core.
-- Network receive and transmit traffic, bytes per second.
-- Number of established TCP connections.
+DOMAIN DATA: the configured queries of the domain, their meaning and units are listed in the "DOMAIN METRICS"
+block above; the context sections (sections[]) have the same names as the queries.
 
 ANALYSIS FOCUS:
 1. CPU by step: at a utilization above 80–85 % at a step the generator stops delivering the target load and itself

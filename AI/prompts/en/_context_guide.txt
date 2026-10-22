@@ -10,7 +10,8 @@ HOW TO READ THE CONTEXT (JSON, passed together with this task):
   level; it is neither a separate load step nor the system limit. The flags are present only on such steps.
   In a spike test the steps alternate background and spikes ("background 1 · ≈100 RPS", "spike 1 · ≈480 RPS").
   Refer to steps by label (for example "step 3 · ≈150 RPS" or "interval 2 · 10:20–10:30").
-- sections[]: metric groups of the domain (label — the query name). Each section has:
+- sections[]: metric groups of the domain (label — the query name; in domain tasks the meaning and units of the
+  queries are listed in the "DOMAIN METRICS" block). Each section has:
   * meaning, unit, description (if present) — what the series means, its unit and the note from the query pack. The
     section's numbers are expressed in unit; do not convert them to other units without an explicit conversion.
   * top_series[] — series statistics over the whole test: mean, min, max, last, change_pct (change between the start

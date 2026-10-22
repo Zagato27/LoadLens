@@ -33,12 +33,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   installations per domain told apart by the host title. Their `host.*` roles fill no SLA field.
 - **Pack detection reads more sources.** "Detect from sources" also reads the direct Prometheus sources of the
   catalogue and the sources rows already read, and offers "Read from it" when a pack's metrics are found there.
+- **Domain metrics in the prompt.** Each domain prompt now lists every configured query of the domain with its
+  meaning, unit, series keys and note, and marks the queries that returned no data in the run. Queries added by hand
+  get a "Role" and a "Note for the AI analysis" in the row editor (`queries.<domain>.descriptions`); the note
+  replaces the description of a pack query ([docs/ai-analysis.md](docs/ai-analysis.md#prompts-and-languages)).
 
 ### Changed
 
 - **A source runs one language, not a domain.** A pack in another language merges into a domain when its rows read
   another source; "Replace only" became "Language conflict" and appears only when rows in another language read the
   same source.
+- **Domain prompts no longer list their sections by hand.** The lists named metrics that no pack collects (for
+  example `kafka_consumer_fetch_rate` or disk by PVC); the generated domain metrics replace them. A stored copy of an
+  old default prompt is still read as the default; a prompt edited in "Settings → Prompts" keeps its own text,
+  including the old list, until it is reset.
 
 ### Fixed
 

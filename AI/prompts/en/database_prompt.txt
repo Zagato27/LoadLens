@@ -1,9 +1,7 @@
 TASK: analysis of database metrics during a load test.
 
-DOMAIN DATA (sections that may be present):
-- Database query volume (query rate) by service/pod.
-- The 95th percentile of query execution time by service/pod.
-- If present — connections, errors, waits and other series included in the context.
+DOMAIN DATA: the configured queries of the domain, their meaning and units are listed in the "DOMAIN METRICS"
+block above; the context sections (sections[]) have the same names as the queries.
 
 ANALYSIS FOCUS:
 1. Latency by step: at which step the p95 query time started to grow faster than the query volume

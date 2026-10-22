@@ -1475,6 +1475,7 @@ table.forecast-list { margin-top: 16px; }
 .q-item-caret { color: var(--dim); }
 .q-item-body { display: flex; flex-direction: column; gap: 8px; padding: 4px 0 14px; }
 .q-item-body textarea { font-family: var(--mono); font-size: 12px; }
+.q-item-body .q-note textarea { font-family: inherit; font-size: 13px; }
 .q-item-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 @media (max-width: 720px) {
   .q-item-head { flex-wrap: wrap; }

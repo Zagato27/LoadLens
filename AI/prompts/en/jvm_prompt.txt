@@ -1,9 +1,7 @@
 TASK: analysis of application JVM metrics during a load test.
 
-DOMAIN DATA (sections that may be present):
-- Memory: heap used / heap max, non-heap — by application and instance.
-- Garbage collection: GC pauses (gc_pause), their frequency, actions and causes.
-- Process and system CPU, threads (live/daemon/peak), loaded classes.
+DOMAIN DATA: the configured queries of the domain, their meaning and units are listed in the "DOMAIN METRICS"
+block above; the context sections (sections[]) have the same names as the queries.
 
 ANALYSIS FOCUS:
 1. Memory by step: whether heap used grows from step to step and comes back after GC. Growth within a step under

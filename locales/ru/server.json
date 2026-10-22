@@ -11,6 +11,7 @@
   "server.capacity.zero_concurrency": "Параллелизм на всех точках нулевой",
   "server.common.unset": "не задан",
   "server.config.derived_object": "{domain}: derived должен быть объектом «название → {kind: sum, of: [названия]}»",
+  "server.config.descriptions_object": "{domain}: descriptions должен быть объектом «название запроса → пояснение» с пояснениями не длиннее {limit} символов",
   "server.config.domain_object": "{domain}: ожидается объект",
   "server.config.duplicate_label": "{domain}: название «{label}» повторяется",
   "server.config.empty_label": "{domain}: пустое название в строке {row}",

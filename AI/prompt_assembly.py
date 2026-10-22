@@ -11,7 +11,7 @@ Texts come from ``AI/prompts/<lang>/`` (``profiles/*.txt``, ``_no_sla.txt`` and 
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from AI.prompt_store import load_prompt, resolve_lang, text
 from AI.test_profile import TEST_TYPE_ALIASES, is_capacity_like, normalize_test_type, profile_for
@@ -143,6 +143,46 @@ def system_context_rules(system_context: Optional[Dict[str, Any]], lang: Optiona
     return lines
 
 
+def metric_inventory_lines(
+    items: Optional[Sequence[Mapping[str, Any]]],
+    labels_with_data: Optional[Iterable[str]] = None,
+    lang: Optional[str] = None,
+) -> List[str]:
+    """Lines of the «domain metrics» block: one per configured query, in the order of the block.
+
+    ``items`` are ``AI.query_packs.series_inventory`` items (label, meaning, unit_title, keys, description).
+    ``labels_with_data`` are the labels that returned values in this run; ``None`` means unknown, so no row is
+    marked as empty.
+    """
+    code = resolve_lang(lang)
+    with_data = None if labels_with_data is None else {str(label) for label in labels_with_data}
+    lines: List[str] = []
+    incomplete = False
+    for item in items or []:
+        if not isinstance(item, Mapping):
+            continue
+        label = str(item.get("label") or "").strip()
+        if not label:
+            continue
+        meaning = " ".join(str(item.get("meaning") or "").split())
+        unit = str(item.get("unit_title") or "").strip()
+        keys = [str(key).strip() for key in (item.get("keys") or []) if str(key).strip()]
+        description = " ".join(str(item.get("description") or "").split())
+        facts = [meaning or text("guidance.metric_no_role", code)]
+        facts.append(text("guidance.metric_unit", code, unit=unit) if unit else text("guidance.metric_no_unit", code))
+        if keys:
+            facts.append(text("guidance.metric_keys", code, keys=", ".join(keys)))
+        if with_data is not None and label not in with_data:
+            facts.append(text("guidance.metric_no_data", code))
+        if description:
+            facts.append(text("guidance.metric_description", code, text=description))
+        incomplete = incomplete or not meaning or not unit
+        lines.append(text("guidance.metric_line", code, label=label, facts="; ".join(facts)))
+    if lines and incomplete:
+        lines.append(text("guidance.metric_unknown", code))
+    return lines
+
+
 def build_analysis_guidance(
     sla_cfg: Optional[Dict[str, Any]],
     system_context: Optional[Dict[str, Any]],
@@ -150,10 +190,14 @@ def build_analysis_guidance(
     domain: Optional[str] = None,
     stack_notes: Optional[Sequence[Tuple[str, str]]] = None,
     lang: Optional[str] = None,
+    metrics: Optional[Sequence[Mapping[str, Any]]] = None,
+    labels_with_data: Optional[Iterable[str]] = None,
 ) -> str:
-    """Prompt block with the customer's criteria: SLA, system-context rules and the test profile.
+    """Prompt block with the customer's criteria: SLA, system-context rules, the domain metrics and the test profile.
 
     ``stack_notes`` are (pack title, text) of the installed query packs that explain their metrics.
+    ``metrics`` are the configured queries of the domain (``AI.query_packs.series_inventory``) and
+    ``labels_with_data`` the labels that returned values in this run (see :func:`metric_inventory_lines`).
     """
     code = resolve_lang(lang)
     sections: List[str] = [text("guidance.header", code)]
@@ -163,6 +207,9 @@ def build_analysis_guidance(
     rules = system_context_rules(system_context, code)
     if rules:
         sections.append(text("guidance.rules_title", code) + "\n" + "\n".join(rules))
+    metric_lines = metric_inventory_lines(metrics, labels_with_data, code)
+    if metric_lines:
+        sections.append(text("guidance.metrics_title", code) + "\n" + "\n".join(metric_lines))
     notes = [f"- {title}: {' '.join(str(note).split())}" for title, note in (stack_notes or []) if str(note).strip()]
     if notes:
         sections.append(text("guidance.stack_title", code) + "\n" + "\n".join(notes))
@@ -181,6 +228,7 @@ __all__ = [
     "TEST_TYPE_OVERLAYS",
     "assemble_prompt",
     "build_analysis_guidance",
+    "metric_inventory_lines",
     "no_sla_guidance",
     "normalize_test_type",
     "sla_guidance_lines",
