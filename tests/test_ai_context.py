@@ -730,7 +730,7 @@ def test_missing_usage_does_not_fail(monkeypatch):
     providers_module.reset_usage()
 
 
-def test_save_llm_results_writes_context(monkeypatch):
+def _capture_llm_rows(monkeypatch):
     from AI import db_store
 
     captured = {}
@@ -751,7 +751,11 @@ def test_save_llm_results_writes_context(monkeypatch):
             return "INSERT INTO llm_reports (context) VALUES"
 
     monkeypatch.setattr(db_store.sql, "SQL", lambda _text: SqlStub())
+    return db_store, captured
 
+
+def test_save_llm_results_writes_context(monkeypatch):
+    db_store, captured = _capture_llm_rows(monkeypatch)
     db_store.save_llm_results(
         {
             "final": '{"verdict":"Успешно"}',
@@ -770,6 +774,29 @@ def test_save_llm_results_writes_context(monkeypatch):
     # A new run stores codes: the verdict column and parsed.verdict (the model's label is mapped).
     parsed_json = final_row[8]
     assert final_row[12] == "pass" and (parsed_json.adapted if hasattr(parsed_json, "adapted") else parsed_json)["verdict"] == "pass"
+
+
+def test_save_llm_results_stores_non_finite_numbers_as_null(monkeypatch):
+    # PostgreSQL rejects Infinity and NaN in jsonb, and the whole run lost its LLM results.
+    db_store, captured = _capture_llm_rows(monkeypatch)
+    db_store.save_llm_results(
+        {
+            "final": '{"verdict":"Успешно"}',
+            "final_parsed": {"verdict": "Успешно", "peak": float("inf")},
+            "scores": {"final": {"data_score": float("nan")}},
+            "contexts": {"final": {"domain": "final", "series": [{"series": "app=a", "mean": float("inf"), "max": float("-inf")}]}},
+            "sla_checks": [{"metric": "rps", "actual": float("inf")}],
+            "system_context": {"limit": float("nan")},
+        },
+        {"run_name": "nightly-1"},
+        {"schema": "public", "llm_table": "llm_reports"},
+    )
+    final_row = captured["rows"][-1]
+    stored = [value.adapted for value in final_row if hasattr(value, "adapted")]
+    assert len(stored) == 5
+    for payload in stored:
+        json.dumps(payload, allow_nan=False)
+    assert final_row[10].adapted["series"] == [{"series": "app=a", "mean": None, "max": None}]
 
 
 class _HttpResp:
@@ -812,6 +839,17 @@ def test_promql_failure_does_not_zero_other_queries(monkeypatch):
     assert dfs[0].empty
     assert not dfs[1].empty
     assert float(dfs[1].iloc[0, 0]) == 1.5
+
+
+def test_promql_non_finite_samples_are_skipped(monkeypatch):
+    values = [[60.0, "+Inf"], [120.0, "2.0"], [180.0, "NaN"], [240.0, "-Inf"]]
+    monkeypatch.setattr(
+        pipeline_module,
+        "fetch_metric_series",
+        lambda *_a, **_k: {"status": "success", "data": {"result": [{"metric": {"app": "a"}, "values": values}]}},
+    )
+    (df,) = pipeline_module.fetch_and_aggregate_with_label_keys("http://prom", 60.0, 240.0, ["q"], [["app"]], "1m", "1T")
+    assert df["app=a"].dropna().tolist() == [2.0]
 
 
 def test_parse_fills_missing_verdict_rationale_from_findings():

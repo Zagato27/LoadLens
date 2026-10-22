@@ -24,6 +24,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 - The time axis and the tooltip of the report charts follow the clock of the report, like the step row and the
   markers; in a browser outside the report's time zone the ticks no longer disagree with the marker labels.
+- The AI analysis of a run is saved when a PromQL query divides by zero. `+Inf`, `-Inf` and `NaN` samples are
+  skipped as missing points, and non-finite numbers in the stored JSON become `null`; before, PostgreSQL rejected
+  the results of every domain with `Token "Infinity" is invalid`.
 
 ## [1.0.0] - 2026-10-21
 

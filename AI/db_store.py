@@ -1354,6 +1354,17 @@ def _coerce_json_object(raw: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _finite_json(value: Any) -> Any:
+    """Replaces NaN and ±Infinity with None: PostgreSQL rejects these tokens in json and jsonb."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _finite_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_finite_json(item) for item in value]
+    return value
+
+
 def save_llm_results(
     results: Dict[str, object],
     run_meta: Dict[str, object],
@@ -1398,7 +1409,7 @@ def save_llm_results(
         rows = []
         scores_all = (results.get("scores", {}) or {})
         contexts_all = results.get("contexts") if isinstance(results.get("contexts"), dict) else {}
-        system_context_snapshot = results.get("system_context") if isinstance(results.get("system_context"), dict) else None
+        system_context_snapshot = _finite_json(results.get("system_context")) if isinstance(results.get("system_context"), dict) else None
         # Verdicts are stored as codes (AI.verdicts); parsed analyses get codes in ``verdict`` as well.
         run_sla_verdict = optional_code(results.get("sla_verdict")) if results.get("sla_checks") else None
         load_step_table = results.get("load_step_table") if isinstance(results.get("load_step_table"), dict) else None
@@ -1415,6 +1426,7 @@ def save_llm_results(
             if results.get("report_language"):
                 # Readers of the run row (forecast, SLA block) find the report language without the final JSON.
                 run_sla_details["report_language"] = results.get("report_language")
+            run_sla_details = _finite_json(run_sla_details)
         domains = [
             ("jvm", results.get("jvm"), results.get("jvm_parsed"), scores_all.get("jvm")),
             ("database", results.get("database"), results.get("database_parsed"), scores_all.get("database")),
@@ -1444,6 +1456,7 @@ def save_llm_results(
             if isinstance(parsed_val, dict):
                 parsed_val = normalize_report(parsed_val)
                 verdict_std = to_code(parsed_val.get("verdict"))
+            parsed_val = _finite_json(parsed_val)
 
             text_str = raw_text
             raw_json_like = bool((raw_text or "").strip().startswith("{") or (raw_text or "").strip().startswith("```json"))
@@ -1453,8 +1466,8 @@ def save_llm_results(
                 except Exception:
                     text_str = raw_text
             parsed_json = Json(parsed_val) if parsed_val is not None else None
-            scores_json = Json(scores_val) if scores_val is not None else None
-            context_obj = _coerce_json_object(contexts_all.get(domain))
+            scores_json = Json(_finite_json(scores_val)) if scores_val is not None else None
+            context_obj = _finite_json(_coerce_json_object(contexts_all.get(domain)))
             context_json = Json(context_obj) if context_obj is not None else None
             system_context_json = Json(system_context_snapshot) if system_context_snapshot is not None else None
             is_final = (domain == "final")

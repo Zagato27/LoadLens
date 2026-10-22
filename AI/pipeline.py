@@ -4,6 +4,7 @@ import copy
 import csv
 import json
 import logging
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1321,6 +1322,9 @@ def fetch_and_aggregate_with_label_keys(
                 label_str = "|".join(label_parts)
                 for (ts_float, value_str) in series["values"]:
                     val = float(value_str)
+                    # PromQL answers a division by zero with +Inf, -Inf or NaN: that is a missing sample, not a value.
+                    if not math.isfinite(val):
+                        continue
                     records.append([ts_float, label_str, val])
         if not records:
             df = pd.DataFrame(columns=["ts", "series", "value"])  # пустая
