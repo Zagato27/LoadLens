@@ -70,7 +70,7 @@ def test_resolve_step_detection_respects_config_only_for_capacity_like_modes():
 
 def test_sla_guidance_degradation_rule_only_for_capacity_modes():
     sla = {"target_rps": 200, "max_p95_ms": 500, "max_performance_query": "LT RPS"}
-    rule = "даже если после него была деградация"
+    rule = "даже если после неё была деградация"
     assert rule in build_analysis_guidance(sla, None, "step")
     assert rule in build_analysis_guidance(sla, None, "stress")
     soak = build_analysis_guidance(sla, None, "soak")

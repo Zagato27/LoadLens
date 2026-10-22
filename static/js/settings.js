@@ -2011,6 +2011,7 @@
   const SLA_SHARED_DESC = LL.t('settings.sla.shared_desc');
   const SLA_PEAK_FIELDS = [
     { key: 'min_stable_minutes', label: LL.t('settings.sla.field.min_stable_minutes'), type: 'number', step: '0.5' },
+    { key: 'target_margin_pct', label: LL.t('settings.sla.field.target_margin_pct'), type: 'number', step: '1', hint: LL.t('settings.sla.field.target_margin_pct_hint') },
     { key: 'step_detection_preset', label: LL.t('settings.sla.field.step_detection_preset'), type: 'select', options: null },
     { key: 'step_detection_enabled', label: LL.t('settings.sla.field.step_detection_enabled'), type: 'checkbox', term: 'step_profile' },
     { key: 'target_rps_allow_peak_fallback', label: LL.t('settings.sla.field.target_rps_allow_peak_fallback'), type: 'checkbox', term: 'peak_max' },
@@ -2151,7 +2152,8 @@
         + (dead ? `<div class="field-hint warn" role="status">${esc(dead)}</div>` : '')
         + (f.hint ? `<div class="field-hint">${esc(f.hint)}</div>` : '');
     } else {
-      wrap.innerHTML = `<label for="${id}">${labelHtml}</label><input type="number" id="${id}" step="${f.step || 'any'}" value="${value === undefined || value === null ? '' : esc(value)}" />`;
+      wrap.innerHTML = `<label for="${id}">${labelHtml}</label><input type="number" id="${id}" step="${f.step || 'any'}" value="${value === undefined || value === null ? '' : esc(value)}" />`
+        + (f.hint ? `<div class="field-hint">${esc(f.hint)}</div>` : '');
     }
     const control = wrap.querySelector('input, select');
     control.addEventListener('change', () => {

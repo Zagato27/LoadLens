@@ -126,9 +126,9 @@ follow them; hand-written queries should too.
 
 | Field | Meaning |
 |---|---|
-| `target_rps` | The RPS the test has to reach (step and stress tests: on the last stable step; soak: held for the whole hold window; spike: the spike level) |
+| `target_rps` | The RPS the test has to reach (step and stress tests: on a step where the latency and error thresholds hold; soak: held for the whole hold window; spike: the spike level) |
 | `max_error_rate_pct`, `max_p95_ms`, `max_p99_ms` | Error ratio and latency limits, checked on the same window |
-| `max_cpu_pct`, `max_memory_pct` | Node resource limits; a violation gives "Risks found" rather than "Failed" on step and stress tests |
+| `max_cpu_pct`, `max_memory_pct` | Node resource limits; on step and stress tests they are checked on the target step (the first step at the target RPS), a violation there gives "Risks found" rather than "Failed" and one on the steps above it is reported as headroom used up |
 | `max_performance_query` | The assigned total RPS series: the step detector and the stable maximum work on it |
 | `step_detection_enabled`, `step_detection_preset`, `min_stable_minutes` | Step detector switch (step and stress tests), preset `strict`, `balanced` or `lenient`, and the shortest plateau that counts as a step |
 | `mean_latency_query`, `vus_query`, `load_model`, `latency_unit`, `service_cpu_query` | Series for the capacity forecast and the pod plan |

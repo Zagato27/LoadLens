@@ -33,6 +33,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   installations per domain told apart by the host title. Their `host.*` roles fill no SLA field.
 - **Pack detection reads more sources.** "Detect from sources" also reads the direct Prometheus sources of the
   catalogue and the sources rows already read, and offers "Read from it" when a pack's metrics are found there.
+- **Margin over the target RPS.** `sla.target_margin_pct` (settings: SLA, step detector block) asks step and stress
+  tests to hold the latency and error thresholds at the target plus a margin; the `target_margin` check fails with
+  `risk` otherwise, and CPU and memory are then checked on that step
+  ([docs/configuration.md](docs/configuration.md#sla)).
 - **Domain metrics in the prompt.** Each domain prompt now lists every configured query of the domain with its
   meaning, unit, series keys and note, and marks the queries that returned no data in the run. Queries added by hand
   get a "Role" and a "Note for the AI analysis" in the row editor (`queries.<domain>.descriptions`); the note
@@ -43,6 +47,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - **A source runs one language, not a domain.** A pack in another language merges into a domain when its rows read
   another source; "Replace only" became "Language conflict" and appears only when rows in another language read the
   same source.
+- **Step and stress verdicts are decided on the target step.** CPU and memory are checked on the first step that
+  reaches `target_rps` with the latency and error thresholds held, not on the last such step: the steps above the
+  target are headroom and never lower the verdict, so a run that goes further gets the same or a better one. No such
+  step is `fail`, as is a target step only after-drop steps would reach. Without `target_rps` CPU or memory over the
+  threshold is `risk` instead of `fail`. Reports show two bands on the charts and two tags in the step row (target
+  step and max), the SLA summary names both, and the model is told that breaches above the target step are headroom
+  (`deterministic_sla.target_window`, `headroom`, `sla_step.role`). Reports saved before are shown as they were.
 - **Domain prompts no longer list their sections by hand.** The lists named metrics that no pack collects (for
   example `kafka_consumer_fetch_rate` or disk by PVC); the generated domain metrics replace them. A stored copy of an
   old default prompt is still read as the default; a prompt edited in "Settings → Prompts" keeps its own text,

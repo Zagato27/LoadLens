@@ -1033,14 +1033,17 @@ def test_sla_window_falls_back_to_last_stable_step_where_latency_holds():
     assert result["stable_window"]["level"] == pytest.approx(1198.4)
     assert result["stable_window"]["degraded_level"] == pytest.approx(1415.8)
 
-    # A lower target still fails when every stable step breaks the SLA: the latest step is kept.
+    # A lower target still fails when every stable step breaks the SLA: the latest step is kept, and no RPS was
+    # reached within the SLA, so the target check has no actual value.
     latency_all_bad = latency.copy()
     latency_all_bad.iloc[:6] = 9000.0
     domain_data["lt_framework"]["labeled"] = [{"label": "p95", "df": latency_all_bad}]
     result_bad = evaluate_sla(domain_data, sla, test_profile={"mode": "capacity"})
     bad_by_name = {check["name"]: check for check in result_bad["checks"]}
-    assert bad_by_name["target_rps"]["actual"] == pytest.approx(1415.8)
+    assert result_bad["stable_window"]["level"] == pytest.approx(1415.8)
+    assert bad_by_name["target_rps"]["passed"] is False and bad_by_name["target_rps"]["actual"] is None
     assert bad_by_name["p95_latency"]["passed"] is False
+    assert result_bad["verdict"] == "fail"
 
 
 # Balanced detector preset; production feeds it per-minute buckets.

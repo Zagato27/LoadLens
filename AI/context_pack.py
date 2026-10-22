@@ -599,7 +599,8 @@ def _covers_start(row: Dict[str, Any], start: Optional[str]) -> bool:
     return left <= moment <= right
 
 
-def _select_step(rows: Sequence[Dict[str, Any]], level: Any, start: Optional[str]) -> None:
+def _select_step(rows: Sequence[Dict[str, Any]], level: Any, start: Optional[str], flag: str = "selected") -> None:
+    """Sets ``flag`` on the row of the window at ``level`` RPS starting at ``start``."""
     target = _round_num(level, 4)
     matches = [
         row for row in rows
@@ -610,7 +611,7 @@ def _select_step(rows: Sequence[Dict[str, Any]], level: Any, start: Optional[str
     containing = [row for row in rows if _covers_start(row, start)]
     pool = covered or containing or [row for row in matches if row.get("stable") is not False] or matches
     if pool:
-        pool[-1]["selected"] = True
+        pool[-1][flag] = True
 
 
 def _empty_step_report() -> Dict[str, Any]:
@@ -632,8 +633,17 @@ def load_step_report_from_frames(
     latency_query: str = "",
     selected_level: Any = None,
     selected_start: Optional[str] = None,
+    selected_role: str = "",
+    ceiling_level: Any = None,
+    ceiling_start: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Per-step RPS level and latency p95 on the plateau, for the report table."""
+    """Per-step RPS level and latency p95 on the plateau, for the report table.
+
+    ``selected_*`` is the step the SLA verdict was decided on (``selected``). On a step test with a target step
+    that row also gets ``sla_role`` (``target`` or ``margin``), and the ceiling (``ceiling_*``: the last step on
+    which the latency and error thresholds hold, when it is another step) gets ``ceiling``. Both keys are set only
+    on those rows.
+    """
     if not steps:
         return _empty_step_report()
     rps_name, rps_series, rps_label = _series_from_labeled(labeled, rps_query, "max")
@@ -671,6 +681,15 @@ def load_step_report_from_frames(
             "selected": False,
         })
     _select_step(rows, selected_level, selected_start)
+    if selected_role:
+        for row in rows:
+            if row["selected"]:
+                row["sla_role"] = selected_role
+    if ceiling_level is not None:
+        _select_step(rows, ceiling_level, ceiling_start, flag="ceiling")
+        for row in rows:
+            if row.get("ceiling") and row["selected"]:
+                del row["ceiling"]
     return {
         "rps_query": rps_label or None,
         "rps_series": rps_name or None,

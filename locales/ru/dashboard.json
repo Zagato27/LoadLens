@@ -34,6 +34,7 @@
   "dashboard.fig.errors": "ошибки · порог ≤ {value}",
   "dashboard.fig.errors_label": "ошибки",
   "dashboard.fig.kept": "соблюдён",
+  "dashboard.fig.not_confirmed": "не подтверждена",
   "dashboard.fig.not_reached": "не достигнута",
   "dashboard.fig.p95": "p95 · порог ≤ {value}",
   "dashboard.fig.reached": "достигнута",

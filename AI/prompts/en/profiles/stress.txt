@@ -4,3 +4,5 @@
   step, not a short peak; the value is already computed in designated_peak_performance and saturation.
 - Name the limiting resource (saturation.limiting_resource, if found) and the kind of degradation
   (saturation.failure_mode): growing latency, errors or falling throughput.
+- When there is a target step (deterministic_sla.target_window), the verdict is decided on it; the saturation
+  point is a separate result: overload above the target step is the expected outcome of a stress test, not a reason to lower the verdict.

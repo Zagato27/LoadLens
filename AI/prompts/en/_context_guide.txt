@@ -35,14 +35,22 @@ HOW TO READ THE CONTEXT (JSON, passed together with this task):
 - timeline (final task only): a "metric × step" matrix across all domains (mean_per_step — means over the step
   plateau) — use it to link events of different components at the same step.
 - deterministic_sla (final task): the result of the programmatic SLA check — verdict, checks[] with actual/threshold
-  and passed. It is the source of truth for the SLA; do not recompute it and do not contradict it without an explicit reason.
+  and passed. It is the source of truth for the SLA; do not recompute it and do not contradict it without an explicit reason. In a
+  step or stress test target_window is the target step (role=target) or the margin step over the target (role=margin):
+  CPU and memory are checked on it and the verdict is decided there; stable_window is the ceiling, the last step on which
+  the latency and error thresholds hold; headroom holds the ceiling (ceiling_level), its ratio to the target (ratio) and
+  the thresholds breached only above the target step (above_target_failed). Breaches above the target step are headroom
+  used up, not a risk.
 - designated_peak_performance (final task): the only source of maximum performance
   (stable_max). Do not take RPS from other domains to estimate the maximum.
 - sla_step (domain tasks): the step on which the SLA was checked programmatically — step_label, start_iso/end_iso,
   rps and checks[] with threshold/actual/passed. Determine the domain status from the steps up to and including the end of sla_step.
   Describe degradation on later steps as findings with its start_time (where and why the system hit its limit), but
   do not set verdict "fail" because of it: in a step test this is the expected outcome. "fail" — only if the problem began
-  before the end of sla_step. If there is no sla_step, assess the whole test.
+  before the end of sla_step. If there is no sla_step, assess the whole test. If sla_step has a role (target — the target
+  step, margin — the margin step over the target), it is the step the verdict is decided on, and ceiling_step_label /
+  ceiling_rps is the ceiling: growth of CPU, memory and latency between them is headroom used up, not a reason for "risk"
+  or "fail".
 - test_profile: the test type (normalized_test_type: step | soak | spike | stress) and the analysis mode (mode).
 - hold_window (soak): the load hold window without the ramp-up — start_iso/end_iso, actual_rps_mean (mean RPS),
   min_bucket_rps/min_bucket_label (the weakest interval), drop_pct, early_drop_iso (RPS fell long before the end).

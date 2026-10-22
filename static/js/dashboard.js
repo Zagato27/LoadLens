@@ -550,7 +550,10 @@
     const targetTone = target ? passTone(target.passed) : '';
     let targetWord = '';
     if (targetValue !== null && target.passed === true) targetWord = LL.t('dashboard.fig.reached');
-    else if (targetValue !== null && target.passed === false) targetWord = LL.t('dashboard.fig.not_reached');
+    else if (targetValue !== null && target.passed === false) {
+      // No step at the target held the latency and error thresholds: the RPS ran, the target is not confirmed.
+      targetWord = finite(target.actual) === null ? LL.t('dashboard.fig.not_confirmed') : LL.t('dashboard.fig.not_reached');
+    }
     const figs = [{
       key: 'rps',
       value: formatRps(rps),

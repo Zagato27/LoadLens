@@ -1541,7 +1541,12 @@
     ].join('');
   }
 
-  const SLA_CHECK_NAMES = ['target_rps', 'error_rate', 'p95_latency', 'p99_latency', 'cpu_usage', 'memory_usage', 'recovery'];
+  const SLA_CHECK_NAMES = ['target_rps', 'target_margin', 'error_rate', 'p95_latency', 'p99_latency', 'cpu_usage', 'memory_usage', 'recovery'];
+  // Checks whose threshold is a floor (more is better): the target RPS and the margin over it.
+  const FLOOR_CHECKS = ['target_rps', 'target_margin'];
+  function isFloorCheck(name) {
+    return FLOOR_CHECKS.indexOf(safeStr(name)) >= 0;
+  }
   // Visible name of an SLA check (criterion and unit) in the UI language; '' for an unknown name.
   function slaCheckLabel(name) {
     const key = safeStr(name);
@@ -1566,7 +1571,7 @@
       fill: Math.round((ratio / SLA_BAR_SPAN) * 1000) / 10,
       mark: Math.round((1 / SLA_BAR_SPAN) * 1000) / 10,
       tone: passed === true ? 'ok' : (passed === false ? 'fail' : 'na'),
-      higherBetter: safeStr(check.name) === 'target_rps',
+      higherBetter: isFloorCheck(check.name),
       percent: Math.round((actual / threshold) * 100)
     };
   }
@@ -1578,9 +1583,9 @@
     const tone = bar.tone === 'ok' ? '' : ` class="${bar.tone}"`;
     return `<div class="fig-bar${bar.higherBetter ? ' is-higher-better' : ''}" title="${escapeHtml(title)}"><i${tone} style="width:${bar.fill}%"></i><b style="left:${bar.mark}%"></b></div>`;
   }
-  // Comparison sign of a threshold: the target RPS is a floor, every other check a ceiling.
+  // Comparison sign of a threshold: the target RPS and the margin over it are floors, every other check a ceiling.
   function thresholdSign(name) {
-    return safeStr(name) === 'target_rps' ? '≥' : '≤';
+    return isFloorCheck(name) ? '≥' : '≤';
   }
   // Query and series a check was computed on («LT: RPS sum by all groups · all»), '' when the report does not say.
   function slaSourceText(check, window, table) {
@@ -1602,7 +1607,22 @@
     const endMs = utcMoment(window.end || window.end_iso);
     const span = startMs !== null && endMs !== null ? clockAt(startMs, offset) + '–' + clockAt(endMs, offset) : '';
     if (mode === 'hold') return span ? LL.t('report.sla.scope_hold', { span: span }) : LL.t('report.sla.scope_hold_only');
-    const chosen = table ? chosenSlaStep(linkSlaToSteps(table, finalRow).steps, window, markerChecks(finalRow)) : null;
+    const linked = table ? linkSlaToSteps(table, finalRow).steps : [];
+    const target = markerTargetWindow(finalRow);
+    const ceiling = linked.find((step) => step.ceiling && !step.selected) || null;
+    if (Object.keys(target).length && ceiling) {
+      // A step test decided on its target step: the window of that step, the ceiling by its index.
+      const chosenTarget = chosenSlaStep(linked, target, markerChecks(finalRow));
+      const fromMs = utcMoment(target.start || target.start_iso);
+      const toMs = utcMoment(target.end || target.end_iso);
+      const targetSpan = fromMs !== null && toMs !== null ? clockAt(fromMs, offset) + '–' + clockAt(toMs, offset) : '';
+      const params = { index: chosenTarget ? safeStr(chosenTarget.index) : '', span: targetSpan, ceiling: safeStr(ceiling.index) };
+      if (params.index) {
+        if (safeStr(target.role) === 'margin') return targetSpan ? LL.t('report.sla.scope_margin', params) : LL.t('report.sla.scope_margin_only', params);
+        return targetSpan ? LL.t('report.sla.scope_target', params) : LL.t('report.sla.scope_target_only', params);
+      }
+    }
+    const chosen = table ? chosenSlaStep(linked, window, markerChecks(finalRow)) : null;
     const index = chosen ? safeStr(chosen.index) : '';
     if (index) return span ? LL.t('report.sla.scope_step', { index: index, span: span }) : LL.t('report.sla.scope_step_only', { index: index });
     return span ? LL.t('report.sla.scope_window', { span: span }) : '';
@@ -1896,14 +1916,44 @@
       const head = LL.t('report.steps.sla_spike');
       return { steps: steps, slaNote: checks.length ? head + '. ' + slaChecksText(checks) + '.' : head + '.' };
     }
+    const target = markerTargetWindow(finalRow);
+    const hasTarget = Object.keys(target).length > 0;
     if (!steps.some((step) => step.selected)) {
-      const moment = momentMs(window && (window.start || window.start_iso));
+      const anchor = hasTarget ? target : window;
+      const moment = momentMs(anchor && (anchor.start || anchor.start_iso));
       const covered = steps.find((step) => stepCovers(step, moment));
       if (covered) covered.selected = true;
-      else markSelectedStep(steps, hintFromCheck(checks, 'target_rps').actual);
+      else markSelectedStep(steps, hasTarget ? target.level : hintFromCheck(checks, 'target_rps').actual);
     }
     const chosen = steps.find((step) => step.selected) || null;
-    return { steps: steps, slaNote: slaStepSentence(chosen, checks, window, steps) };
+    if (!hasTarget) return { steps: steps, slaNote: slaStepSentence(chosen, checks, window, steps) };
+    // A step test decided on its target step: that step is tagged by its role, the ceiling (when it is another
+    // step) gets its own tag; tables saved with the report carry both, older ones get them from the windows.
+    if (chosen && !chosen.sla_role) chosen.sla_role = safeStr(target.role) === 'margin' ? 'margin' : 'target';
+    let ceiling = null;
+    if (window && !sameWindowRange(target, window)) {
+      ceiling = steps.find((step) => step.ceiling) || null;
+      if (!ceiling) {
+        const found = ceilingStep(steps, window);
+        if (found && found !== chosen) {
+          found.ceiling = true;
+          ceiling = found;
+        }
+      }
+    }
+    return { steps: steps, slaNote: slaTargetSentence(chosen, ceiling, checks, target, window) };
+  }
+  // "The target is confirmed on step 1 (15:01–15:09); the latency and error thresholds hold up to step 3
+  // (≈300 RPS). <checks>." — the step-row sentence of a step test with a target step.
+  function slaTargetSentence(chosen, ceiling, checks, target, window) {
+    if (!chosen || !checks.length) return '';
+    const params = { index: chosen.index || '', interval: stepInterval(chosen) };
+    let head = safeStr(target.role) === 'margin' ? LL.t('report.steps.sla_margin_step', params) : LL.t('report.steps.sla_target_step', params);
+    if (ceiling && ceiling !== chosen) {
+      const level = finiteOrNull(window && window.level) !== null ? window.level : ceiling.rps;
+      head += '; ' + LL.t('report.steps.sla_ceiling', { index: ceiling.index || '', level: formatNumber(level) });
+    }
+    return head + '. ' + slaChecksText(checks) + '.';
   }
   // The full «SLA проверено на ступени …» sentence (plain text), shown as the tooltip of the SLA caption.
   function slaStepNote(finalRow) {
@@ -1914,9 +1964,22 @@
   // One cell of the step row: «5 · 250 RPS» (SLA tag on the step the criteria were checked on) over «15:54–15:58 ·
   // p95 462.67 мс»; a step after a drop is named so and drawn in the fail tone. The cell grows with the step length,
   // so it sits under its step of the profile; hovering or focusing it highlights that interval on the charts.
+  // Tag of the step the SLA verdict was decided on: "target" / "margin" on a step test with a target step, else
+  // "SLA"; the ceiling of such a run (another step) is tagged "max".
+  function stepTagHtml(step) {
+    if (step.selected) {
+      let text = 'SLA';
+      if (step.sla_role === 'margin') text = LL.t('report.steps.tag_margin');
+      else if (step.sla_role === 'target') text = LL.t('report.steps.tag_target');
+      return `<span class="rep-step-tag">${escapeHtml(text)}</span>`;
+    }
+    if (step.ceiling) return `<span class="rep-step-tag is-ceiling" title="${escapeHtml(LL.t('report.steps.tag_ceiling_title'))}">${escapeHtml(LL.t('report.steps.tag_ceiling'))}</span>`;
+    return '';
+  }
   function stepCellHtml(step) {
     const classes = ['rep-step'];
     if (step.selected) classes.push('is-sla');
+    else if (step.ceiling) classes.push('is-ceiling');
     if (step.after_drop === true) classes.push('is-bad');
     else if (step.stable === false) classes.push('is-unstable');
     const rps = formatNumber(step.rps);
@@ -1938,7 +2001,7 @@
     const minutes = start !== null && end !== null && end > start ? Math.round((end - start) / 6000) / 10 : 1;
     return [
       `<div class="${classes.join(' ')}" role="listitem"${rangeAttrs}${indexAttr} style="flex-grow:${minutes}">`,
-      `<b>${escapeHtml(head || '—')}${step.selected ? '<span class="rep-step-tag">SLA</span>' : ''}</b>`,
+      `<b>${escapeHtml(head || '—')}${stepTagHtml(step)}</b>`,
       `<span class="rep-step-sub">${escapeHtml(sub)}</span>`,
       flag ? `<span class="rep-step-flag">${escapeHtml(flag)}</span>` : '',
       '</div>'
@@ -2023,6 +2086,50 @@
     }
     return isPlainObject(window) ? window : {};
   }
+  // Step the verdict of a step test was decided on (target_window: the target or the margin step); {} for reports
+  // without one (AI/report_markers.sla_target_window).
+  function markerTargetWindow(finalRow) {
+    const sla = parseJsonish(finalRow && finalRow.sla_details) || {};
+    let window = sla.target_window;
+    if (!isPlainObject(window)) {
+      const parsed = parseJsonish(finalRow && finalRow.parsed) || {};
+      window = isPlainObject(parsed.deterministic_sla) ? parsed.deterministic_sla.target_window : null;
+    }
+    return isPlainObject(window) && (window.start || window.start_iso) ? window : {};
+  }
+  function windowRange(window) {
+    return [window.start || window.start_iso, window.end || window.end_iso];
+  }
+  function sameWindowRange(a, b) {
+    const left = windowRange(a);
+    const right = windowRange(b);
+    return left[0] === right[0] && left[1] === right[1];
+  }
+  // Ceiling of a step test: the row marked `ceiling`, else the one under the start of the ceiling window, else the
+  // last one at its level (AI/report_markers.ceiling_step).
+  function ceilingStep(steps, window) {
+    const marked = steps.find((step) => step.ceiling);
+    if (marked) return marked;
+    const start = utcMoment(windowRange(window)[0]);
+    const covered = steps.find((step) => {
+      const range = stepRangeMs(step);
+      return start !== null && range[0] !== null && range[1] !== null && range[0] <= start && start <= range[1];
+    });
+    if (covered) return covered;
+    const level = finiteOrNull(window.level);
+    if (level === null) return null;
+    const matches = steps.filter((step) => finiteOrNull(step.rps) !== null && Math.abs(Number(step.rps) - level) <= 0.51);
+    const stable = matches.filter((step) => step.stable !== false);
+    const pool = stable.length ? stable : matches;
+    return pool.length ? pool[pool.length - 1] : null;
+  }
+  // "SLA: step N", or "Target: step N" / "Margin: step N" when the verdict was decided on a target step.
+  function slaBandLabel(chosen, target) {
+    const index = chosen && safeStr(chosen.index) ? safeStr(chosen.index) : '';
+    if (!Object.keys(target).length) return index ? LL.t('report.marker.sla_step', { index: index }) : LL.t('report.marker.sla_window');
+    if (safeStr(target.role) === 'margin') return index ? LL.t('report.marker.sla_margin_step', { index: index }) : LL.t('report.marker.sla_margin_window');
+    return index ? LL.t('report.marker.sla_target_step', { index: index }) : LL.t('report.marker.sla_target_window');
+  }
   function markerChecks(finalRow) {
     const sla = parseJsonish(finalRow && finalRow.sla_details) || {};
     let checks = sla.checks;
@@ -2056,7 +2163,8 @@
   function checkNamed(checks, name) {
     return checks.find((check) => safeStr(check.name) === name) || {};
   }
-  // Step the SLA was checked on: the marked one, the one under the window start, else by target RPS.
+  // Step the SLA was checked on: the marked one, the one under the window start, else by RPS: the level of a
+  // target window (it has a role), else the actual target RPS.
   function chosenSlaStep(steps, window, checks) {
     const selected = steps.find((step) => step.selected);
     if (selected) return selected;
@@ -2066,7 +2174,7 @@
       return start !== null && range[0] !== null && range[1] !== null && range[0] <= start && start <= range[1];
     });
     if (covered) return covered;
-    const target = finiteOrNull(checkNamed(checks, 'target_rps').actual);
+    const target = finiteOrNull(window.role ? window.level : checkNamed(checks, 'target_rps').actual);
     if (target === null) return null;
     const matches = steps.filter((step) => finiteOrNull(step.rps) !== null && Math.abs(Number(step.rps) - target) <= 0.51);
     const stable = matches.filter((step) => step.stable !== false);
@@ -2078,22 +2186,35 @@
     const same = (a, b) => (a === undefined ? null : a) === (b === undefined ? null : b);
     return steps.findIndex((item) => same(item.index, step.index) && same(item.start_iso, step.start_iso));
   }
-  function stepMarkers(parsed, window, checks, steps) {
+  function stepMarkers(parsed, window, checks, steps, targetWindow) {
     const out = [];
     const offset = reportOffsetHours(steps);
     const saturation = isPlainObject(parsed.saturation) ? parsed.saturation : null;
-    const chosen = chosenSlaStep(steps, window, checks);
     const kind = safeStr(window.kind).toLowerCase() || 'step';
+    const target = kind === 'step' && isPlainObject(targetWindow) ? targetWindow : {};
+    const hasTarget = Object.keys(target).length > 0;
+    const chosen = chosenSlaStep(steps, hasTarget ? target : window, checks);
     const hasWindow = Object.keys(window).length > 0;
-    const label = chosen && safeStr(chosen.index) ? LL.t('report.marker.sla_step', { index: safeStr(chosen.index) }) : LL.t('report.marker.sla_window');
+    const label = slaBandLabel(chosen, target);
     let band = null;
-    if (hasWindow && kind === 'step') band = bandItem(window.start || window.start_iso, window.end || window.end_iso, label, 'accent', 'sla');
+    if (hasTarget) band = bandItem(target.start || target.start_iso, target.end || target.end_iso, label, 'accent', 'sla');
+    else if (hasWindow && kind === 'step') band = bandItem(window.start || window.start_iso, window.end || window.end_iso, label, 'accent', 'sla');
     if (!band && chosen) band = bandItem(chosen.plateau_start_iso || chosen.start_iso, chosen.plateau_end_iso || chosen.end_iso, label, 'accent', 'sla');
     if (!band && saturation) {
       const satWindow = isPlainObject(saturation.saturation_window) ? saturation.saturation_window : {};
       band = bandItem(satWindow.start_iso, satWindow.end_iso, label, 'accent', 'sla');
     }
     if (band) out.push(band);
+    // The ceiling of a run that went past the target step: a second band, in the ok tone.
+    const otherCeiling = hasTarget && hasWindow && !sameWindowRange(target, window);
+    let ceiling = null;
+    if (otherCeiling) {
+      ceiling = ceilingStep(steps, window);
+      const index = ceiling && safeStr(ceiling.index) ? safeStr(ceiling.index) : '';
+      const ceilingLabel = index ? LL.t('report.marker.ceiling_step', { index: index }) : LL.t('report.marker.ceiling_window');
+      const ceilingBand = bandItem(window.start || window.start_iso, window.end || window.end_iso, ceilingLabel, 'ok', 'ceiling');
+      if (ceilingBand) out.push(ceilingBand);
+    }
     steps.slice(1).forEach((step) => {
       const t = utcMoment(step.start_iso);
       if (t !== null) out.push(markerItem('tick', t, null, '', 'muted', 'step'));
@@ -2103,7 +2224,8 @@
     const degraded = (window.degraded_level !== null && window.degraded_level !== undefined)
       || (Array.isArray(degradedChecks) ? degradedChecks.length > 0 : !!degradedChecks);
     if (hasWindow && kind === 'step' && degraded) {
-      const position = stepPosition(steps, chosen);
+      // The step after the ceiling broke the thresholds.
+      const position = stepPosition(steps, otherCeiling ? ceiling : chosen);
       const following = position >= 0 && position < steps.length - 1 ? steps[position + 1] : null;
       degradationMs = following ? utcMoment(following.start_iso) : utcMoment(window.end || window.end_iso);
       if (degradationMs !== null) out.push(markerItem('line', degradationMs, null, LL.t('report.marker.degradation', { time: clockAt(degradationMs, offset) }), 'fail', 'degradation'));
@@ -2151,7 +2273,7 @@
     if (mode === 'spike') return spikeMarkers(parsed, window);
     if (mode === 'hold') return holdMarkers(parsed, window);
     const steps = (markerTable(finalRow, table).steps || []).filter(isPlainObject);
-    return stepMarkers(parsed, window, markerChecks(finalRow), steps);
+    return stepMarkers(parsed, window, markerChecks(finalRow), steps, markerTargetWindow(finalRow));
   }
   // Query label and series named in the text of a check (reports saved before checks carried query_label and
   // series): label='…' / series='…', or «запрос «…»» / «серия «…»» of a ru report and «query «…»» / «series «…»»
@@ -2420,7 +2542,9 @@
     const errorNote = kpiThresholdNote(errors, errorBound, limitWords);
     const errorTile = errors ? withFigure(tile('errors', LL.t('report.kpi.errors'), 'error_rate', errors.actual, ' %', errorNote, kpiTone(errors.passed)), errors, kpiThresholdParts(errors, errorBound, limitWords)) : null;
     const targetBound = (value) => LL.t('report.kpi.goal_rps', { value: value });
-    const targetWords = [LL.t('report.kpi.goal_reached'), LL.t('report.kpi.goal_missed')];
+    // A step test with no step at the target that holds the latency and error thresholds has no actual target RPS.
+    const notConfirmed = !!target && target.passed === false && finiteOrNull(target.actual) === null;
+    const targetWords = [LL.t('report.kpi.goal_reached'), notConfirmed ? LL.t('report.kpi.goal_not_confirmed') : LL.t('report.kpi.goal_missed')];
     const targetNote = kpiThresholdNote(target, targetBound, targetWords);
     if (mode === 'spike') {
       const sa = parsed.spike_analysis || {};
@@ -2520,6 +2644,7 @@
   // verdict block; '' without checks. Keys are literal (tests/test_i18n.py checks every one exists).
   const SUMMARY_NAMES = {
     target_rps: 'report.summary.name.target_rps',
+    target_margin: 'report.summary.name.target_margin',
     p95_latency: 'report.summary.name.p95_latency',
     p99_latency: 'report.summary.name.p99_latency',
     error_rate: 'report.summary.name.error_rate',
@@ -2534,7 +2659,7 @@
   // Unit of a check value in prose: «450 мс», «0.4 %», «249.3 RPS», «7 мин».
   function checkUnit(name) {
     const key = safeStr(name);
-    if (key === 'target_rps') return ' RPS';
+    if (key === 'target_rps' || key === 'target_margin') return ' RPS';
     if (key === 'p95_latency' || key === 'p99_latency') return ' ' + LL.t('report.unit.ms');
     if (key === 'recovery') return ' ' + LL.t('report.unit.min');
     if (key === 'error_rate' || key === 'cpu_usage' || key === 'memory_usage') return ' %';
@@ -2565,6 +2690,8 @@
     let head = null;
     if (target && target.passed === true) {
       head = html(mode === 'hold' ? 'report.summary.target_held' : (mode === 'spike' ? 'report.summary.target_spike' : 'report.summary.target_met'));
+    } else if (target && target.passed === false && mode === 'step' && finiteOrNull(target.actual) === null) {
+      head = html('report.summary.target_not_confirmed');
     } else if (target && target.passed === false) {
       const params = { actual: summaryFigure(target.actual, 'target_rps'), threshold: summaryFigure(target.threshold, 'target_rps') };
       head = html(mode === 'hold' ? 'report.summary.target_not_held' : 'report.summary.target_missed', params);
@@ -2579,7 +2706,10 @@
         breach = html('report.summary.breach_no_value', { name: summaryName(name) });
       } else {
         const params = { name: summaryName(name), actual: summaryFigure(check.actual, name), threshold: summaryFigure(check.threshold, name) };
-        breach = html(name === 'recovery' ? 'report.summary.breach_recovery' : 'report.summary.breach_one', params);
+        let key = 'report.summary.breach_one';
+        if (name === 'recovery') key = 'report.summary.breach_recovery';
+        else if (name === 'target_margin') key = 'report.summary.breach_margin';
+        breach = html(key, params);
       }
     } else if (failed.length > 1) {
       breach = html('report.summary.breach_many', { names: summaryNames(failed) });

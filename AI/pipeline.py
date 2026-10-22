@@ -275,7 +275,7 @@ def _deterministic_sla_context(sla_result: Dict[str, Any] | None) -> Dict[str, A
         None,
     )
     verdict = to_code(result.get("verdict"))
-    return {
+    out = {
         "verdict": verdict,
         "summary": str(result.get("summary") or ""),
         "test_mode": str(result.get("test_mode") or ""),
@@ -286,6 +286,24 @@ def _deterministic_sla_context(sla_result: Dict[str, Any] | None) -> Dict[str, A
         "failed_checks": [str(item.get("name")) for item in checks if item.get("passed") is False],
         "unknown_checks": [str(item.get("name")) for item in checks if item.get("passed") is None],
     }
+    # Step tests with a target step: the step the verdict was decided on and what the run showed above it.
+    if isinstance(result.get("target_window"), dict):
+        out["target_window"] = result["target_window"]
+    if isinstance(result.get("headroom"), dict):
+        out["headroom"] = result["headroom"]
+    return out
+
+
+def _step_window(window: Any) -> Optional[Dict[str, Any]]:
+    """An SLA window of a load step (not a hold window or a spike) with both ends, else None."""
+    if not isinstance(window, dict) or not window.get("start") or not window.get("end"):
+        return None
+    return window if str(window.get("kind") or "step") == "step" else None
+
+
+def _step_of_window(load_steps: List[LoadStep], window: Dict[str, Any]) -> Optional[LoadStep]:
+    start = to_utc(window["start"])
+    return next((item for item in reversed(load_steps) if to_utc(item.start) <= start <= to_utc(item.end)), None)
 
 
 def _sla_step_context(
@@ -293,16 +311,20 @@ def _sla_step_context(
     load_steps: List[LoadStep],
     shift_hours: int,
 ) -> Optional[Dict[str, Any]]:
-    """Step the SLA was checked on; shared by domain contexts and the domain verdict guard."""
+    """Step the SLA verdict was decided on; shared by domain contexts and the domain verdict guard.
+
+    On a step test with a target step it is the target (or margin) step, ``role`` says which, and the ceiling (the
+    last step on which the latency and error thresholds hold) is named next to it. Otherwise it is the ceiling.
+    ``degraded_*`` always describe the step after the ceiling.
+    """
     result = sla_result if isinstance(sla_result, dict) else {}
-    window = result.get("stable_window")
-    if not isinstance(window, dict) or not window.get("start") or not window.get("end"):
+    ceiling = _step_window(result.get("stable_window"))
+    if ceiling is None:
         return None
-    if str(window.get("kind") or "step") != "step":
-        return None
+    window = _step_window(result.get("target_window")) or ceiling
     start = to_utc(window["start"])
     end = to_utc(window["end"])
-    step = next((item for item in reversed(load_steps) if to_utc(item.start) <= start <= to_utc(item.end)), None)
+    step = _step_of_window(load_steps, window)
     checks = [
         {key: item.get(key) for key in ("name", "category", "threshold", "actual", "passed", "message")}
         for item in (result.get("checks") or [])
@@ -312,7 +334,7 @@ def _sla_step_context(
     primary_failed = any(
         item.get("passed") is False and str(item.get("category") or "primary") == "primary" for item in checks
     )
-    return {
+    out = {
         "step_index": step.index if step else None,
         "step_label": step.label if step else None,
         "start_iso": format_iso(start, shift_hours),
@@ -321,9 +343,15 @@ def _sla_step_context(
         "verdict": to_code(result.get("verdict")),
         "primary_passed": (target is None or target.get("passed") is True) and not primary_failed,
         "checks": checks,
-        "degraded_level": window.get("degraded_level"),
-        "degraded_checks": list(window.get("degraded_checks") or []),
+        "degraded_level": ceiling.get("degraded_level"),
+        "degraded_checks": list(ceiling.get("degraded_checks") or []),
     }
+    if window is not ceiling:
+        out["role"] = str(window.get("role") or "target")
+        ceiling_step = _step_of_window(load_steps, ceiling)
+        out["ceiling_step_label"] = ceiling_step.label if ceiling_step else None
+        out["ceiling_rps"] = ceiling.get("level")
+    return out
 
 
 _SEVERE_FINDINGS = frozenset({"critical", "high"})
@@ -383,20 +411,31 @@ def _load_step_table_for_report(
     labeled: List[Dict[str, Any]],
     sla_cfg: Dict[str, Any],
     window: Optional[Dict[str, Any]],
+    target_window: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Compact step table stored with the report: step RPS and plateau latency p95."""
+    """Compact step table stored with the report: step RPS and plateau latency p95.
+
+    The step the verdict was decided on is ``selected``: the target step when there is one (with ``sla_role``;
+    the ceiling ``window`` gets ``ceiling`` when it is another step), else the ceiling.
+    """
     if not steps:
         return None
     cfg = sla_cfg if isinstance(sla_cfg, dict) else {}
     stable = window if isinstance(window, dict) else {}
+    target = target_window if isinstance(target_window, dict) and target_window.get("start") else None
+    chosen = target or stable
+    other_ceiling = target is not None and (target.get("start"), target.get("end")) != (stable.get("start"), stable.get("end"))
     latency_query = str(cfg.get("p95_query") or "").strip() or str(cfg.get("p99_query") or "").strip()
     report = load_step_report_from_frames(
         steps,
         labeled,
         rps_query=str(cfg.get("max_performance_query") or ""),
         latency_query=latency_query,
-        selected_level=stable.get("level"),
-        selected_start=str(stable["start"]) if stable.get("start") else None,
+        selected_level=chosen.get("level"),
+        selected_start=str(chosen["start"]) if chosen.get("start") else None,
+        selected_role=str(target.get("role") or "target") if target is not None else "",
+        ceiling_level=stable.get("level") if other_ceiling else None,
+        ceiling_start=str(stable["start"]) if other_ceiling and stable.get("start") else None,
     )
     return report if report.get("steps") else None
 
@@ -3155,6 +3194,7 @@ def _upload_from_llm(
         (domain_data.get("lt_framework") or {}).get("labeled") or [],
         sla_cfg,
         sla_window if profile.mode != "stability" else None,
+        sla_result.get("target_window") if is_capacity_like(profile.mode) else None,
     )
     sla_step_ctx = _sla_step_context(sla_result, load_steps, shift_hours)
     for key in domain_keys:
@@ -3657,6 +3697,8 @@ def _upload_from_llm(
         "sla_checks": sla_result.get("checks", []),
         "sla_summary": sla_result.get("summary", ""),
         "sla_window": sla_result.get("stable_window"),
+        "sla_target_window": sla_result.get("target_window"),
+        "sla_headroom": sla_result.get("headroom"),
         "load_step_table": load_step_table,
         "system_context": active_system_context,
     }

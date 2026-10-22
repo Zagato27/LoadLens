@@ -78,9 +78,10 @@ prompt of the report language is used (see [ai-analysis.md](ai-analysis.md#promp
 
 | Key | Meaning |
 |---|---|
-| `target_rps` | RPS to reach. Step and stress tests: on the last stable step; soak: held for the whole hold window (average not more than 5 % below, no interval more than 15 % below); spike: the spike level. `None` disables the check |
+| `target_rps` | RPS to reach. Step and stress tests: on a step where the latency and error thresholds hold (the target step, 2 % below the target still counts); CPU and memory are checked on that step and the steps above it are headroom that does not affect the verdict; soak: held for the whole hold window (average not more than 5 % below, no interval more than 15 % below); spike: the spike level. `None` disables the check |
+| `target_margin_pct` | Step and stress tests: margin over the target in percent. The latency and error thresholds must also hold at `target_rps × (1 + margin / 100)`, otherwise the `target_margin` check fails and the verdict is `risk`; CPU and memory are then checked on that step. `None` or `0` disables it |
 | `max_error_rate_pct`, `max_p95_ms`, `max_p99_ms` | Limits of the error ratio and the latency percentiles; `error_rate_query`, `p95_query`, `p99_query` name the series |
-| `max_cpu_pct`, `max_memory_pct` | Node limits, read from `cpu_query` and `memory_query` (percent, key `node`) |
+| `max_cpu_pct`, `max_memory_pct` | Node limits, read from `cpu_query` and `memory_query` (percent, key `node`). Step and stress tests check them on the target step |
 | `max_performance_query` | The total RPS series of the load tool: the step detector, the stable maximum and the live charts work on it |
 | `step_detection_enabled`, `step_detection_preset`, `min_stable_minutes` | Step detector (step and stress tests only; soak and spike derive their own windows), preset `strict`, `balanced` or `lenient`, shortest plateau that counts |
 | `target_rps_allow_peak_fallback` | When no stable maximum was found, use the peak RPS of the window as the achieved RPS (default `True`) |

@@ -34,6 +34,7 @@
   "dashboard.fig.errors": "errors · limit ≤ {value}",
   "dashboard.fig.errors_label": "errors",
   "dashboard.fig.kept": "met",
+  "dashboard.fig.not_confirmed": "not confirmed",
   "dashboard.fig.not_reached": "not reached",
   "dashboard.fig.p95": "p95 · limit ≤ {value}",
   "dashboard.fig.reached": "reached",

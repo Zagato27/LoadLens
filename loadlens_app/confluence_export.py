@@ -294,9 +294,21 @@ def _step_flag(step: dict[str, Any]) -> str:
     return t("report.steps.flag_unstable") if step.get("stable") is False else ""
 
 
+def _step_tag(step: dict[str, Any]) -> str:
+    """Tag of a step as on the report page: "SLA" (or "target" / "margin" on a step test decided on its target
+    step) on the step the verdict was decided on, "max" on the ceiling of such a run."""
+    if step.get("selected"):
+        role = str(step.get("sla_role") or "")
+        if role == "margin":
+            return t("report.steps.tag_margin")
+        return t("report.steps.tag_target") if role == "target" else "SLA"
+    return t("report.steps.tag_ceiling") if step.get("ceiling") else ""
+
+
 def _step_name(step: dict[str, Any]) -> str:
     flag = _step_flag(step)
-    name = str(step.get("index") or "") + (" SLA" if step.get("selected") else "")
+    tag = _step_tag(step)
+    name = str(step.get("index") or "") + (f" {tag}" if tag else "")
     return f"{name}, {flag}" if flag else name
 
 
@@ -334,7 +346,9 @@ def load_step_expand(table: dict[str, Any] | None) -> str:
 # ---- SLA criteria (same content as the block at the top of the report page) ----
 
 # Checks with a title in report.sla_check.<name> (the same titles as on the report page).
-SLA_CHECK_NAMES = ("target_rps", "error_rate", "p95_latency", "p99_latency", "cpu_usage", "memory_usage", "recovery")
+SLA_CHECK_NAMES = (
+    "target_rps", "target_margin", "error_rate", "p95_latency", "p99_latency", "cpu_usage", "memory_usage", "recovery",
+)
 # Confluence status lozenge per check result: passed, failed, no data (colour, title key).
 _SLA_STATUS = {
     True: ("Green", "confluence.sla.status_pass"),
@@ -384,6 +398,11 @@ def sla_window_of(final_row: dict[str, Any]) -> dict[str, Any]:
     return window if isinstance(window, dict) else {}
 
 
+def sla_target_window_of(final_row: dict[str, Any]) -> dict[str, Any]:
+    """Target (or margin) step a step test was decided on; {} without one (AI/report_markers.sla_target_window)."""
+    return report_markers.sla_target_window(final_row)
+
+
 def _moment(value: object) -> datetime | None:
     text = str(value or "").strip().replace(" ", "T")
     if not text:
@@ -421,11 +440,34 @@ def _step_covering(steps: list[dict[str, Any]], moment: datetime | None) -> dict
     return None
 
 
-def sla_window_note(window: dict[str, Any], step_table: dict[str, Any] | None) -> str:
-    """Where the thresholds were checked: the load step, the soak hold window or the spikes."""
+def _target_window_note(target: dict[str, Any], window: dict[str, Any], steps: list[dict[str, Any]]) -> str:
+    """Note of a step test decided on its target step: 'The target is confirmed on step 1 (…); the latency and
+    error thresholds hold up to step 3 (≈300 RPS).'"""
+    chosen = next((step for step in steps if step.get("selected")), None) or _step_covering(steps, _moment(target.get("start") or target.get("start_iso")))
+    if chosen is None:
+        return ""
+    key = "report.steps.sla_margin_step" if str(target.get("role") or "") == "margin" else "report.steps.sla_target_step"
+    note = t(key, index=chosen.get("index") or "", interval=_step_interval(chosen))
+    same = (target.get("start"), target.get("end")) == (window.get("start"), window.get("end"))
+    ceiling = None if same else (
+        next((step for step in steps if step.get("ceiling")), None) or _step_covering(steps, _moment(window.get("start") or window.get("start_iso")))
+    )
+    if ceiling is not None and ceiling is not chosen:
+        level = _number_text(window.get("level"))
+        note += "; " + t("report.steps.sla_ceiling", index=ceiling.get("index") or "", level=_number_text(ceiling.get("rps")) if level == "—" else level)
+    return note + "."
+
+
+def sla_window_note(window: dict[str, Any], step_table: dict[str, Any] | None, target: dict[str, Any] | None = None) -> str:
+    """Where the thresholds were checked: the load step (the target step and the ceiling of a step test decided on
+    its target step), the soak hold window or the spikes."""
     if not window:
         return ""
     steps = [step for step in ((step_table or {}).get("steps") or []) if isinstance(step, dict)]
+    if target and str(window.get("kind") or "step") == "step":
+        note = _target_window_note(target, window, steps)
+        if note:
+            return note
     offset = _offset_hours(steps)
     start, end = _moment(window.get("start") or window.get("start_iso")), _moment(window.get("end") or window.get("end_iso"))
     span = f"{_clock(start, offset)}–{_clock(end, offset)}" if start and end else ""
@@ -486,7 +528,7 @@ def sla_criteria_block(final_row: dict[str, Any], step_table: dict[str, Any] | N
     ) + "</tr>"
     table = f"<table><thead>{head}</thead><tbody>{''.join(rows)}</tbody></table>"
     summary = str(_as_dict(final_row.get("sla_details")).get("summary") or "").strip()
-    note = sla_window_note(sla_window_of(final_row), step_table)
+    note = sla_window_note(sla_window_of(final_row), step_table, sla_target_window_of(final_row))
     return table + (p(summary) if summary else "") + (p(note) if note else "")
 
 

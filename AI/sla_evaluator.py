@@ -3,10 +3,15 @@
 
 Окно проверки и правила вердикта зависят от режима профиля теста (AI/test_profile.py):
 
-- capacity / stress (step, stress): окно — последняя ступень, где пороги latency/errors
-  выполнены. target_rps — главный критерий: если достигнут (stable_max >= target_rps),
-  тест успешен ДАЖЕ если система деградировала после этого; нарушения остальных порогов
-  на этой ступени дают ``risk``.
+- capacity / stress (step, stress): two windows. The ceiling (``stable_window``) is the last
+  step on which the latency/error thresholds hold: the maximum performance, checked with the
+  primary thresholds. The target step (``target_window``) is the first step at ``target_rps``
+  or above (``TARGET_STEP_TOLERANCE_PCT`` below it still counts) on which they hold; CPU/memory
+  are checked on it, so steps above the target are headroom and a run that goes further never
+  gets a worse verdict. No such step: ``fail``. CPU/memory over the threshold on the target
+  step: ``risk``. With ``target_margin_pct`` the CPU/memory step is the first one at
+  ``target × (1 + margin)`` and the ``target_margin`` check fails (``risk``) without it.
+  Without ``target_rps``: primary violations on the ceiling ``fail``, CPU/memory ``risk``.
 - stability (soak): окно — окно удержания нагрузки без разгона (``lt_pack["hold_window"]``,
   иначе весь тест). target_rps — уровень, который нужно удерживать: средний RPS окна не ниже
   target на 5 %, ни один интервал не ниже на 15 %. Любое нарушение primary-порога → ``fail``,
@@ -49,12 +54,20 @@ SECONDARY_SPECS: tuple[tuple[str, str, str, str], ...] = (
     ("cpu_usage", "max_cpu_pct", "cpu_query", "%"),
     ("memory_usage", "max_memory_pct", "memory_query", "%"),
 )
+# A step measured this far below the target (or the margin level) still counts as reaching it:
+# a "100 RPS" step measured at 99.6 RPS is the target step.
+TARGET_STEP_TOLERANCE_PCT = 2.0
+# Roles of a step window: the step the target (or the margin over it) was confirmed on.
+ROLE_TARGET = "target"
+ROLE_MARGIN = "margin"
 
 
 @dataclass(frozen=True)
 class StableWindow:
     """Window the SLA is evaluated on: a load step (``kind="step"``), the soak hold window
-    (``"hold"``) or a spike (``"spike"``); ``level`` is its RPS."""
+    (``"hold"``) or a spike (``"spike"``); ``level`` is its RPS. ``role`` marks the target step
+    (``"target"``) or the margin step (``"margin"``, with ``margin_pct``) of a step test. ``after_drop``
+    marks a report step after an RPS drop: evidence of degradation, never a ceiling or a target step."""
 
     start: str
     end: str
@@ -65,6 +78,9 @@ class StableWindow:
     degraded_checks: tuple[str, ...] = ()
     kind: str = "step"
     title: str = ""
+    role: str = ""
+    margin_pct: Optional[float] = None
+    after_drop: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {
@@ -79,6 +95,10 @@ class StableWindow:
         if self.kind != "step":
             out["kind"] = self.kind
             out["title"] = self.title
+        if self.role:
+            out["role"] = self.role
+        if self.margin_pct is not None:
+            out["margin_pct"] = self.margin_pct
         return out
 
 
@@ -96,6 +116,10 @@ def _scope_text(window: Optional[StableWindow]) -> str:
         if window.title:
             return t("sla.scope.spike_named", title=window.title, level=level)
         return t("sla.scope.spike", level=level)
+    if window.role == ROLE_TARGET:
+        return t("sla.scope.target_step", level=level)
+    if window.role == ROLE_MARGIN:
+        return t("sla.scope.margin_step", level=level, margin=f"{window.margin_pct or 0:g}")
     return t("sla.scope.step", level=level)
 
 
@@ -107,7 +131,9 @@ def _empty_scope_text(window: StableWindow, query: str) -> str:
     return t("sla.check.empty_step", query=query)
 
 
-SLA_CHECK_NAMES = ("target_rps", "error_rate", "p95_latency", "p99_latency", "cpu_usage", "memory_usage", "recovery")
+SLA_CHECK_NAMES = (
+    "target_rps", "target_margin", "error_rate", "p95_latency", "p99_latency", "cpu_usage", "memory_usage", "recovery",
+)
 # Names of the checks (sla.check_title.*) in the language of the report being built.
 SLA_CHECK_TITLES = LocaleTable(SLA_CHECK_NAMES, lambda name: t(f"sla.check_title.{name}"))
 
@@ -140,6 +166,8 @@ ADJUST_TREND = "adverse_trend"
 # Parts of the summary by mode: modes with a note of their own and the names of the summary lists.
 _MODE_NOTES = ("stability", "spike")
 _SUMMARY_LISTS = ("passed", "failed", "unknown")
+# Fields of ``headroom`` the summary is rebuilt from.
+_HEADROOM_SUMMARY_KEYS = ("role", "verdict_level", "margin_pct", "ceiling_level", "ratio", "above_target_failed")
 
 
 def _lang_of(lang: Any) -> str:
@@ -162,7 +190,11 @@ def format_sla_rationale(verdict: str, checks: List[Dict[str, Any]], lang: Optio
 
     if code == PASS:
         if rps and rps.get("passed") is True and rps.get("actual") is not None:
-            text = head("pass_target", actual=str(rps["actual"]), threshold=str(rps["threshold"]))
+            # Within the tolerance of the target step the RPS may be a little under the target.
+            below = _safe_float(rps["actual"]) is not None and _safe_float(rps.get("threshold")) is not None and (
+                float(rps["actual"]) < float(rps["threshold"])
+            )
+            text = head("pass_target", actual=str(rps["actual"]), op="≈" if below else "≥", threshold=str(rps["threshold"]))
         else:
             text = head("pass")
     elif code == RISK:
@@ -187,9 +219,16 @@ def format_sla_rationale(verdict: str, checks: List[Dict[str, Any]], lang: Optio
     return text + "\n" + "\n".join(lines)
 
 
-def sla_summary_parts(verdict: Any, checks: List[Dict[str, Any]], test_mode: str, detected: bool = True) -> Dict[str, Any]:
-    """Parts of the SLA summary: the verdict code, check names by state, the mode and the adjustments."""
-    return {
+def sla_summary_parts(
+    verdict: Any,
+    checks: List[Dict[str, Any]],
+    test_mode: str,
+    detected: bool = True,
+    headroom: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Parts of the SLA summary: the verdict code, check names by state, the mode, the adjustments and, for a
+    step test with a target step, its ``headroom`` (target step, ceiling, breaches above the target)."""
+    parts: Dict[str, Any] = {
         "verdict": to_code(verdict),
         "passed": [str(c.get("name")) for c in checks if c.get("passed") is True],
         "failed": [str(c.get("name")) for c in checks if c.get("passed") is False],
@@ -198,6 +237,9 @@ def sla_summary_parts(verdict: Any, checks: List[Dict[str, Any]], test_mode: str
         "spike_detected": bool(detected),
         "adjustments": [],
     }
+    if isinstance(headroom, Mapping):
+        parts["headroom"] = {key: headroom.get(key) for key in _HEADROOM_SUMMARY_KEYS}
+    return parts
 
 
 def summary_parts_from_checks(result: Mapping[str, Any]) -> Dict[str, Any]:
@@ -218,9 +260,39 @@ def _adjustment_text(item: Mapping[str, Any], lang: str, fail_label: str) -> str
     return str(item.get("text") or code)
 
 
+def _number_label(value: Any) -> str:
+    number = _safe_float(value)
+    return f"{number:.0f}" if number is not None else ""
+
+
+def _headroom_items(headroom: Mapping[str, Any], lang: str) -> List[str]:
+    """Summary items of a step test with a target step: where CPU/memory were checked, how far the latency and
+    error thresholds held and what broke above the target step (headroom, not the verdict)."""
+    items: List[str] = []
+    level = _number_label(headroom.get("verdict_level"))
+    if level:
+        if headroom.get("role") == ROLE_MARGIN:
+            margin = _safe_float(headroom.get("margin_pct"))
+            items.append(t("sla.summary.margin_step", locale=lang, level=level, margin=f"{margin or 0:g}"))
+        else:
+            items.append(t("sla.summary.target_step", locale=lang, level=level))
+    ceiling = _number_label(headroom.get("ceiling_level"))
+    ratio = _safe_float(headroom.get("ratio"))
+    above_level = (_safe_float(headroom.get("ceiling_level")) or 0.0) > (_safe_float(headroom.get("verdict_level")) or 0.0)
+    if ceiling and ceiling != level and above_level:
+        if ratio is not None:
+            items.append(t("sla.summary.ceiling_ratio", locale=lang, level=ceiling, ratio=f"{ratio:g}"))
+        else:
+            items.append(t("sla.summary.ceiling", locale=lang, level=ceiling))
+    above = [str(name) for name in headroom.get("above_target_failed") or []]
+    if above:
+        items.append(t("sla.summary.above_target", locale=lang, names=", ".join(above)))
+    return items
+
+
 def format_sla_summary(parts: Mapping[str, Any], lang: Optional[str] = None) -> str:
-    """«SLA verdict: <label>. Пройдено: …; Нарушено: …; <mode note>; <adjustments>» in ``lang``
-    (default: the current locale)."""
+    """Summary 'SLA verdict: <label>. Passed: …; Breached: …; <target step and headroom>; <mode note>;
+    <adjustments>' in ``lang`` (default: the current locale)."""
     lang = _lang_of(lang)
     fail_label = verdict_label(FAIL, lang)
     items: List[str] = []
@@ -228,6 +300,9 @@ def format_sla_summary(parts: Mapping[str, Any], lang: Optional[str] = None) -> 
         names = [str(name) for name in parts.get(key) or []]
         if names:
             items.append(t(f"sla.summary.{key}", locale=lang, names=", ".join(names)))
+    headroom = parts.get("headroom")
+    if isinstance(headroom, Mapping):
+        items.extend(_headroom_items(headroom, lang))
     mode = str(parts.get("test_mode") or "")
     if mode in _MODE_NOTES:
         items.append(t(f"sla.summary.mode_{mode}", locale=lang, fail=fail_label))
@@ -493,7 +568,9 @@ def _windows_from_load_steps(
 ) -> List[StableWindow]:
     """Report steps, latest first. Their RPS is what the step table shows.
 
-    A recovered RPS dip is skipped: it is not a load level the system was tested at.
+    A recovered RPS dip is skipped: it is not a load level the system was tested at. Steps after an
+    RPS drop are kept with ``after_drop``: the thresholds they break describe the degradation, but they
+    are never the ceiling or the target step.
     """
     raw = [
         item for item in (pack.get("load_steps") or [])
@@ -525,43 +602,85 @@ def _windows_from_load_steps(
             level=level,
             series=column or str(step.get("series") or ""),
             label=label,
+            after_drop=bool(step.get("after_drop")),
         ))
     return sorted(windows, key=lambda item: _segment_end_sort_key(item.end), reverse=True)
 
 
-def _select_sla_window(
-    sla_config: Dict[str, Any],
-    lt_pack: Dict[str, Any],
-    lt_labeled: Any,
-) -> tuple[Optional[StableWindow], List[Dict[str, Any]]]:
-    """Latest report step on which latency and error SLA still hold, with its checks.
-
-    The step table is the source of the steps. A later flat RPS stretch can
-    continue through a latency collapse, so the search walks from the last step
-    backwards and stops at the last one that still passes. Detector segments are
-    used only when the report has no load steps. When every step breaks the SLA
-    the latest one is kept and fails.
-    """
+def _step_candidates(sla_config: Dict[str, Any], lt_pack: Dict[str, Any], lt_labeled: Any) -> List[StableWindow]:
+    """Load steps the SLA may be checked on, latest first: the report steps, else the detector segments."""
     query = sla_config.get("max_performance_query")
     candidates = _windows_from_load_steps(lt_pack, query, lt_labeled)
     if not candidates:
         candidates = _stable_windows_from_rps(lt_pack, query)
+    return candidates
+
+
+def _select_sla_window(
+    sla_config: Dict[str, Any],
+    candidates: List[StableWindow],
+    lt_labeled: Any,
+) -> tuple[Optional[StableWindow], List[Dict[str, Any]]]:
+    """Latest report step on which latency and error SLA still hold (the ceiling), with its checks.
+
+    The step table is the source of the steps. A later flat RPS stretch can
+    continue through a latency collapse, so the search walks from the last step
+    backwards and stops at the last one that still passes. A step after an RPS drop
+    that breaks the thresholds is the degradation of the ceiling; one that holds
+    them is passed over. Detector segments are used only when the report has no
+    load steps. When every step breaks the SLA the latest one (before a drop, when
+    there is one) is kept and fails.
+    """
     if not candidates:
         return None, _checks_for_window(sla_config, PRIMARY_SPECS, lt_labeled, None, "primary")
-    latest_checks: List[Dict[str, Any]] = []
+    by_window: List[tuple[StableWindow, List[Dict[str, Any]]]] = []
     degraded: Optional[StableWindow] = None
     degraded_names: tuple[str, ...] = ()
     for window in candidates:
         checks = _checks_for_window(sla_config, PRIMARY_SPECS, lt_labeled, window, "primary")
-        if window is candidates[0]:
-            latest_checks = checks
+        by_window.append((window, checks))
         failed = tuple(str(c["name"]) for c in checks if c.get("passed") is False)
         if not failed:
+            if window.after_drop:
+                continue
             if degraded is None:
                 return window, checks
             return replace(window, degraded_level=degraded.level, degraded_checks=degraded_names), checks
         degraded, degraded_names = window, failed
-    return candidates[0], latest_checks
+    fallback = next(((window, checks) for window, checks in by_window if not window.after_drop), by_window[0])
+    return fallback
+
+
+def _reach_floor(level: float) -> float:
+    """Lowest measured step RPS that still reaches ``level`` (``TARGET_STEP_TOLERANCE_PCT`` below it)."""
+    return level * (1.0 - TARGET_STEP_TOLERANCE_PCT / 100.0)
+
+
+def _select_target_window(
+    sla_config: Dict[str, Any],
+    candidates: List[StableWindow],
+    lt_labeled: Any,
+    level: float,
+    min_level: float = 0.0,
+) -> Optional[StableWindow]:
+    """First step in time at ``level`` RPS or above (within the tolerance, never below ``min_level``) on which
+    latency and error SLA hold.
+
+    A step at the level that breaks them does not end the search: the next one that holds is taken, as the
+    ceiling search does. None when no step at the level holds.
+    """
+    floor = max(_reach_floor(level), min_level)
+    for window in sorted(candidates, key=lambda item: _segment_end_sort_key(item.end)):
+        if window.level < floor or window.after_drop:
+            continue
+        checks = _checks_for_window(sla_config, PRIMARY_SPECS, lt_labeled, window, "primary")
+        if not any(check.get("passed") is False for check in checks):
+            return window
+    return None
+
+
+def _same_window(a: Optional[StableWindow], b: Optional[StableWindow]) -> bool:
+    return a is not None and b is not None and (a.start, a.end) == (b.start, b.end)
 
 
 def _as_utc(value: Any) -> Optional[pd.Timestamp]:
@@ -749,23 +868,40 @@ def _capacity_target_check(
     window: Optional[StableWindow],
     lt_pack: Dict[str, Any],
     perf_query: Optional[str],
+    target_window: Optional[StableWindow] = None,
 ) -> Dict[str, Any]:
-    """target_rps on the SLA step; without steps — stable_max or the peak of the designated query."""
+    """target_rps of a step test: reached when there is a target step (``target_window``); the actual value is
+    the ceiling ``window``. Without steps — stable_max or the peak of the designated query."""
     if window is not None:
-        passed = window.level >= target_rps
+        passed = target_window is not None
+        actual: Optional[float] = max(window.level, target_window.level) if target_window is not None else window.level
         degraded_note = ""
         if window.degraded_level is not None:
             degraded_note = t("sla.target.degraded", level=f"{window.degraded_level:.0f}", checks=", ".join(window.degraded_checks))
+        confirmed_note = ""
+        if target_window is not None and not _same_window(target_window, window):
+            confirmed_note = t("sla.target.confirmed", level=f"{target_window.level:.0f}")
+        if not passed and window.level >= _reach_floor(target_rps):
+            # Steps at the target were run, but none of them (none at all) holds the latency and error thresholds:
+            # no RPS was reached within the SLA, so the check has no actual value.
+            message = t(
+                "sla.target.not_confirmed", level=f"{window.level:.0f}", label=window.label, target=f"{target_rps:.0f}",
+                series=window.series, degraded=degraded_note,
+            )
+            actual = None
+        else:
+            op = ("≥" if actual >= target_rps else "≈") if passed else "<"
+            message = t(
+                "sla.target.step", level=f"{actual:.1f}", label=window.label, op=op, target=f"{target_rps:.0f}",
+                series=window.series, degraded=degraded_note, confirmed=confirmed_note,
+            )
         return _make_check(
             name="target_rps",
             threshold=target_rps,
-            actual=round(window.level, 2),
+            actual=round(actual, 2) if actual is not None else None,
             passed=passed,
             severity="critical",
-            message=t(
-                "sla.target.step", level=f"{window.level:.1f}", label=window.label, op="≥" if passed else "<",
-                target=f"{target_rps:.0f}", series=window.series, degraded=degraded_note,
-            ),
+            message=message,
             query_label=window.label,
             series=window.series,
         )
@@ -800,6 +936,94 @@ def _capacity_target_check(
         query_label=source_label,
         series=source_series,
     )
+
+
+def _margin_pct(sla_config: Dict[str, Any]) -> Optional[float]:
+    """``target_margin_pct`` when it is a positive number, else None (the margin check is off)."""
+    value = _safe_float(sla_config.get("target_margin_pct"))
+    return value if value is not None and value > 0 else None
+
+
+def _margin_check(
+    target_rps: float,
+    margin_pct: float,
+    window: Optional[StableWindow],
+    margin_window: Optional[StableWindow],
+    target_check: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """``target_margin``: the latency and error thresholds hold at ``target × (1 + margin)`` too.
+
+    On a step test it passes when there is a margin step (``margin_window``); the actual value is the ceiling.
+    Without steps the RPS of the target check is compared with the margin level.
+    """
+    level = target_rps * (1.0 + margin_pct / 100.0)
+    margin = f"{margin_pct:g}"
+    query_label = target_check.get("query_label")
+    series = target_check.get("series")
+    if window is not None:
+        passed = margin_window is not None
+        actual = max(window.level, margin_window.level) if margin_window is not None else window.level
+        if passed:
+            message = t("sla.margin.confirmed", margin=margin, level=f"{level:.0f}", step=f"{margin_window.level:.0f}")
+        else:
+            message = t("sla.margin.missed", margin=margin, level=f"{level:.0f}", ceiling=f"{window.level:.0f}")
+    else:
+        actual = _safe_float(target_check.get("actual"))
+        if actual is None:
+            return _make_check(
+                name="target_margin", threshold=round(level, 2), actual=None, passed=None, category="secondary",
+                message=t("sla.margin.no_rps", margin=margin), query_label=query_label, series=series,
+            )
+        passed = actual >= max(_reach_floor(level), target_rps)
+        message = t(
+            "sla.margin.measured", actual=f"{actual:.1f}", op="≥" if actual >= level else ("≈" if passed else "<"),
+            level=f"{level:.0f}", margin=margin,
+        )
+    return _make_check(
+        name="target_margin",
+        threshold=round(level, 2),
+        actual=round(actual, 2),
+        passed=passed,
+        message=message,
+        category="secondary",
+        query_label=query_label,
+        series=series,
+    )
+
+
+def _headroom(
+    sla_config: Dict[str, Any],
+    target_rps: float,
+    margin_pct: Optional[float],
+    window: StableWindow,
+    verdict_window: StableWindow,
+    hr_labeled: Any,
+    verdict_checks: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """What a step test showed above the step the verdict was decided on: the ceiling (last step on which the
+    latency and error thresholds hold), its ratio to the target and the CPU/memory checks on the ceiling.
+
+    Those checks are information only: a breach above the target step is headroom used up, not a risk.
+    ``above_target_failed`` names the ones that hold on the verdict step (``verdict_checks``) and break above it.
+    """
+    above: List[Dict[str, Any]] = []
+    # A later step at a lower RPS (a sag too small to count as a drop) is no load above the verdict step.
+    if not _same_window(window, verdict_window) and window.level > verdict_window.level:
+        above = _checks_for_window(sla_config, SECONDARY_SPECS, hr_labeled, window, "secondary")
+    failed_on_step = {str(check.get("name")) for check in verdict_checks if check.get("passed") is False}
+    peak = max(window.level, verdict_window.level)
+    return {
+        "role": verdict_window.role,
+        "verdict_level": round(verdict_window.level, 2),
+        "target_rps": target_rps,
+        "margin_pct": margin_pct,
+        "ceiling_level": round(window.level, 2),
+        "ratio": round(peak / target_rps, 2) if target_rps > 0 else None,
+        "above_target_failed": [
+            str(check["name"]) for check in above if check.get("passed") is False and str(check["name"]) not in failed_on_step
+        ],
+        "above_target_checks": above,
+    }
 
 
 def _hold_window(lt_pack: Dict[str, Any]) -> tuple[Optional[Dict[str, Any]], Optional[StableWindow]]:
@@ -985,14 +1209,17 @@ def _capacity_verdict(checks: List[Dict[str, Any]]) -> str:
         if any(c["passed"] is False for c in evaluable):
             return FAIL
         return NO_DATA
-    if evaluable and all(c["passed"] is True for c in evaluable):
-        return PASS
-    if any(c["passed"] is False for c in evaluable):
+    # Without a target the latency and error thresholds decide the run; CPU/memory over the threshold is a risk.
+    if any(c["passed"] is False and _is_primary(c) for c in evaluable):
         return FAIL
+    if any(c["passed"] is False for c in evaluable):
+        return RISK
+    if evaluable:
+        return PASS
     return NO_DATA
 
 
-def _is_primary(check: Dict[str, Any]) -> bool:
+def _is_primary(check: Mapping[str, Any]) -> bool:
     return str(check.get("category") or "primary") == "primary"
 
 
@@ -1061,18 +1288,17 @@ def _evaluate_sla(
     perf_query = str(sla_config.get("max_performance_query") or "").strip() or None
     target_rps = _safe_float(sla_config.get("target_rps"))
     detected = True
+    verdict_window: Optional[StableWindow] = None
+    headroom: Optional[Dict[str, Any]] = None
 
     if test_mode == "stability":
         checks, window = _stability_checks(sla_config, target_rps, lt_pack, lt_labeled, hr_labeled)
     elif test_mode == "spike":
         checks, window, detected = _spike_checks(sla_config, target_rps, lt_pack, lt_labeled, hr_labeled)
     else:
-        window, primary_checks = _select_sla_window(sla_config, lt_pack, lt_labeled)
-        checks = []
-        if target_rps is not None:
-            checks.append(_capacity_target_check(sla_config, target_rps, window, lt_pack, perf_query))
-        checks.extend(primary_checks)
-        checks.extend(_checks_for_window(sla_config, SECONDARY_SPECS, hr_labeled, window, "secondary"))
+        checks, window, verdict_window, headroom = _capacity_checks(
+            sla_config, target_rps, perf_query, lt_pack, lt_labeled, hr_labeled,
+        )
 
     if not checks:
         return {
@@ -1083,15 +1309,16 @@ def _evaluate_sla(
         }
 
     verdict = _verdict_for_mode(test_mode, checks, detected)
-    parts = sla_summary_parts(verdict, checks, test_mode, detected)
+    parts = sla_summary_parts(verdict, checks, test_mode, detected, headroom)
     summary = format_sla_summary(parts, lang)
 
     logger.info(
-        "SLA evaluation: verdict=%s, mode=%s, checks=%d, passed=%d, failed=%d",
-        verdict, test_mode, len(checks), len(parts["passed"]), len(parts["failed"])
+        "SLA evaluation: verdict=%s, mode=%s, checks=%d, passed=%d, failed=%d, target_step=%s",
+        verdict, test_mode, len(checks), len(parts["passed"]), len(parts["failed"]),
+        verdict_window.level if verdict_window is not None else None,
     )
 
-    return {
+    result: Dict[str, Any] = {
         "verdict": verdict,
         "checks": checks,
         "summary": summary,
@@ -1099,3 +1326,53 @@ def _evaluate_sla(
         "test_mode": test_mode,
         "stable_window": window.to_dict() if window is not None else None,
     }
+    if verdict_window is not None:
+        result["target_window"] = verdict_window.to_dict()
+    if headroom is not None:
+        result["headroom"] = headroom
+    return result
+
+
+def _capacity_checks(
+    sla_config: Dict[str, Any],
+    target_rps: Optional[float],
+    perf_query: Optional[str],
+    lt_pack: Dict[str, Any],
+    lt_labeled: Any,
+    hr_labeled: Any,
+) -> tuple[List[Dict[str, Any]], Optional[StableWindow], Optional[StableWindow], Optional[Dict[str, Any]]]:
+    """Checks of a step or stress test, the ceiling window, the step the verdict is decided on and the headroom.
+
+    The latency and error checks come from the ceiling. CPU/memory are checked on the margin step, else the
+    target step, else the ceiling (no target, or the target is not reached).
+    """
+    candidates = _step_candidates(sla_config, lt_pack, lt_labeled)
+    window, primary_checks = _select_sla_window(sla_config, candidates, lt_labeled)
+    margin_pct = _margin_pct(sla_config) if target_rps is not None else None
+    target_window: Optional[StableWindow] = None
+    margin_window: Optional[StableWindow] = None
+    if target_rps is not None and window is not None:
+        found = _select_target_window(sla_config, candidates, lt_labeled, target_rps)
+        if found is not None:
+            target_window = replace(found, role=ROLE_TARGET)
+            if margin_pct is not None:
+                # A margin smaller than the tolerance must still be shown above the target itself.
+                above = _select_target_window(
+                    sla_config, candidates, lt_labeled, target_rps * (1.0 + margin_pct / 100.0), min_level=target_rps,
+                )
+                if above is not None:
+                    margin_window = replace(above, role=ROLE_MARGIN, margin_pct=margin_pct)
+    verdict_window = margin_window or target_window
+    checks: List[Dict[str, Any]] = []
+    if target_rps is not None:
+        target_check = _capacity_target_check(sla_config, target_rps, window, lt_pack, perf_query, target_window=target_window)
+        checks.append(target_check)
+        if margin_pct is not None:
+            checks.append(_margin_check(target_rps, margin_pct, window, margin_window, target_check))
+    checks.extend(primary_checks)
+    secondary = _checks_for_window(sla_config, SECONDARY_SPECS, hr_labeled, verdict_window or window, "secondary")
+    checks.extend(secondary)
+    headroom = None
+    if target_rps is not None and window is not None and verdict_window is not None:
+        headroom = _headroom(sla_config, target_rps, margin_pct, window, verdict_window, hr_labeled, secondary)
+    return checks, window, verdict_window, headroom

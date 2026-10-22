@@ -101,6 +101,17 @@ def sla_window(final_row: Mapping[str, Any]) -> Dict[str, Any]:
     return dict(window) if isinstance(window, Mapping) else {}
 
 
+def sla_target_window(final_row: Mapping[str, Any]) -> Dict[str, Any]:
+    """Step the verdict of a step test was decided on (``target_window``: the target or the margin step); {} for
+    reports without one (no target, target not reached, other test types, reports saved before it)."""
+    window = _as_dict(final_row.get("sla_details")).get("target_window")
+    if not isinstance(window, Mapping):
+        window = _as_dict(_as_dict(final_row.get("parsed")).get("deterministic_sla")).get("target_window")
+    if not isinstance(window, Mapping) or not (window.get("start") or window.get("start_iso")):
+        return {}
+    return dict(window)
+
+
 def embedded_step_table(final_row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     for source in ("sla_details", "parsed"):
         table = _as_dict(final_row.get(source)).get("load_step_table")
@@ -221,7 +232,8 @@ def _check(checks: Sequence[Mapping[str, Any]], name: str) -> Dict[str, Any]:
 
 
 def chosen_step(steps: Sequence[Mapping[str, Any]], window: Mapping[str, Any], checks: Sequence[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Step the SLA was checked on: the marked one, the one under the window start, else by target RPS."""
+    """Step the SLA was checked on: the marked one, the one under the window start, else by RPS: the level of a
+    target window (it has a ``role``), else the actual target RPS."""
     selected = next((step for step in steps if step.get("selected")), None)
     if selected is not None:
         return dict(selected)
@@ -229,7 +241,7 @@ def chosen_step(steps: Sequence[Mapping[str, Any]], window: Mapping[str, Any], c
     covered = next((step for step in steps if _covers(step, start)), None)
     if covered is not None:
         return dict(covered)
-    target = _finite(_check(checks, "target_rps").get("actual"))
+    target = _finite(window.get("level") if window.get("role") else _check(checks, "target_rps").get("actual"))
     if target is None:
         return None
     matches = [step for step in steps if _finite(step.get("rps")) is not None and abs(float(step["rps"]) - target) <= 0.51]
@@ -247,16 +259,59 @@ def _position(steps: Sequence[Mapping[str, Any]], step: Optional[Mapping[str, An
     return -1
 
 
-def _step_markers(parsed: Mapping[str, Any], window: Mapping[str, Any], checks: Sequence[Mapping[str, Any]], steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _window_range(window: Mapping[str, Any]) -> Tuple[Any, Any]:
+    return window.get("start") or window.get("start_iso"), window.get("end") or window.get("end_iso")
+
+
+def ceiling_step(steps: Sequence[Mapping[str, Any]], window: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """Ceiling of a step test (the last step on which the latency and error thresholds hold): the row marked
+    ``ceiling``, else the one under the start of the ceiling window, else the last one at its level."""
+    marked = next((step for step in steps if step.get("ceiling")), None)
+    if marked is not None:
+        return dict(marked)
+    covered = next((step for step in steps if _covers(step, moment_ms(_window_range(window)[0]))), None)
+    if covered is not None:
+        return dict(covered)
+    level = _finite(window.get("level"))
+    if level is None:
+        return None
+    matches = [step for step in steps if _finite(step.get("rps")) is not None and abs(float(step["rps"]) - level) <= 0.51]
+    pool = [step for step in matches if step.get("stable") is not False] or matches
+    return dict(pool[-1]) if pool else None
+
+
+def _sla_band_label(chosen: Optional[Mapping[str, Any]], target: Mapping[str, Any]) -> str:
+    """report.marker.sla_step ("SLA: step N"), or sla_target_step / sla_margin_step ("Target: step N" / "Margin:
+    step N") when the verdict was decided on a target step; the *_window texts without a step index."""
+    index = _text(chosen.get("index")) if chosen else ""
+    if not target:
+        return t("report.marker.sla_step", index=index) if index else t("report.marker.sla_window")
+    if _text(target.get("role")) == "margin":
+        return t("report.marker.sla_margin_step", index=index) if index else t("report.marker.sla_margin_window")
+    return t("report.marker.sla_target_step", index=index) if index else t("report.marker.sla_target_window")
+
+
+def _step_markers(
+    parsed: Mapping[str, Any],
+    window: Mapping[str, Any],
+    checks: Sequence[Mapping[str, Any]],
+    steps: List[Dict[str, Any]],
+    target: Optional[Mapping[str, Any]] = None,
+) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     offset = offset_hours(steps)
     saturation = parsed.get("saturation") if isinstance(parsed.get("saturation"), Mapping) else None
-    chosen = chosen_step(steps, window, checks)
+    target = target or {}
     kind = _text(window.get("kind")).lower() or "step"
-    label = t("report.marker.sla_step", index=_text(chosen.get("index"))) if chosen and _text(chosen.get("index")) else t("report.marker.sla_window")
+    if kind != "step":
+        target = {}
+    chosen = chosen_step(steps, target or window, checks)
+    label = _sla_band_label(chosen, target)
     band = None
-    if window and kind == "step":
-        band = _band(window.get("start") or window.get("start_iso"), window.get("end") or window.get("end_iso"), label, "accent", "sla")
+    if target:
+        band = _band(*_window_range(target), label, "accent", "sla")
+    elif window and kind == "step":
+        band = _band(*_window_range(window), label, "accent", "sla")
     if band is None and chosen is not None:
         band = _band(chosen.get("plateau_start_iso") or chosen.get("start_iso"), chosen.get("plateau_end_iso") or chosen.get("end_iso"), label, "accent", "sla")
     if band is None and saturation is not None:
@@ -264,13 +319,24 @@ def _step_markers(parsed: Mapping[str, Any], window: Mapping[str, Any], checks: 
         band = _band(sat_window.get("start_iso"), sat_window.get("end_iso"), label, "accent", "sla")
     if band is not None:
         out.append(band)
+    # The ceiling of a run that went past the target step: a second band, in the ok tone.
+    ceiling: Optional[Dict[str, Any]] = None
+    other_ceiling = bool(target) and bool(window) and _window_range(target) != _window_range(window)
+    if other_ceiling:
+        ceiling = ceiling_step(steps, window)
+        index = _text(ceiling.get("index")) if ceiling else ""
+        ceiling_label = t("report.marker.ceiling_step", index=index) if index else t("report.marker.ceiling_window")
+        ceiling_band = _band(*_window_range(window), ceiling_label, "ok", "ceiling")
+        if ceiling_band is not None:
+            out.append(ceiling_band)
     for step in steps[1:]:
         start_ms = moment_ms(step.get("start_iso"))
         if start_ms is not None:
             out.append(_marker("tick", start_ms, None, "", "muted", "step"))
     degradation_ms: Optional[int] = None
     if window and kind == "step" and (window.get("degraded_level") is not None or window.get("degraded_checks")):
-        position = _position(steps, chosen)
+        # The step after the ceiling broke the thresholds.
+        position = _position(steps, ceiling if other_ceiling else chosen)
         following = steps[position + 1] if 0 <= position < len(steps) - 1 else None
         degradation_ms = moment_ms(following.get("start_iso")) if following else moment_ms(window.get("end") or window.get("end_iso"))
         if degradation_ms is not None:
@@ -313,9 +379,11 @@ def _spike_markers(parsed: Mapping[str, Any], window: Mapping[str, Any]) -> List
 def markers_for(final_row: Mapping[str, Any], step_table: Optional[Mapping[str, Any]] = None) -> List[Dict[str, Any]]:
     """Markers drawn on every chart of the report.
 
-    Step and stress tests: the SLA step as a band («SLA: ступень N»), step boundaries as ticks,
-    the start of the step after the SLA step when it broke the thresholds («деградация HH:MM») and
-    the RPS drop (stress ``rps_drop_iso`` or the first ``after_drop`` step, «падение RPS HH:MM»).
+    Step and stress tests: the SLA step as a band («SLA: ступень N»; "Target: step N" or "Margin: step N"
+    when the verdict was decided on a target step, then the ceiling as a second band "Max: step M" when it
+    is another step), step boundaries as ticks, the start of the step after the ceiling when it broke
+    the thresholds («деградация HH:MM») and the RPS drop (stress ``rps_drop_iso`` or the first ``after_drop``
+    step, «падение RPS HH:MM»).
     Soak: the hold window. Spike: every spike window. ``step_table`` is the resolved load-step
     table (``resolve_load_step_table``); without it the table saved with the row is used.
     """
@@ -328,7 +396,7 @@ def markers_for(final_row: Mapping[str, Any], step_table: Optional[Mapping[str, 
     if mode == "hold":
         return _hold_markers(parsed, window)
     steps = _steps_of(_table_of(row, step_table))
-    return _step_markers(parsed, window, sla_checks(row), steps)
+    return _step_markers(parsed, window, sla_checks(row), steps, sla_target_window(row))
 
 
 # ---- thresholds ---------------------------------------------------------------------------
@@ -468,6 +536,7 @@ __all__ = [
     "THRESHOLD_SPECS",
     "TONE_COLORS",
     "check_source",
+    "ceiling_step",
     "chosen_step",
     "clock",
     "embedded_step_table",
@@ -481,6 +550,7 @@ __all__ = [
     "resolve_query_label",
     "series_color",
     "sla_checks",
+    "sla_target_window",
     "sla_window",
     "thresholds_for",
     "thresholds_for_query",

@@ -106,12 +106,17 @@ CONFIG = {
         "resample_interval": "10T"
     },
 
-    # SLA‑критерии. None — критерий не проверяется. Смысл target_rps зависит от типа теста:
-    # step/stress — достигнут на стабильной ступени (тест успешен даже при деградации после неё),
-    # soak — удерживается весь тест (окно удержания), spike — уровень всплеска.
-    # Остальные пороги для step/stress вторичные (их нарушение даёт «Есть риски»).
+    # SLA criteria. None: the criterion is not checked. The meaning of target_rps depends on the test type:
+    # step/stress: reached on a step where the latency and error thresholds hold (the test passes even if it
+    # degrades later), soak: held for the whole test (hold window), spike: the spike level.
+    # step/stress: latency and errors are checked on the last step where they hold, CPU and memory on the
+    # target step (the first step at target_rps); steps above the target are headroom and do not affect the
+    # verdict. CPU/memory over the threshold on the target step gives "Risks found".
     "sla": {
         "target_rps": None,
+        # step/stress: margin over the target in %. The latency and error thresholds must also hold at
+        # target_rps × (1 + margin/100), otherwise "Risks found"; CPU and memory are then checked there. None: off.
+        "target_margin_pct": None,
         "max_error_rate_pct": None,
         "error_rate_query": "LT (InfluxQL): error rate (%)",
         "max_p95_ms": None,

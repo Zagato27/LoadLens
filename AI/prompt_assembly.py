@@ -102,6 +102,8 @@ def sla_guidance_lines(
         lines.append(text("guidance.target_reached", code))
     else:
         lines.append(text("guidance.domain_sla_step", code))
+    if is_capacity_like(mode) and _cfg_number(sla_cfg.get("target_rps")) is not None:
+        lines.append(text("guidance.target_step", code))
     lines.append(text("guidance.only_source", code))
     return lines
 

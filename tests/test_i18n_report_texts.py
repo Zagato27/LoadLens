@@ -219,9 +219,10 @@ GOLDEN_RU = {
         ["error_rate", "p95 0.40 % ≤ порог 1 % (стабильной ступени ≈300 RPS, запрос «LT errors», серия «err»)"],
         ["p95_latency", "p95 211.15 мс ≤ порог 250 мс (стабильной ступени ≈300 RPS, запрос «LT p95», серия «p95_all»)"],
         ["p99_latency", "p95 211.15 мс ≤ порог 900 мс (стабильной ступени ≈300 RPS, запрос «LT p95», серия «p95_all»)"],
-        ["cpu_usage", "p95 60.00 % ≤ порог 80 % (стабильной ступени ≈300 RPS, запрос «CPU», серия «node=a»)"],
+        ["cpu_usage", "p95 60.00 % ≤ порог 80 % (ступени цели ≈300 RPS, запрос «CPU», серия «node=a»)"],
         ["memory_usage", "Нет данных по запросу «MEM»"],
-        "SLA verdict: Успешно. Пройдено: target_rps, error_rate, p95_latency, p99_latency, cpu_usage; Нет данных: memory_usage",
+        "SLA verdict: Успешно. Пройдено: target_rps, error_rate, p95_latency, p99_latency, cpu_usage; Нет данных: memory_usage; "
+        "цель подтверждена на ступени ≈300 RPS",
     ],
     "soak": [
         ["target_rps", "Удержание: средний RPS 299.8 за окно 12:04–13:00 (56.0 мин) ≥ целевой 290 (допуск 5 %); "
@@ -441,7 +442,9 @@ def test_en_labels_and_messages_use_the_english_formats(scenarios_en):
     assert en["step"][2] == ["p95_latency", "p95 211.15 ms ≤ threshold 250 ms (stable step ≈300 RPS, query «LT p95», series «p95_all»)"]
     assert en["step"][0][1] == ("RPS 300.0 (stable_max (query: LT RPS)) ≥ target 250; label='LT RPS'; series='sum_all'; "
                                 "breached at the ≈400 RPS step: error_rate, p95_latency")
-    assert en["step"][-1] == "SLA verdict: Passed. Passed: target_rps, error_rate, p95_latency, p99_latency, cpu_usage; No data: memory_usage"
+    assert en["step"][-1] == ("SLA verdict: Passed. Passed: target_rps, error_rate, p95_latency, p99_latency, cpu_usage; No data: memory_usage; "
+                              "the target is confirmed on the ≈300 RPS step")
+    assert en["step"][4] == ["cpu_usage", "p95 60.00 % ≤ threshold 80 % (target step ≈300 RPS, query «CPU», series «node=a»)"]
     assert en["soak"][0][1].startswith("Hold: mean RPS 299.8 over the window 12:04–13:00 (56.0 min) ≥ target 290 (tolerance 5 %); "
                                        "lowest interval «interval 3 · 12:20–12:30» 299.4 RPS (+3 % vs the target")
     assert en["spike"][0][1] == "Spike «spike 1 · ≈400 RPS» level 399.8 RPS ≥ target 350; label='LT RPS'"

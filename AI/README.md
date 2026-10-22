@@ -81,7 +81,7 @@ GigaChat подключается через `langchain_gigachat` с mTLS (`cert
 Итоговый блок дополнительно содержит поля, которые пайплайн вычисляет сам, а не модель:
 - `report_language` — язык отчёта (`ru`/`en`; нет поля — `ru`);
 - `test_profile` — профиль типа теста (`test_type`, `normalized_test_type`, `mode`, `label`, `focus` на языке отчёта, …); поле `label_ru` больше не пишется — подпись типа берётся по `normalized_test_type`, у старых отчётов `label_ru` читается запасным вариантом;
-- `deterministic_sla` — программная проверка SLA (`verdict`, `checks[]`, `stable_window` с `kind`: ступень, `hold` или `spike`);
+- `deterministic_sla` — программная проверка SLA (`verdict`, `checks[]`, `stable_window` с `kind`: ступень, `hold` или `spike`); в ступенчатом и стресс-тесте `stable_window` — потолок (последняя ступень, где выполнены пороги задержек и ошибок), `target_window` — ступень цели (`role: target`) или запаса над целью (`role: margin`), на которой проверены CPU и память и решён вердикт, `headroom` — потолок, его отношение к цели и пороги, нарушенные только выше ступени цели;
 - `stability_under_load` (soak) — `target_rps`, `actual_rps`, `hold` (окно удержания, минимальный интервал), `trends[]`, `flagged_trends[]`;
 - `spike_analysis` (spike) — `detected`, `baseline_rps`, `spikes[]` с `pre`/`during`, `overshoot_p95_pct`, `recovered`, `recovery_time_sec`;
 - `saturation` (stress) — `saturation_rps`, ступень насыщения, `degraded_checks`, `failure_mode`, `limiting_resource`.

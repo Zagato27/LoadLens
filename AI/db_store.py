@@ -1423,6 +1423,11 @@ def save_llm_results(
                 run_sla_details["load_step_table"] = load_step_table
             if isinstance(results.get("sla_window"), dict):
                 run_sla_details["stable_window"] = results.get("sla_window")
+            # Step tests with a target step: the step the verdict was decided on and what the run showed above it.
+            if isinstance(results.get("sla_target_window"), dict):
+                run_sla_details["target_window"] = results.get("sla_target_window")
+            if isinstance(results.get("sla_headroom"), dict):
+                run_sla_details["headroom"] = results.get("sla_headroom")
             if results.get("report_language"):
                 # Readers of the run row (forecast, SLA block) find the report language without the final JSON.
                 run_sla_details["report_language"] = results.get("report_language")

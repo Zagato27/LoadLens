@@ -668,6 +668,7 @@ canvas.ll-zoomable { cursor: crosshair; }
 .ll-profile .pf-grid { stroke: var(--line); stroke-width: 1; shape-rendering: crispEdges; }
 .ll-profile .pf-band { fill: var(--accent-soft); }
 .ll-profile .pf-band.tone-warn { fill: color-mix(in srgb, var(--warn) 14%, transparent); }
+.ll-profile .pf-band.tone-ok { fill: color-mix(in srgb, var(--ok) 14%, transparent); }
 .ll-profile .pf-band.tone-muted { fill: var(--bg-2); }
 .ll-profile .pf-hl { fill: color-mix(in srgb, var(--text) 9%, transparent); }
 .ll-profile text.pf-band-label { fill: var(--muted); }
@@ -826,6 +827,8 @@ abbr.term.rep-verdict-term { text-decoration: none; }
 .rep-step-flag { color: var(--dim); }
 .rep-step-tag { margin-left: 8px; color: var(--dim); font-weight: 400; }
 .rep-step.is-sla { border-top-color: var(--text); }
+.rep-step.is-ceiling { border-top-color: var(--ok); }
+.rep-step-tag.is-ceiling { color: var(--ok); }
 .rep-step.is-bad, .rep-step.is-bad b { color: var(--fail); }
 .rep-step.is-unstable b { color: var(--muted); }
 .rep-step-note { margin: 8px 0 0; color: var(--dim); font-size: 12px; }

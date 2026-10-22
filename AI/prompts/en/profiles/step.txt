@@ -5,3 +5,6 @@
   not a short max peak. For the final analysis the value is already computed in designated_peak_performance.
 - Of interest: on which step degradation began (latency/errors growing faster than the load),
   which resources hit their limit, the error rate at the threshold and what happened after it.
+- When there is a target step (deterministic_sla.target_window, sla_step with a role), the verdict is decided
+  on it: the load above it searches for the ceiling. Describe CPU and memory overload and latency growth above the target step as headroom
+  used up and do not lower the verdict because of them.

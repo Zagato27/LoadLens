@@ -446,7 +446,7 @@ def test_sla_checks_carry_query_label_and_series_without_changing_the_message():
 
 def test_capacity_target_check_names_the_window_query():
     window = sla_evaluator.StableWindow(start="2026-10-15T10:00:00Z", end="2026-10-15T10:10:00Z", level=210.0, series="all", label="RPS total")
-    check = sla_evaluator._capacity_target_check({}, 200.0, window, {}, "RPS total")
+    check = sla_evaluator._capacity_target_check({}, 200.0, window, {}, "RPS total", target_window=window)
     assert (check["query_label"], check["series"]) == ("RPS total", "all")
     assert "label='RPS total'; series='all'" in check["message"]
     assert rm.thresholds_for({"sla_details": {"checks": [check]}})[0]["query_label"] == "RPS total"

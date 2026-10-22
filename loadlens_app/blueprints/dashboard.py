@@ -573,9 +573,10 @@ def _dashboard_checks(sla_details, fallback_checks) -> list[dict]:
 def _dashboard_profile(sla_details, parsed, fallback_checks) -> dict | None:
     """``{steps, window, markers, target}`` of the last run's load profile; None without a load-step table.
 
-    The steps are ``load_step_table.steps`` saved with the final row, the window its ``stable_window`` and the
-    markers those of the report charts (AI/report_markers.markers_for: degradation, RPS drop, hold and spike
-    windows) without the step ticks and the SLA band, which the window already draws; their labels follow the
+    The steps are ``load_step_table.steps`` saved with the final row, the window its ``target_window`` (a step
+    test decided on its target step) or else its ``stable_window``, and the markers those of the report charts
+    (AI/report_markers.markers_for: the ceiling, degradation, RPS drop, hold and spike windows) without the step
+    ticks and the SLA band, which the window already draws; their labels follow the
     UI language of the request. ``target`` is the threshold of the ``target_rps`` check.
     """
     from AI import report_markers
@@ -598,7 +599,8 @@ def _dashboard_profile(sla_details, parsed, fallback_checks) -> dict | None:
     ]
     if not steps:
         return None
-    window = report_markers.sla_window(row)
+    # A step test decided on its target step shows that step as the SLA zone; its ceiling comes as a marker band.
+    window = report_markers.sla_target_window(row) or report_markers.sla_window(row)
     start = report_markers.moment_ms(window.get("start") or window.get("start_iso"))
     end = report_markers.moment_ms(window.get("end") or window.get("end_iso"))
     window_out = {"start": window.get("start") or window.get("start_iso"), "end": window.get("end") or window.get("end_iso")} if (
