@@ -233,10 +233,16 @@ def test_retired_report_blocks_are_gone():
         assert not re.search(re.escape(selector) + r"(?![\w-])", css), selector
 
 
-def test_sticky_tabs_sit_under_the_topbar_on_narrow_screens():
+def test_sticky_tabs_sit_under_the_topbar():
+    # The top bar sticks on every width, so the tab bar starts below it everywhere and no media query moves it.
     section = _report_css()
-    assert re.search(r"\.report-tabs-bar \{[^}]*position: sticky; top: 0;", section)
-    assert re.search(r"@media \(max-width: 1023px\) \{ \.report-tabs-bar \{ top: var\(--topbar-h\); \} \}", section)
+    rules = re.findall(r"\.report-tabs-bar \{([^}]*)\}", section)
+    assert rules and "position: sticky; top: var(--topbar-h);" in rules[0]
+    assert sum(1 for rule in rules if re.search(r"(?<![\w-])top:", rule)) == 1
+    # Its offset is constant, so the stuck observer is not reconnected on a width change.
+    source = (REPO / "static/js/reports.js").read_text(encoding="utf-8")
+    body = re.search(r"function observeSticky\(bar, sentinel\) \{(.*?)\n  \}\n", source, re.S)
+    assert body and "IntersectionObserver" in body.group(1) and "matchMedia" not in body.group(1)
 
 
 # ---- manual verdict ---------------------------------------------------------------------------------

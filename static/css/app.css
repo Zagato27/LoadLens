@@ -85,7 +85,8 @@
 /* ---------- Base ---------- */
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
-html { background: var(--bg); }
+/* Anchors, the skip link and scrollIntoView stop below the sticky top bar. */
+html { background: var(--bg); scroll-padding-top: var(--topbar-h); }
 body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 13px; line-height: 1.45; -webkit-font-smoothing: antialiased; }
 /* Links: text color, underlined with a hairline; navigation, buttons and table names opt out. */
 a { color: var(--text); text-decoration: underline; text-decoration-color: var(--line-2); text-decoration-thickness: 1px; text-underline-offset: 3px; }
@@ -119,11 +120,12 @@ code, kbd, samp { font-size: 0.92em; }
 
 /* ---------- App shell: top bar ----------
    A 48px bar: wordmark and version, text navigation with the active item underlined, then the project area (mono),
-   search with its key hint, the view menu and the user menu. Below 1024px the bar keeps the menu button and the
-   wordmark; the navigation and the controls (.topbar-drawer#appSidebar) become an off-canvas drawer: body.nav-open,
-   #navToggle, #navClose, #navBackdrop. */
+   search with its key hint, the view menu and the user menu. It sticks to the top of the window on every width; its
+   edge is the hairline, no shadow. Below 1024px the bar keeps the menu button and the wordmark; the navigation and the
+   controls (.topbar-drawer#appSidebar) become an off-canvas drawer: body.nav-open, #navToggle, #navClose,
+   #navBackdrop. Sticky elements below it (.report-tabs-bar, .settings-menu) start at var(--topbar-h). */
 .app-shell { display: flex; flex-direction: column; min-height: 100vh; }
-.topbar { position: relative; z-index: 1500; display: flex; align-items: center; gap: 28px; height: var(--topbar-h); padding: 0 28px; background: var(--bg); border-bottom: 1px solid var(--line); }
+.topbar { position: sticky; top: 0; z-index: 1500; display: flex; align-items: center; gap: 28px; height: var(--topbar-h); padding: 0 28px; background: var(--bg); border-bottom: 1px solid var(--line); }
 .topbar .nav-toggle { display: none; flex: 0 0 auto; }
 .topbar-brand { display: flex; align-items: baseline; gap: 8px; flex: 0 0 auto; min-width: 0; }
 .brand-link { display: inline-flex; align-items: center; gap: 8px; min-width: 0; color: var(--text); text-decoration: none; }
@@ -180,7 +182,7 @@ select.pa-select:focus-visible { border: 0; box-shadow: none; outline: 2px solid
   select.pa-select { max-width: 100px; }
 }
 @media (max-width: 1023px) {
-  .topbar { position: sticky; top: 0; gap: 10px; padding: 0 12px; }
+  .topbar { gap: 10px; padding: 0 12px; }
   .topbar .nav-toggle { display: inline-flex; }
   .topbar-drawer { position: fixed; top: 0; left: 0; bottom: 0; z-index: 2; width: min(300px, 86vw); height: auto; flex-direction: column; align-items: stretch; gap: 6px; padding: 10px 10px 16px; overflow-y: auto; background: var(--bg); border-right: 1px solid var(--line); visibility: hidden; transform: translateX(-100%); transition: transform 0.2s ease, visibility 0.2s; }
   body.nav-open .topbar-drawer { visibility: visible; transform: none; box-shadow: var(--shadow); }
@@ -910,15 +912,14 @@ abbr.term.rep-verdict-term { text-decoration: none; }
 .editor-area[contenteditable="true"]:focus { border-color: var(--focus); }
 .editor-actions { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
 
-/* Charts: domain tabs in a sticky bar with the zoom reset (the sentinel above it marks the bar .is-stuck; the
-   hairline of the tabs is its edge, no shadow); a chart has no frame: mono title with the zoom hint on the right, the
-   canvas, the legend list. */
+/* Charts: domain tabs in a sticky bar under the top bar with the zoom reset (the sentinel above it marks the bar
+   .is-stuck; the hairline of the tabs is its edge, no shadow); a chart has no frame: mono title with the zoom hint on
+   the right, the canvas, the legend list. */
 .tabs-sticky-sentinel { height: 1px; margin-bottom: -1px; }
-.report-tabs-bar { position: sticky; top: 0; z-index: 30; display: flex; align-items: center; gap: 10px; margin: 0 -8px; padding: 0 8px; background: var(--bg); }
+.report-tabs-bar { position: sticky; top: var(--topbar-h); z-index: 30; display: flex; align-items: center; gap: 10px; margin: 0 -8px; padding: 0 8px; background: var(--bg); }
 .report-tabs-bar .tabs { flex: 1 1 auto; min-width: 0; flex-wrap: nowrap; overflow-x: auto; margin: 0; scrollbar-width: thin; }
 .report-tabs-bar .tab { flex: 0 0 auto; white-space: nowrap; }
 .report-tabs-bar .chart-zoom-reset { flex: 0 0 auto; }
-@media (max-width: 1023px) { .report-tabs-bar { top: var(--topbar-h); } }
 .chart-pending { color: var(--dim); padding: 12px 0; font-size: 13px; }
 .report-chart { margin-top: 22px; }
 .report-chart-head { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; margin: 0 0 6px; }
@@ -1431,7 +1432,7 @@ table.forecast-list { margin-top: 16px; }
 /* ---- Settings ---- */
 /* Section menu: plain text, the active section underlined (a row of tabs on narrow screens). */
 .settings-layout { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 32px; align-items: start; }
-.settings-menu { position: sticky; top: 16px; display: flex; flex-direction: column; gap: 0; }
+.settings-menu { position: sticky; top: calc(var(--topbar-h) + 16px); display: flex; flex-direction: column; gap: 0; }
 .settings-menu button { padding: 6px 0; border: 0; border-radius: 0; background: none; color: var(--muted); font-size: 13px; font-weight: 400; text-align: left; white-space: nowrap; cursor: pointer; }
 .settings-menu button:hover { color: var(--text); }
 .settings-menu button.active { color: var(--text); font-weight: 500; text-decoration: underline; text-decoration-color: var(--text); text-decoration-thickness: 2px; text-underline-offset: 6px; }

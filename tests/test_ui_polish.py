@@ -297,6 +297,22 @@ def test_reduced_motion_and_phone_cards():
     assert "border: 0" in chips and "background: none" in chips
 
 
+def test_topbar_sticks_on_every_width():
+    css = app_css()
+    # Base rule, outside any media query: the bar sticks above the page and below the skip link, toasts and dialogs.
+    base = re.search(r"^\.topbar \{([^}]*)\}", css, re.M).group(1)
+    for decl in ("position: sticky; top: 0;", "z-index: 1500", "background: var(--bg)"):
+        assert decl in base, decl
+    # An overflow on the shell would turn it into the scroll container and the bar would stop sticking.
+    assert "overflow" not in re.search(r"^\.app-shell \{([^}]*)\}", css, re.M).group(1)
+    # Narrow screens only change the spacing of the bar.
+    narrow = re.search(r"@media \(max-width: 1023px\) \{\n  \.topbar \{([^}]*)\}", css).group(1)
+    assert "position" not in narrow and "top:" not in narrow
+    # Anchors and scrollIntoView stop below the bar; sticky elements under it start at its height.
+    assert re.search(r"^html \{[^}]*scroll-padding-top: var\(--topbar-h\);", css, re.M)
+    assert re.search(r"\.settings-menu \{[^}]*position: sticky; top: calc\(var\(--topbar-h\) \+ 16px\);", css)
+
+
 def test_ui_js_has_no_inline_handlers_or_eval():
     source = (REPO_ROOT / "static" / "js" / "ui.js").read_text(encoding="utf-8")
     assert "eval(" not in source and "new Function" not in source

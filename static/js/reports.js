@@ -3106,24 +3106,17 @@
     const group = reportState.groups[reportState.activePane];
     btn.hidden = !(group && group.zoom && group.zoom.range());
   }
-  // The domain tab bar sticks to the top; a sentinel just above it tells when it is stuck (for the shadow).
+  // The domain tab bar sticks under the top bar on every width; a sentinel just above it tells when it is stuck
+  // (for the hairline).
   function observeSticky(bar, sentinel) {
     if (!('IntersectionObserver' in window)) return;
-    let observer = null;
-    const connect = () => {
-      if (observer) observer.disconnect();
-      const top = parseFloat(getComputedStyle(bar).top) || 0;
-      observer = new IntersectionObserver((entries) => {
-        entries.forEach((entry) => {
-          bar.classList.toggle('is-stuck', !entry.isIntersecting && entry.boundingClientRect.top < top + 1);
-        });
-      }, { rootMargin: `-${Math.ceil(top) + 1}px 0px 0px 0px`, threshold: 0 });
-      observer.observe(sentinel);
-    };
-    connect();
-    const narrow = window.matchMedia ? window.matchMedia('(max-width: 1023px)') : null;
-    if (narrow && typeof narrow.addEventListener === 'function') narrow.addEventListener('change', connect);
-    else if (narrow && typeof narrow.addListener === 'function') narrow.addListener(connect);
+    const top = parseFloat(getComputedStyle(bar).top) || 0;
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        bar.classList.toggle('is-stuck', !entry.isIntersecting && entry.boundingClientRect.top < top + 1);
+      });
+    }, { rootMargin: `-${Math.ceil(top) + 1}px 0px 0px 0px`, threshold: 0 });
+    observer.observe(sentinel);
   }
 
   // ---- print / PDF -------------------------------------------------------------------------------

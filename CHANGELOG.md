@@ -51,6 +51,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Changed
 
+- **The top bar stays on screen while a page scrolls,** on every width (before, only below 1024px). The chart
+  tabs of a report and the section menu of Settings stick below it, and links to an anchor stop below it.
 - **A source runs one language, not a domain.** A pack in another language merges into a domain when its rows read
   another source; "Replace only" became "Language conflict" and appears only when rows in another language read the
   same source.
