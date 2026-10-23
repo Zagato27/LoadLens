@@ -15,7 +15,7 @@ from psycopg2.extras import Json, execute_batch
 from AI import storage_state
 from AI.i18n import get_locale, t
 from AI.scoring import parse_llm_analysis_strict
-from AI.verdicts import CODES as VERDICT_CODES, PASS, code_sql, exact_code, normalize_report, optional_code, to_code
+from AI.verdicts import CODES as VERDICT_CODES, PASS, code_sql, exact_code, is_deterministic_report, normalize_report, optional_code, to_code
 from AI.verdicts import label as verdict_label
 
 
@@ -1379,6 +1379,9 @@ def save_llm_results(
 
     Побочные эффекты:
         Пишет в таблицу `llm_reports` (создаёт её при необходимости).
+
+    A report built without the model (``final_parsed`` marked ``analysis: deterministic``) gets the final
+    row alone: no text, the SLA verdict, ``sla_details`` and the stored context.
     """
     if not storage_cfg:
         logger.warning("TimescaleDB конфигурация не задана, пропускаю сохранение LLM результатов")
@@ -1446,6 +1449,9 @@ def save_llm_results(
             domains.insert(-1, ("lt_generators", results.get("lt_generators"), results.get("lt_generators_parsed"), scores_all.get("lt_generators")))
         if "application_logs" in results:
             domains.insert(-1, ("application_logs", results.get("application_logs"), results.get("application_logs_parsed"), scores_all.get("application_logs")))
+        if is_deterministic_report(results.get("final_parsed")):
+            # Built without the model: no domain analyses, the final row alone.
+            domains = [item for item in domains if item[0] == "final"]
 
         for domain, text_val, parsed_val, scores_val in domains:
             raw_text = str(text_val) if text_val is not None else None

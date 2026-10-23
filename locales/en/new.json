@@ -21,7 +21,7 @@
   "new.params.legend": "Options",
   "new.params.llm": "AI analysis",
   "new.params.llm_hint": "Without the AI analysis the report holds only the metric charts.",
-  "new.params.llm_off": "Collect metrics only",
+  "new.params.llm_off": "No AI analysis",
   "new.params.llm_on": "On",
   "new.params.optional": "(optional)",
   "new.params.report_language_hint": "The report will be in the installation's report language, {language} (Settings → Appearance).",

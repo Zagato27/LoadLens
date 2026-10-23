@@ -85,6 +85,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Fixed
 
+- **Reports without AI analysis are full reports and publish to Confluence.** Before, `use_llm: false` (the "No AI
+  analysis" button, which said "Collect metrics only", or an exhausted daily analysis budget) saved the metrics
+  only: the report page said the report was not ready, the archive had no verdict, the forecast did not open and
+  Confluence refused the run. Now such a report stores its final row with everything computed without the model:
+  the SLA verdict and checks, the load steps, the peak RPS with its peak and degradation times or the test-type
+  figures, and the run context the forecast reads. The report page marks the verdict "no AI analysis" and shows the
+  figures in place of the analysis tabs; the Confluence page heads with the verdict and has no analysis section; the
+  verdict can be overridden. Runs built that way before keep their metrics only and publish with their charts and
+  the engineer summary ([docs/ai-analysis.md](docs/ai-analysis.md#other-model-calls-and-limits)).
 - The capacity forecast no longer shows the steps above the report maximum as green. Before, it judged a step only by
   response time stalls inside it, so a step that was evenly slow past the SLA got "no stalls", entered the model and
   painted the load scale green. Now the forecast reads the maximum of the report (the last step on which the SLA

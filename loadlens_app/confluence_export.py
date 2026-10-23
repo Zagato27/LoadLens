@@ -5,6 +5,10 @@ The page and its PNG charts are written in the language of the report (``stored_
 rows: ``parsed.report_language``, then ``sla_details.report_language``, else ``ru``), never in the language of the
 person who publishes it. Stored texts (LLM answers, ``domain_titles``, SLA messages) are shown as they were saved.
 Progress messages and errors of the publication job are rendered in the locale of the job.
+
+A report built without the model has the final row alone (``analysis: deterministic``): the page shows its verdict
+and test figures under the header and has no analysis section. A run with metrics but no stored rows (built
+without the model before that row existed) gets its charts and the engineer summary, in the locale of the job.
 """
 
 from __future__ import annotations
@@ -27,7 +31,7 @@ from AI import report_markers
 from AI.i18n import SUPPORTED, LocalizedError, get_locale, msg, t, with_locale
 from AI.report_sections import test_type_section
 from AI.test_profile import normalize_test_type, test_type_label
-from AI.verdicts import NO_DATA, normalize_report, optional_code, to_code
+from AI.verdicts import NO_DATA, is_deterministic_report, normalize_report, optional_code, to_code
 from AI.verdicts import label as verdict_label
 from loadlens_app.core import _ts_conn
 from loadlens_app.html_sanitizer import safe_href
@@ -790,6 +794,49 @@ def pair_findings_with_actions(findings: list[Any], actions: list[Any]) -> list[
     return rows
 
 
+def _verdict_rows(row: dict[str, Any], parsed: dict[str, Any]) -> list[tuple[str, str]]:
+    """Verdict rows of a report: the verdict; a manual one names who, when and why and keeps the automatic one."""
+    verdict = _verdict_text(row.get("sla_verdict") or parsed.get("verdict") or row.get("verdict"))
+    manual = row.get("manual_verdict") if row.get("domain") == "final" else None
+    if isinstance(manual, dict) and manual.get("verdict"):
+        who = ", ".join(part for part in (str(manual.get("author") or ""), _iso_to_text(manual.get("changed_at"))) if part)
+        reason = str(manual.get("reason") or "").strip()
+        rows = [(t("confluence.verdict.title"), _verdict_text(manual["verdict"]))]
+        changed = t("confluence.verdict.manual_by", who=who, reason=reason) if who else t("report.verdict.reason_line", reason=reason)
+        rows.append((t("confluence.verdict.manual"), changed))
+        rows.append((t("confluence.verdict.auto"), verdict))
+        return rows
+    rows = [(t("confluence.verdict.title"), verdict)]
+    llm = _verdict_text(row.get("llm_verdict") or parsed.get("verdict"))
+    # Rows saved before the SLA verdict replaced the model's one keep a different model verdict.
+    if row.get("domain") == "final" and row.get("llm_verdict") and row.get("sla_verdict") and llm != verdict:
+        rows.append((t("confluence.verdict.llm"), llm))
+        rows.append(("SLA", _verdict_text(row.get("sla_verdict"))))
+    return rows
+
+
+def _test_figures(row: dict[str, Any], parsed: dict[str, Any]) -> list[str]:
+    """Test-type section of the final report (saturation, spikes, stability), else the peak RPS table."""
+    peak = _as_dict(parsed.get("peak_performance") or parsed.get("peak_perfomance"))
+    section = test_type_section(parsed) if row.get("domain") == "final" else None
+    if section is not None:
+        title, section_rows = section
+        return [h3(title), kv_table(section_rows)]
+    if _peak_table_applies(str(row.get("domain") or ""), peak):
+        return [h3(t("report.structured.peak_title")), kv_table([
+            (t("report.structured.max_rps"), _cell_text(peak.get("max_rps"))),
+            (t("report.section.peak_time"), _cell_text(peak.get("max_time"))),
+            (t("report.section.drop_time"), _cell_text(peak.get("drop_time"))),
+        ])]
+    return []
+
+
+def render_deterministic_summary(row: dict[str, Any]) -> str:
+    """Final row of a report built without the model: the verdict, the test figures and a note on the analysis."""
+    parsed = _as_dict(row.get("parsed"))
+    return "".join([kv_table(_verdict_rows(row, parsed)), *_test_figures(row, parsed), p(t("confluence.no_llm_analysis"))])
+
+
 def render_llm_domain_body(row: dict[str, Any]) -> str:
     parsed = _as_dict(row.get("parsed"))
     analysis_error = _as_dict(parsed.get("analysis_error"))
@@ -817,24 +864,7 @@ def render_llm_domain_body(row: dict[str, Any]) -> str:
         text = _require_str(row.get("text"))
         return f"<pre>{xml_text(text[:12000])}</pre>" if text else p(t("confluence.no_data"))
 
-    verdict = _verdict_text(row.get("sla_verdict") or parsed.get("verdict") or row.get("verdict"))
-    manual = row.get("manual_verdict") if row.get("domain") == "final" else None
-    if isinstance(manual, dict) and manual.get("verdict"):
-        # Set by hand: the page names who, when and why, and keeps the automatic verdict next to it.
-        who = ", ".join(part for part in (str(manual.get("author") or ""), _iso_to_text(manual.get("changed_at"))) if part)
-        reason = str(manual.get("reason") or "").strip()
-        rows = [(t("confluence.verdict.title"), _verdict_text(manual["verdict"]))]
-        changed = t("confluence.verdict.manual_by", who=who, reason=reason) if who else t("report.verdict.reason_line", reason=reason)
-        rows.append((t("confluence.verdict.manual"), changed))
-        rows.append((t("confluence.verdict.auto"), verdict))
-    else:
-        rows = [(t("confluence.verdict.title"), verdict)]
-        llm = _verdict_text(row.get("llm_verdict") or parsed.get("verdict"))
-        # Rows saved before the SLA verdict replaced the model's one keep a different model verdict.
-        if row.get("domain") == "final" and row.get("llm_verdict") and row.get("sla_verdict") and llm != verdict:
-            rows.append((t("confluence.verdict.llm"), llm))
-            rows.append(("SLA", _verdict_text(row.get("sla_verdict"))))
-    parts = [kv_table(rows)]
+    parts = [kv_table(_verdict_rows(row, parsed))]
 
     rationale = _cell_text(
         parsed.get("verdict_rationale") or parsed.get("verdict_reason") or parsed.get("rationale"),
@@ -844,19 +874,7 @@ def render_llm_domain_body(row: dict[str, Any]) -> str:
         parts.append(h3(t("report.rationale.title")))
         parts.append(_html_paragraphs(rationale))
 
-    peak = _as_dict(parsed.get("peak_performance") or parsed.get("peak_perfomance"))
-    section = test_type_section(parsed) if row.get("domain") == "final" else None
-    if section is not None:
-        title, section_rows = section
-        parts.append(h3(title))
-        parts.append(kv_table(section_rows))
-    elif _peak_table_applies(str(row.get("domain") or ""), peak):
-        parts.append(h3(t("report.structured.peak_title")))
-        parts.append(kv_table([
-            (t("report.structured.max_rps"), _cell_text(peak.get("max_rps"))),
-            (t("report.section.peak_time"), _cell_text(peak.get("max_time"))),
-            (t("report.section.drop_time"), _cell_text(peak.get("drop_time"))),
-        ]))
+    parts.extend(_test_figures(row, parsed))
 
     parts.append(h3(t("report.findings.title")))
     parts.append(two_col_table(
@@ -1367,6 +1385,47 @@ def load_domains_schema(run_name: str) -> dict[str, list[str]]:
     return out
 
 
+def _datetime_ms(value: object) -> int | None:
+    return int(value.timestamp() * 1000) if isinstance(value, datetime) else None
+
+
+def load_run_meta(run_name: str) -> dict[str, Any] | None:
+    """``{service, start_ms, end_ms}`` of a run without stored report rows, from ``run_index`` or the metrics.
+
+    None when the run has no metrics either.
+    """
+    from AI.db_store import RUN_INDEX_TABLE
+
+    schema = str(_storage_cfg().get("schema") or "public")
+    conn = _ts_conn()
+    try:
+        row = None
+        with conn.cursor() as cur:
+            try:
+                cur.execute(
+                    sql.SQL("SELECT COALESCE(service, ''), start_time, end_time FROM {} WHERE run_name = %s").format(
+                        sql.Identifier(schema, RUN_INDEX_TABLE)
+                    ),
+                    (run_name,),
+                )
+                row = cur.fetchone()
+            except Exception as exc:  # a database without the index answers from the metrics
+                logger.warning("confluence: run_index of %s not read: %s", run_name, exc)
+                conn.rollback()
+        if row is None:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT COALESCE(MAX(service), ''), MIN("time"), MAX("time") FROM public.metrics WHERE run_name = %s""",
+                    (run_name,),
+                )
+                row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row or row[1] is None:
+        return None
+    return {"service": str(row[0] or ""), "start_ms": _datetime_ms(row[1]), "end_ms": _datetime_ms(row[2])}
+
+
 def load_run_series(run_name: str, domain: str, query_label: str) -> list[dict[str, Any]]:
     conn = _ts_conn()
     try:
@@ -1588,10 +1647,20 @@ def build_page_body(
     engineer_html: str,
     charts: list[dict[str, str]],
     step_table: dict[str, Any] | None = _UNRESOLVED,
+    run_meta: dict[str, Any] | None = None,
 ) -> str:
-    """Storage-format page of the report, in the language the report was written in (``ru`` for older reports)."""
-    with with_locale(stored_report_language(llm_rows)):
-        return _page_body(run_name, service, source_url, llm_rows, engineer_html, charts, step_table)
+    """Storage-format page of the report, in the language the report was written in (``ru`` for older reports).
+
+    ``run_meta`` (``service``, ``start_ms``, ``end_ms``) heads the page of a run without stored report rows,
+    which is written in the current locale.
+    """
+    with with_locale(_page_language(llm_rows)):
+        return _page_body(run_name, service, source_url, llm_rows, engineer_html, charts, step_table, run_meta)
+
+
+def _page_language(llm_rows: list[dict[str, Any]]) -> str:
+    """The stored language of the report; a run without report rows has none and takes the current locale."""
+    return stored_report_language(llm_rows) if llm_rows else get_locale()
 
 
 def _llm_domain_title(domain: str, stored_titles: dict[str, str]) -> str:
@@ -1608,8 +1677,9 @@ def _page_body(
     engineer_html: str,
     charts: list[dict[str, str]],
     step_table: Any,
+    run_meta: dict[str, Any] | None = None,
 ) -> str:
-    first = llm_rows[0] if llm_rows else {}
+    first = llm_rows[0] if llm_rows else (run_meta or {})
     test_type = next((str(row.get("test_type")) for row in llm_rows if row.get("test_type")), "")
     type_label = (test_type_label(normalize_test_type(test_type), get_locale()) or test_type) if test_type else ""
     start_text = _ms_to_text(first.get("start_ms"))
@@ -1632,11 +1702,21 @@ def _page_body(
     ]
     if source_url:
         parts.append(f'<p><a href="{xml_text(source_url)}">{xml_text(t("confluence.open_report"))}</a></p>')
-    if step_table is _UNRESOLVED:
-        step_table = resolve_load_step_table(run_name, llm_rows)
     final_row = next((row for row in llm_rows if str(row.get("domain")) == "final"), {})
-    parts.append(h2(t("report.sla.title")))
-    parts.append(sla_criteria_block(final_row if isinstance(final_row, dict) else {}, step_table))
+    final_row = final_row if isinstance(final_row, dict) else {}
+    if is_deterministic_report(final_row.get("parsed")):
+        # Built without the model: the verdict and the test figures head the page; there is no analysis section.
+        parts.append(h2(t("report.hero.verdict_title")))
+        parts.append(render_deterministic_summary(final_row))
+    if llm_rows:
+        if step_table is _UNRESOLVED:
+            step_table = resolve_load_step_table(run_name, llm_rows)
+        parts.append(h2(t("report.sla.title")))
+        parts.append(sla_criteria_block(final_row, step_table))
+    else:
+        # A run with metrics and no stored report: charts and the engineer summary only.
+        step_table = None
+        parts.append(p(t("confluence.no_llm_analysis")))
     parts.append(h2(t("report.engineer.title")))
     parts.append(html_to_storage(engineer_html))
     context_items = _system_context_items(system_context)
@@ -1646,7 +1726,7 @@ def _page_body(
     if step_block:
         parts.append(step_block)
 
-    by_domain = {str(row.get("domain")): row for row in llm_rows}
+    by_domain = {str(row.get("domain")): row for row in llm_rows if not is_deterministic_report(row.get("parsed"))}
     stored_titles = report_domain_titles(llm_rows)
     llm_panels: list[tuple[str, str]] = []
     for domain in LLM_DOMAIN_ORDER:
@@ -1655,8 +1735,9 @@ def _page_body(
     for domain, row in by_domain.items():
         if domain not in LLM_DOMAIN_TITLES:
             llm_panels.append((stored_titles.get(domain) or domain, render_llm_domain_body(row)))
-    parts.append(h2(t("confluence.llm_analysis")))
-    parts.append(wrap_ui_tabs(llm_panels or [(t("common.domain.final"), p(t("confluence.no_llm_reports")))]))
+    if llm_panels:
+        parts.append(h2(t("confluence.llm_analysis")))
+        parts.append(wrap_ui_tabs(llm_panels))
 
     charts_by_domain: dict[str, list[dict[str, str]]] = {}
     for chart in charts:
@@ -1695,9 +1776,13 @@ def publish_report(
     validate_confluence_config(cfg)
     _progress(progress_callback, msg("confluence.progress.loading_report"), 5)
     llm_rows = load_llm_rows(run_name)
+    run_meta: dict[str, Any] | None = None
     if not llm_rows:
-        raise ConfluencePublishError("confluence.error.no_reports", run=run_name)
-    service_name = service or _require_str(llm_rows[0].get("service")) or "unknown"
+        # A run built without the model before its final row was stored: charts and the engineer summary.
+        run_meta = load_run_meta(run_name)
+        if run_meta is None:
+            raise ConfluencePublishError("confluence.error.no_report_data", run=run_name)
+    service_name = service or _require_str((llm_rows[0] if llm_rows else run_meta or {}).get("service")) or "unknown"
     engineer_html = load_engineer_html(run_name)
     schema = load_domains_schema(run_name)
 
@@ -1709,8 +1794,8 @@ def publish_report(
             raise ConfluenceDependencyError("confluence.error.matplotlib") from exc
     # Page text, chart captions, markers and thresholds in the language of the report; the job's own
     # messages (progress, errors) stay in the job's locale.
-    with with_locale(stored_report_language(llm_rows)):
-        title, body, attachments = _report_page(run_name, service_name, source_url, llm_rows, engineer_html, schema)
+    with with_locale(_page_language(llm_rows)):
+        title, body, attachments = _report_page(run_name, service_name, source_url, llm_rows, engineer_html, schema, run_meta)
 
     client = ConfluenceClient(cfg)
     existing = load_publication(run_name)
@@ -1734,9 +1819,10 @@ def _report_page(
     llm_rows: list[dict[str, Any]],
     engineer_html: str,
     schema: dict[str, list[str]],
+    run_meta: dict[str, Any] | None = None,
 ) -> tuple[str, str, dict[str, bytes]]:
     """Title, storage body and PNG attachments of the report page, in the current locale."""
-    step_table = resolve_load_step_table(run_name, llm_rows)
+    step_table = resolve_load_step_table(run_name, llm_rows) if llm_rows else None
     annotations = chart_annotations(llm_rows, step_table)
     all_labels = [label for labels in schema.values() for label in labels]
     charts: list[dict[str, str]] = []
@@ -1767,6 +1853,7 @@ def _report_page(
         engineer_html=engineer_html,
         charts=charts,
         step_table=step_table,
+        run_meta=run_meta,
     )
     return title, body, attachments
 

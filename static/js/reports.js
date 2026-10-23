@@ -589,6 +589,11 @@
     const manual = row && row.manual_verdict;
     return manual && manual.verdict ? manual : null;
   }
+  // Final row of a report built without the model (use_llm: false): SLA verdict, steps and test figures only.
+  function isDeterministicFinal(row) {
+    const parsed = parseJsonish(row && row.parsed);
+    return !!(parsed && typeof parsed === 'object' && parsed.analysis === 'deterministic');
+  }
   // The line under the verdict pill: who set the verdict and from what.
   function verdictSourceText(finalRow) {
     const row = finalRow || {};
@@ -1319,21 +1324,34 @@
       }
     ];
     verdictRows._tableClass = 'report-aligned-value-table';
+    const sections = [
+      renderKeyValueTable('', verdictRows),
+      renderRationaleBox(verdictRationale),
+      testFiguresHtml(report, domain, peak),
+      renderProblemRecommendationRows(pairFindingsWithActions(findings, actions, domain)),
+      extraHtml || ''
+    ].filter(Boolean);
+    return `<div class="report-stack">${sections.join('')}</div>`;
+  }
+  // Test-type section of the final report (saturation, spikes, stability), else the peak RPS table; '' for none.
+  function testFiguresHtml(report, domain, peak) {
+    const typeSection = renderTestTypeSection(report, domain);
+    if (typeSection) return typeSection;
+    if (!peakTableApplies(domain, peak)) return '';
     const peakRows = [
       { label: LL.t('report.structured.max_rps'), html: escapeHtml(safeStr(peak.max_rps) || '—') },
       { label: LL.t('report.section.peak_time'), html: escapeHtml(safeStr(peak.max_time) || '—') },
       { label: LL.t('report.section.drop_time'), html: escapeHtml(safeStr(peak.drop_time) || '—') }
     ];
     peakRows._tableClass = 'report-aligned-value-table';
-    const typeSection = renderTestTypeSection(report, domain);
-    const sections = [
-      renderKeyValueTable('', verdictRows),
-      renderRationaleBox(verdictRationale),
-      typeSection || (peakTableApplies(domain, peak) ? renderKeyValueTable(LL.t('report.structured.peak_title'), peakRows) : ''),
-      renderProblemRecommendationRows(pairFindingsWithActions(findings, actions, domain)),
-      extraHtml || ''
-    ].filter(Boolean);
-    return `<div class="report-stack">${sections.join('')}</div>`;
+    return renderKeyValueTable(LL.t('report.structured.peak_title'), peakRows);
+  }
+  // Analysis block of a report built without the model: a note and the test figures of the final row.
+  function deterministicSummaryHtml(finalRow) {
+    const report = parseJsonish(finalRow && finalRow.parsed) || {};
+    const peak = report.peak_performance || report.peak_perfomance || {};
+    const figures = testFiguresHtml(report, 'final', peak);
+    return `<div class="report-analysis-card"><div class="report-stack"><p class="dim">${escapeHtml(LL.t('report.analysis.no_ai_note'))}</p>${figures}</div></div>`;
   }
   // Where the reliability level comes from: the judge, the data check alone (one answer), or the data
   // check and confidence because the judge gave no usable scores. Reports saved before that case was
@@ -2779,7 +2797,8 @@
   // «Вердикт верен?» with the votes, then «Изменить вердикт» / «Вернуть автоматический», on one line under the SLA table.
   function verdictLineHtml(finalRow) {
     const manual = manualOf(finalRow);
-    const votes = renderVoteGroup('final', 'verdict', '', LL.t('report.feedback.agree_verdict'), LL.t('report.feedback.disagree_verdict'));
+    // Votes on the verdict rate the model; a report built without it has nothing to rate.
+    const votes = isDeterministicFinal(finalRow) ? '' : renderVoteGroup('final', 'verdict', '', LL.t('report.feedback.agree_verdict'), LL.t('report.feedback.disagree_verdict'));
     return [
       '<div class="rep-verdict-line" data-min-role="engineer">',
       votes ? `<span class="rep-verdict-q">${escapeHtml(LL.t('report.feedback.verdict_question'))}</span>${votes}` : '',
@@ -2819,6 +2838,7 @@
       '<div class="rep-verdict-row">',
       `<abbr class="term rep-verdict-term" data-term="${verdictTermKey}" data-tip="${tip}" title="${tip}" tabindex="0"><span class="rep-verdict-word">${escapeHtml(LL.verdictLabel(code))}</span></abbr>`,
       manual ? `<span class="verdict-manual-tag">${escapeHtml(LL.t('report.verdict.manual_tag'))}</span>` : '',
+      isDeterministicFinal(finalRow) ? `<span class="verdict-manual-tag">${escapeHtml(LL.t('report.hero.no_ai_tag'))}</span>` : '',
       '</div>',
       summary ? `<p class="rep-verdict-why">${summary}</p>` : '',
       `<div class="hero-sub rep-verdict-source">${escapeHtml(verdictSourceText(finalRow))}</div>`,
@@ -2901,12 +2921,19 @@
     await renderLoadSteps(finalRow);
     reportState.finalRow = finalRow;
     renderForecastLink();
+    // A report built without the model has no analyses: a note and the test figures stand in for the tabs.
+    const analysisRows = arr.filter((x) => !isDeterministicFinal(x));
+    if (!analysisRows.length && isDeterministicFinal(finalRow)) {
+      box.innerHTML = deterministicSummaryHtml(finalRow);
+      LL.ui.applyTerms(box);
+      return;
+    }
     const domainsOrder = ['final', 'jvm', 'database', 'kafka', 'microservices', 'hard_resources', 'lt_framework', 'lt_generators', 'application_logs'];
-    arr.sort((a, b) => domainsOrder.indexOf(a.domain) - domainsOrder.indexOf(b.domain));
+    analysisRows.sort((a, b) => domainsOrder.indexOf(a.domain) - domainsOrder.indexOf(b.domain));
     const tabsNav = document.createElement('div'); tabsNav.className = 'tabs'; tabsNav.setAttribute('aria-label', LL.t('report.tabs.analysis_aria'));
     const tabsBody = document.createElement('div');
     const idBase = 'rep-llm-tab-';
-    arr.forEach((x, idx) => {
+    analysisRows.forEach((x, idx) => {
       const btn = document.createElement('button'); btn.className = 'tab' + (idx === 0 ? ' active' : '');
       const dot = document.createElement('span');
       const verdictForTab = x.verdict || x.llm_verdict || '';
@@ -3416,6 +3443,8 @@
     renderLoadStepTableHtml: renderLoadStepTableHtml,
     renderSlaChecklist: renderSlaChecklist,
     renderStructuredReportHtml: renderStructuredReportHtml,
+    isDeterministicFinal: isDeterministicFinal,
+    deterministicSummaryHtml: deterministicSummaryHtml,
     renderTrendsTable: renderTrendsTable,
     judgeSectionHtml: judgeSectionHtml,
     systemContextMarkdown: systemContextMarkdown,

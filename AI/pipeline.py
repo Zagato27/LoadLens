@@ -76,7 +76,7 @@ from AI.test_profile import is_capacity_like, mode_of, normalize_test_type, prof
 from AI.stability import build_stability_payload, compute_trends, hold_window_from_labeled
 from AI.spike import analyze_spikes, build_spike_payload, detect_spikes_from_labeled, spike_load_steps, spike_windows_ctx
 from AI.saturation import build_saturation
-from AI.verdicts import FAIL, PASS, RISK, to_code
+from AI.verdicts import DETERMINISTIC, FAIL, PASS, RISK, to_code
 from AI.verdicts import label as verdict_label
 
 
@@ -484,6 +484,24 @@ def _designated_window_ctx(window: Optional[Dict[str, Any]], shift_hours: int) -
         "degraded_level": window.get("degraded_level"),
         "degraded_checks": window.get("degraded_checks") or [],
     }
+
+
+def _peak_step_start(steps: Sequence[LoadStep], level: Any, shift_hours: int) -> Optional[str]:
+    """Start (ISO, report time) of the plateau of the stable load step at the designated peak ``level``.
+
+    The step whose level is nearest to the peak, within 10 % of it; None without such a step.
+    """
+    try:
+        target = float(level)
+    except (TypeError, ValueError):
+        return None
+    stable = [step for step in steps if step.stable and step.rps_level]
+    if target <= 0 or not stable:
+        return None
+    nearest = min(stable, key=lambda step: abs(float(step.rps_level) - target))
+    if abs(float(nearest.rps_level) - target) > 0.1 * target:
+        return None
+    return format_iso(nearest.plateau_start if nearest.plateau_start is not None else nearest.start, shift_hours)
 
 
 _RECONCILED_MODES = frozenset({"stability", "spike"})
@@ -3237,7 +3255,156 @@ def _upload_from_llm(
         except Exception as e:
             logger.error(f"Failed to save domain data to TimescaleDB: {e}")
 
+    def _overall_context() -> Dict[str, Any]:
+        """Data context of the final analysis, built from the collected data alone.
+
+        The model reads it; the final row stores it with or without the model (the forecast takes
+        ``load_steps``, ``rps_drop_iso`` and ``lt_series_labels`` from it).
+        """
+        ctx: Dict[str, Any] = {
+            "time_range": time_range_ctx,
+            "load_steps": [step.to_dict() for step in load_steps],
+            "rps_drop_iso": format_iso(run_steps.rps_drop, shift_hours) if run_steps.rps_drop is not None else None,
+            "lt_series_labels": _labels_with_data(domain_data.get("lt_framework", {}).get("labeled") or []),
+            "timeline": build_timeline(
+                {k: (v.get("pack") or {}) for k, v in domain_data.items() if isinstance(v, dict) and _is_enabled(k)},
+                load_steps,
+            ),
+            "baseline": _baseline_for_overall(baseline_ctx, {k: v for k, v in domain_data.items() if isinstance(v, dict) and _is_enabled(k)}),
+            "test_profile": test_profile,
+            "designated_peak_performance": {
+                "source_domain": "lt_framework",
+                "source_label": designated_source_label or perf_query_label or None,
+                "stable_max": designated_peak,
+                "not_applicable": not peak_performance_applicable,
+                "reason": peak_not_applicable_reason if not peak_performance_applicable else None,
+                "value_type": (
+                    "stable_max" if str(designated_method or "").startswith("stable_max")
+                    else ("max" if str(designated_method or "").startswith("peak_max") else None)
+                ),
+                "series": designated_series,
+                "method": designated_method,
+                "stable_window": _designated_window_ctx(sla_window if is_capacity_like(profile.mode) else None, shift_hours),
+                "note": (
+                    prompt_text("peak.not_applicable", lang, test=profile.label(lang), focus=profile.focus(lang))
+                    if not peak_performance_applicable
+                    else prompt_text("peak.designated", lang)
+                ),
+            },
+            "deterministic_sla": deterministic_sla,
+            **mode_payloads,
+            "domains": {
+                "jvm": domain_data["jvm"]["pack"],
+                "database": domain_data["database"]["pack"],
+                "kafka": domain_data["kafka"]["pack"],
+                "microservices": domain_data["microservices"]["pack"],
+                "hard_resources": domain_data["hard_resources"]["pack"],
+            },
+        }
+        if _has_meaningful_system_context(active_system_context):
+            ctx["system_context"] = active_system_context
+        if "lt_framework" in domain_keys:
+            ctx["domains"]["lt_framework"] = lt_pack
+        if APPLICATION_LOGS_DOMAIN in domain_keys:
+            ctx["domains"][APPLICATION_LOGS_DOMAIN] = domain_data.get(APPLICATION_LOGS_DOMAIN, {}).get("pack", {})
+        if GENERATORS_DOMAIN in domain_keys:
+            ctx["domains"][GENERATORS_DOMAIN] = domain_data.get(GENERATORS_DOMAIN, {}).get("pack", {})
+        return ctx
+
+    def _decorate_final_payload(final_payload: Dict[str, Any]) -> None:
+        """Adds the deterministic parts to the final payload and sets its verdict to the SLA one."""
+        final_payload["report_language"] = lang
+        final_payload["test_profile"] = test_profile
+        final_payload["deterministic_sla"] = deterministic_sla
+        if report_titles:
+            final_payload["domain_titles"] = report_titles
+        if load_step_table:
+            final_payload["load_step_table"] = load_step_table
+        for payload_key, payload_value in mode_payloads.items():
+            final_payload[payload_key] = payload_value
+        if not peak_performance_applicable:
+            # ``reason`` names why; no prose note (nobody read it and it tied the payload to one language).
+            final_payload["peak_performance"] = {
+                "not_applicable": True,
+                "reason": peak_not_applicable_reason,
+                "method": None,
+            }
+        elif designated_peak is not None:
+            peak_obj = final_payload.get("peak_performance")
+            if not isinstance(peak_obj, dict):
+                peak_obj = {}
+            try:
+                peak_obj["max_rps"] = round(float(designated_peak), 2)
+            except (TypeError, ValueError):
+                peak_obj["max_rps"] = designated_peak
+            if designated_method:
+                peak_obj["method"] = str(designated_method)
+            if designated_series:
+                peak_obj["series"] = str(designated_series)
+            if designated_source_label:
+                peak_obj["source_label"] = str(designated_source_label)
+            final_payload["peak_performance"] = peak_obj
+        if isinstance(sla_result, dict) and sla_result.get("verdict"):
+            # The final verdict is the SLA one (a code); the model's verdict stays only in the rationale.
+            sla_verdict = to_code(sla_result["verdict"])
+            original_verdict = to_code(final_payload.get("verdict"))
+            final_payload["verdict"] = sla_verdict
+            if sla_verdict == RISK and original_verdict == FAIL:
+                rationale = str(final_payload.get("verdict_rationale") or "").strip()
+                correction = prompt_text("verdict.final_adjusted", lang, test=profile.label(lang))
+                final_payload["verdict_rationale"] = f"{correction}\n\n{rationale}" if rationale else correction
+                final_payload["verdict_adjusted_from"] = FAIL
+
+    def _deterministic_results() -> Dict[str, Any]:
+        """Results of a report built without the model: the final payload, its context and the SLA data.
+
+        The payload is marked ``analysis: deterministic`` and has no domain analyses; ``save_llm_results``
+        writes the final row alone.
+        """
+        payload: Dict[str, Any] = {"analysis": DETERMINISTIC}
+        _decorate_final_payload(payload)
+        peak = payload.get("peak_performance")
+        if isinstance(peak, dict) and not peak.get("not_applicable"):
+            # The model reads these times off the context; here they come from the SLA step (without SLA, the
+            # stable step at the peak) and the RPS drop (HH:MM of report time: format_iso applied the offset).
+            window = _designated_window_ctx(sla_window if is_capacity_like(profile.mode) else None, shift_hours) or {}
+            peak_start = window.get("start_iso") or _peak_step_start(load_steps, peak.get("max_rps"), shift_hours)
+            if peak_start:
+                peak["max_time"] = str(peak_start)[11:16]
+            if run_steps.rps_drop is not None:
+                peak["drop_time"] = format_iso(run_steps.rps_drop, shift_hours)[11:16]
+            elif window.get("end_iso") and window.get("degraded_level") is not None:
+                peak["drop_time"] = str(window["end_iso"])[11:16]
+        return {
+            "report_language": lang,
+            "final_parsed": payload,
+            "contexts": {"final": json.dumps(_compact_overall_context(_overall_context()), ensure_ascii=False)},
+            "sla_verdict": sla_result.get("verdict"),
+            "sla_checks": sla_result.get("checks", []),
+            "sla_summary": sla_result.get("summary", ""),
+            "sla_window": sla_result.get("stable_window"),
+            "sla_target_window": sla_result.get("target_window"),
+            "sla_headroom": sla_result.get("headroom"),
+            "load_step_table": load_step_table,
+            "system_context": active_system_context,
+        }
+
     if only_collect:
+        # Without the model the report still gets its final row: SLA verdict, steps and test figures.
+        if save_to_db:
+            _progress(msg("job.progress.save_results"), PROGRESS_SAVE_RESULTS)
+            try:
+                save_llm_results(
+                    results=_deterministic_results(),
+                    run_meta={
+                        **(run_meta or {}),
+                        "start_ms": int((run_meta or {}).get("start_ms") or int(start_ts * 1000)),
+                        "end_ms": int((run_meta or {}).get("end_ms") or int(end_ts * 1000)),
+                    },
+                    storage_cfg=storage_cfg,
+                )
+            except Exception as e:
+                logger.error("Failed to save the report built without the model: %s", e)
         return {}
 
     # Default prompts in the report language; an override is used only when it is not empty and not a copy
@@ -3287,16 +3454,14 @@ def _upload_from_llm(
 
     include_tables = bool(((CONFIG.get("llm", {}) or {}).get("include_markdown_tables_in_context", False)))
     jvm_full_data = domain_data["jvm"]["markdown"]; jvm_pack = domain_data["jvm"]["pack"]; jvm_ctx = domain_data["jvm"]["ctx"]
-    database_full_data = domain_data["database"]["markdown"]; database_pack = domain_data["database"]["pack"]; database_ctx = domain_data["database"]["ctx"]
-    kafka_full_data = domain_data["kafka"]["markdown"]; kafka_pack = domain_data["kafka"]["pack"]; kafka_ctx = domain_data["kafka"]["ctx"]
+    database_full_data = domain_data["database"]["markdown"]; database_ctx = domain_data["database"]["ctx"]
+    kafka_full_data = domain_data["kafka"]["markdown"]; kafka_ctx = domain_data["kafka"]["ctx"]
     ms_full_data = domain_data["microservices"]["markdown"]; ms_pack = domain_data["microservices"]["pack"]
-    hr_full_data = domain_data["hard_resources"]["markdown"]; hr_pack = domain_data["hard_resources"]["pack"]; hr_ctx = domain_data["hard_resources"]["ctx"]
+    hr_full_data = domain_data["hard_resources"]["markdown"]; hr_ctx = domain_data["hard_resources"]["ctx"]
     lt_full_data = domain_data.get("lt_framework", {}).get("markdown", "")
     lt_pack = domain_data.get("lt_framework", {}).get("pack", {})
     generators_full_data = domain_data.get(GENERATORS_DOMAIN, {}).get("markdown", "")
-    generators_pack = domain_data.get(GENERATORS_DOMAIN, {}).get("pack", {})
     application_logs_full_data = domain_data.get(APPLICATION_LOGS_DOMAIN, {}).get("markdown", "")
-    application_logs_pack = domain_data.get(APPLICATION_LOGS_DOMAIN, {}).get("pack", {})
     application_logs_ctx = domain_data.get(APPLICATION_LOGS_DOMAIN, {}).get(
         "ctx",
         json.dumps({"domain": APPLICATION_LOGS_DOMAIN, "intervals": []}, ensure_ascii=False),
@@ -3476,54 +3641,7 @@ def _upload_from_llm(
         merged_prompt_overall = _augment_prompt_with_system_context(merged_prompt_overall, system_context_brief, lang)
     merged_prompt_overall = assemble_prompt(merged_prompt_overall, context_guide, analysis_guidance, response_format)
 
-    base_ctx = {
-        "time_range": time_range_ctx,
-        "load_steps": [step.to_dict() for step in load_steps],
-        "rps_drop_iso": format_iso(run_steps.rps_drop, shift_hours) if run_steps.rps_drop is not None else None,
-        "lt_series_labels": _labels_with_data(domain_data.get("lt_framework", {}).get("labeled") or []),
-        "timeline": build_timeline(
-            {k: (v.get("pack") or {}) for k, v in domain_data.items() if isinstance(v, dict) and _is_enabled(k)},
-            load_steps,
-        ),
-        "baseline": _baseline_for_overall(baseline_ctx, {k: v for k, v in domain_data.items() if isinstance(v, dict) and _is_enabled(k)}),
-        "test_profile": test_profile,
-        "designated_peak_performance": {
-            "source_domain": "lt_framework",
-            "source_label": designated_source_label or perf_query_label or None,
-            "stable_max": designated_peak,
-            "not_applicable": not peak_performance_applicable,
-            "reason": peak_not_applicable_reason if not peak_performance_applicable else None,
-            "value_type": (
-                "stable_max" if str(designated_method or "").startswith("stable_max")
-                else ("max" if str(designated_method or "").startswith("peak_max") else None)
-            ),
-            "series": designated_series,
-            "method": designated_method,
-            "stable_window": _designated_window_ctx(sla_window if is_capacity_like(profile.mode) else None, shift_hours),
-            "note": (
-                prompt_text("peak.not_applicable", lang, test=profile.label(lang), focus=profile.focus(lang))
-                if not peak_performance_applicable
-                else prompt_text("peak.designated", lang)
-            ),
-        },
-        "deterministic_sla": deterministic_sla,
-        **mode_payloads,
-        "domains": {
-            "jvm": jvm_pack,
-            "database": database_pack,
-            "kafka": kafka_pack,
-            "microservices": ms_pack,
-            "hard_resources": hr_pack
-        }
-    }
-    if _has_meaningful_system_context(active_system_context):
-        base_ctx["system_context"] = active_system_context
-    if "lt_framework" in domain_keys:
-        base_ctx["domains"]["lt_framework"] = lt_pack
-    if APPLICATION_LOGS_DOMAIN in domain_keys:
-        base_ctx["domains"][APPLICATION_LOGS_DOMAIN] = application_logs_pack
-    if GENERATORS_DOMAIN in domain_keys:
-        base_ctx["domains"][GENERATORS_DOMAIN] = generators_pack
+    base_ctx = _overall_context()
     if include_tables:
         base_ctx["domains_tables_markdown"] = {
             "jvm": jvm_full_data,
@@ -3594,47 +3712,7 @@ def _upload_from_llm(
 
     final_payload = _to_dict_maybe(final_parsed) or _extract_json_obj(final_answer)
     if isinstance(final_payload, dict):
-        final_payload["report_language"] = lang
-        final_payload["test_profile"] = test_profile
-        final_payload["deterministic_sla"] = deterministic_sla
-        if report_titles:
-            final_payload["domain_titles"] = report_titles
-        if load_step_table:
-            final_payload["load_step_table"] = load_step_table
-        for payload_key, payload_value in mode_payloads.items():
-            final_payload[payload_key] = payload_value
-        if not peak_performance_applicable:
-            # ``reason`` names why; no prose note (nobody read it and it tied the payload to one language).
-            final_payload["peak_performance"] = {
-                "not_applicable": True,
-                "reason": peak_not_applicable_reason,
-                "method": None,
-            }
-        elif designated_peak is not None:
-            peak_obj = final_payload.get("peak_performance")
-            if not isinstance(peak_obj, dict):
-                peak_obj = {}
-            try:
-                peak_obj["max_rps"] = round(float(designated_peak), 2)
-            except (TypeError, ValueError):
-                peak_obj["max_rps"] = designated_peak
-            if designated_method:
-                peak_obj["method"] = str(designated_method)
-            if designated_series:
-                peak_obj["series"] = str(designated_series)
-            if designated_source_label:
-                peak_obj["source_label"] = str(designated_source_label)
-            final_payload["peak_performance"] = peak_obj
-        if isinstance(sla_result, dict) and sla_result.get("verdict"):
-            # The final verdict is the SLA one (a code); the model's verdict stays only in the rationale.
-            sla_verdict = to_code(sla_result["verdict"])
-            original_verdict = to_code(final_payload.get("verdict"))
-            final_payload["verdict"] = sla_verdict
-            if sla_verdict == RISK and original_verdict == FAIL:
-                rationale = str(final_payload.get("verdict_rationale") or "").strip()
-                correction = prompt_text("verdict.final_adjusted", lang, test=profile.label(lang))
-                final_payload["verdict_rationale"] = f"{correction}\n\n{rationale}" if rationale else correction
-                final_payload["verdict_adjusted_from"] = FAIL
+        _decorate_final_payload(final_payload)
         final_parsed = final_payload
         try:
             trimmed = (final_answer or "").strip()

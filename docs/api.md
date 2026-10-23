@@ -57,11 +57,11 @@ is one table in `loadlens_app/auth/policy.py`, and a test refuses a route withou
 | `GET /job_status/<job_id>` | | Phase, progress, message, error and the link to the result |
 | `GET /jobs` | `status=running,error`, `limit` | Recent jobs; cached 3 s |
 | `POST /jobs/dismiss` | `{"job_ids": [...]}` | Hides finished jobs from the list; running ones are returned in `skipped_running`. Engineer |
-| `GET /llm_reports` | `run_name` | Domain and overall blocks of a report with the SLA details, the step table, the effective verdict and `manual_verdict` |
+| `GET /llm_reports` | `run_name` | Domain and overall blocks of a report with the SLA details, the step table, the effective verdict and `manual_verdict`. A report built without AI has the `final` row alone: no `text`, `parsed.analysis` is `deterministic` |
 | `GET /llm_context` | `run_name` | The JSON context that was sent to the model (large, kept off `/llm_reports`) |
 | `GET` / `PUT /llm_feedback` | | Votes on findings |
 | `GET` / `POST /engineer_summary` | | The engineer summary (sanitized HTML: formatting and http(s)/mailto links only) |
-| `GET /confluence_publication`, `POST /publish_confluence` | `run_name` | The published page of a report; publication as a background job. Engineer |
+| `GET /confluence_publication`, `POST /publish_confluence` | `run_name` | The published page of a report; publication as a background job. A report built without AI is published with its verdict and test figures and no analysis section; a run with metrics only, with its charts and the engineer summary. Engineer |
 | `GET /report_ref/<run_id>` | | Service and run name of a report by id (old runs by name) |
 | `POST /demo/seed` | | Writes the synthetic run `demo-checkout-step` in the area `demo`; `409` when it exists. Administrator |
 

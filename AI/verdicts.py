@@ -178,9 +178,20 @@ def normalize_report(parsed: Any) -> Any:
     return out
 
 
+# ``analysis`` of the final payload of a report built without the model (``use_llm: false``): the SLA verdict,
+# the steps and the test figures only, no domain analyses.
+DETERMINISTIC = "deterministic"
+
+
+def is_deterministic_report(parsed: Any) -> bool:
+    """True for the stored final payload of a report built without the model."""
+    return isinstance(parsed, Mapping) and parsed.get("analysis") == DETERMINISTIC
+
+
 __all__ = [
     "CODES",
     "DEFAULT_LANG",
+    "DETERMINISTIC",
     "FAIL",
     "LABELS",
     "LEGACY",
@@ -191,6 +202,7 @@ __all__ = [
     "TONES",
     "code_sql",
     "exact_code",
+    "is_deterministic_report",
     "label",
     "normalize_report",
     "optional_code",

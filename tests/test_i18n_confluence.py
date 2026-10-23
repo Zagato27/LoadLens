@@ -276,11 +276,12 @@ def test_publication_errors_render_where_they_are_shown(monkeypatch):
     assert str(missing.value) == "Не заполнены настройки Confluence: username, password, space_key, parent_page_id"
     monkeypatch.setattr(confluence_export, "confluence_config", lambda: dict(CONFLUENCE_CFG))
     monkeypatch.setattr(confluence_export, "load_llm_rows", lambda run: [])
+    monkeypatch.setattr(confluence_export, "load_run_meta", lambda run: None)
     with pytest.raises(ValueError) as empty:
         confluence_export.publish_report("run-9")
-    assert str(empty.value) == "Для запуска 'run-9' нет LLM-отчётов"
+    assert str(empty.value) == "Для запуска 'run-9' нет данных отчёта"
     with with_locale("en"):
-        assert str(empty.value) == "Run 'run-9' has no LLM reports"
+        assert str(empty.value) == "Run 'run-9' has no report data"
 
 
 # ---- template flow -------------------------------------------------------------------------------------------------

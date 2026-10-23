@@ -179,8 +179,10 @@ context import, the document text are sent to the provider you configure; nothin
 - **Forecast explanation.** "Explain with AI" on the forecast page links the USL limit to the findings of the report
   (`forecast_limit_prompt.txt`), in the language of the report; the answer is cached per report
   (`forecast_explanations`). Limit: `limits.llm_explanations_per_user_per_day`.
-- **Reports without AI.** `use_llm: false` builds the deterministic report only: SLA, steps, charts; such reports have
-  no analysis tabs and no overall verdict to override.
+- **Reports without AI.** `use_llm: false` builds the deterministic report: the SLA verdict and checks, the load
+  steps, the peak RPS with its peak and degradation times or the test-type figures (saturation, spikes, stability),
+  the charts and the engineer summary. The report page and the Confluence page mark it "no AI analysis" and have
+  no analysis tabs; its verdict can be overridden and the forecast opens as for any report.
 - **Budgets.** `limits.llm_reports_per_user_per_day` counts reports with analysis; when it is exhausted, a report
   started from the "Run a test" page is built without the analysis.
 

@@ -21,7 +21,7 @@
   "new.params.legend": "Параметры",
   "new.params.llm": "Анализ ИИ",
   "new.params.llm_hint": "Без анализа ИИ отчёт будет содержать только графики метрик.",
-  "new.params.llm_off": "Только собрать метрики",
+  "new.params.llm_off": "Без анализа ИИ",
   "new.params.llm_on": "Включить",
   "new.params.optional": "(необязательно)",
   "new.params.report_language_hint": "Отчёт будет на языке отчётов установки — {language} («Настройки → Оформление»).",
