@@ -2728,6 +2728,41 @@
     const block = queriesModel()[domain];
     return isPlainObject(block) ? block : {};
   }
+
+  // ---- domains a service does not analyse (the ticks in Services) ------------------------------------------
+  // Only the report reads disabled_domains; the queries of such a domain stay editable, so the page marks them.
+  function offDomainsOf(meta) {
+    const list = isPlainObject(meta) && Array.isArray(meta.disabled_domains) ? meta.disabled_domains : [];
+    return list.filter((domain) => typeof domain === 'string' && domain);
+  }
+  // Services, in the order of ``ids``, that turn the domain off.
+  function servicesWithDomainOff(domain, servicesMeta, ids) {
+    const metas = isPlainObject(servicesMeta) ? servicesMeta : {};
+    return (Array.isArray(ids) ? ids : []).filter((id) => offDomainsOf(metas[id]).includes(domain));
+  }
+  function serviceTitleOf(id, servicesMeta) {
+    const meta = isPlainObject(servicesMeta) ? servicesMeta[id] : null;
+    const title = isPlainObject(meta) && typeof meta.title === 'string' ? meta.title.trim() : '';
+    return title || String(id);
+  }
+  // The line under the query tabs: the picked service (``scope``) turns the domain off, or, in the area scope,
+  // some services of the area do. ``null`` when nothing is off.
+  function domainOffNote(domain, scope, servicesMeta, ids) {
+    if (scope) {
+      if (!offDomainsOf(isPlainObject(servicesMeta) ? servicesMeta[scope] : null).includes(domain)) return null;
+      return { text: LL.t('settings.queries.domain_off_service', { service: serviceTitleOf(scope, servicesMeta) }), services: [scope] };
+    }
+    const off = servicesWithDomainOff(domain, servicesMeta, ids);
+    if (!off.length) return null;
+    return { text: LL.tn('settings.queries.domain_off_services', off.length, { list: off.map((id) => serviceTitleOf(id, servicesMeta)).join(', ') }), services: off };
+  }
+  // Rows of the domain a service reads: the area block, or the block of the service override when it has one.
+  // ``null`` for a domain without queries (application logs).
+  function domainRowCount(domain, base, override) {
+    const block = deepMerge(isPlainObject(base) ? base : {}, isPlainObject(override) ? override : {})[domain];
+    if (!isPlainObject(block)) return null;
+    return Array.isArray(block.labels) ? block.labels.length : 0;
+  }
   function filledLangs(block) {
     return LT_QUERY_PRIORITY.filter((lang) => (block[QUERY_LANG[lang].query] || []).some((q) => String(q || '').trim()));
   }
@@ -2854,6 +2889,8 @@
     state.queryDomain = domain;
     host.innerHTML = '';
     host.appendChild(queryDomainTabs(domain));
+    const offLine = domainOffLine(domain);
+    if (offLine) host.appendChild(offLine);
     host.appendChild(queryLangBar(domain, queryBlock(domain)));
     host.appendChild(domainSourceLine(domain));
     host.appendChild(previewWindowBar());
@@ -2896,16 +2933,37 @@
   }
   function queryDomainTabs(active) {
     const tabs = makeEl('div', 'struct-tabs');
+    // The marks follow the picked service only: the ticks in Services belong to a service, not to the area.
+    const off = state.queriesScope ? offDomainsOf(state.servicesMeta[state.queriesScope]) : [];
     QUERY_DOMAINS.forEach((name) => {
       const block = queryBlock(name);
       const count = Array.isArray(block.labels) ? block.labels.length : 0;
-      tabs.appendChild(makeBtn(`${LL.domainTitle(name)} (${count})`, () => {
+      const tab = makeBtn(`${LL.domainTitle(name)} (${count})`, () => {
         state.queryDomain = name;
         state.queryOpen = null;
         renderQueriesForm();
-      }, 'btn' + (name === active ? ' is-active' : '')));
+      }, 'btn' + (name === active ? ' is-active' : ''));
+      if (off.includes(name)) {
+        tab.classList.add('is-off');
+        tab.title = LL.t('settings.queries.tab_off_title', { service: serviceTitleOf(state.queriesScope, state.servicesMeta) });
+        tab.appendChild(document.createTextNode(' '));
+        tab.appendChild(makeEl('span', 'tab-off', LL.t('settings.queries.tab_off')));
+      }
+      tabs.appendChild(tab);
     });
     return tabs;
+  }
+  // Says that the shown domain is off for the picked service (or for some services of the area) and leads to
+  // Services, where the ticks are. Not in the first-run wizard: it has no services yet.
+  function domainOffLine(domain) {
+    if (state.wizard) return null;
+    const note = domainOffNote(domain, state.queriesScope, state.servicesMeta, allServiceIds());
+    if (!note) return null;
+    const line = makeEl('div', 'field-hint warn domain-off-note');
+    line.setAttribute('role', 'note');
+    line.appendChild(makeEl('span', '', note.text));
+    line.appendChild(makeBtn(LL.t('settings.queries.open_services'), () => activateSection('services'), 'btn btn-sm'));
+    return line;
   }
 
   // Language of new rows. Every row keeps its own language: a domain may read several sources.
@@ -4487,6 +4545,13 @@
       sel.value = allServiceIds().includes(current) ? current : '';
     });
   }
+  // A domain tick of a service with the number of query rows the service reads in the domain.
+  function domainTick(id, domain, off) {
+    const count = domainRowCount(domain, state.config.queries, (state.config.service_queries || {})[id]);
+    const title = count === null ? '' : ` title="${esc(LL.t('settings.services.domain_count_title', { n: count }))}"`;
+    const suffix = count === null ? '' : ` (${count})`;
+    return `<label${title}><input type="checkbox" data-domain="${esc(domain)}" ${off ? '' : 'checked'}/> ${esc(LL.domainTitle(domain))}${suffix}</label>`;
+  }
   function renderServices() {
     const body = $('servicesBody');
     body.innerHTML = '';
@@ -4506,7 +4571,7 @@
       tr.innerHTML = `
         <td><strong>${esc(id)}</strong>${state.metricsConfigIds.includes(id) ? '' : `<div class="dim">${LL.tHtml('settings.services.no_metrics_config')}</div>`}</td>
         <td><input type="text" value="${esc(meta.title || '')}" placeholder="${esc(id)}" aria-label="${LL.tHtml('settings.services.title_aria', { id })}" /></td>
-        <td><div class="domain-toggle-list">${state.domainList.map((d) => `<label><input type="checkbox" data-domain="${esc(d)}" ${disabled.includes(d) ? '' : 'checked'}/> ${esc(LL.domainTitle(d))}</label>`).join('')}</div></td>
+        <td><div class="domain-toggle-list">${state.domainList.map((d) => domainTick(id, d, disabled.includes(d))).join('')}</div></td>
         <td class="actions"><div class="actions-inner" style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap"><button type="button" class="btn btn-sm svc-save">${LL.tHtml('settings.action.save')}</button><button type="button" class="btn btn-sm svc-reset">${LL.tHtml('settings.services.reset')}</button><button type="button" class="btn btn-sm btn-danger svc-delete">${LL.tHtml('settings.services.delete')}</button></div></td>`;
       tr.querySelector('.svc-save').addEventListener('click', async () => {
         const title = tr.querySelector('input[type="text"]').value.trim();
@@ -4528,6 +4593,7 @@
       state.servicesMeta[id] = { ...(state.servicesMeta[id] || {}), ...(j.meta || {}) };
       renderServices();
       fillServiceSelects();
+      if ($('queryList')) renderQueriesForm();
       setStatus('servicesStatus', LL.t('settings.status.saved'), 'ok');
       ui.toast(LL.t('settings.services.saved', { id }), { tone: 'ok' });
     } catch (e) {
@@ -4947,7 +5013,8 @@
     _internals: {
       schemaTexts, sourceSummary, generatorSummary, generatorStatus, toolSummary, toolBadge, hostKeyMessage,
       queryOptions, deadRefText, contextGroupSummary, slaUsageText, CONTEXT_GROUPS, promptLanguageNote, WIZARD_STEPS,
-      aboutMarkdown, roleOptions, sharedRoleLabel, QUERY_NOTE_MAX, removeQueryRowsFromBlock
+      aboutMarkdown, roleOptions, sharedRoleLabel, QUERY_NOTE_MAX, removeQueryRowsFromBlock,
+      offDomainsOf, servicesWithDomainOff, domainOffNote, domainRowCount
     }
   };
 
@@ -5017,6 +5084,7 @@
         const r = await postConfig(configBody('queries', data, state.queriesScope));
         if (state.queriesScope) { state.config.service_queries = state.config.service_queries || {}; state.config.service_queries[state.queriesScope] = clone(data); }
         else state.config.queries = clone(data);
+        renderServices();  // the row counts at the domain ticks
         return r;
       },
       render: renderQueriesForm

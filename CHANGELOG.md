@@ -51,6 +51,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - **Bulk deletion of queries.** Every row of the query list in the settings has a tick, and the bar above the list
   ticks all shown rows, counts the ticked ones and deletes them after one confirmation that names them and the ones
   the SLA reads. The change reaches the configuration with the Save button, like a single deletion.
+- **Off domains in the query list.** With a service picked in Settings → Queries, the tabs of the domains the
+  service does not analyse are marked "off", and a line under the tabs says so and opens Services; in the area scope
+  the line names the services that skip the domain. The queries stay editable. The domain ticks of a service in
+  Services show how many query rows the service reads in each domain.
 
 ### Changed
 

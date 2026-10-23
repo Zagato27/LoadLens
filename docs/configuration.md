@@ -72,6 +72,11 @@ and the matching service endpoint remove an override. Prompts are edited in "Set
 history; an empty text or a copy of the default of either language does not count as an override, so the default
 prompt of the report language is used (see [ai-analysis.md](ai-analysis.md#prompts-and-languages)).
 
+The analysis domains of a service are the ticks in "Settings → Services", stored as
+`per_area.<area>.services.<service>.disabled_domains`: the reports of the service skip the unticked domains. Their
+queries are kept and stay editable: with the service picked in "Settings → Queries" such a domain is marked "off",
+and in the area scope a line under the tabs names the services that skip it.
+
 ## Key reference
 
 ### sla
