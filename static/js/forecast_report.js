@@ -76,6 +76,7 @@
   const ROLE_TITLES = {
     get fit() { return LL.t('forecast.role.fit'); },
     get stall() { return LL.t('forecast.role.stall'); },
+    get degraded() { return LL.t('forecast.role.degraded'); },
     get edge() { return LL.t('forecast.role.edge'); },
     get after_cutoff() { return LL.t('forecast.role.after_cutoff'); }
   };
@@ -253,11 +254,26 @@
     return { data: body };
   }
 
+  // Titles of the SLA checks the report says broke on the step after its maximum (the server sends them localized).
+  function brokenChecks(data) {
+    const ceiling = data.sla_ceiling;
+    return ceiling ? (ceiling.degraded_checks || []).map((check) => check.title || check.name).join(', ') : '';
+  }
   function limitText(data) {
     const limit = data.limit;
     if (limit.kind === 'instability') return LL.t('forecast.limit.instability', { rps: formatApproxRps(limit.rps) });
+    if (limit.kind === 'sla') {
+      const checks = brokenChecks(data);
+      const rps = formatApproxRps(limit.rps);
+      return checks ? LL.t('forecast.limit.sla_checks', { rps: rps, checks: checks }) : LL.t('forecast.limit.sla', { rps: rps });
+    }
     if (limit.kind === 'model') return LL.t('forecast.limit.model', { rps: formatApproxRps(limit.rps) });
     return LL.t('forecast.limit.none');
+  }
+  // Load of the first step above the report maximum, or null when the run has nothing above it.
+  function slaLimitRps(data) {
+    const ceiling = data.sla_ceiling;
+    return ceiling && isFiniteNumber(ceiling.limit_rps) ? Number(ceiling.limit_rps) : null;
   }
   function scaledServices(plan) {
     return (plan.services || []).filter((item) => item.instances_needed == null || item.instances_needed > item.instances);
@@ -325,7 +341,8 @@
     const plan = data.resources;
     if (!data.limit_applies && plan.limit_cause) {
       const params = { rps: formatApproxRps(data.limit.rps), service: plan.limit_cause, cpu: cpuPct(plan.limit_cpu) };
-      return data.limit.kind === 'instability' ? LL.t('forecast.plan.cause_instability', params) : LL.t('forecast.plan.cause_model', params);
+      if (data.limit.kind === 'instability') return LL.t('forecast.plan.cause_instability', params);
+      return data.limit.kind === 'sla' ? LL.t('forecast.plan.cause_sla', params) : LL.t('forecast.plan.cause_model', params);
     }
     const verdict = data.answer ? data.answer.verdict : '';
     if (data.limit_applies && plan.status === 'ok' && (verdict === 'blocked' || verdict === 'scale')) return '';
@@ -449,7 +466,25 @@
 
   function stableSteps(data) {
     const onset = data.instability ? data.instability.onset_step : Infinity;
-    return (data.steps || []).filter((step) => step.stalls === 0 && !step.after_drop && step.number < onset);
+    return (data.steps || []).filter((step) => step.stalls === 0 && !step.after_drop && !step.degraded && step.number < onset);
+  }
+  function stepName(data, number, rps) {
+    return number != null ? `${stepWords(data).one} ${number}, ${formatRps(Math.round(rps))}` : formatRps(Math.round(rps));
+  }
+  // The report maximum and, when the run went further, the first step above it with the checks that broke there.
+  function ceilingText(data) {
+    const ceiling = data.sla_ceiling;
+    if (!ceiling || ceiling.rps == null) return '';
+    const text = LL.t('forecast.facts.ceiling', { where: stepName(data, ceiling.step_number, ceiling.rps) });
+    const above = (data.steps || []).find((step) => step.degraded);
+    const limit = slaLimitRps(data);
+    if (!above && limit == null) return text;
+    const where = above ? stepName(data, above.number, above.rps) : formatApproxRps(limit);
+    const checks = brokenChecks(data);
+    const tail = checks
+      ? LL.t('forecast.facts.ceiling_above_checks', { where: where, checks: checks })
+      : LL.t('forecast.facts.ceiling_above', { where: where });
+    return `${text} ${tail}`;
   }
   function stableText(data, stable) {
     const words = stepWords(data);
@@ -508,6 +543,8 @@
     const items = [];
     const stable = stableSteps(data);
     if (stable.length) items.push(stableText(data, stable));
+    const ceiling = ceilingText(data);
+    if (ceiling) items.push(ceiling);
     const cpu = cpuFact(data);
     if (cpu) items.push(cpu);
     if (data.instability) items.push(instabilityText(data));
@@ -546,6 +583,7 @@
     const parts = [];
     if (data.excluded_edges) parts.push(LL.t('forecast.method.excluded_edges', { count: data.excluded_edges }));
     if (data.excluded_stalls) parts.push(LL.t('forecast.method.excluded_stalls', { count: data.excluded_stalls }));
+    if (data.excluded_degraded) parts.push(LL.t('forecast.method.excluded_degraded', { count: data.excluded_degraded }));
     const after = (data.points || []).filter((point) => point.role === 'after_cutoff').length;
     if (data.cutoff_kind === 'rps_drop' && after) parts.push(LL.t('forecast.method.excluded_after_drop', { count: after }));
     return parts.length ? LL.t('forecast.method.excluded', { parts: parts.join(', ') }) : LL.t('forecast.method.all_included');
@@ -616,7 +654,8 @@
     return datasets.reduce((sum, dataset) => sum + dataset.data.filter((point) => point.clipped).length, 0);
   }
   function limitTitle(limit) {
-    return limit.kind === 'instability' ? LL.t('forecast.chart.limit_instability') : LL.t('forecast.chart.limit_model');
+    if (limit.kind === 'instability') return LL.t('forecast.chart.limit_instability');
+    return limit.kind === 'sla' ? LL.t('forecast.chart.limit_sla') : LL.t('forecast.chart.limit_model');
   }
 
   function sampleTip(point) {
@@ -632,8 +671,9 @@
   function stepPoint(x, y, step) {
     const lines = [step.label, LL.t('forecast.point.rps_mean', { rps: formatRps(step.rps) }), LL.t('forecast.point.mean', { value: formatMs(step.response_ms) })];
     if (step.p95_ms != null) lines.push(LL.t('forecast.point.worst_p95', { value: formatMs(step.p95_ms) }));
-    lines.push(step.stalls ? LL.t('forecast.point.stalls', { stalls: step.stalls, samples: step.samples }) : LL.t('forecast.point.no_stalls'));
-    return { x: x, y: y, number: step.number, tip: lines };
+    if (step.degraded) lines.push(LL.t('forecast.point.degraded'));
+    else lines.push(step.stalls ? LL.t('forecast.point.stalls', { stalls: step.stalls, samples: step.samples }) : LL.t('forecast.point.no_stalls'));
+    return { x: x, y: y, number: step.number, degraded: Boolean(step.degraded), tip: lines };
   }
   function modelPoint(x, y, point) {
     const lines = [LL.t('forecast.point.model', { rps: formatRps(point.rps) }), LL.t('forecast.point.mean', { value: formatMs(point.response_ms) })];
@@ -680,11 +720,18 @@
       pointStyle: 'line'
     };
   }
+  // Steps above the report maximum are drawn in the stall color: the SLA thresholds broke there.
+  function stepColor(context) {
+    return context && context.raw && context.raw.degraded ? COLORS.stall : COLORS.step;
+  }
   function stepSet(label, data) {
-    return Object.assign(pointSet(label, data, COLORS.step, 9, 1), { stepNumbers: true, borderColor: 'rgba(0, 0, 0, 0.35)', borderWidth: 1 });
+    return Object.assign(pointSet(label, data, COLORS.step, 9, 1), { backgroundColor: stepColor, stepNumbers: true, borderColor: 'rgba(0, 0, 0, 0.35)', borderWidth: 1 });
   }
   function stepP95Set(label, data) {
-    return Object.assign(pointSet(label, data, 'transparent', 6, 2), { borderColor: COLORS.step, borderWidth: 2, pointStyle: clippedStyle('rectRot') });
+    return Object.assign(pointSet(label, data, 'transparent', 6, 2), { borderColor: stepColor, borderWidth: 2, pointStyle: clippedStyle('rectRot') });
+  }
+  function degradedSet(data) {
+    return Object.assign(pointSet(LL.t('forecast.chart.degraded'), data, 'transparent', 3.5, 5), { borderColor: COLORS.stall, borderWidth: 1.5 });
   }
   function edgeSet(data) {
     return Object.assign(pointSet(LL.t('forecast.chart.edges'), data, 'transparent', 3.5, 5), { borderColor: COLORS.edge, borderWidth: 1.5 });
@@ -696,7 +743,7 @@
 
   function latencyBounds(data, points, steps, curve) {
     const measured = byRole(points, 'fit');
-    const stable = steps.filter((step) => step.stalls === 0);
+    const stable = steps.filter((step) => step.stalls === 0 && !step.degraded);
     const base = maxOf([].concat(
       measured.map((point) => point.response_ms),
       curve.map((point) => point.response_ms),
@@ -708,7 +755,7 @@
     const hasP95 = curve.some((point) => point.p95_ms != null) || steps.some((step) => step.p95_ms != null);
     const slaKnown = Number.isFinite(sla) && sla > 0;
     const slaShown = slaKnown && hasP95 && sla <= SLA_LINE_SPAN * base;
-    const loads = [].concat(measured.concat(byRole(points, 'stall')).map((point) => point.rps), steps.map((step) => step.rps), curve.map((point) => point.rps));
+    const loads = [].concat(measured.concat(byRole(points, 'stall'), byRole(points, 'degraded')).map((point) => point.rps), steps.map((step) => step.rps), curve.map((point) => point.rps));
     const dataX = maxOf(loads);
     return {
       xMin: niceMin(0.9 * minOf(loads.concat([data.target ? data.target.rps : null]))),
@@ -737,14 +784,21 @@
     if (data.knee) sets.push(kneeSet(data.knee));
     return sets;
   }
+  // Where the test itself showed the system failing: stalls began, or the SLA broke above the report maximum.
+  function observedFailure(data) {
+    const onset = data.instability ? Number(data.instability.onset_rps) : null;
+    const sla = slaLimitRps(data);
+    if (sla != null && (onset == null || sla < onset)) return { rps: sla, caption: LL.t('forecast.chart.zone_degraded') };
+    return onset != null ? { rps: onset, caption: LL.t('forecast.chart.zone_unstable') } : null;
+  }
   function latencyZones(data, xMax) {
-    if (data.instability) return [{ from: data.instability.onset_rps, to: xMax, color: COLORS.zoneUnstable }];
+    const failure = observedFailure(data);
+    if (failure) return [{ from: failure.rps, to: xMax, color: COLORS.zoneUnstable }];
     return data.tested_rps ? [{ from: data.tested_rps, to: xMax, color: COLORS.zoneUntested }] : [];
   }
   function latencyCaption(data, datasets, bounds) {
-    const parts = [data.instability
-      ? LL.t('forecast.chart.zone_unstable')
-      : LL.t('forecast.chart.zone_untested')];
+    const failure = observedFailure(data);
+    const parts = [failure ? failure.caption : LL.t('forecast.chart.zone_untested')];
     const hidden = clippedCount(datasets);
     if (hidden) parts.push(LL.t('forecast.chart.clipped_top', { count: hidden }));
     if (bounds.slaNote) parts.push(bounds.slaNote);
@@ -762,6 +816,7 @@
     const datasets = [
       pointSet(LL.t('forecast.chart.points', { minutes: formatNumber(data.bin_minutes, 1) }), byRole(points, 'fit').map((p) => clip(samplePoint(p.rps, p.response_ms, p))), COLORS.sample, 2.5, 6),
       pointSet(LL.t('forecast.chart.stalls'), byRole(points, 'stall').map((p) => clip(samplePoint(p.rps, p.response_ms, p))), COLORS.stall, 3.5, 5),
+      degradedSet(byRole(points, 'degraded').map((p) => clip(samplePoint(p.rps, p.response_ms, p)))),
       stepSet(LL.t('forecast.chart.unit_mean', { unit: words.title }), steps.map((step) => clip(stepPoint(step.rps, step.response_ms, step)))),
       stepP95Set(`${words.title}: p95`, steps.filter((step) => step.p95_ms != null).map((step) => clip(stepPoint(step.rps, step.p95_ms, step)))),
       lineSet(LL.t('forecast.chart.model_mean'), curve.map((point) => modelPoint(point.rps, point.response_ms, point)), modelColor(), false, 4),
@@ -787,6 +842,7 @@
     const datasets = [
       pointSet(LL.t('forecast.chart.model_points'), byRole(points, 'fit').map(sample), COLORS.sample, 2.5, 6),
       pointSet(LL.t('forecast.chart.stalls'), byRole(points, 'stall').map(sample), COLORS.stall, 3.5, 5),
+      degradedSet(byRole(points, 'degraded').map(sample)),
       edgeSet(byRole(points, 'edge').map(sample)),
       lineSet(LL.t('forecast.chart.model'), curve.map((point) => modelPoint(point.concurrency, point.rps, point)), modelColor(), false, 4)
     ];
@@ -1067,15 +1123,19 @@
   }
   function zoneText(data, zone) {
     if (!data.limit || data.limit.rps == null) return LL.t('forecast.scale.zone_no_stalls');
-    if (zone.tone === 'fail') return data.limit.kind === 'instability' ? LL.t('forecast.scale.zone_stalls') : LL.t('forecast.scale.zone_over_ceiling');
+    if (zone.tone === 'fail') {
+      if (data.limit.kind === 'instability') return LL.t('forecast.scale.zone_stalls');
+      return data.limit.kind === 'sla' ? LL.t('forecast.scale.zone_degraded') : LL.t('forecast.scale.zone_over_ceiling');
+    }
     return zone.tone === 'warn' ? LL.t('forecast.scale.zone_tight') : LL.t('forecast.scale.zone_safe');
+  }
+  function limitMark(limit) {
+    if (limit.kind === 'instability') return LL.t('forecast.scale.mark_stalls');
+    return limit.kind === 'sla' ? LL.t('forecast.scale.mark_sla') : LL.t('forecast.scale.mark_ceiling');
   }
   function markText(data, mark) {
     if (mark.kind === 'safe') return { value: formatRps(Math.floor(mark.rps)), label: LL.t('forecast.scale.mark_safe') };
-    if (mark.kind === 'limit') {
-      const label = data.limit.kind === 'instability' ? LL.t('forecast.scale.mark_stalls') : LL.t('forecast.scale.mark_ceiling');
-      return { value: formatApproxRps(mark.rps), label: label };
-    }
+    if (mark.kind === 'limit') return { value: formatApproxRps(mark.rps), label: limitMark(data.limit) };
     return { value: formatRps(Math.round(mark.rps)), label: LL.t('forecast.scale.mark_tested') };
   }
   function placedMarks(data, end) {
@@ -1126,10 +1186,16 @@
   }
   function scaleCaption(data) {
     if (data.limit.rps == null) return LL.t('forecast.scale.caption_no_limit');
-    return data.limit.kind === 'instability' ? LL.t('forecast.scale.caption_instability') : LL.t('forecast.scale.caption_model');
+    if (data.limit.kind === 'instability') return LL.t('forecast.scale.caption_instability');
+    return data.limit.kind === 'sla' ? LL.t('forecast.scale.caption_sla') : LL.t('forecast.scale.caption_model');
+  }
+  function stepTone(step) {
+    if (step.after_drop) return 'muted';
+    return step.stalls || step.degraded ? 'fail' : 'ok';
   }
   function stepState(step, tone) {
     if (tone === 'muted') return LL.t('forecast.steps.state_after_drop');
+    if (step.degraded) return LL.t('forecast.steps.state_degraded');
     if (tone === 'fail') return LL.t('forecast.steps.state_stalls', { stalls: step.stalls, samples: step.samples });
     return LL.t('forecast.steps.state_ok');
   }
@@ -1138,7 +1204,7 @@
     if (!steps.length) return `<p class="dim">${LL.tHtml('forecast.steps.none')}</p>`;
     const words = stepWords(data);
     const cards = steps.map((step) => {
-      const tone = step.after_drop ? 'muted' : (step.stalls ? 'fail' : 'ok');
+      const tone = stepTone(step);
       const state = stepState(step, tone);
       return [
         `<div class="forecast-step is-${tone}" title="${escapeHtml(step.label)}">`,

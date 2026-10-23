@@ -23,7 +23,16 @@ from AI.capacity_forecast import (
     step_windows,
     usl_throughput,
 )
-from AI.resource_plan import CpuCeiling, build_plan, capacity_answer, safe_capacity, stable_step_loads, utilization_lines
+from AI.resource_plan import (
+    CpuCeiling,
+    build_plan,
+    capacity_answer,
+    load_scale,
+    safe_capacity,
+    stable_step_loads,
+    unavailable_plan,
+    utilization_lines,
+)
 
 
 def _usl_series(noise: float = 0.0, seed: int = 1) -> tuple[np.ndarray, np.ndarray]:
@@ -112,6 +121,82 @@ def test_ramps_and_stalls_stay_out_of_the_fit():
     assert held.verdict == "holds" and "instability" in held.confidence_reasons
     assert evaluate_target(model, 450.0, 0.2).verdict == "no_headroom"
     assert evaluate_target(model, 600.0, 0.2).verdict == "over_limit"
+
+
+def _stepped_run(latency: np.ndarray, ceiling_step: int):
+    """Six ten-minute steps of 100..600 RPS; the report maximum is ``ceiling_step`` (1-based)."""
+    index = pd.date_range("2026-10-01T10:00:00Z", periods=60, freq="1min")
+    rps = np.repeat([100.0, 200.0, 300.0, 400.0, 500.0, 600.0], 10)
+    rps[0] = 20.0
+    steps = step_windows([
+        {
+            "label": f"ступень {number + 1}",
+            "source": "step_detector",
+            "start_iso": index[number * 10].isoformat(),
+            "end_iso": (index[number * 10] + pd.Timedelta(minutes=10)).isoformat(),
+        }
+        for number in range(6)
+    ])
+    cutoff = index[-1] + pd.Timedelta(minutes=1)
+    samples = align_samples(
+        pd.Series(rps, index=index), pd.Series(latency, index=index),
+        unit="ms", load_model="open", start=index[0], cutoff=cutoff, steps=steps,
+        ceiling_end=steps[ceiling_step - 1].end,
+    )
+    return samples, cutoff
+
+
+def test_steps_above_the_report_maximum_stay_out_of_the_model():
+    # Steps 5 and 6 are evenly slow (no dips inside a step), so only the report maximum shows they broke the SLA.
+    latency = np.where(np.arange(60) < 40, 30.0, 150.0)
+    samples, cutoff = _stepped_run(latency, ceiling_step=4)
+    roles = samples.frame["role"]
+    assert int((roles == "degraded").sum()) == 20
+    assert roles.iloc[0] == "edge" and roles.iloc[-1] == "degraded"
+    assert len(samples.fit_rows) == 39 and float(samples.fit_rows["x"].max()) == 400.0
+    assert detect_instability(samples, 0) is None
+    points = step_points(samples, cutoff, 0)
+    assert [point.degraded for point in points] == [False, False, False, False, True, True]
+    assert [point.stalls for point in points] == [0] * 6
+    assert points[4].response_ms == pytest.approx(150.0)
+    coverage = load_coverage(samples, points)
+    assert (coverage.rps, coverage.peak_rps) == (400.0, 600.0)
+    assert [step.number for step in stable_step_loads(samples, points, None)] == [1, 2, 3, 4]
+    fit = fit_usl(samples.fit_rows["n"].to_numpy(), samples.fit_rows["x"].to_numpy())
+    assert fit.x_max is None
+    limit = load_limit(fit, None, points[4].rps)
+    assert (limit.kind, limit.rps) == ("sla", 500.0)
+    model = ModelContext(fit, 0.0, None, coverage.concurrency, limit, False)
+    assert evaluate_target(model, 600.0, 0.2).verdict == "over_limit"
+    safe = safe_capacity(unavailable_plan("missing_setting", "", CpuCeiling(80.0, "default"), 400.0), limit, 0.2)
+    scale = load_scale(safe, limit, coverage.rps, None)
+    assert [(zone.from_rps, zone.to_rps, zone.tone) for zone in scale.zones][:2] == [
+        (0.0, pytest.approx(400.0), "ok"), (pytest.approx(400.0), 500.0, "warn"),
+    ]
+    assert scale.zones[-1].tone == "fail" and scale.zones[-1].from_rps == 500.0
+
+
+def test_dips_below_the_report_maximum_set_a_lower_limit():
+    latency = np.full(60, 30.0)
+    latency[40:50] = np.where(np.arange(10) % 2 == 1, 300.0, 30.0)
+    latency[50:] = 150.0
+    samples, cutoff = _stepped_run(latency, ceiling_step=5)
+    instability = detect_instability(samples, 0)
+    assert instability is not None and (instability.onset_step, instability.onset_rps) == (5, 500.0)
+    points = step_points(samples, cutoff, 0)
+    assert [point.degraded for point in points] == [False] * 5 + [True]
+    fit = fit_usl(samples.fit_rows["n"].to_numpy(), samples.fit_rows["x"].to_numpy())
+    limit = load_limit(fit, instability, points[5].rps)
+    assert (limit.kind, limit.rps) == ("instability", 500.0)
+
+
+def test_without_a_report_maximum_every_step_is_measured_as_before():
+    latency = np.where(np.arange(60) < 40, 30.0, 150.0)
+    index = pd.date_range("2026-10-01T10:00:00Z", periods=60, freq="1min")
+    rps = pd.Series(np.repeat([100.0, 200.0, 300.0, 400.0, 500.0, 600.0], 10), index=index)
+    samples = align_samples(rps, pd.Series(latency, index=index), unit="ms", load_model="open", start=index[0],
+                            cutoff=index[-1] + pd.Timedelta(minutes=1))
+    assert "degraded" not in set(samples.frame["role"])
 
 
 def _over_limit(rps: float) -> TargetEstimate:

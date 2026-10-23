@@ -146,8 +146,12 @@ def _hhmm(iso: str) -> str:
 
 
 def _limit_window(forecast: ForecastReport) -> Optional[LimitWindow]:
-    """From the step where stalls began (or the last step under a model ceiling) to the cutoff."""
+    """From the first step above the report maximum (under that limit), the step where stalls began or the last
+    step under a model ceiling to the cutoff."""
     cutoff = to_utc(forecast.cutoff_iso)
+    above = next((step for step in forecast.steps if step.degraded), None)
+    if forecast.limit.kind == "sla" and above is not None:
+        return LimitWindow(to_utc(above.start_iso), cutoff)
     if forecast.instability is not None:
         onset = next((step for step in forecast.steps if step.number == forecast.instability.onset_step), None)
         return LimitWindow(to_utc(onset.start_iso if onset else forecast.instability.onset_iso), cutoff)
@@ -158,6 +162,15 @@ def _limit_window(forecast: ForecastReport) -> Optional[LimitWindow]:
 
 
 def _limit_facts(forecast: ForecastReport, lang: str = "ru") -> dict[str, Any]:
+    ceiling = forecast.sla_ceiling
+    if forecast.limit.kind == "sla" and forecast.limit.rps is not None and ceiling is not None:
+        return {
+            "kind": prompt_text("forecast.kind_sla", lang),
+            "rps": round(forecast.limit.rps),
+            "report_maximum_step": ceiling.step_label or None,
+            "report_maximum_rps": round(ceiling.rps) if ceiling.rps is not None else None,
+            "broken_checks": [check.title or check.name for check in ceiling.degraded_checks],
+        }
     info = forecast.instability
     if info is not None:
         return {
@@ -191,7 +204,11 @@ def _cpu_facts(forecast: ForecastReport) -> dict[str, Any]:
 
 
 def _step_fact(step: Any) -> dict[str, Any]:
-    return {"step": step.label, "rps": round(step.rps), "mean_ms": round(step.response_ms, 1), "stall_points": step.stalls}
+    fact = {"step": step.label, "rps": round(step.rps), "mean_ms": round(step.response_ms, 1), "stall_points": step.stalls}
+    if step.degraded:
+        # Only when set: the facts (and the cached explanations keyed by them) of other runs stay as they were.
+        fact["above_report_maximum"] = True
+    return fact
 
 
 def _facts(forecast: ForecastReport, lang: str = "ru") -> dict[str, Any]:

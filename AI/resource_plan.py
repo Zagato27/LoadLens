@@ -148,14 +148,14 @@ class LoadScale:
 
 
 def stable_step_loads(samples: Samples, steps: Sequence[StepPoint], instability: Optional[Instability]) -> list[StepLoad]:
-    """Steps without stalls before the instability onset, trimmed to their fit samples."""
+    """Steps without stalls before the instability onset and up to the report maximum, trimmed to their fit samples."""
     onset = instability.onset_step if instability is not None else math.inf
     windows = {window.number: window for window in samples.steps}
     fit = samples.fit_rows
     width = pd.Timedelta(minutes=samples.bin_minutes)
     loads: list[StepLoad] = []
     for point in steps:
-        if point.stalls or point.after_drop or point.number >= onset:
+        if point.stalls or point.after_drop or point.degraded or point.number >= onset:
             continue
         window = windows[point.number]
         inside = fit.loc[(fit.index >= window.plateau_start) & (fit.index < window.plateau_end)]

@@ -7,7 +7,7 @@
   "server.capacity.missing_vus": "Для закрытой модели нужен ряд числа VU",
   "server.capacity.negative_think_time": "Число VU меньше параллелизма по закону Литтла (RPS × время отклика): похоже, сценарий шлёт запросы параллельно. Выберите открытую модель нагрузки.",
   "server.capacity.no_low_load": "Нет точек на низкой нагрузке: модели нужен разгон с малой нагрузки",
-  "server.capacity.too_few_points": "Для модели осталось {count} точек до первого падения RPS (исключены разгон и спад нагрузки — {edges}, провалы — {stalls}), нужно не меньше {min}",
+  "server.capacity.too_few_points": "Для модели осталось {count} точек до первого падения RPS (исключены разгон и спад нагрузки — {edges}, провалы — {stalls}, ступени выше максимума отчёта — {degraded}), нужно не меньше {min}",
   "server.capacity.zero_concurrency": "Параллелизм на всех точках нулевой",
   "server.common.unset": "не задан",
   "server.config.derived_object": "{domain}: derived должен быть объектом «название → {kind: sum, of: [названия]}»",

@@ -15,6 +15,7 @@ from typing import Any, Iterable, Optional, Sequence
 
 from psycopg2 import sql
 
+from AI.capacity_forecast import StepPoint
 from AI.i18n import LocalizedError, fmt_date, fmt_number, get_locale, msg, plural, t, with_locale
 from AI.pipeline import _time_shift_hours
 from AI.resource_plan import ScaleMark, ScaleZone, ServicePlan
@@ -162,18 +163,32 @@ def _scale_action(item: ServicePlan) -> str:
     return t("confluence.forecast.add", **params)
 
 
+CAUSE_KEYS = {"instability": "confluence.forecast.cause_instability", "sla": "confluence.forecast.cause_sla"}
+
+
+def _broken_checks(report: ForecastReport) -> str:
+    """Titles of the SLA checks the report says broke on the step after its maximum."""
+    ceiling = report.sla_ceiling
+    return ", ".join(check.title or check.name for check in ceiling.degraded_checks) if ceiling is not None else ""
+
+
 def _limit_line(report: ForecastReport) -> str:
     limit = report.limit
     plan = report.resources
     if limit.rps is None:
         return t("confluence.forecast.limit_none")
     if not report.limit_applies and plan.limit_cause and plan.limit_cpu is not None:
-        key = "confluence.forecast.cause_instability" if limit.kind == "instability" else "confluence.forecast.cause_model"
+        key = CAUSE_KEYS.get(limit.kind, "confluence.forecast.cause_model")
         return t(key, rps=_approx_rps(limit.rps), service=plan.limit_cause, cpu=_pct(plan.limit_cpu))
     if plan.status == "ok":
         return t("confluence.forecast.limit_not_cpu", rps=_approx_rps(limit.rps))
     if limit.kind == "instability":
         return t("confluence.forecast.limit_instability", rps=_approx_rps(limit.rps))
+    if limit.kind == "sla":
+        checks = _broken_checks(report)
+        if checks:
+            return t("confluence.forecast.limit_sla_checks", rps=_approx_rps(limit.rps), checks=checks)
+        return t("confluence.forecast.limit_sla", rps=_approx_rps(limit.rps))
     return t("confluence.forecast.limit_model", rps=_approx_rps(limit.rps))
 
 
@@ -362,6 +377,8 @@ def _method_items(report: ForecastReport) -> list[str]:
     else:
         items.append(t("confluence.forecast.method_usl", **usl))
     items.append(t("confluence.forecast.method_excluded", edges=report.excluded_edges, stalls=report.excluded_stalls))
+    if report.excluded_degraded:
+        items.append(t("confluence.forecast.method_excluded_degraded", count=report.excluded_degraded))
     return items + list(report.notes)
 
 
@@ -370,6 +387,8 @@ def _scale_caption(report: ForecastReport) -> str:
         return t("confluence.forecast.caption_no_limit")
     if report.limit.kind == "instability":
         return t("confluence.forecast.caption_instability")
+    if report.limit.kind == "sla":
+        return t("confluence.forecast.caption_sla")
     return t("confluence.forecast.caption_model")
 
 
@@ -436,15 +455,20 @@ def _zone_text(report: ForecastReport, zone: ScaleZone) -> str:
     if report.limit.rps is None:
         return t("confluence.forecast.zone_no_stalls")
     if zone.tone == "fail":
-        return t("confluence.forecast.zone_stalls") if report.limit.kind == "instability" else t("confluence.forecast.zone_over_ceiling")
+        if report.limit.kind == "instability":
+            return t("confluence.forecast.zone_stalls")
+        return t("confluence.forecast.zone_degraded") if report.limit.kind == "sla" else t("confluence.forecast.zone_over_ceiling")
     return t("confluence.forecast.zone_tight") if zone.tone == "warn" else t("confluence.forecast.zone_safe")
+
+
+LIMIT_MARK_KEYS = {"instability": "confluence.forecast.mark_stalls", "sla": "confluence.forecast.mark_sla"}
 
 
 def _mark_text(report: ForecastReport, mark: ScaleMark) -> str:
     if mark.kind == "safe":
         return f"{_rps(math.floor(mark.rps))}\n{t('confluence.forecast.mark_safe')}"
     if mark.kind == "limit":
-        key = "confluence.forecast.mark_stalls" if report.limit.kind == "instability" else "confluence.forecast.mark_ceiling"
+        key = LIMIT_MARK_KEYS.get(report.limit.kind, "confluence.forecast.mark_ceiling")
         return f"{_approx_rps(mark.rps)}\n{t(key)}"
     return f"{_rps(mark.rps)}\n{t('confluence.forecast.mark_tested')}"
 
@@ -490,20 +514,27 @@ def render_scale_png(report: ForecastReport) -> bytes:
     return _png(plt, fig)
 
 
+def _step_note(step: StepPoint) -> str:
+    if step.after_drop:
+        return ""
+    if step.degraded:
+        return "\n" + t("confluence.forecast.step_degraded")
+    return "\n" + t("confluence.forecast.step_stalls", stalls=step.stalls, samples=step.samples) if step.stalls else ""
+
+
 def render_steps_png(report: ForecastReport) -> bytes:
-    """Mean response per load step, green without stalls and red with them."""
+    """Mean response per load step: green without stalls, red with them or above the report maximum."""
     steps = report.steps
     plt, fig, ax = _figure(12.0, 3.6)
     if not steps:
         ax.text(0.5, 0.5, t("confluence.forecast.steps_none"), ha="center", va="center", transform=ax.transAxes)
         ax.axis("off")
         return _png(plt, fig)
-    tones = ["muted" if step.after_drop else ("fail" if step.stalls else "ok") for step in steps]
+    tones = ["muted" if step.after_drop else ("fail" if step.stalls or step.degraded else "ok") for step in steps]
     values = [step.response_ms for step in steps]
     ax.bar(range(len(steps)), values, color=[STEP_COLORS[tone] for tone in tones], alpha=0.8)
     for index, step in enumerate(steps):
-        stalls = "\n" + t("confluence.forecast.step_stalls", stalls=step.stalls, samples=step.samples) if step.stalls else ""
-        ax.text(index, step.response_ms, _ms(step.response_ms) + stalls, ha="center", va="bottom", fontsize=9)
+        ax.text(index, step.response_ms, _ms(step.response_ms) + _step_note(step), ha="center", va="bottom", fontsize=9)
     word = _step_word(report)
     ax.set_xticks(range(len(steps)))
     ax.set_xticklabels([f"{word} {step.number}\n{_rps(step.rps)}" for step in steps], fontsize=9)

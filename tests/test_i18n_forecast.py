@@ -101,10 +101,11 @@ def _services():
     return [dict(zip(keys, row)) for row in rows]
 
 
-def _step(number, rps, response_ms, stalls=0, after_drop=False):
+def _step(number, rps, response_ms, stalls=0, after_drop=False, degraded=False):
     return {
         "number": number, "label": f"Step {number}", "source": "step_detector", "rps": rps, "concurrency": rps * response_ms / 1000,
         "response_ms": response_ms, "p95_ms": response_ms * 2.2, "stalls": stalls, "samples": 10, "after_drop": after_drop,
+        "degraded": degraded,
     }
 
 
@@ -224,7 +225,41 @@ def _variants():
     no_plan["limit"] = {"rps": None, "kind": "none"}
     no_plan["resources"] = dict(no_plan["resources"], status="missing_setting", message="Server message")
     out.append(no_plan)
+    out.append(_above_maximum())
     return out
+
+
+def _above_maximum():
+    """The report maximum is step 4; steps 5 and 6 are evenly slow (no stalls), so the limit is the report SLA."""
+    data = copy.deepcopy(PAYLOAD)
+    data.update(
+        instability=None, excluded_stalls=0, excluded_degraded=20, cutoff_kind="test_end", tested_rps=400.0,
+        limit={"rps": 500.0, "kind": "sla"}, limit_applies=True, safe={"rps": 400.0, "source": "limit", "service": None},
+        answer={"verdict": "blocked", "confidence": "medium", "confidence_reasons": ["extrapolation"]},
+        target={"rps": 550, "headroom_pct": None, "concurrency": None, "response_ms": None, "p95_ms": None},
+    )
+    data["fit"].update(kappa=0, x_max=None, n_peak=None)
+    data["resources"] = dict(data["resources"], status="missing_setting", message="Server message", limit_cause=None)
+    data["scale"] = {
+        "end_rps": 636.0,
+        "tested_rps": 400.0,
+        "zones": [
+            {"from_rps": 0.0, "to_rps": 400.0, "tone": "ok"},
+            {"from_rps": 400.0, "to_rps": 500.0, "tone": "warn"},
+            {"from_rps": 500.0, "to_rps": 636.0, "tone": "fail"},
+        ],
+        "marks": [{"rps": 400.0, "kind": "safe"}, {"rps": 400.0, "kind": "tested"}, {"rps": 500.0, "kind": "limit"}],
+    }
+    data["points"] = [_point(5, 100.0, 30.0, "fit"), _point(25, 300.0, 33.0, "fit"), _point(45, 500.0, 150.0, "degraded")]
+    data["steps"] = [
+        _step(1, 100.0, 30.0), _step(2, 200.0, 31.0), _step(3, 300.0, 33.0), _step(4, 400.0, 34.0),
+        _step(5, 500.0, 150.0, degraded=True), _step(6, 600.0, 160.0, degraded=True),
+    ]
+    data["sla_ceiling"] = {
+        "rps": 400.0, "step_number": 4, "step_label": "Step 4", "end_iso": "2026-10-01T13:40:00+03:00", "degraded_rps": 500.0,
+        "degraded_checks": [{"name": "p95_latency", "title": "p95 latency"}], "limit_rps": 500.0,
+    }
+    return data
 
 
 BUILDERS = """
@@ -290,6 +325,54 @@ def test_page_builders_in_ru_keep_the_russian_text():
     assert "Интервалы: среднее" in out["pages"][2][8]
     assert "<strong>Добавление подов поможет частично.</strong>" in out["explain"][0]
     assert "06.10.2026, 07:30" in out["explain"][0]
+
+
+@pytest.mark.parametrize(
+    "locale, texts",
+    [
+        ("en", {
+            "steps": ["✓ no stalls", "✗ above the report maximum"],
+            "answer": ["Limit ≈ 500 RPS: the report shows the SLA thresholds broken from this load (p95 latency)."],
+            "scale": ["above the report maximum", "SLA broken"],
+            "caption": ["red: above the report maximum, where the test broke the SLA thresholds"],
+            "facts": [
+                "No stalls: steps 1–4, 100 → 400 RPS, mean 30–34 ms.",
+                "Report maximum: step 4, 400 RPS, the last load at which the SLA latency and error thresholds hold. "
+                "Above it (step 5, 500 RPS) p95 latency broke; those points are left out of the model.",
+            ],
+            "method": ["above the report maximum (20)"],
+            "latency": ["Red fill: load above the report maximum", "Above the report maximum", "Limit: report SLA",
+                        "above the report maximum: SLA thresholds broken"],
+        }),
+        ("ru", {
+            "steps": ["✓ без провалов", "✗ выше максимума отчёта"],
+            "answer": ["Предел ≈ 500 RPS: с этой нагрузки в отчёте нарушены пороги SLA (p95 latency)."],
+            "scale": ["выше максимума отчёта", "нарушен SLA"],
+            "caption": ["красная — выше максимума отчёта: там в тесте нарушены пороги SLA"],
+            "facts": [
+                "Без провалов: ступени 1–4, 100 → 400 RPS, среднее 30–34 мс.",
+                "Максимум отчёта — ступень 4, 400 RPS: последняя нагрузка, на которой держатся пороги задержек и ошибок SLA. "
+                "Выше (ступень 5, 500 RPS) нарушено: p95 latency — эти точки в модель не вошли.",
+            ],
+            "method": ["выше максимума отчёта — 20"],
+            "latency": ["Красная заливка — нагрузка выше максимума отчёта", "Выше максимума отчёта", "Предел: SLA отчёта",
+                        "выше максимума отчёта: пороги SLA нарушены"],
+        }),
+    ],
+)
+def test_steps_above_the_report_maximum_are_red(locale, texts):
+    page = _render(locale)["pages"][5]
+    steps = page[3]
+    cards = re.findall(r'<div class="forecast-step is-(\w+)"', steps)
+    assert cards == ["ok", "ok", "ok", "ok", "fail", "fail"]
+    blocks = {
+        "steps": steps, "answer": page[0], "scale": page[1], "caption": page[2], "facts": "\n".join(page[5]),
+        "method": "\n".join(page[7]), "latency": "\n".join(page[8]),
+    }
+    for name, expected in texts.items():
+        for text in expected:
+            assert text in blocks[name], (name, text, blocks[name])
+    assert re.search(r'forecast-scale-zone is-fail[^>]*title="[^"]*' + re.escape(texts["scale"][0]), page[1])
 
 
 @pytest.mark.parametrize(

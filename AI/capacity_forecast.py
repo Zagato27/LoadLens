@@ -3,9 +3,10 @@
 
 Samples are the stored metric buckets up to the first RPS drop. Concurrency is
 the virtual-user count for a closed workload and RPS times mean response time
-for an open one. The leading ramp-up, the trailing ramp-down and response-time
-stalls inside a load step stay out of the fit. The fit is a coarse grid search
-on numpy, without scipy.
+for an open one. The leading ramp-up, the trailing ramp-down, response-time
+stalls inside a load step and the steps above the report's maximum (the last
+step on which the SLA latency and error thresholds hold) stay out of the fit.
+The fit is a coarse grid search on numpy, without scipy.
 """
 
 from __future__ import annotations
@@ -47,14 +48,16 @@ PERIOD_MIN_RUNS = 3
 PERIOD_TOLERANCE = 0.25
 PERIOD_REGULAR_SHARE = 0.5
 
-SampleRole = Literal["fit", "edge", "stall", "after_cutoff"]
+SampleRole = Literal["fit", "edge", "stall", "degraded", "after_cutoff"]
 TargetVerdict = Literal["holds", "no_headroom", "over_limit"]
 ConfidenceLevel = Literal["high", "medium", "low"]
-LimitKind = Literal["instability", "model", "none"]
+LimitKind = Literal["instability", "sla", "model", "none"]
 ROLE_FIT: SampleRole = "fit"
 ROLE_EDGE: SampleRole = "edge"
 ROLE_STALL: SampleRole = "stall"
+ROLE_DEGRADED: SampleRole = "degraded"
 ROLE_AFTER_CUTOFF: SampleRole = "after_cutoff"
+MEASURED_ROLES: tuple[SampleRole, ...] = (ROLE_FIT, ROLE_STALL, ROLE_DEGRADED)
 
 
 class CapacityModelError(ValueError):
@@ -90,8 +93,8 @@ class StepWindow:
 
 @dataclass(frozen=True)
 class Samples:
-    """Aligned series. ``role`` keeps ramps, stalls and samples past the cutoff out of the fit;
-    ``step`` is the position of the sample's load step in ``steps``, -1 outside every step."""
+    """Aligned series. ``role`` keeps ramps, stalls, steps above the report maximum and samples past the
+    cutoff out of the fit; ``step`` is the position of the sample's load step in ``steps``, -1 outside every step."""
 
     frame: pd.DataFrame
     think_time_s: float
@@ -104,8 +107,13 @@ class Samples:
 
     @property
     def checked_rows(self) -> pd.DataFrame:
-        """Samples of the load window: fit samples and stalls."""
+        """Samples up to the report maximum: fit samples and stalls."""
         return self.frame.loc[self.frame["role"].isin((ROLE_FIT, ROLE_STALL))]
+
+    @property
+    def measured_rows(self) -> pd.DataFrame:
+        """Samples of the load window: fit samples, stalls and the steps above the report maximum."""
+        return self.frame.loc[self.frame["role"].isin(MEASURED_ROLES)]
 
 
 @dataclass(frozen=True)
@@ -133,6 +141,7 @@ class StepPoint:
     stalls: int
     samples: int
     after_drop: bool
+    degraded: bool = False  # above the report maximum: the SLA latency or error thresholds broke there
 
 
 @dataclass(frozen=True)
@@ -265,12 +274,14 @@ def align_samples(
     vus: Optional[pd.Series] = None,
     p95: Optional[pd.Series] = None,
     steps: Sequence[StepWindow] = (),
+    ceiling_end: Optional[pd.Timestamp] = None,
 ) -> Samples:
     """Joins the series on time, converts latency to seconds, computes concurrency and sample roles.
 
-    A sample whose bucket ends after ``cutoff`` is ``after_cutoff``. The leading ramp-up and
-    the trailing ramp-down are ``edge``; a response spike inside a load step is ``stall``.
-    Runs without load steps have no stall check. Only ``fit`` samples feed the model.
+    A sample whose bucket ends after ``cutoff`` is ``after_cutoff``. A sample from ``ceiling_end`` (the end of
+    the report's maximum step) on is ``degraded``. Among the rest the leading ramp-up and the trailing ramp-down
+    are ``edge``; a response spike inside a load step is ``stall``. Runs without load steps have no stall check.
+    Only ``fit`` samples feed the model.
     """
     factor = LATENCY_UNIT_SECONDS[unit]
     parts: dict[str, pd.Series] = {"x": _named(rps, "x"), "r_s": _named(mean_latency, "r_s") * factor}
@@ -284,7 +295,7 @@ def align_samples(
     frame = _require_closed_vus(frame) if load_model == "closed" else frame.assign(n=frame["x"] * frame["r_s"])
     width = _bin_width(pd.DatetimeIndex(frame.index))
     frame = frame.assign(step=_step_positions(pd.DatetimeIndex(frame.index), steps))
-    frame = frame.assign(role=_roles(frame, width, cutoff))
+    frame = frame.assign(role=_roles(frame, width, cutoff, ceiling_end))
     fit = frame.loc[frame["role"] == ROLE_FIT]
     _check_coverage(fit, frame)
     think = _think_time(fit) if load_model == "closed" else 0.0
@@ -298,10 +309,19 @@ def _step_positions(index: pd.DatetimeIndex, steps: Sequence[StepWindow]) -> np.
     return positions
 
 
-def _roles(frame: pd.DataFrame, width: pd.Timedelta, cutoff: pd.Timestamp) -> pd.Series:
+def _roles(
+    frame: pd.DataFrame,
+    width: pd.Timedelta,
+    cutoff: pd.Timestamp,
+    ceiling_end: Optional[pd.Timestamp] = None,
+) -> pd.Series:
     roles = pd.Series(ROLE_FIT, index=frame.index, dtype=object)
     inside = frame.loc[(frame.index + width) <= cutoff]
     roles.loc[~roles.index.isin(inside.index)] = ROLE_AFTER_CUTOFF
+    if ceiling_end is not None:
+        above = inside.index >= ceiling_end
+        roles.loc[inside.index[above]] = ROLE_DEGRADED
+        inside = inside.loc[~above]
     edge = _edge_mask(inside["x"]).to_numpy()
     roles.loc[inside.index[edge]] = ROLE_EDGE
     steady = inside.loc[~edge]
@@ -343,8 +363,9 @@ def _check_coverage(fit: pd.DataFrame, frame: pd.DataFrame) -> None:
     if count < MIN_SAMPLES:
         edges = int((frame["role"] == ROLE_EDGE).sum())
         stalls = int((frame["role"] == ROLE_STALL).sum())
+        degraded = int((frame["role"] == ROLE_DEGRADED).sum())
         raise CapacityModelError(
-            t("server.capacity.too_few_points", count=count, edges=edges, stalls=stalls, min=MIN_SAMPLES),
+            t("server.capacity.too_few_points", count=count, edges=edges, stalls=stalls, degraded=degraded, min=MIN_SAMPLES),
             "too_few_points",
         )
     low, high = float(fit["n"].min()), float(fit["n"].max())
@@ -506,13 +527,16 @@ def model_curve(
     return points
 
 
-def load_limit(fit: UslFit, instability: Optional[Instability]) -> LoadLimit:
-    """The lower of the model ceiling and the load where stalls became frequent."""
+def load_limit(fit: UslFit, instability: Optional[Instability], sla_rps: Optional[float] = None) -> LoadLimit:
+    """The lowest of the model ceiling, the load where stalls became frequent and ``sla_rps``, the load of the
+    first step above the report maximum (the SLA latency or error thresholds broke there)."""
     limits: list[tuple[float, LimitKind]] = []
     if fit.x_max is not None:
         limits.append((fit.x_max, "model"))
     if instability is not None:
         limits.append((instability.onset_rps, "instability"))
+    if sla_rps is not None:
+        limits.append((sla_rps, "sla"))
     if not limits:
         return LoadLimit(rps=None, kind="none")
     rps, kind = min(limits, key=lambda item: item[0])
@@ -591,11 +615,12 @@ def sample_points(samples: Samples, shift_hours: int) -> list[SamplePoint]:
 
 
 def step_points(samples: Samples, cutoff: pd.Timestamp, shift_hours: int) -> list[StepPoint]:
-    """Plateau averages of each load step over its fit samples and stalls, for chart markers and facts."""
-    checked = samples.checked_rows
+    """Plateau averages of each load step over its fit samples, stalls and samples above the report maximum,
+    for chart markers and facts."""
+    measured = samples.measured_rows
     points: list[StepPoint] = []
     for step in samples.steps:
-        chunk = checked.loc[(checked.index >= step.plateau_start) & (checked.index < step.plateau_end)]
+        chunk = measured.loc[(measured.index >= step.plateau_start) & (measured.index < step.plateau_end)]
         if chunk.empty:
             continue
         points.append(StepPoint(
@@ -611,20 +636,23 @@ def step_points(samples: Samples, cutoff: pd.Timestamp, shift_hours: int) -> lis
             stalls=int((chunk["role"] == ROLE_STALL).sum()),
             samples=int(len(chunk)),
             after_drop=step.plateau_end > cutoff,
+            degraded=bool((chunk["role"] == ROLE_DEGRADED).any()),
         ))
     return points
 
 
 def load_coverage(samples: Samples, steps: Sequence[StepPoint]) -> LoadCoverage:
-    """Tested range: the highest step median concurrency of fit samples and the best step mean RPS.
+    """Tested range: the highest step median concurrency of fit samples and the best step mean RPS up to the
+    report maximum; ``peak_rps`` is the best sample of the whole load window.
 
-    A run without load steps uses its highest fit sample and its best sample instead.
+    A run without load steps uses its highest fit sample and its best sample up to the maximum instead.
     """
     fit = samples.fit_rows
     stepped = fit.loc[fit["step"] >= 0]
     concurrency = float(stepped.groupby("step")["n"].median().max()) if not stepped.empty else float(fit["n"].max())
-    peak = float(samples.checked_rows["x"].max())
-    rps = max((step.rps for step in steps if not step.after_drop), default=peak)
+    held = float(samples.checked_rows["x"].max())
+    peak = float(samples.measured_rows["x"].max())
+    rps = max((step.rps for step in steps if not step.after_drop and not step.degraded), default=held)
     return LoadCoverage(concurrency=concurrency, rps=rps, peak_rps=peak)
 
 
@@ -690,6 +718,7 @@ __all__ = [
     "MIN_SAMPLES",
     "ModelContext",
     "ROLE_AFTER_CUTOFF",
+    "ROLE_DEGRADED",
     "ROLE_EDGE",
     "ROLE_FIT",
     "ROLE_STALL",

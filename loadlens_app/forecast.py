@@ -17,6 +17,7 @@ import psycopg2
 from AI.capacity_forecast import (
     LOAD_MODELS,
     LATENCY_UNIT_SECONDS,
+    ROLE_DEGRADED,
     ROLE_EDGE,
     ROLE_STALL,
     CapacityModelError,
@@ -72,8 +73,8 @@ from AI.resource_plan import (
     unavailable_plan,
     utilization_lines,
 )
-from AI.sla_evaluator import _safe_float, _worst_series_p95
-from AI.i18n import DEFAULT, msg, render_ref, t
+from AI.sla_evaluator import PRIMARY_SPECS, _safe_float, _worst_series_p95
+from AI.i18n import DEFAULT, has_key, msg, render_ref, t
 from AI.report_texts import localized_step_label
 from loadlens_app.core import _find_area_for_service, _ts_conn
 from loadlens_app.errors import log_failure, with_error_id
@@ -87,6 +88,8 @@ SERVICES_CPU_DOMAIN = ROLES["runtime.cpu"].domain
 NODES_CPU_DOMAIN = ROLES["node.cpu_pct"].domain
 NODE_CPU_SCALE = 0.01  # sla.cpu_query is node CPU in percent
 DEFAULT_CPU_CEILING_PCT = 80.0
+# The SLA checks that decide the report maximum (latency and errors); CPU and memory do not move it.
+CEILING_CHECKS = frozenset(spec[0] for spec in PRIMARY_SPECS)
 
 
 class ForecastError(Exception):
@@ -138,6 +141,28 @@ class InputSeries:
 
 
 @dataclass(frozen=True)
+class SlaCheckName:
+    name: str
+    title: str
+
+
+@dataclass(frozen=True)
+class SlaCeiling:
+    """Report maximum (``sla_details.stable_window``): the last load step on which the SLA latency and error
+    thresholds hold. ``end_iso`` ends its step; the samples after it lie above the maximum. ``degraded_*`` are the
+    level and the broken checks of the step after it, as the report states them. ``limit_rps`` is the load limit
+    it sets for the forecast (None when the window has no samples above the maximum)."""
+
+    rps: Optional[float]
+    step_number: Optional[int]
+    step_label: str
+    end_iso: str
+    degraded_rps: Optional[float]
+    degraded_checks: list[SlaCheckName]
+    limit_rps: Optional[float] = None
+
+
+@dataclass(frozen=True)
 class ForecastReport:
     run_id: str
     run_name: str
@@ -155,6 +180,7 @@ class ForecastReport:
     samples_used: int
     excluded_edges: int
     excluded_stalls: int
+    excluded_degraded: int
     think_time_s: float
     p95_ratio: Optional[float]
     knee: Optional[KneePoint]
@@ -171,6 +197,7 @@ class ForecastReport:
     curve: list[CurvePoint]
     sla_target_rps: Optional[float]
     sla_p95_ms: Optional[float]
+    sla_ceiling: Optional[SlaCeiling]
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -190,9 +217,14 @@ def build_forecast(
     settings = _forecast_settings(_scope_sla(report))
     start, cutoff, cutoff_kind = _window(report)
     inputs = _input_series(_stored_frames(run_id, settings), settings, start, cutoff)
-    samples = _samples(inputs, settings, start, cutoff, _report_steps(report))
+    steps = _report_steps(report)
+    sla_ceiling, ceiling_end = _sla_ceiling(report, steps, _time_shift_hours())
+    samples = _samples(inputs, settings, start, cutoff, steps, ceiling_end)
+    notes = [*inputs.notes, *_ceiling_notes(report, sla_ceiling)]
     ceiling = _cpu_ceiling(cpu_ceiling_pct, settings)
-    return _assemble(report, settings, samples, start, cutoff, cutoff_kind, inputs.notes, target_rps, headroom_pct, ceiling)
+    return _assemble(
+        report, settings, samples, start, cutoff, cutoff_kind, notes, target_rps, headroom_pct, ceiling, sla_ceiling,
+    )
 
 
 def _storage() -> dict[str, Any]:
@@ -407,12 +439,84 @@ def _report_steps(report: StoredFinalReport) -> tuple[StepWindow, ...]:
     return tuple(replace(window, label=localized_step_label(window.label)) for window in windows)
 
 
+def _timestamp(value: Any) -> Optional[pd.Timestamp]:
+    try:
+        stamp = to_utc(value)
+    except (TypeError, ValueError):
+        return None
+    return None if pd.isna(stamp) else stamp
+
+
+def _check_names(raw: Any) -> list[SlaCheckName]:
+    """Broken checks of the step after the maximum with their titles in the current locale."""
+    names = [str(item).strip() for item in raw if str(item or "").strip()] if isinstance(raw, list) else []
+    return [SlaCheckName(name, t(f"sla.check_title.{name}") if has_key(f"sla.check_title.{name}") else name) for name in names]
+
+
+def _sla_details(report: StoredFinalReport) -> dict[str, Any]:
+    return report.sla_details if isinstance(report.sla_details, dict) else {}
+
+
+def _broken_on_ceiling(details: dict[str, Any]) -> list[SlaCheckName]:
+    """Latency and error checks that fail on the ceiling window itself. The report checks them there, and keeps its
+    latest step as the window when no step holds them: then the run has no maximum."""
+    checks = details.get("checks")
+    if not isinstance(checks, list):
+        return []
+    return _check_names([
+        check.get("name") for check in checks
+        if isinstance(check, dict) and str(check.get("name") or "") in CEILING_CHECKS and check.get("passed") is False
+    ])
+
+
+def _sla_ceiling(
+    report: StoredFinalReport,
+    steps: tuple[StepWindow, ...],
+    shift_hours: int,
+) -> tuple[Optional[SlaCeiling], Optional[pd.Timestamp]]:
+    """Report maximum and the end of its load step (the end of the window itself without report steps).
+
+    The forecast follows the report and does not evaluate the SLA again. (None, None) for a report without a step
+    window (no SLA thresholds, an old report), with bounds that cannot be read or when no step holds the latency and
+    error thresholds.
+    """
+    details = _sla_details(report)
+    window = details.get("stable_window")
+    if not isinstance(window, dict) or str(window.get("kind") or "step") != "step" or _broken_on_ceiling(details):
+        return None, None
+    start, end = _timestamp(window.get("start")), _timestamp(window.get("end"))
+    if start is None or end is None or end <= start:
+        return None, None
+    step = next((item for item in reversed(steps) if item.start <= start <= item.end), None)
+    ceiling_end = step.end if step is not None else end
+    ceiling = SlaCeiling(
+        rps=_positive(_safe_float(window.get("level"))),
+        step_number=step.number if step is not None else None,
+        step_label=step.label if step is not None else "",
+        end_iso=format_iso(ceiling_end, shift_hours),
+        degraded_rps=_positive(_safe_float(window.get("degraded_level"))),
+        degraded_checks=_check_names(window.get("degraded_checks")),
+    )
+    return ceiling, ceiling_end
+
+
+def _ceiling_notes(report: StoredFinalReport, ceiling: Optional[SlaCeiling]) -> list[str]:
+    """Why the steps are judged by stalls only: the report has no maximum, or no step holds its thresholds."""
+    if ceiling is not None:
+        return []
+    broken = _broken_on_ceiling(_sla_details(report))
+    if broken:
+        return [msg("capacity.note.sla_broken_on_ceiling", checks=", ".join(check.title for check in broken))]
+    return [msg("capacity.note.no_sla_ceiling")]
+
+
 def _samples(
     inputs: InputSeries,
     settings: ForecastSettings,
     start: pd.Timestamp,
     cutoff: pd.Timestamp,
     steps: tuple[StepWindow, ...],
+    ceiling_end: Optional[pd.Timestamp] = None,
 ) -> Samples:
     try:
         return align_samples(
@@ -425,28 +529,55 @@ def _samples(
             vus=inputs.vus,
             p95=inputs.p95,
             steps=steps,
+            ceiling_end=ceiling_end,
         )
     except CapacityModelError as exc:
         # The first argument keeps a msg (rendered again where it is shown); a plain text stays as it is.
         raise ForecastError(exc.args[0] if exc.args else str(exc), 422, exc.code) from exc
 
 
-def _model_context(samples: Samples, fit: UslFit, coverage: LoadCoverage, instability: Optional[Instability]) -> ModelContext:
+def _sla_limit_rps(
+    sla_ceiling: Optional[SlaCeiling],
+    samples: Samples,
+    steps: list[StepPoint],
+    tested_rps: float,
+) -> Optional[float]:
+    """Load of the first step above the report maximum, never below the tested load; without load steps the
+    level the report names for the step after the maximum. None when the window has no samples above it."""
+    if sla_ceiling is None or not bool((samples.frame["role"] == ROLE_DEGRADED).any()):
+        return None
+    first = next((step for step in steps if step.degraded), None)
+    rps = first.rps if first is not None else sla_ceiling.degraded_rps
+    return None if rps is None else max(rps, tested_rps)
+
+
+def _model_context(
+    samples: Samples,
+    fit: UslFit,
+    coverage: LoadCoverage,
+    instability: Optional[Instability],
+    sla_rps: Optional[float] = None,
+) -> ModelContext:
     return ModelContext(
         fit=fit,
         think_time_s=samples.think_time_s,
         p95_ratio=p95_ratio(samples),
         tested_concurrency=coverage.concurrency,
-        limit=load_limit(fit, instability),
+        limit=load_limit(fit, instability, sla_rps),
         unstable=instability is not None,
     )
 
 
-def _curve_edge(model: ModelContext, target_rps: Optional[float], instability: Optional[Instability]) -> float:
-    """Right edge of the model curve; it stops where the stalls began."""
+def _curve_edge(
+    model: ModelContext,
+    target_rps: Optional[float],
+    instability: Optional[Instability],
+    sla_rps: Optional[float] = None,
+) -> float:
+    """Right edge of the model curve; it stops where the stalls began or above the report maximum."""
     target_n = concurrency_for(model.fit, target_rps) if target_rps else None
-    stop_rps = instability.onset_rps if instability is not None else None
-    return curve_upper(model.fit, model.tested_concurrency, target_n, stop_rps)
+    observed = [value for value in (instability.onset_rps if instability is not None else None, sla_rps) if value is not None]
+    return curve_upper(model.fit, model.tested_concurrency, target_n, min(observed) if observed else None)
 
 
 def _resource_frames(run_id: str, settings: ForecastSettings) -> dict[tuple[str, str], pd.DataFrame]:
@@ -522,6 +653,7 @@ def _assemble(
     target_rps: Optional[float],
     headroom_pct: float,
     ceiling: CpuCeiling,
+    sla_ceiling: Optional[SlaCeiling] = None,
 ) -> ForecastReport:
     shift = _time_shift_hours()
     fit_rows = samples.fit_rows
@@ -529,9 +661,10 @@ def _assemble(
     instability = detect_instability(samples, shift)
     steps = step_points(samples, cutoff, shift)
     coverage = load_coverage(samples, steps)
-    model = _model_context(samples, fit, coverage, instability)
+    sla_rps = _sla_limit_rps(sla_ceiling, samples, steps, coverage.rps)
+    model = _model_context(samples, fit, coverage, instability, sla_rps)
     n_low = float(fit_rows["n"].min())
-    upper = _curve_edge(model, target_rps, instability)
+    upper = _curve_edge(model, target_rps, instability, sla_rps)
     roles = samples.frame["role"]
     target = evaluate_target(model, target_rps, headroom_pct / 100.0) if target_rps else None
     plan = _resource_plan(report.run_id, settings, samples, steps, instability, model.limit, target_rps or coverage.rps, ceiling)
@@ -553,6 +686,7 @@ def _assemble(
         samples_used=int(len(fit_rows)),
         excluded_edges=int((roles == ROLE_EDGE).sum()),
         excluded_stalls=int((roles == ROLE_STALL).sum()),
+        excluded_degraded=int((roles == ROLE_DEGRADED).sum()),
         think_time_s=samples.think_time_s,
         p95_ratio=model.p95_ratio,
         knee=knee_point(fit, samples.think_time_s, settings.elasticity_threshold, n_low, upper),
@@ -569,6 +703,7 @@ def _assemble(
         curve=model_curve(fit, samples.think_time_s, model.p95_ratio, n_low, upper),
         sla_target_rps=_sla_threshold(report, "target_rps"),
         sla_p95_ms=_sla_threshold(report, "p95_latency"),
+        sla_ceiling=replace(sla_ceiling, limit_rps=sla_rps) if sla_ceiling is not None else None,
         notes=notes,
     )
 

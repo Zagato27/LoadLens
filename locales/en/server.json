@@ -7,7 +7,7 @@
   "server.capacity.missing_vus": "The closed model needs the VU series",
   "server.capacity.negative_think_time": "The number of VUs is below the concurrency by Little's law (RPS × response time): the scenario seems to send requests in parallel. Choose the open load model.",
   "server.capacity.no_low_load": "No points at low load: the model needs a ramp-up from a small load",
-  "server.capacity.too_few_points": "{count} points are left for the model before the first RPS drop (excluded: ramp-up and ramp-down {edges}, dips {stalls}), at least {min} are needed",
+  "server.capacity.too_few_points": "{count} points are left for the model before the first RPS drop (excluded: ramp-up and ramp-down {edges}, dips {stalls}, steps above the report maximum {degraded}), at least {min} are needed",
   "server.capacity.zero_concurrency": "Concurrency is zero at every point",
   "server.common.unset": "not set",
   "server.config.derived_object": "{domain}: derived must be an object \"name → {kind: sum, of: [names]}\"",

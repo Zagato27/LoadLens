@@ -2228,6 +2228,82 @@ def test_forecast_endpoint_rejects_bad_input(client, monkeypatch):
     assert resp.status_code == 422 and resp.get_json()["code"] == "missing_series"
 
 
+def _ceiling_run(stable_window):
+    """Six ten-minute steps of 100..600 RPS; from step 5 on the response is five times slower without dips."""
+    import numpy as np
+    from dataclasses import replace
+
+    index = pd.date_range("2026-10-01T10:00:00Z", periods=60, freq="1min")
+    rps = np.repeat([100.0, 200.0, 300.0, 400.0, 500.0, 600.0], 10)
+    mean = np.where(np.arange(60) < 40, 30.0, 150.0)
+    steps = [
+        {
+            "label": f"Step {number + 1}",
+            "source": "step_detector",
+            "start_iso": index[number * 10].isoformat(),
+            "end_iso": (index[number * 10] + pd.Timedelta(minutes=10)).isoformat(),
+        }
+        for number in range(6)
+    ]
+    details = {"checks": [{"name": "target_rps", "threshold": 200}]}
+    if stable_window:
+        details["stable_window"] = {
+            "start": steps[3]["start_iso"], "end": steps[3]["end_iso"], "level": 400.0, "series": "all", "label": "RPS",
+            "degraded_level": 500.0, "degraded_checks": ["p95_latency"],
+        }
+    report = replace(
+        _forecast_report(index[0], index[-1] + pd.Timedelta(minutes=1)),
+        context={"load_steps": steps},
+        sla_details=details,
+    )
+    frames = {"RPS": pd.DataFrame({"all": rps}, index=index), "mean": pd.DataFrame({"mean": mean}, index=index)}
+    return report, frames
+
+
+def test_forecast_steps_above_the_report_maximum_are_not_green(client, monkeypatch):
+    report, frames = _ceiling_run(stable_window=True)
+    _patch_forecast(monkeypatch, report, frames)
+    resp = client.get("/forecast/abc", query_string={"target_rps": 550, "headroom_pct": 20})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert [step["degraded"] for step in body["steps"]] == [False, False, False, False, True, True]
+    assert all(step["stalls"] == 0 for step in body["steps"])
+    assert body["limit"] == {"rps": pytest.approx(500.0), "kind": "sla"}
+    assert body["tested_rps"] == pytest.approx(400.0)
+    assert body["excluded_degraded"] == 20 and body["samples_used"] == 40
+    assert {point["role"] for point in body["points"]} == {"fit", "degraded"}
+    ceiling = body["sla_ceiling"]
+    assert (ceiling["step_number"], ceiling["rps"], ceiling["degraded_rps"]) == (4, 400.0, 500.0)
+    assert ceiling["limit_rps"] == pytest.approx(500.0)
+    assert ceiling["degraded_checks"] == [{"name": "p95_latency", "title": "p95 latency"}]
+    assert body["safe"] == {"rps": pytest.approx(400.0), "source": "limit", "service": None}
+    zones = body["scale"]["zones"]
+    assert zones[-1]["tone"] == "fail" and zones[-1]["from_rps"] == pytest.approx(500.0)
+    assert body["target"]["verdict"] == "over_limit" and body["answer"]["verdict"] == "blocked"
+    assert max(point["rps"] for point in body["curve"]) <= 500.0 + 1e-6
+    assert not any("максимума SLA" in note for note in body["notes"])
+
+
+def test_forecast_without_a_report_maximum_says_so(client, monkeypatch):
+    report, frames = _ceiling_run(stable_window=False)
+    _patch_forecast(monkeypatch, report, frames)
+    body = client.get("/forecast/abc", query_string={"target_rps": 550}).get_json()
+    assert body["sla_ceiling"] is None and body["excluded_degraded"] == 0
+    assert not any(step["degraded"] for step in body["steps"])
+    assert body["limit"]["kind"] != "sla"
+    assert any("нет максимума SLA" in note for note in body["notes"])
+
+
+def test_forecast_claims_no_maximum_when_the_report_window_breaks_the_sla(client, monkeypatch):
+    # No step holds p95: the report keeps its latest step as the window and the p95 check fails there.
+    report, frames = _ceiling_run(stable_window=True)
+    report.sla_details["checks"].append({"name": "p95_latency", "category": "primary", "threshold": 100, "passed": False})
+    _patch_forecast(monkeypatch, report, frames)
+    body = client.get("/forecast/abc", query_string={"target_rps": 550}).get_json()
+    assert body["sla_ceiling"] is None and not any(step["degraded"] for step in body["steps"])
+    assert any("пороги нарушены (p95 latency)" in note for note in body["notes"])
+
+
 def test_sla_rejects_unknown_load_model(client):
     resp = client.post("/config", json={"section": "sla", "data": {"load_model": "mixed"}})
     assert resp.status_code == 400
@@ -2425,6 +2501,34 @@ def test_forecast_confluence_page_has_report_sections(monkeypatch):
         assert part in body
     assert render_scale_png(report).startswith(b"\x89PNG")
     assert render_steps_png(report).startswith(b"\x89PNG")
+
+
+def test_forecast_publication_and_explanation_follow_the_report_maximum(monkeypatch):
+    from loadlens_app import forecast as service
+    from loadlens_app import forecast_confluence as page
+    from loadlens_app import forecast_explanation as explain
+
+    report, frames = _ceiling_run(stable_window=True)
+    _patch_forecast(monkeypatch, report, frames)
+    forecast = service.build_forecast("abc", 550.0, 20.0)
+    assert "нарушены пороги SLA (p95 latency)" in page._limit_line(forecast)
+    assert "выше максимума отчёта" in page._scale_caption(forecast)
+    fail = next(zone for zone in forecast.scale.zones if zone.tone == "fail")
+    assert page._zone_text(forecast, fail) == "выше максимума отчёта"
+    limit = next(mark for mark in forecast.scale.marks if mark.kind == "limit")
+    assert page._mark_text(forecast, limit).endswith("нарушен SLA")
+    assert [page._step_note(step) for step in forecast.steps][3:] == ["", "\nвыше максимума отчёта", "\nвыше максимума отчёта"]
+    assert any("точки выше максимума отчёта" in item and "20" in item for item in page._method_items(forecast))
+    assert page.render_steps_png(forecast).startswith(b"\x89PNG")
+    facts = explain._facts(forecast, "ru")
+    assert facts["limit"] == {
+        "kind": "нарушение порогов SLA выше максимума отчёта", "rps": 500, "report_maximum_step": "Step 4",
+        "report_maximum_rps": 400, "broken_checks": ["p95 latency"],
+    }
+    assert [step.get("above_report_maximum", False) for step in facts["steps"]] == [False] * 4 + [True, True]
+    assert "above_report_maximum" not in facts["steps"][0]
+    window = explain._limit_window(forecast)
+    assert window is not None and window.start == pd.Timestamp(frames["RPS"].index[40])
 
 
 def test_forecasting_pages(client):

@@ -131,6 +131,13 @@ curl -s -H "Authorization: Bearer ll_..." "http://localhost:5000/runs?limit=1&in
 | `GET` / `POST /forecast/<run_id>/explanation` | The model's explanation of the limit (cached). Engineer for `POST` |
 | `GET` / `POST /forecast/<run_id>/confluence` | Publication of the forecast page (background job). Engineer for `POST` |
 
+The forecast follows the maximum of the report: `sla_ceiling` is the last step on which the SLA latency and error
+thresholds hold (`rps`, `step_number`, `step_label`, `end_iso`, `degraded_rps`, `degraded_checks` as `{name, title}`
+and `limit_rps`), or `null` when the report has none or its latency and error checks fail on that step (a note says
+which). Points after that step have the role `degraded`, their steps `degraded: true`, and they stay out of the
+model and the pod plan (`excluded_degraded` counts them). `limit.kind` is `model`, `instability`, `sla` (the load of
+the first step above the maximum) or `none`; the lowest limit wins.
+
 ## Load tests (engineer)
 
 | Endpoint | Body or parameters |

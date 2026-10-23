@@ -78,6 +78,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Fixed
 
+- The capacity forecast no longer shows the steps above the report maximum as green. Before, it judged a step only by
+  response time stalls inside it, so a step that was evenly slow past the SLA got "no stalls", entered the model and
+  painted the load scale green. Now the forecast reads the maximum of the report (the last step on which the SLA
+  latency and error thresholds hold): later steps are red, stay out of the model and the pod plan, and the first of
+  them sets the load limit (`limit.kind: sla`). The Confluence page and the AI explanation of the limit follow it
+  ([docs/api.md](docs/api.md#capacity-forecast)).
 - A finished load test run no longer keeps its name taken. Before, any run of the service with that name, even a
   failed or cancelled one, refused the name forever, and deleting the report from the archive did not free it. Now
   only a running test or an existing report holds a name.

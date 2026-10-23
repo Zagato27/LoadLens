@@ -54,8 +54,10 @@ Russian names) selects the analysis mode, the SLA window and the profile text ad
 | Stress (`stress`) | As step, plus the saturation point, the first degraded step, the degradation pattern and the limiting resource (`saturation`, `AI/saturation.py`) | As step | As step |
 
 Peak performance is reported only where the total RPS series exists; for soak and spike it is marked
-`not_applicable`. The forecast is built for step and stress tests. The verdict policy per mode is documented in the
-docstring of `AI/sla_evaluator.py`.
+`not_applicable`. The forecast is built for step and stress tests. It takes the ceiling (`stable_window`) from the
+report: steps above it are marked red, stay out of the model and set the load limit, so a run that went past its
+SLA maximum is not shown as safe there. The verdict policy per mode is documented in the docstring of
+`AI/sla_evaluator.py`.
 
 ## Candidates, judge and verification
 

@@ -14,6 +14,7 @@
   "context_import.document_close": "DOCUMENT>>>",
   "context_import.document_open": "<<<DOCUMENT",
   "context_import.system": "You transfer the description of a software system from a document into a JSON structure. Use only the information from the document and return only JSON.",
+  "forecast.kind_sla": "SLA thresholds broken above the report maximum",
   "forecast.kind_stalls": "response time stalls",
   "forecast.kind_usl": "USL model ceiling",
   "forecast.system": "You are a performance engineer. Answer strictly in JSON of the given schema, all texts in English.",
