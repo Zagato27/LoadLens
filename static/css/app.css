@@ -1163,6 +1163,14 @@ table.archive-table { margin-top: 4px; }
 .archive-table .actions-inner { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
 .archive-table details.menu > summary { width: 24px; height: 20px; border-color: transparent; color: var(--dim); line-height: 1; }
 .archive-table details.menu > summary:hover, .archive-table details.menu[open] > summary { border-color: var(--line-2); background: transparent; color: var(--text); }
+/* Reports / Runs tabs and the load test runs table (static/js/archive_runs.js). */
+.archive-tabs { margin: 4px 0 0; }
+table.archive-table.lt-runs-table th.lt-run-col { min-width: 200px; }
+table.archive-table.lt-runs-table td.lt-report { max-width: 240px; font-weight: 400; }
+table.archive-table.lt-runs-table td.lt-instances { color: var(--text); }
+table.archive-table.lt-runs-table td.select-cell:has(input:disabled) { cursor: default; }
+table.archive-table.lt-runs-table td.select-cell input.row-select:disabled { opacity: 0.35; cursor: not-allowed; }
+.archive-page .selection-actions .btn-danger { height: 30px; padding: 0 12px; font: 500 12px var(--sans); }
 
 .archive-page .selection-bar { position: sticky; bottom: 0; z-index: 40; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin-top: 0; padding: 10px 0; border: 0; border-top: 1px solid var(--line-2); border-radius: 0; background: var(--bg); box-shadow: none; color: var(--muted); font: 12px var(--mono); }
 .archive-page .selection-count { font-weight: 400; text-transform: lowercase; white-space: nowrap; }

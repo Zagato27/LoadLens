@@ -273,8 +273,12 @@ def test_deleting_a_run_deletes_its_run_index_row(monkeypatch):
 
 
 def test_deleting_a_service_deletes_its_runs_from_run_index_in_savepoints(monkeypatch):
+    from loadlens_app.load_tests import store as lt_store
+
     monkeypatch.setattr(core, "_load_settings_runtime_data", lambda: {})
     monkeypatch.setattr(core, "_load_metrics_runtime_data", lambda: {})
+    # Load test runs live in their own store (tests/test_run_archive.py); keep them off this connection.
+    monkeypatch.setattr(lt_store, "_store", lt_store.MemoryLoadTestStore())
     # engineer_reports is missing: its failure is rolled back to its savepoint and the rest still runs.
     conn = Conn(("FROM public.engineer_reports", RuntimeError("relation does not exist")))
     monkeypatch.setattr(core, "_ts_conn", lambda: conn)

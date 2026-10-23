@@ -150,7 +150,8 @@ def test_archive_markup_has_inline_filter_captions_sla_columns_and_a_text_pager(
     assert '<kbd class="archive-kbd" aria-hidden="true">/</kbd>' in main
     assert 'id="archiveCounter"' in main
     assert 'id="searchBtn"' not in main and 'id="clearBtn"' not in main  # the filters apply as they change
-    heads = [re.sub(r"<[^>]+>", "", h).strip() for h in re.findall(r"<th(?:\s[^>]*)?>(.*?)</th>", main, re.S)]
+    reports_table = re.search(r'<table[^>]*id="runsTable".*?</table>', main, re.S).group(0)
+    heads = [re.sub(r"<[^>]+>", "", h).strip() for h in re.findall(r"<th(?:\s[^>]*)?>(.*?)</th>", reports_table, re.S)]
     assert heads == ["Select for comparison", "Run", "Service", "Test type", "Test date", "Verdict", "SLA", "Max RPS",
                      "p95", "Report created", "Actions"]
     assert '<th class="n" title="SLA criteria of the final report: met of evaluated">SLA</th>' in main

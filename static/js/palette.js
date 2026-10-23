@@ -464,8 +464,9 @@
       return;
     }
     if (isSlashShortcut(e) && !document.querySelector('dialog[open]')) {
-      const field = document.querySelector('[data-slash-focus]');
-      if (field && !field.disabled && field.getClientRects().length) {
+      // A page with tabs has a search field per tab: the visible one takes the focus.
+      const field = Array.from(document.querySelectorAll('[data-slash-focus]')).find((el) => !el.disabled && el.getClientRects().length);
+      if (field) {
         e.preventDefault();
         field.focus();
         if (typeof field.select === 'function') field.select();

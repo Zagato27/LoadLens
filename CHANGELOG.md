@@ -41,6 +41,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   meaning, unit, series keys and note, and marks the queries that returned no data in the run. Queries added by hand
   get a "Role" and a "Note for the AI analysis" in the row editor (`queries.<domain>.descriptions`); the note
   replaces the description of a pack query ([docs/ai-analysis.md](docs/ai-analysis.md#prompts-and-languages)).
+- **Runs tab in the archive.** The archive has two tabs, Reports and Runs (`/reports?tab=runs`, also the "All runs"
+  link on the Run test page). The Runs tab lists the load test runs of the active area with status, start and
+  duration, instances, owner and report, filters by name, service and status, and is open to viewers without
+  commands or parameters (`GET /load_tests/history`). Finished runs are deleted from the row menu or with checkboxes:
+  an engineer deletes their own, an administrator anyone's and may delete the runs' reports with them
+  (`POST /load_tests/runs/delete`, `DELETE /load_tests/runs/<run_id>`, audit `load_test.delete`)
+  ([docs/running-load-tests.md](docs/running-load-tests.md#run-history-in-the-archive)).
 
 ### Changed
 
@@ -58,9 +65,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   example `kafka_consumer_fetch_rate` or disk by PVC); the generated domain metrics replace them. A stored copy of an
   old default prompt is still read as the default; a prompt edited in "Settings → Prompts" keeps its own text,
   including the old list, until it is reset.
+- **Deleting a service deletes its finished load test runs.** Runs still going stay until they end.
+- **The archive finds a run started from LoadLens by its report id.** The "started from LoadLens" mark and "Run
+  again" stay on a renamed report, and of two runs with one name the newest is offered.
 
 ### Fixed
 
+- A finished load test run no longer keeps its name taken. Before, any run of the service with that name, even a
+  failed or cancelled one, refused the name forever, and deleting the report from the archive did not free it. Now
+  only a running test or an existing report holds a name.
 - Saved data sources and domain bindings replace those of `settings.py` instead of being merged into them field by
   field. Before, a binding switched to a direct Prometheus kept the Grafana datasource of `settings.py`, so the next
   save of the bindings card failed with "field datasource_uid is not used for type prometheus", and a source or a

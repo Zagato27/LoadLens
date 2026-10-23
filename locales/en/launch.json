@@ -99,6 +99,7 @@
   "launch.report.legend": "Report",
   "launch.report.llm": "With AI analysis",
   "launch.runs.active": "running: {n}",
+  "launch.runs.all": "All runs",
   "launch.runs.details": "Details",
   "launch.runs.empty": "No runs yet.",
   "launch.runs.instances": "{n} inst. ({tools})",

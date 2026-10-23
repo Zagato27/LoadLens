@@ -10,6 +10,8 @@
   .runs-panel { margin: 0 0 22px; }
   .runs-panel .runs-title { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--line-2); font-size: 15px; font-weight: 600; }
   .runs-panel .runs-title small { font-weight: 400; }
+  .runs-panel .runs-side { display: inline-flex; align-items: baseline; gap: 14px; }
+  .runs-panel .runs-all { font-size: 13px; font-weight: 400; }
   .runs-panel #runsList > p { margin: 10px 0 0; }
   .run-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
   .run-row:last-child { border-bottom: 0; }
@@ -59,7 +61,7 @@
   <p class="form-intro">{{ t('launch.intro') }}</p>
 
   <section id="runsPanel" class="runs-panel" aria-live="polite">
-    <div class="runs-title"><span>{{ t('launch.runs.title') }}</span><small class="dim" id="runsNote"></small></div>
+    <div class="runs-title"><span>{{ t('launch.runs.title') }}</span><span class="runs-side"><small class="dim" id="runsNote"></small><a class="runs-all" href="/reports?tab=runs">{{ t('launch.runs.all') }}</a></span></div>
     <div id="runsList"><p class="dim">{{ t('launch.runs.loading') }}</p></div>
   </section>
 

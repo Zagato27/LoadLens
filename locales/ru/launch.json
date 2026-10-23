@@ -99,6 +99,7 @@
   "launch.report.legend": "Отчёт",
   "launch.report.llm": "С анализом ИИ",
   "launch.runs.active": "идёт: {n}",
+  "launch.runs.all": "Все запуски",
   "launch.runs.details": "Подробнее",
   "launch.runs.empty": "Прогонов ещё не было.",
   "launch.runs.instances": "{n} инст. ({tools})",

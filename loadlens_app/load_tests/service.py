@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import logging
 import shlex
 import uuid
 from dataclasses import dataclass, replace
 from typing import Any, Mapping, Optional
+from urllib.parse import quote, unquote
 
 from loadlens_app.limits import LimitError, check_load_test_slot, limit
 
@@ -27,6 +29,9 @@ from .store import (
     INSTANCE_STATUS_TITLES,
     INST_ACTIVE,
     RUN_ACTIVE,
+    RUN_CANCELLED,
+    RUN_DONE,
+    RUN_FAILED,
     RUN_LOADING,
     RUN_STATUS_TITLES,
     InstanceRecord,
@@ -49,6 +54,8 @@ from .tools import (
     render_command,
     resolve_script,
 )
+
+logger = logging.getLogger(__name__)
 
 TEST_TYPES = ("step", "soak", "spike", "stress")
 MAX_NAME_CHARS = 60
@@ -732,9 +739,15 @@ def _iso(value) -> Optional[str]:
     return value.isoformat() if value else None
 
 
+def _tool_title(inst: InstanceRecord, cat: Catalog) -> str:
+    tool = cat.tools.get(inst.tool) if inst.tool else None
+    if tool:
+        return tool.display_title
+    return CI_TITLES.get(inst.ci_kind, inst.tool) if inst.ci_kind else inst.tool
+
+
 def instance_view(run: RunRecord, inst: InstanceRecord, cat: Catalog) -> dict[str, Any]:
     generator = cat.generators.get(inst.generator)
-    tool = cat.tools.get(inst.tool) if inst.tool else None
     ci = None
     if inst.ci_kind:
         ci = {
@@ -753,7 +766,7 @@ def instance_view(run: RunRecord, inst: InstanceRecord, cat: Catalog) -> dict[st
         "generator_title": generator.title if generator else inst.generator,
         "manual": bool(generator and generator.is_manual),
         "tool": inst.tool,
-        "tool_title": tool.display_title if tool else (CI_TITLES.get(inst.ci_kind, inst.tool) if inst.ci_kind else inst.tool),
+        "tool_title": _tool_title(inst, cat),
         "script": inst.script,
         "params": inst.params,
         "env_keys": sorted(inst.env),
@@ -821,6 +834,201 @@ def run_view(run: RunRecord, cat: Optional[Catalog] = None, with_report: bool = 
         "created_at": _iso(run.created_at),
         "updated_at": _iso(run.updated_at),
         "instances": [instance_view(run, inst, cat) for inst in run.instances],
+    }
+
+
+# ---- run history of the archive ----------------------------------------------------------------
+
+HISTORY_MAX_LIMIT = 100
+DELETE_MAX_RUNS = 100
+# Status filter of the archive tab: request codes -> run statuses.
+HISTORY_STATUS_GROUPS: dict[str, tuple[str, ...]] = {
+    "active": RUN_ACTIVE,
+    RUN_DONE: (RUN_DONE,),
+    RUN_FAILED: (RUN_FAILED,),
+    RUN_CANCELLED: (RUN_CANCELLED,),
+}
+_REPORT_PATH = "/reports/"
+_SKIP_KEYS = {
+    "not_found": "lt.history.skip.not_found",
+    "active": "lt.history.skip.active",
+    "forbidden": "lt.history.skip.forbidden",
+}
+
+
+def history_statuses(raw: Any) -> Optional[tuple[str, ...]]:
+    """Run statuses of the ``status=`` filter (codes joined by commas); ``None`` when there is no filter."""
+    codes = [code.strip() for code in str(raw or "").split(",") if code.strip()]
+    if not codes:
+        return None
+    unknown = [code for code in codes if code not in HISTORY_STATUS_GROUPS]
+    if unknown:
+        raise LaunchError("lt.history.bad_status", status=400, code="bad_request",
+                          value=unknown[0][:40], allowed=", ".join(HISTORY_STATUS_GROUPS))
+    statuses: list[str] = []
+    for code in codes:
+        statuses.extend(HISTORY_STATUS_GROUPS[code])
+    return tuple(dict.fromkeys(statuses))
+
+
+def report_id_of(run: RunRecord) -> str:
+    """Id of the run's report from its address ``/reports/<id>``; '' when there is none or it is elsewhere.
+
+    The id survives renaming the report, so a run finds its report even under a new name, and two runs that
+    share a name never share a report.
+    """
+    url = str(run.report_url or "")
+    if not url.startswith(_REPORT_PATH):
+        return ""
+    token = url[len(_REPORT_PATH):].split("?", 1)[0].split("#", 1)[0]
+    return unquote(token) if token and "/" not in token else ""
+
+
+def _report_refs(report_ids: list[str]) -> Optional[dict[str, dict[str, str]]]:
+    """Existing reports among ``report_ids`` (id -> ``{run_id, run_name, service}``); ``None`` when unknown."""
+    if not report_ids:
+        return {}
+    from loadlens_app.blueprints import dashboard
+
+    try:
+        return dashboard._lookup_report_refs(report_ids)
+    except Exception as exc:
+        logger.warning("Could not look up the reports of load test runs: %s", exc)
+        return None
+
+
+def can_delete(run: RunRecord, user: str, can_write: bool, is_admin: bool) -> bool:
+    """Engineers delete their own finished runs, an administrator anyone's."""
+    return can_write and not run.active and (is_admin or not run.owner or run.owner == user)
+
+
+def history_view(run: RunRecord, cat: Catalog, reports: Optional[dict[str, dict[str, str]]], user: str,
+                 can_write: bool, is_admin: bool) -> dict[str, Any]:
+    """A run for the archive tab: who, what and when, without commands, scripts, parameters or CI values.
+
+    Viewers read this list, so nothing here may name a generator host or carry a test credential.
+    """
+    tools: list[str] = []
+    for inst in run.instances:
+        title = _tool_title(inst, cat)
+        if title and title not in tools:
+            tools.append(title)
+    report: Optional[dict[str, str]] = None
+    has_report: Optional[bool] = False
+    report_id = report_id_of(run)
+    if report_id and reports is not None:
+        ref = reports.get(report_id)
+        has_report = ref is not None
+        if ref is not None:
+            report = {"url": _REPORT_PATH + quote(report_id, safe=""), "run_name": str(ref.get("run_name") or "")}
+    elif run.report_url:
+        # The report database did not answer, or the report lives elsewhere: the stored address, unchecked.
+        has_report = None
+        report = {"url": str(run.report_url), "run_name": ""}
+    return {
+        "run_id": run.run_id,
+        "run_name": run.run_name,
+        "service": run.service,
+        "test_type": run.test_type,
+        "status": run.status,
+        "status_title": RUN_STATUS_TITLES.get(run.status, run.status),
+        "active": run.active,
+        "owner": run.owner,
+        "created_at": _iso(run.created_at),
+        "started_at": _iso(run.started_at),
+        "finished_at": _iso(run.finished_at),
+        "instances": len(run.instances),
+        "tools": tools,
+        "report": report,
+        "has_report": has_report,
+        "can_delete": can_delete(run, user, can_write, is_admin),
+    }
+
+
+def history_page(services: Optional[list[str]], statuses: Optional[tuple[str, ...]], query: str, offset: int,
+                 limit: int, user: str, can_write: bool, is_admin: bool) -> dict[str, Any]:
+    """One page of the archive tab, newest first, and how many runs match the filters."""
+    store = get_store()
+    limit = max(1, min(int(limit), HISTORY_MAX_LIMIT))
+    runs = store.list(limit=limit, statuses=statuses, services=services or None, offset=max(0, int(offset)), query=query)
+    total = store.count(statuses=statuses, services=services or None, query=query)
+    if not runs:
+        return {"runs": [], "total": total}
+    reports = _report_refs([rid for rid in dict.fromkeys(report_id_of(run) for run in runs) if rid])
+    cat = load_catalog()
+    return {"runs": [history_view(run, cat, reports, user, can_write, is_admin) for run in runs], "total": total}
+
+
+def _skipped(run_id: str, code: str, run: Optional[RunRecord] = None) -> dict[str, str]:
+    name = run.run_name if run is not None else ""
+    return {"run_id": run_id, "run_name": name, "code": code, "message": t(_SKIP_KEYS[code], run=name or run_id)}
+
+
+def _delete_reports(runs: list[RunRecord]) -> tuple[list[str], list[dict[str, str]]]:
+    """Deletes the reports of deleted runs, found by report id under their current name."""
+    from loadlens_app.core import _delete_run_data
+
+    ids = {run.run_id: report_id_of(run) for run in runs}
+    refs = _report_refs([rid for rid in dict.fromkeys(ids.values()) if rid])
+    deleted: list[str] = []
+    failed: list[dict[str, str]] = []
+    for run in runs:
+        report_id = ids[run.run_id]
+        if not report_id:
+            continue
+        if refs is None:
+            failed.append({"run_id": run.run_id, "run_name": "", "message": t("lt.history.report_lookup_failed")})
+            continue
+        ref = refs.get(report_id)
+        if ref is None or ref.get("run_name") in deleted:
+            continue  # already gone: nothing to delete
+        name = str(ref.get("run_name") or "")
+        try:
+            _delete_run_data(name)
+        except Exception as exc:
+            logger.warning("Could not delete report '%s' of load test run %s: %s", name, run.run_id, exc)
+            failed.append({"run_id": run.run_id, "run_name": name, "message": t("lt.history.report_delete_failed", run=name)})
+            continue
+        deleted.append(name)
+    return deleted, failed
+
+
+def delete_runs(run_ids: Any, owner: str, is_admin: bool, with_reports: bool = False) -> dict[str, Any]:
+    """Deletes finished runs; the rest are skipped with a reason. ``with_reports`` (administrators) removes their reports too.
+
+    A run and its report are separate: without ``with_reports`` the report stays in the archive.
+    """
+    if not isinstance(run_ids, list) or not all(isinstance(i, str) and i.strip() for i in run_ids) or not run_ids:
+        raise LaunchError("lt.history.ids_required", status=400, code="bad_request")
+    ids = list(dict.fromkeys(i.strip() for i in run_ids))
+    if len(ids) > DELETE_MAX_RUNS:
+        raise LaunchError("lt.history.too_many", status=400, code="bad_request", max=DELETE_MAX_RUNS)
+    if with_reports and not is_admin:
+        raise LaunchError("lt.history.reports_forbidden", status=403, code="forbidden")
+    store = get_store()
+    found = {run.run_id: run for run in store.get_many(ids)}
+    allowed: list[RunRecord] = []
+    skipped: list[dict[str, str]] = []
+    for run_id in ids:
+        run = found.get(run_id)
+        if run is None:
+            skipped.append(_skipped(run_id, "not_found"))
+        elif run.active:
+            skipped.append(_skipped(run_id, "active", run))
+        elif not can_delete(run, owner, True, is_admin):
+            skipped.append(_skipped(run_id, "forbidden", run))
+        else:
+            allowed.append(run)
+    gone = set(store.delete([run.run_id for run in allowed])) if allowed else set()
+    deleted = [run for run in allowed if run.run_id in gone]
+    # Deleted by someone else meanwhile.
+    skipped += [_skipped(run.run_id, "not_found", run) for run in allowed if run.run_id not in gone]
+    reports_deleted, reports_failed = _delete_reports(deleted) if with_reports and deleted else ([], [])
+    return {
+        "deleted": [{"run_id": run.run_id, "run_name": run.run_name, "service": run.service} for run in deleted],
+        "skipped": skipped,
+        "reports_deleted": reports_deleted,
+        "reports_failed": reports_failed,
     }
 
 

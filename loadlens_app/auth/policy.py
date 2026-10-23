@@ -176,6 +176,11 @@ POLICY: dict[str, Rule] = {
     "load_tests.preview": _write(E),  # validates the form and renders commands, starts nothing
     "load_tests.create": _write(E, "load_test.start"),
     "load_tests.list_runs": _read(E),
+    # The archive's Runs tab: name, status, owner, times and tool names only, so viewers may read it.
+    "load_tests.history": _read(V),
+    # Engineers delete their own finished runs, an administrator anyone's (checked in the service).
+    "load_tests.delete_run": _write(E, "load_test.delete", session_only=True),
+    "load_tests.delete_runs": _write(E, "load_test.delete", session_only=True),
     "load_tests.active": _read(E),
     "load_tests.get_run": _read(E),
     "load_tests.stop": _write(E, "load_test.stop"),

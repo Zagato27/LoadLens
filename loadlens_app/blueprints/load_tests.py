@@ -174,6 +174,111 @@ def active():
     return jsonify(data), 200
 
 
+HISTORY_DEFAULT_LIMIT = 20
+HISTORY_MAX_OFFSET = 1_000_000
+HISTORY_QUERY_CHARS = 200
+# Why a run was not deleted -> HTTP answer of the one-run DELETE.
+_SKIP_STATUS = {"not_found": (404, "not_found"), "active": (409, "conflict"), "forbidden": (403, "forbidden")}
+
+
+def _int_arg(name: str, default: int) -> int:
+    raw = request.args.get(name, "")
+    return int(raw) if str(raw).strip() else default
+
+
+@load_tests_bp.route("/load_tests/history", methods=["GET"])
+def history():
+    """Runs of the active area for the archive's Runs tab: no commands or parameters, open to viewers.
+
+    ``q`` is part of the name, ``service`` one service, ``status`` codes joined by commas (active, done,
+    failed, cancelled), ``offset`` and ``limit`` (up to 100). The match count is in ``total`` and ``X-Total-Count``.
+    """
+    try:
+        offset = max(0, min(_int_arg("offset", 0), HISTORY_MAX_OFFSET))
+        limit = _int_arg("limit", HISTORY_DEFAULT_LIMIT)
+    except ValueError:
+        return jsonify({"error": translate("lt.api.limit_int"), "code": "bad_request"}), 400
+    try:
+        statuses = service.history_statuses(request.args.get("status", ""))
+    except service.LaunchError as exc:
+        return _error(exc)
+    query = request.args.get("q", "").strip()[:HISTORY_QUERY_CHARS]
+    services = _resolve_services_filter(_active_project_area()) or []
+    wanted = request.args.get("service", "").strip()
+    if wanted:
+        if services and wanted not in services:
+            return _history_response({"runs": [], "total": 0})
+        services = [wanted]
+    auth = current_auth()
+    page = service.history_page(
+        services, statuses, query, offset, limit,
+        user=_owner(), can_write=auth.role >= Role.ENGINEER, is_admin=auth.role >= Role.ADMIN,
+    )
+    if any(run["active"] for run in page["runs"]):
+        ensure_watcher()
+    return _history_response(page)
+
+
+def _history_response(page: dict):
+    response = jsonify(page)
+    response.headers["X-Total-Count"] = str(page["total"])
+    return response, 200
+
+
+def _after_delete(result: dict, with_reports: bool) -> None:
+    if result["reports_deleted"]:
+        response_cache.invalidate(response_cache.DASHBOARD)
+    g.audit_extra = {
+        "run_ids": ",".join(run["run_id"] for run in result["deleted"])[:500],
+        "run_names": ", ".join(run["run_name"] for run in result["deleted"])[:500],
+        "with_reports": "1" if with_reports else "0",
+        "reports_deleted": ", ".join(result["reports_deleted"])[:500],
+        "skipped": str(len(result["skipped"])),
+    }
+
+
+@load_tests_bp.route("/load_tests/runs/delete", methods=["POST"])
+def delete_runs():
+    """Deletes finished runs: ``{"run_ids": [...], "with_reports": false}``, up to 100 at once.
+
+    Engineers delete their own runs, an administrator anyone's; active runs are skipped. ``with_reports``
+    (administrators only) deletes their reports too. The answer lists deleted and skipped runs with the reason.
+    """
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": translate("lt.launch.json_object_expected"), "code": "bad_request"}), 400
+    with_reports = body.get("with_reports") is True
+    auth = current_auth()
+    try:
+        result = service.delete_runs(body.get("run_ids"), _owner(), auth.role >= Role.ADMIN, with_reports)
+    except service.LaunchError as exc:
+        return _error(exc)
+    _after_delete(result, with_reports)
+    return jsonify(result), 200
+
+
+@load_tests_bp.route("/load_tests/runs/<run_id>", methods=["DELETE"])
+def delete_run(run_id: str):
+    """Deletes one finished run; ``with_report=1`` (administrators) deletes its report too."""
+    with_report = request.args.get("with_report") == "1"
+    auth = current_auth()
+    try:
+        result = service.delete_runs([run_id], _owner(), auth.role >= Role.ADMIN, with_report)
+    except service.LaunchError as exc:
+        return _error(exc)
+    if result["skipped"]:
+        skip = result["skipped"][0]
+        status, code = _SKIP_STATUS.get(skip["code"], (409, "conflict"))
+        return jsonify({"status": "error", "error": skip["message"], "message": skip["message"], "code": code}), status
+    _after_delete(result, with_report)
+    return jsonify({
+        "status": "ok",
+        "run_id": run_id,
+        "report_deleted": bool(result["reports_deleted"]),
+        "reports_failed": result["reports_failed"],
+    }), 200
+
+
 @load_tests_bp.route("/load_tests/runs/<run_id>", methods=["GET"])
 def get_run(run_id: str):
     run, missing = _run_or_404(run_id)

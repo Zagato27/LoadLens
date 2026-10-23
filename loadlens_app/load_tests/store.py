@@ -37,7 +37,9 @@ RUN_DONE = "done"
 RUN_FAILED = "failed"
 RUN_CANCELLED = "cancelled"
 RUN_ACTIVE = (RUN_STARTING, RUN_RUNNING, RUN_STOPPING, RUN_DRAINING, RUN_REPORTING)
-RUN_STATUSES = RUN_ACTIVE + (RUN_DONE, RUN_FAILED, RUN_CANCELLED)
+# Finished runs: only these may be deleted, and they no longer hold their name.
+RUN_TERMINAL = (RUN_DONE, RUN_FAILED, RUN_CANCELLED)
+RUN_STATUSES = RUN_ACTIVE + RUN_TERMINAL
 # Runs still holding a generator: instances may be running.
 RUN_LOADING = (RUN_STARTING, RUN_RUNNING, RUN_STOPPING)
 
@@ -293,7 +295,25 @@ class LoadTestStore:
     def get(self, run_id: str) -> Optional[RunRecord]:
         raise NotImplementedError
 
-    def list(self, limit: int = 50, statuses: Optional[Iterable[str]] = None, services: Optional[list[str]] = None) -> list[RunRecord]:
+    def get_many(self, run_ids: Iterable[str]) -> list[RunRecord]:
+        """The runs among ``run_ids`` that exist, in no particular order."""
+        return [run for run in (self.get(run_id) for run_id in dict.fromkeys(run_ids)) if run is not None]
+
+    def list(self, limit: int = 50, statuses: Optional[Iterable[str]] = None, services: Optional[list[str]] = None,
+             offset: int = 0, query: str = "") -> list[RunRecord]:
+        """Runs newest first; ``query`` matches part of the name, case-insensitive."""
+        raise NotImplementedError
+
+    def count(self, statuses: Optional[Iterable[str]] = None, services: Optional[list[str]] = None, query: str = "") -> int:
+        """How many runs :meth:`list` would page through with the same filters."""
+        raise NotImplementedError
+
+    def delete(self, run_ids: Iterable[str]) -> list[str]:
+        """Deletes the finished runs among ``run_ids``; returns the ids actually deleted (active runs stay)."""
+        raise NotImplementedError
+
+    def delete_service(self, service: str) -> int:
+        """Deletes the finished runs of a removed service; active ones stay with the watcher. Returns the count."""
         raise NotImplementedError
 
     def claim(self, watcher_id: str, stale_after_sec: int) -> list[RunRecord]:
@@ -312,6 +332,7 @@ class LoadTestStore:
         raise NotImplementedError
 
     def name_in_use(self, run_name: str, service: str) -> bool:
+        """Whether an active run of ``service`` has this name. A finished run leaves the name to its report."""
         raise NotImplementedError
 
     def record_event(self, run_id: str, event: dict[str, Any]) -> bool:
@@ -336,12 +357,41 @@ class MemoryLoadTestStore(LoadTestStore):
             run = self._runs.get(run_id)
             return run.copy() if run else None
 
-    def list(self, limit: int = 50, statuses: Optional[Iterable[str]] = None, services: Optional[list[str]] = None) -> list[RunRecord]:
+    def _matching(self, statuses: Optional[Iterable[str]], services: Optional[list[str]], query: str) -> list[RunRecord]:
         wanted = set(statuses or RUN_STATUSES)
+        needle = str(query or "").strip().lower()
         with self._lock:
-            runs = [r.copy() for r in self._runs.values() if r.status in wanted and (not services or r.service in services)]
-        runs.sort(key=lambda r: r.created_at, reverse=True)
-        return runs[: max(1, int(limit))]
+            return [
+                r.copy() for r in self._runs.values()
+                if r.status in wanted and (not services or r.service in services) and needle in r.run_name.lower()
+            ]
+
+    def list(self, limit: int = 50, statuses: Optional[Iterable[str]] = None, services: Optional[list[str]] = None,
+             offset: int = 0, query: str = "") -> list[RunRecord]:
+        runs = self._matching(statuses, services, query)
+        runs.sort(key=lambda r: (r.created_at, r.run_id), reverse=True)
+        start = max(0, int(offset))
+        return runs[start: start + max(1, int(limit))]
+
+    def count(self, statuses: Optional[Iterable[str]] = None, services: Optional[list[str]] = None, query: str = "") -> int:
+        return len(self._matching(statuses, services, query))
+
+    def delete(self, run_ids: Iterable[str]) -> list[str]:
+        deleted: list[str] = []
+        with self._lock:
+            for run_id in dict.fromkeys(str(i) for i in run_ids):
+                run = self._runs.get(run_id)
+                if run is not None and run.status in RUN_TERMINAL:
+                    del self._runs[run_id]
+                    deleted.append(run_id)
+        return deleted
+
+    def delete_service(self, service: str) -> int:
+        with self._lock:
+            gone = [rid for rid, r in self._runs.items() if r.service == service and r.status in RUN_TERMINAL]
+            for run_id in gone:
+                del self._runs[run_id]
+        return len(gone)
 
     def claim(self, watcher_id: str, stale_after_sec: int) -> list[RunRecord]:
         now = utcnow()
@@ -397,7 +447,7 @@ class MemoryLoadTestStore(LoadTestStore):
 
     def name_in_use(self, run_name: str, service: str) -> bool:
         with self._lock:
-            return any(r.run_name == run_name and r.service == service for r in self._runs.values())
+            return any(r.run_name == run_name and r.service == service and r.active for r in self._runs.values())
 
     def record_event(self, run_id: str, event: dict[str, Any]) -> bool:
         with self._lock:
@@ -406,6 +456,11 @@ class MemoryLoadTestStore(LoadTestStore):
                 return False
             run.events.append(copy.deepcopy(event))
             return True
+
+
+def _like_escape(text: str) -> str:
+    """``text`` for a LIKE pattern with ``%``, ``_`` and the escape character itself taken literally."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _table_ref() -> tuple[str, str]:
@@ -557,25 +612,89 @@ class PgLoadTestStore(LoadTestStore):
             conn.close()
         return self._row(row) if row else None
 
-    def list(self, limit: int = 50, statuses: Optional[Iterable[str]] = None, services: Optional[list[str]] = None) -> list[RunRecord]:
+    def get_many(self, run_ids: Iterable[str]) -> list[RunRecord]:
+        ids = list(dict.fromkeys(str(i) for i in run_ids))
+        if not ids:
+            return []
+        conn = self._conn()
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute(sql.SQL("{} WHERE run_id = ANY(%s)").format(self._select()), (ids,))
+                rows = cur.fetchall() or []
+        finally:
+            conn.close()
+        return [self._row(row) for row in rows]
+
+    @staticmethod
+    def _filters(statuses: Optional[Iterable[str]], services: Optional[list[str]], query: str) -> tuple[sql.Composed, list[Any]]:
         wanted = [s for s in (statuses or RUN_STATUSES) if s in RUN_STATUSES]
         clauses = [sql.SQL("status = ANY(%s)")]
         params: list[Any] = [wanted]
         if services:
             clauses.append(sql.SQL("service = ANY(%s)"))
             params.append(list(services))
-        params.append(max(1, int(limit)))
+        needle = str(query or "").strip()
+        if needle:
+            # LIKE wildcards in the text are literal characters of a run name; backslash is the LIKE escape.
+            clauses.append(sql.SQL("run_name ILIKE %s"))
+            params.append("%" + _like_escape(needle) + "%")
+        return sql.SQL(" AND ").join(clauses), params
+
+    def list(self, limit: int = 50, statuses: Optional[Iterable[str]] = None, services: Optional[list[str]] = None,
+             offset: int = 0, query: str = "") -> list[RunRecord]:
+        where, params = self._filters(statuses, services, query)
+        params += [max(1, int(limit)), max(0, int(offset))]
         conn = self._conn()
         try:
             with conn, conn.cursor() as cur:
                 cur.execute(
-                    sql.SQL("{} WHERE {} ORDER BY created_at DESC LIMIT %s").format(self._select(), sql.SQL(" AND ").join(clauses)),
+                    sql.SQL("{} WHERE {} ORDER BY created_at DESC, run_id DESC LIMIT %s OFFSET %s").format(self._select(), where),
                     tuple(params),
                 )
                 rows = cur.fetchall() or []
         finally:
             conn.close()
         return [self._row(row) for row in rows]
+
+    def count(self, statuses: Optional[Iterable[str]] = None, services: Optional[list[str]] = None, query: str = "") -> int:
+        where, params = self._filters(statuses, services, query)
+        conn = self._conn()
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute(sql.SQL("SELECT count(*) FROM {} WHERE {}").format(self._ref(), where), tuple(params))
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        return int(row[0]) if row else 0
+
+    def delete(self, run_ids: Iterable[str]) -> list[str]:
+        ids = list(dict.fromkeys(str(i) for i in run_ids))
+        if not ids:
+            return []
+        conn = self._conn()
+        try:
+            with conn, conn.cursor() as cur:
+                # The status check is part of the statement: a run the watcher still owns is never removed.
+                cur.execute(
+                    sql.SQL("DELETE FROM {} WHERE run_id = ANY(%s) AND status = ANY(%s) RETURNING run_id").format(self._ref()),
+                    (ids, list(RUN_TERMINAL)),
+                )
+                rows = cur.fetchall() or []
+        finally:
+            conn.close()
+        return [str(row[0]) for row in rows]
+
+    def delete_service(self, service: str) -> int:
+        conn = self._conn()
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL("DELETE FROM {} WHERE service = %s AND status = ANY(%s)").format(self._ref()),
+                    (service, list(RUN_TERMINAL)),
+                )
+                return int(cur.rowcount or 0)
+        finally:
+            conn.close()
 
     def claim(self, watcher_id: str, stale_after_sec: int) -> list[RunRecord]:
         conn = self._conn()
@@ -661,8 +780,8 @@ class PgLoadTestStore(LoadTestStore):
         conn = self._conn()
         try:
             with conn, conn.cursor() as cur:
-                cur.execute(sql.SQL("SELECT 1 FROM {} WHERE run_name = %s AND service = %s LIMIT 1").format(self._ref()),
-                            (run_name, service))
+                cur.execute(sql.SQL("SELECT 1 FROM {} WHERE run_name = %s AND service = %s AND status = ANY(%s) LIMIT 1").format(self._ref()),
+                            (run_name, service, list(RUN_ACTIVE)))
                 return cur.fetchone() is not None
         finally:
             conn.close()
@@ -709,6 +828,7 @@ __all__ = [
     "RUN_LOADING",
     "RUN_STATUSES",
     "RUN_STATUS_TITLES",
+    "RUN_TERMINAL",
     "RunRecord",
     "get_store",
     "set_store",

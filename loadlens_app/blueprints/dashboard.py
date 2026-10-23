@@ -215,6 +215,51 @@ def _lookup_report_ref(run_id: str = "", run_name: str = "", service: str = "") 
         conn.close()
 
 
+def _lookup_report_refs(run_ids: list[str]) -> dict[str, dict]:
+    """Existing reports among ``run_ids``: id -> ``{run_id, run_name, service}``, in two queries for any number.
+
+    ``run_index`` answers for reports with metrics, ``llm_reports`` for the rest. A missing table means no
+    reports there; a database that does not answer raises, so callers can tell "no report" from "unknown".
+    """
+    from AI.db_store import RUN_INDEX_TABLE
+
+    ids = list(dict.fromkeys(str(i).strip() for i in run_ids if str(i or "").strip()))
+    if not ids:
+        return {}
+    cfg = _storage_cfg()
+    schema = cfg.get("schema", "public")
+    llm_table = cfg.get("llm_table", "llm_reports")
+    queries = (
+        f"SELECT run_id, run_name, COALESCE(service, '') FROM {schema}.{RUN_INDEX_TABLE} WHERE run_id = ANY(%s)",
+        f"SELECT DISTINCT ON (run_id) run_id, run_name, COALESCE(service, '') FROM {schema}.{llm_table} "
+        f"WHERE run_id = ANY(%s) ORDER BY run_id, created_at DESC",
+    )
+    found: dict[str, dict] = {}
+    conn = _ts_conn()
+    try:
+        with conn, conn.cursor() as cur:
+            for query in queries:
+                missing = [i for i in ids if i not in found]
+                if not missing:
+                    break
+                cur.execute("SAVEPOINT report_refs")
+                try:
+                    cur.execute(query, (missing,))
+                    rows = cur.fetchall() or []
+                    cur.execute("RELEASE SAVEPOINT report_refs")
+                except Exception as exc:
+                    cur.execute("ROLLBACK TO SAVEPOINT report_refs")
+                    logger.warning("Report lookup by id failed: %s", exc)
+                    continue
+                for row in rows:
+                    report_id, name = str(row[0] or ""), str(row[1] or "")
+                    if report_id and name and report_id not in found:
+                        found[report_id] = {"run_id": report_id, "run_name": name, "service": str(row[2] or "")}
+    finally:
+        conn.close()
+    return found
+
+
 def _services_clause(services_filter: list[str], column: str = "service") -> tuple[str, list]:
     """SQL fragment (with leading AND) restricting rows to the active project area."""
     if not services_filter:

@@ -1012,6 +1012,14 @@ def _delete_service_data(area_name: str, service_name: str) -> None:
                 logger.warning("Не удалось удалить данные сервиса '%s' из %s.%s: %s", service_name, schema, table, exc)
     conn.close()
 
+    # Finished load test runs of the service go too; active ones stay with the watcher, which stops their instances.
+    try:
+        from loadlens_app.load_tests.store import get_store
+
+        get_store().delete_service(service_name)
+    except Exception as exc:
+        logger.warning("Could not delete the load test runs of service '%s': %s", service_name, exc)
+
 
 def _bootstrap_service_queries(area_name: str, service_name: str) -> None:
     """Ensures runtime config for service exists (backward compatibility helper)."""

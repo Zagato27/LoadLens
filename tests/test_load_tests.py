@@ -810,7 +810,7 @@ def test_plan_builds_commands_and_warns(planner):
 @pytest.mark.parametrize("patch, fragment", [
     ({"service": ""}, "сервис"),
     ({"service": "other"}, "не найден"),
-    ({"run_name": "taken"}, "уже есть"),
+    ({"run_name": "taken"}, "уже занято"),
     ({"run_name": "a/b"}, "недопустимые"),
     ({"test_type": "endurance"}, "Тип теста"),
     ({"instances": []}, "инстанс"),

@@ -147,6 +147,21 @@ building the report, finished, failed to start, cancelled.
 
 Several runs on one generator are allowed; the form warns, and `max_parallel` of the generator is the hard cap.
 
+## Run history in the archive
+
+- **Run name.** A name is taken while a run of the service with that name is going, or while the archive holds a
+  report with that name. A finished run does not hold its name: after its report is deleted, the name can be used
+  again. When the name is taken by the time the report is built, the report gets a suffix (`nightly-1a2b`).
+- **The Runs tab** of the archive (`/reports?tab=runs`, the "All runs" link on the Run test page) lists the runs of
+  the active area, newest first: status, start and duration, instances and tools, who started it and the report.
+  It filters by name, service and status. Viewers see the tab too, without commands or parameters, and without a
+  link to the run page.
+- **A run and its report are deleted separately.** Deleting a report keeps its run; deleting a run keeps its report.
+  The run finds its report by the report id, so renaming the report keeps the link.
+- **Deleting runs.** An engineer deletes their own finished runs, an administrator anyone's, from the row menu or
+  with checkboxes. Running runs are stopped first. An administrator can tick "Also delete the reports of these
+  runs" in the confirmation. Deleting a service also deletes its finished runs.
+
 ## Presets, repeat and output hints
 
 - A **preset** is a saved form of a service (instances, parameters, test type, duration, report options), shared by
@@ -221,8 +236,9 @@ analysed as a separate domain and taken into account by the overall verdict.
   instance ends.
 - Instance variable values are not shown in the UI or the audit log and are erased when the instance finishes;
   generator secrets are returned as `***` and only re-used while the address, port, CA, `in_cluster` and the pinned
-  host key are unchanged. Start, stop and preset actions go to the audit log (`load_test.start`, `load_test.stop`,
-  `load_test.preset_save`, `load_test.preset_delete`) with the commands, variable values hidden.
+  host key are unchanged. Start, stop, delete and preset actions go to the audit log (`load_test.start`,
+  `load_test.stop`, `load_test.delete`, `load_test.preset_save`, `load_test.preset_delete`) with the commands,
+  variable values hidden.
 - Limits (`limits`): `max_parallel_load_tests`, `max_parallel_load_tests_per_user`, `max_load_test_instances`,
   `max_load_test_hours`.
 

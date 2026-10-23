@@ -16,6 +16,12 @@
     </div>
   </div>
 
+  <div class="tabs archive-tabs" role="tablist" aria-label="{{ t('archive.tabs_label') }}">
+    <button type="button" class="tab active" role="tab" id="tabReports" data-tab="reports" aria-controls="reportsPanel" aria-selected="true">{{ t('archive.tab.reports') }}</button>
+    <button type="button" class="tab" role="tab" id="tabRuns" data-tab="runs" aria-controls="runsPanel" aria-selected="false" tabindex="-1">{{ t('archive.tab.runs') }}</button>
+  </div>
+
+  <section id="reportsPanel" role="tabpanel" aria-labelledby="tabReports">
   <section id="jobsStrip" class="jobs-strip" style="display:none" aria-live="polite">
     <div class="jobs-title"><span>{{ t('archive.jobs.title') }}</span><span class="jobs-actions"><small id="jobsStripNote"></small><button type="button" class="btn btn-sm btn-ghost" id="jobsStripClear" data-min-role="engineer" hidden>{{ t('archive.jobs.clear') }}</button></span></div>
     <div id="jobsStripList"></div>
@@ -76,7 +82,59 @@
     <span class="info" id="pageInfo" aria-live="polite"></span>
     <button type="button" class="pager-step" id="nextBtn">{{ t('archive.pager.next') }} <span aria-hidden="true">&rarr;</span></button>
   </nav>
+  </section>
+
+  <section id="runsPanel" role="tabpanel" aria-labelledby="tabRuns" hidden>
+  <form class="archive-filters" id="ltFiltersForm" role="search">
+    <label class="inp archive-search">
+      <input type="search" id="ltSearchInput" placeholder="{{ t('archive.runs.filter.search_placeholder') }}" aria-label="{{ t('archive.runs.filter.search_label') }}" aria-keyshortcuts="/" data-slash-focus />
+      <kbd class="archive-kbd" aria-hidden="true">/</kbd>
+    </label>
+    <label class="inp archive-filter"><span class="archive-filter-key">{{ t('archive.filter.service_key') }}</span>
+      <select id="ltServiceFilter"><option value="">{{ t('archive.filter.all') }}</option></select>
+    </label>
+    <label class="inp archive-filter"><span class="archive-filter-key">{{ t('archive.runs.filter.status_key') }}</span>
+      <select id="ltStatusFilter"><option value="">{{ t('archive.filter.all') }}</option></select>
+    </label>
+    <span class="archive-counter" id="ltCounter" aria-live="polite"></span>
+  </form>
+
+  <div class="table-wrap">
+    <table class="data-table responsive archive-table lt-runs-table" id="ltRunsTable">
+      <thead>
+        <tr>
+          <th class="select-col"><span class="visually-hidden">{{ t('archive.runs.col.select') }}</span></th>
+          <th class="lt-run-col">{{ t('archive.runs.col.run') }}</th>
+          <th>{{ t('archive.col.service') }}</th>
+          <th>{{ t('archive.runs.col.status') }}</th>
+          <th>{{ t('archive.runs.col.started') }}</th>
+          <th>{{ t('archive.runs.col.instances') }}</th>
+          <th>{{ t('archive.runs.col.owner') }}</th>
+          <th>{{ t('archive.runs.col.report') }}</th>
+          <th class="actions-col"><span class="visually-hidden">{{ t('archive.col.actions') }}</span></th>
+        </tr>
+      </thead>
+      <tbody id="ltTbody"></tbody>
+    </table>
+  </div>
+
+  <div id="ltSelectionBar" class="selection-bar" role="region" aria-label="{{ t('archive.runs.selection.label') }}" hidden>
+    <span class="selection-count" id="ltSelectionCount" aria-live="polite"></span>
+    <span class="selection-names" id="ltSelectionNames"></span>
+    <span class="selection-actions">
+      <button type="button" class="btn btn-danger btn-sm" id="ltSelectionDelete">{{ t('archive.runs.selection.delete') }}</button>
+      <button type="button" class="link selection-clear" id="ltSelectionClear">{{ t('archive.selection.clear') }}</button>
+    </span>
+  </div>
+
+  <nav class="pager archive-pager" id="ltPager" aria-label="{{ t('archive.runs.pager.label') }}" hidden>
+    <button type="button" class="pager-step" id="ltPrevBtn"><span aria-hidden="true">&larr;</span> {{ t('archive.pager.prev') }}</button>
+    <span class="info" id="ltPageInfo" aria-live="polite"></span>
+    <button type="button" class="pager-step" id="ltNextBtn">{{ t('archive.pager.next') }} <span aria-hidden="true">&rarr;</span></button>
+  </nav>
+  </section>
 {% endblock %}
 {% block scripts %}
 <script defer src="{{ url_for('static', filename='js/archive.js') }}"></script>
+<script defer src="{{ url_for('static', filename='js/archive_runs.js') }}"></script>
 {% endblock %}

@@ -237,11 +237,43 @@
     return bits.filter(Boolean).join(' · ');
   }
 
+  // The tab of the page from its address: '?tab=runs' opens the load test runs, anything else the reports.
+  function tabFromQuery(search) {
+    return new URLSearchParams(search || '').get('tab') === 'runs' ? 'runs' : 'reports';
+  }
+
+  // Id of the report a load test run produced, from its address /reports/<id>; '' without one.
+  function reportIdFromUrl(url) {
+    const match = /^\/reports\/([^/?#]+)$/.exec(String(url || ''));
+    if (!match) return '';
+    try { return decodeURIComponent(match[1]); } catch (e) { return match[1]; }
+  }
+
+  // Lookup of runs started from LoadLens: by the id of their report first (survives renaming the report),
+  // then by service and name, where the newest run wins (the list comes newest first).
+  function launchedIndex(runs) {
+    const index = new Map();
+    (Array.isArray(runs) ? runs : []).forEach((run) => {
+      if (!run || !run.run_id) return;
+      const reportId = reportIdFromUrl(run.report_url);
+      if (reportId && !index.has(`id:${reportId}`)) index.set(`id:${reportId}`, run.run_id);
+      const key = `name:${run.service || ''}|${run.run_name || ''}`;
+      if (!index.has(key)) index.set(key, run.run_id);
+    });
+    return index;
+  }
+
+  function launchedFor(index, row) {
+    if (!index || !row) return null;
+    return (row.run_id && index.get(`id:${row.run_id}`)) || index.get(`name:${row.service || ''}|${row.run_name || ''}`) || null;
+  }
+
   LL.archive = LL.archive || {};
   LL.archive._internals = {
     PAGE_SIZE, SORT_KEYS, defaultState, defaultDir, parseQuery, buildQuery, buildRunsUrl, hasFilters, activeChips,
     withoutFilter, nextSort, compareTargets, compareUrl, selectionLabel, selectionHint, formatRps, timeCell, durationText,
     shortTypeLabel, verdictTitle, pagerText, jobMeta, shortDateTime, slaText, p95Text, pageCount, pageText,
+    tabFromQuery, reportIdFromUrl, launchedIndex, launchedFor,
   };
 
   // ---- page --------------------------------------------------------------------------------
@@ -255,8 +287,11 @@
   let searchTimer = 0;
   let loadSeq = 0;
   let columnLabels = [];
-  // Runs started from the Run test page: "service|run name" -> load test run id (engineers only).
+  // Runs started from the Run test page (launchedIndex), engineers only.
   let launchedRuns = null;
+  // 'reports' or 'runs'; only the active tab writes the address and refreshes in the background.
+  let activeTab = 'reports';
+  let reportsStarted = false;
 
   // ---- filters ----
 
@@ -360,6 +395,7 @@
   }
 
   function syncUrl() {
+    if (activeTab !== 'reports') return;
     try {
       history.replaceState(history.state, '', `${location.pathname}${buildQuery(state)}${location.hash}`);
     } catch (e) { /* the address bar stays as it was */ }
@@ -701,7 +737,7 @@
   }
 
   function launchedRun(run) {
-    return launchedRuns ? launchedRuns.get(`${run.service || ''}|${run.run_name || ''}`) : null;
+    return launchedFor(launchedRuns, run);
   }
 
   async function loadLaunchedRuns() {
@@ -711,7 +747,7 @@
       const resp = await fetch('/load_tests/runs?limit=200');
       if (!resp.ok) return;
       const data = await resp.json();
-      (data.runs || []).forEach((run) => launchedRuns.set(`${run.service}|${run.run_name}`, run.run_id));
+      launchedRuns = launchedIndex(data.runs);
     } catch (e) { /* the archive works without the launch history */ }
   }
 
@@ -837,7 +873,13 @@
       const running = jobs.filter((j) => j.status === 'running').length;
       $('jobsStripNote').textContent = running ? LL.t('archive.jobs.running_count', { n: running }) : '';
       strip.style.display = '';
-      if (running && !jobsTimer) jobsTimer = setInterval(async () => { await loadJobsStrip(); await loadPage({ quiet: true }); }, JOBS_REFRESH_MS);
+      if (running && !jobsTimer) {
+        jobsTimer = setInterval(async () => {
+          if (activeTab !== 'reports') return;
+          await loadJobsStrip();
+          await loadPage({ quiet: true });
+        }, JOBS_REFRESH_MS);
+      }
       if (!running && jobsTimer) { clearInterval(jobsTimer); jobsTimer = null; }
     } catch (e) {
       // strip is auxiliary
@@ -892,6 +934,61 @@
     });
   }
 
+  // ---- tabs ----
+
+  // The reports tab starts on its first showing; later showings refresh it quietly (runs may have taken
+  // their reports with them) and put its filters back into the address.
+  async function showReports() {
+    if (reportsStarted) {
+      syncUrl();
+      await loadPage({ quiet: true });
+      loadJobsStrip();
+      return;
+    }
+    reportsStarted = true;
+    const services = loadServiceOptions();
+    await loadPage();
+    await services;
+    $('jobsStripClear').addEventListener('click', clearFinishedJobs);
+    loadJobsStrip();
+  }
+
+  function selectTab(tab, options) {
+    const next = tab === 'runs' && LL.archiveRuns ? 'runs' : 'reports';
+    activeTab = next;
+    [['reports', 'tabReports', 'reportsPanel'], ['runs', 'tabRuns', 'runsPanel']].forEach(([name, tabId, panelId]) => {
+      const on = name === next;
+      const btn = $(tabId);
+      btn.classList.toggle('active', on);
+      btn.setAttribute('aria-selected', on ? 'true' : 'false');
+      btn.tabIndex = on ? 0 : -1;
+      $(panelId).hidden = !on;
+    });
+    const subtitle = document.querySelector('.page-header .page-subtitle');
+    if (subtitle) subtitle.textContent = LL.t(next === 'runs' ? 'archive.runs.subtitle' : 'archive.subtitle');
+    if (next === 'runs') {
+      $('archiveBreadcrumbs').hidden = true;
+      LL.archiveRuns.show();
+    } else {
+      showReports();
+    }
+    if (options && options.focus) $(next === 'runs' ? 'tabRuns' : 'tabReports').focus();
+  }
+
+  function wireTabs() {
+    const tabs = [$('tabReports'), $('tabRuns')];
+    tabs.forEach((btn) => btn.addEventListener('click', () => {
+      if (btn.dataset.tab !== activeTab) selectTab(btn.dataset.tab);
+    }));
+    // Arrow keys move between the tabs (WAI-ARIA tabs pattern).
+    tabs.forEach((btn, i) => btn.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+      e.preventDefault();
+      const other = tabs[(i + 1) % tabs.length];
+      selectTab(other.dataset.tab, { focus: true });
+    }));
+  }
+
   document.addEventListener('DOMContentLoaded', async () => {
     if (!$('runsTable')) return;
     // The filters apply as they change; the form itself never submits (CSP forbids inline handlers).
@@ -899,15 +996,13 @@
     if (filtersForm) filtersForm.addEventListener('submit', (e) => e.preventDefault());
     columnLabels = Array.from(document.querySelectorAll('#runsTable thead th')).map((th) => th.textContent.trim());
     // Filters, sort and page come from the address (?service= also arrives from report breadcrumbs).
-    Object.assign(state, parseQuery(location.search));
+    const tab = tabFromQuery(location.search);
+    if (tab === 'reports') Object.assign(state, parseQuery(location.search));
     fillStaticOptions();
     applyStateToControls();
     wireControls();
     renderSelectionBar();
-    const services = loadServiceOptions();
-    await loadPage();
-    await services;
-    $('jobsStripClear').addEventListener('click', clearFinishedJobs);
-    loadJobsStrip();
+    if ($('tabRuns')) wireTabs();
+    selectTab(tab);
   });
 })();

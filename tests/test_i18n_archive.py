@@ -114,10 +114,16 @@ def test_english_archive_markup(client):
     assert '<select id="verdictFilter"><option value="">All</option></select>' in html
     assert 'placeholder="Search by run name or service…"' in html
     # Phone cards read the column names from the header cells, so they follow the language too.
-    heads = re.findall(r"<th(?:\s[^>]*)?>(.*?)</th>", html, re.S)
-    assert [re.sub(r"<[^>]+>", "", h).strip() for h in heads] == [
+    def heads(table_id):
+        table = re.search(rf'<table[^>]*id="{table_id}".*?</table>', html, re.S).group(0)
+        return [re.sub(r"<[^>]+>", "", h).strip() for h in re.findall(r"<th(?:\s[^>]*)?>(.*?)</th>", table, re.S)]
+
+    assert heads("runsTable") == [
         "Select for comparison", "Run", "Service", "Test type", "Test date", "Verdict", "SLA", "Max RPS", "p95",
         "Report created", "Actions",
+    ]
+    assert heads("ltRunsTable") == [
+        "Select for deletion", "Run", "Service", "Status", "Started", "Instances", "Started by", "Report", "Actions",
     ]
 
 
