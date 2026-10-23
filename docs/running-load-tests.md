@@ -31,7 +31,7 @@ generators, tools and generator types.
    launch page is first opened. Runs survive a restart of LoadLens; with several processes, the runs of a silent
    watcher are taken over by another after two minutes.
 4. When the last instance has finished, LoadLens waits for the metrics to reach the store (two sampling steps, 30 s
-   to 5 min) and starts the report for the window from the first start to the last end.
+   to 5 min) and starts the report for the span with load between the first start and the last end.
 
 The test type of the form selects the deterministic analysis of the report, as on the New report page; the load
 profile stays in the script.
@@ -86,9 +86,10 @@ Common fields: `title`, `tools` (available tools with their paths or images; emp
   `LOADLENS_INSTANCE_INDEX`, `LOADLENS_MAX_SECONDS` and, with `loadlens_url`, `LOADLENS_EVENTS_URL` and
   `LOADLENS_TOKEN` for the `started` / `finished` events (`POST /load_tests/ci/<run_id>/<index>/events` with the
   header `X-LoadLens-Token`). Start and end come from the pipeline, or from the events when they were sent; the
-  report window of a CI instance is narrowed to the span where the total RPS is above zero. GitLab needs a token with
-  scope `api` and the Developer role (`read_api` only reads parameters); Jenkins needs Job/Read, Job/Build,
-  Job/Cancel and, for Active Choices, Job/ExtendedRead.
+  pipeline time includes its preparation, and the report window is narrowed by users and total RPS as in every run
+  (see "Report window" below); without such data the report takes the pipeline time and the run message says so.
+  GitLab needs a token with scope `api` and the Developer role (`read_api` only reads parameters); Jenkins needs
+  Job/Read, Job/Build, Job/Cancel and, for Active Choices, Job/ExtendedRead.
 
 Configuration examples of every type are in [load-tests.md](load-tests.md) (Russian; the keys are the same) and,
 commented out, in [settings.example.py](../settings.example.py).
@@ -142,7 +143,13 @@ building the report, finished, failed to start, cancelled.
   (SSH, Kubernetes, CI) are stopped by the watcher if the instance is still running two minutes after the limit.
 - **Log.** The tail of the tool output is shown on the run page; the last 32 KB are stored with the run, so the log
   survives the removal of the container or Job.
-- **Report window**: from the first start to the last end. An instance that failed in its first minute is left out;
+- **Report window** follows the load. Its outer limit runs from the first start to the last end of the instances.
+  Inside it LoadLens takes the span from the first to the last point where the users (role `lt.vus`) or the total
+  RPS (`lt.rps_total`) are above zero, one query step wider on each side; the queries use the run tag filter and
+  pauses inside the test stay. JVM warm-up, pipeline preparation and a slow stop are left out, while a tail where the
+  stand is down and requests hang until their timeout stays in: RPS falls to zero there, the users still run. The run
+  message names the signal that narrowed the window; with no data from either, the window is the process time. The
+  run page and the archive always show the process time. An instance that failed in its first minute is left out;
   a run where no instance started finishes without a report.
 
 Several runs on one generator are allowed; the form warns, and `max_parallel` of the generator is the hard cap.

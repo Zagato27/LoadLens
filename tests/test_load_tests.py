@@ -504,6 +504,8 @@ def world(monkeypatch):
     # A report job of the fake starter is not in memory: looking it up must not reach the configured database.
     monkeypatch.setattr(jobs, "_ts_conn", no_db)
     monkeypatch.setattr(watcher, "report_filter", lambda run, tool_set, start, end: (live.run_filter_packs(run, tool_set), ""))
+    # Every run narrows its report window by the load metrics: no source here, the window stays the process time.
+    monkeypatch.setattr(watcher, "load_bounds", lambda run, start, end, packs: None)
     w = watcher.Watcher(
         store_getter=lambda: memory,
         catalog_loader=lambda: catalog,

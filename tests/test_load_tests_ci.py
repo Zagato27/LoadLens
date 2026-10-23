@@ -624,14 +624,33 @@ def test_ci_instance_runs_through_to_a_report_with_a_cut_window(world, monkeypat
 
     def bounds(run, start, end, packs):
         seen["window"] = (start, end)
-        return start + 120, end - 60
+        return live.LoadWindow(start + 120, end - 60, ("lt.rps_total",))
 
-    monkeypatch.setattr(watcher, "rps_bounds", bounds)
+    monkeypatch.setattr(watcher, "load_bounds", bounds)
     world.clock.now += 400
     world.watcher.tick()
     (args, kwargs), = world.reports
     assert seen["window"] == (t0, t0 + 900) and (args[0], args[1]) == (int((t0 + 120) * 1000), int((t0 + 840) * 1000))
     assert "окно отчёта сужено по RPS" in world.store.get("r1").message
+
+
+def test_ci_run_without_load_data_reports_the_pipeline_time_and_says_so(world, monkeypatch):
+    run = RunRecord(run_id="r1", run_name="n", run_tag="n", service="s", project_area="a",
+                    options={"auto_report": True, "use_llm": False, "max_seconds": 3600},
+                    instances=[InstanceRecord(index=0, name="ci", tag="ci", generator="gitlab", ci_kind="gitlab", ci_ref="main")],
+                    created_at=datetime.fromtimestamp(world.clock.now, timezone.utc))
+    world.store.create(run)
+    world.watcher.tick()
+    t0 = world.clock.now
+    world.fake.state = Probe(state="exited", started_at=t0, finished_at=t0 + 900, exit_code=0)
+    world.clock.now = t0 + 900
+    world.watcher.tick()
+    monkeypatch.setattr(watcher, "load_bounds", lambda run, start, end, packs: None)
+    world.clock.now += 400
+    world.watcher.tick()
+    (args, _kwargs), = world.reports
+    assert (args[0], args[1]) == (int(t0 * 1000), int((t0 + 900) * 1000))
+    assert "окно отчёта — время пайплайна: данных о нагрузке (пользователи, RPS) в нём не найдено" in world.store.get("r1").message
 
 
 def test_stop_of_a_ci_instance_speaks_of_the_pipeline(world):

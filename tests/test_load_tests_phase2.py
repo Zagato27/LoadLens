@@ -403,7 +403,7 @@ def world(monkeypatch):
     monkeypatch.setattr(dashboard, "_report_step", lambda area, service_id: "30s")
     monkeypatch.setattr(dashboard, "_run_name_taken", lambda name, service_id: False)
     monkeypatch.setattr(watcher, "report_filter", lambda run, tool_set, start, end: ([], ""))
-    monkeypatch.setattr(watcher, "rps_bounds", lambda run, start, end, packs: None)
+    monkeypatch.setattr(watcher, "load_bounds", lambda run, start, end, packs: None)
     from loadlens_app.load_tests import ci_params
 
     monkeypatch.setattr(ci_params, "cached_params", lambda generator, ref="": ci_params.CiParams(ref=ref or "main", source="none"))

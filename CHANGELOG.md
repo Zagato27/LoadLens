@@ -68,6 +68,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - **Deleting a service deletes its finished load test runs.** Runs still going stay until they end.
 - **The archive finds a run started from LoadLens by its report id.** The "started from LoadLens" mark and "Run
   again" stay on a renamed report, and of two runs with one name the newest is offered.
+- **The report window of every run follows the load.** Before, only runs with CI instances were narrowed, and only
+  by RPS; the others reported the whole process time with JVM warm-up and a slow stop. Now the report covers the
+  span where the users (`lt.vus`) or the total RPS (`lt.rps_total`) are above zero inside the process time, so a
+  tail where the stand is down and requests hang until their timeout keeps its users. The run message names the
+  signal ([docs/running-load-tests.md](docs/running-load-tests.md#a-run-and-its-instances)).
 
 ### Fixed
 

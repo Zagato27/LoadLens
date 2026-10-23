@@ -470,31 +470,66 @@ def report_filter(run: RunRecord, tools: dict[str, ToolTemplate], start: float, 
     return packs, ""
 
 
+def _has_load(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
+
+
 def trim_bounds(points: list[tuple[float, float]], start: float, end: float, step: float) -> Optional[tuple[float, float]]:
     """From the first to the last point with load (above zero), one step wider each side, inside start..end.
 
-    Pauses in the middle stay in the window; fewer than two points with load say nothing about it (None).
+    Pauses in the middle stay in the window; fewer than two moments with load say nothing about it (None).
     """
-    loaded = sorted(ts for ts, value in points if isinstance(value, (int, float)) and math.isfinite(value) and value > 0)
+    loaded = sorted({ts for ts, value in points if _has_load(value)})
     if len(loaded) < 2:
         return None
     return max(start, loaded[0] - step), min(end, loaded[-1] + step)
 
 
-def rps_bounds(run: RunRecord, start: float, end: float, packs: list[str]) -> Optional[tuple[float, float]]:
-    """The window with load by the summed RPS of the run (the report filter applied); None when unknown."""
+# Signals of the report window, in the order the run note names them.
+BOUNDS_ROLES = ("lt.vus", "lt.rps_total")
+
+
+class LoadWindow(NamedTuple):
+    """Where the run produced load inside the process time, and the roles whose points showed it."""
+
+    start: float
+    end: float
+    by: tuple[str, ...]
+
+
+def load_bounds(run: RunRecord, start: float, end: float, packs: list[str]) -> Optional[LoadWindow]:
+    """The window with load by virtual users and the summed RPS of the run (the report filter applied).
+
+    The window spans the points of both signals: when a dead stand makes requests hang, RPS falls to zero while
+    the users still run, and that tail matters most for the verdict; RPS covers tools without a users query.
+    A query that fails leaves its signal out. ``None`` when neither signal has two moments with load.
+    """
     try:
         cfg = _scope_config(run)
         queries = _filtered(cfg, run, packs) if packs else (cfg.get("queries") or {})
-        lang, rows = _block_rows(queries, ("lt.rps_total",), cfg)
-        row = rows.get("lt.rps_total")
-        if row is None:
-            return None
-        step = choose_step(start, end)
-        points = _fetch(cfg, lang, row, start, end, step, True)
+        lang, rows = _block_rows(queries, BOUNDS_ROLES, cfg)
     except Exception:
         return None
-    return trim_bounds(points, start, end, step)
+    found = [(role, rows[role]) for role in BOUNDS_ROLES if role in rows]
+    if not found:
+        return None
+    step = choose_step(start, end)
+    outcomes = _run_all(
+        (lambda role=role, row=row: _fetch(cfg, lang, row, start, end, step, role in SUMMED_ROLES)) for role, row in found
+    )
+    points: list[tuple[float, float]] = []
+    by: list[str] = []
+    for (role, _row), outcome in zip(found, outcomes):
+        if isinstance(outcome, BaseException) or not isinstance(outcome, list):
+            continue
+        loaded = [(ts, value) for ts, value in outcome if _has_load(value)]
+        if loaded:
+            by.append(role)
+            points.extend(loaded)
+    bounds = trim_bounds(points, start, end, step)
+    if bounds is None:
+        return None
+    return LoadWindow(bounds[0], bounds[1], tuple(by))
 
 
 # ---- test window hint ------------------------------------------------------------------------------
@@ -671,7 +706,9 @@ __all__ = [
     "load_windows",
     "installed_filter_packs",
     "report_filter",
-    "rps_bounds",
+    "BOUNDS_ROLES",
+    "LoadWindow",
+    "load_bounds",
     "run_filter_packs",
     "trim_bounds",
 ]

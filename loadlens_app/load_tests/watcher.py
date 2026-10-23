@@ -29,7 +29,7 @@ from loadlens_app.limits import LimitError, check_job_slot, step_seconds
 
 from .executors import STORED_LOG_BYTES, Executor, GeneratorError, Probe, executor_for
 from .generators import Generator
-from .live import report_filter, rps_bounds
+from .live import load_bounds, report_filter
 from .messages import error_param, joined, msg, ref_of
 from .service import Catalog, instance_plan, load_catalog
 from .store import (
@@ -103,6 +103,12 @@ _STOP_KEYS = {
     "pipeline": ("lt.watcher.stop.pipeline", "lt.watcher.stop.pipeline_limit"),
     "build": ("lt.watcher.stop.build", "lt.watcher.stop.build_limit"),
     "platform": ("lt.watcher.stop.platform", "lt.watcher.stop.platform_limit"),
+}
+# What narrowed the report window, named in the run note.
+_BOUNDS_BY_KEYS = {
+    ("lt.vus",): "lt.watcher.report.by_vus",
+    ("lt.rps_total",): "lt.watcher.report.by_rps",
+    ("lt.vus", "lt.rps_total"): "lt.watcher.report.by_both",
 }
 
 
@@ -791,18 +797,20 @@ class Watcher:
         start_ts, end_ts = run.started_at.timestamp(), run.finished_at.timestamp()
         packs, note = report_filter(run, catalog.tools, start_ts, end_ts)
         notes_before: list[Any] = []
-        if any(inst.ci_kind and inst.started_at for inst in run.instances):
-            # A pipeline's start and end include its preparation: the report window follows the load itself.
-            bounds = rps_bounds(run, start_ts, end_ts, packs)
-            if bounds is None:
+        # The process (or pipeline) time is the outer limit and the report follows the load inside it: JVM warm-up,
+        # pipeline preparation and a slow stop stay out, a tail whose requests hang on a dead stand keeps its users.
+        bounds = load_bounds(run, start_ts, end_ts, packs)
+        if bounds is None:
+            if any(inst.ci_kind and inst.started_at for inst in run.instances):
                 notes_before.append(msg("lt.watcher.report.note_pipeline_window"))
-            elif bounds != (start_ts, end_ts):
-                start_ts, end_ts = bounds
-                notes_before.append(msg(
-                    "lt.watcher.report.note_window_narrowed",
-                    start=datetime.fromtimestamp(start_ts).strftime("%H:%M:%S"),
-                    end=datetime.fromtimestamp(end_ts).strftime("%H:%M:%S"),
-                ))
+        elif (bounds.start, bounds.end) != (start_ts, end_ts):
+            start_ts, end_ts = bounds.start, bounds.end
+            notes_before.append(msg(
+                "lt.watcher.report.note_window_narrowed",
+                by=msg(_BOUNDS_BY_KEYS.get(bounds.by, "lt.watcher.report.by_both")),
+                start=datetime.fromtimestamp(start_ts).strftime("%H:%M:%S"),
+                end=datetime.fromtimestamp(end_ts).strftime("%H:%M:%S"),
+            ))
         report_name = run.run_name
         try:
             if dashboard._run_name_taken(report_name, run.service):
