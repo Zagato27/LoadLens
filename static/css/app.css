@@ -1489,6 +1489,14 @@ table.forecast-list { margin-top: 16px; }
 .q-item-body textarea { font-family: var(--mono); font-size: 12px; }
 .q-item-body .q-note textarea { font-family: inherit; font-size: 13px; }
 .q-item-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+/* A tick next to the head of every row and the bar of the bulk actions above the list. */
+.q-item-row { display: flex; align-items: flex-start; margin: 0 -8px; }
+.q-item-row > input.q-select { flex: 0 0 auto; width: auto; height: auto; margin: 11px 0 0 8px; cursor: pointer; }
+.q-item-row > .q-item-head { flex: 1 1 auto; min-width: 0; margin: 0; }
+.q-item.selected > .q-item-row { background: var(--bg-2); }
+.q-select-bar { display: flex; align-items: center; gap: 6px 14px; flex-wrap: wrap; margin: 0 0 8px; color: var(--muted); font-size: 12px; }
+.q-select-bar label { display: inline-flex; align-items: center; gap: 6px; margin: 0; color: var(--text); font-size: 12px; font-weight: 400; cursor: pointer; }
+.q-select-bar label input { width: auto; height: auto; }
 @media (max-width: 720px) {
   .q-item-head { flex-wrap: wrap; }
   .q-item-head > .q-item-main { flex: 1 1 calc(100% - 30px); }

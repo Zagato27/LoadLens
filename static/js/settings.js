@@ -42,6 +42,8 @@
     domainLangPicker: {},
     // Language picked for an empty query row (its text decides once it has one), by domain:index.
     rowLangDraft: {},
+    // Rows of the shown domain ticked for a bulk action (positions); the form drops them when it re-renders.
+    querySelected: new Set(),
     openSources: {},
     sourceChecks: {},
     bindingChecks: {},
@@ -2873,6 +2875,10 @@
     const installed = installedPacksLine(domain);
     if (installed) host.appendChild(installed);
     host.appendChild(domainTitleField(domain));
+    state.querySelected = new Set();
+    const selectBar = makeEl('div', 'q-select-bar');
+    selectBar.id = 'querySelectBar';
+    host.appendChild(selectBar);
     const list = makeEl('div', 'q-list');
     list.id = 'queryList';
     host.appendChild(list);
@@ -2924,19 +2930,67 @@
     return bar;
   }
 
+  // Rows of the domain that pass the search.
+  function shownQueryRows(domain) {
+    const needle = String(state.querySearch || '').trim().toLowerCase();
+    return queryRows(queryBlock(domain), domain)
+      .filter((row) => !needle || row.label.toLowerCase().includes(needle) || row.query.toLowerCase().includes(needle));
+  }
   function renderQueryList() {
     const list = $('queryList');
     if (!list) return;
     const domain = state.queryDomain;
-    const needle = String(state.querySearch || '').trim().toLowerCase();
-    const rows = queryRows(queryBlock(domain), domain)
-      .filter((row) => !needle || row.label.toLowerCase().includes(needle) || row.query.toLowerCase().includes(needle));
+    const rows = shownQueryRows(domain);
     list.innerHTML = '';
+    renderQuerySelectBar(rows);
     if (!rows.length) {
-      list.appendChild(makeEl('p', 'dim', needle ? LL.t('settings.queries.not_found') : LL.t('settings.queries.empty')));
+      const searching = String(state.querySearch || '').trim();
+      list.appendChild(makeEl('p', 'dim', searching ? LL.t('settings.queries.not_found') : LL.t('settings.queries.empty')));
       return;
     }
     rows.forEach((row) => list.appendChild(queryItem(domain, row.spec, row)));
+  }
+  // The bar above the list: a tick for every shown row, the count of ticked rows and the bulk delete. The count
+  // and the delete cover every ticked row, also one the search hides; the confirmation lists them by name.
+  function renderQuerySelectBar(rows) {
+    const bar = $('querySelectBar');
+    if (!bar) return;
+    bar.innerHTML = '';
+    bar.hidden = !rows.length;
+    if (!rows.length) return;
+    const shown = rows.map((row) => row.index);
+    const ticked = shown.filter((index) => state.querySelected.has(index)).length;
+    const all = makeEl('label');
+    const box = makeEl('input');
+    box.type = 'checkbox';
+    box.checked = ticked === shown.length;
+    box.indeterminate = ticked > 0 && ticked < shown.length;
+    box.addEventListener('change', () => {
+      shown.forEach((index) => { if (box.checked) state.querySelected.add(index); else state.querySelected.delete(index); });
+      renderQueryList();
+    });
+    all.append(box, document.createTextNode(LL.t('settings.queries.select_all')));
+    bar.appendChild(all);
+    const count = state.querySelected.size;
+    if (count) bar.appendChild(makeEl('span', 'dim', LL.t('settings.queries.selected_count', { n: count })));
+    const remove = makeBtn(LL.t('settings.queries.delete_selected'), removeSelectedQueryRows, 'btn btn-sm btn-danger');
+    remove.disabled = !count;
+    bar.appendChild(remove);
+    if (count) bar.appendChild(makeBtn(LL.t('settings.queries.clear_selection'), () => { state.querySelected.clear(); renderQueryList(); }, 'btn btn-sm'));
+  }
+  // The tick of a row; it sits next to the head, so it neither opens nor closes the row.
+  function queryTick(item, row) {
+    const tick = makeEl('input', 'q-select');
+    tick.type = 'checkbox';
+    tick.checked = state.querySelected.has(row.index);
+    item.classList.toggle('selected', tick.checked);
+    tick.setAttribute('aria-label', LL.t('settings.queries.select_row', { name: row.label || LL.t('settings.queries.untitled') }));
+    tick.addEventListener('change', () => {
+      if (tick.checked) state.querySelected.add(row.index); else state.querySelected.delete(row.index);
+      item.classList.toggle('selected', tick.checked);
+      renderQuerySelectBar(shownQueryRows(state.queryDomain));
+    });
+    return tick;
   }
 
   function queryItem(domain, spec, row) {
@@ -2971,7 +3025,9 @@
     }
     if (row.langs.length > 1) head.appendChild(makeEl('span', 'pill error', LL.t('settings.queries.two_langs_pill')));
     head.appendChild(makeEl('span', 'q-item-caret', open ? '▾' : '▸'));
-    item.appendChild(head);
+    const line = makeEl('div', 'q-item-row');
+    line.append(queryTick(item, row), head);
+    item.appendChild(line);
     if (open) item.appendChild(queryEditor(domain, spec, row));
     return item;
   }
@@ -3241,18 +3297,52 @@
     renderQueriesForm();
   }
 
-  function removeQueryRow(domain, index) {
-    const label = String((queryBlock(domain).labels || [])[index] || '');
-    if (!window.confirm(LL.t('settings.queries.delete_confirm', { name: label || LL.t('settings.queries.untitled_lower') }))) return;
-    editQueryBlock(domain, (block) => {
+  // Removes the rows at ``indexes`` (any order, repeats ignored) from an aligned block together with the role, the
+  // note and the source of their names, unless a remaining row still carries the name. Returns the removed names.
+  function removeQueryRowsFromBlock(block, indexes) {
+    const count = queryRowCount(block);
+    const order = Array.from(new Set(indexes)).filter((index) => Number.isInteger(index) && index >= 0 && index < count).sort((a, b) => b - a);
+    const labels = Array.isArray(block.labels) ? block.labels : [];
+    const removed = order.map((index) => String(labels[index] || ''));
+    order.forEach((index) => {
       QUERY_PARALLEL_KEYS.forEach((key) => { if (Array.isArray(block[key]) && index < block[key].length) block[key].splice(index, 1); });
+    });
+    const kept = new Set((Array.isArray(block.labels) ? block.labels : []).map((label) => String(label || '')));
+    removed.filter((label) => !kept.has(label)).forEach((label) => {
       if (isPlainObject(block.roles)) delete block.roles[label];
       if (isPlainObject(block.descriptions)) delete block.descriptions[label];
       if (isPlainObject(block.sources)) delete block.sources[label];
     });
+    return removed.reverse();
+  }
+  function spliceQueryRows(domain, indexes) {
+    editQueryBlock(domain, (block) => { removeQueryRowsFromBlock(block, indexes); });
     clearRowLangDrafts(domain);
     state.queryOpen = null;
     renderQueriesForm();
+  }
+  function removeQueryRow(domain, index) {
+    const label = String((queryBlock(domain).labels || [])[index] || '');
+    if (!window.confirm(LL.t('settings.queries.delete_confirm', { name: label || LL.t('settings.queries.untitled_lower') }))) return;
+    spliceQueryRows(domain, [index]);
+  }
+  // Deletes the ticked rows of the shown domain after one confirmation that names them and the ones the SLA reads.
+  const QUERY_CONFIRM_NAMES = 8;  // names listed in the confirmation; the rest is a count
+  async function removeSelectedQueryRows() {
+    const domain = state.queryDomain;
+    const block = queryBlock(domain);
+    const count = queryRowCount(block);
+    const indexes = Array.from(state.querySelected).filter((index) => index >= 0 && index < count).sort((a, b) => a - b);
+    if (!indexes.length) return;
+    const labels = Array.isArray(block.labels) ? block.labels : [];
+    const names = indexes.map((index) => String(labels[index] || '') || LL.t('settings.queries.untitled_lower'));
+    if (names.length > QUERY_CONFIRM_NAMES) names.splice(QUERY_CONFIRM_NAMES, names.length, LL.t('settings.queries.delete_selected_more', { n: names.length - QUERY_CONFIRM_NAMES }));
+    const inSla = Array.from(new Set(indexes.map((index) => String(labels[index] || '')).filter((label) => label && slaLabelsUsing(label).length)));
+    let message = LL.tn('settings.queries.delete_selected_confirm', indexes.length, { list: names.join(', ') });
+    if (inSla.length) message += ' ' + LL.t('settings.queries.delete_selected_sla', { list: inSla.join(', ') });
+    const ok = await ui.confirm({ title: LL.t('settings.queries.delete_selected_title'), message, confirmText: LL.t('settings.action.delete'), danger: true });
+    if (!ok) return;
+    spliceQueryRows(domain, indexes);
   }
 
   function moveQueryRow(domain, index, dir) {
@@ -4857,7 +4947,7 @@
     _internals: {
       schemaTexts, sourceSummary, generatorSummary, generatorStatus, toolSummary, toolBadge, hostKeyMessage,
       queryOptions, deadRefText, contextGroupSummary, slaUsageText, CONTEXT_GROUPS, promptLanguageNote, WIZARD_STEPS,
-      aboutMarkdown, roleOptions, sharedRoleLabel, QUERY_NOTE_MAX
+      aboutMarkdown, roleOptions, sharedRoleLabel, QUERY_NOTE_MAX, removeQueryRowsFromBlock
     }
   };
 

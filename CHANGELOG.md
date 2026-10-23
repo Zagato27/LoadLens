@@ -48,6 +48,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   an engineer deletes their own, an administrator anyone's and may delete the runs' reports with them
   (`POST /load_tests/runs/delete`, `DELETE /load_tests/runs/<run_id>`, audit `load_test.delete`)
   ([docs/running-load-tests.md](docs/running-load-tests.md#run-history-in-the-archive)).
+- **Bulk deletion of queries.** Every row of the query list in the settings has a tick, and the bar above the list
+  ticks all shown rows, counts the ticked ones and deletes them after one confirmation that names them and the ones
+  the SLA reads. The change reaches the configuration with the Save button, like a single deletion.
 
 ### Changed
 
