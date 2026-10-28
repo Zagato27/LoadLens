@@ -28,7 +28,7 @@ import requests
 from psycopg2 import sql
 
 from AI import report_markers
-from AI.i18n import SUPPORTED, LocalizedError, get_locale, msg, t, with_locale
+from AI.i18n import SUPPORTED, LocalizedError, fmt_number, get_locale, msg, t, with_locale
 from AI.report_sections import test_type_section
 from AI.test_profile import normalize_test_type, test_type_label
 from AI.verdicts import NO_DATA, is_deterministic_report, normalize_report, optional_code, to_code
@@ -343,8 +343,51 @@ def load_step_expand(table: dict[str, Any] | None) -> str:
         t("report.steps.source_series", series=series) if series else "",
     ) if part]
     source = p(t("confluence.steps.source", source=", ".join(source_parts))) if source_parts else ""
-    note = p(t("confluence.steps.note"))
+    detector = step_detection_text(table)
+    note = p(f"{t('confluence.steps.note')} {detector}" if detector else t("confluence.steps.note"))
     return wrap_expand(t("report.steps.title"), f"<table><thead>{head}</thead><tbody>{body}</tbody></table>{source}{note}")
+
+
+def _short_number(value: Any, digits: int) -> str:
+    """``value`` with at most ``digits`` decimals in the current locale: 2,5 / 2.5, 3, 0,01."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    text = fmt_number(number, digits)
+    if digits > 0 and text != "—":
+        text = text.rstrip("0").rstrip(",.")
+    return text
+
+
+def step_detection_text(table: dict[str, Any] | None) -> str:
+    """How the step detector found the steps of the table (``detection``, AI/step_detector.py), or why the report
+    shows equal intervals: the sentence under the step row of the report page. Empty for older reports."""
+    detection = table.get("detection") if isinstance(table, dict) else None
+    if not isinstance(detection, dict):
+        return ""
+    try:
+        seconds = float(detection.get("sample_sec"))
+    except (TypeError, ValueError):
+        seconds = 60.0
+    if seconds >= 60:
+        cadence = t("report.steps.cadence_min", n=_short_number(seconds / 60.0, 1))
+    else:
+        cadence = t("report.steps.cadence_sec", n=_short_number(seconds, 0))
+    minutes = _short_number(detection.get("min_step_minutes"), 1)
+    reason = detection.get("reason")
+    if reason == "no_plateaus":
+        return t("report.steps.detector_no_plateaus", cadence=cadence)
+    if reason == "no_stable_step":
+        return t("report.steps.detector_no_stable_step", minutes=minutes)
+    if reason == "few_steps":
+        return t("report.steps.detector_few_steps", minutes=minutes)
+    return t(
+        "report.steps.detector_auto",
+        cadence=cadence,
+        noise=_short_number(detection.get("noise_pct"), 2),
+        threshold=_short_number(detection.get("threshold_pct"), 1),
+    )
 
 
 # ---- SLA criteria (same content as the block at the top of the report page) ----

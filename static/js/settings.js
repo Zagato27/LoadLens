@@ -2012,9 +2012,8 @@
   // One explanation for every criterion except the target RPS (it used to repeat under each row).
   const SLA_SHARED_DESC = LL.t('settings.sla.shared_desc');
   const SLA_PEAK_FIELDS = [
-    { key: 'min_stable_minutes', label: LL.t('settings.sla.field.min_stable_minutes'), type: 'number', step: '0.5' },
+    { key: 'min_stable_minutes', label: LL.t('settings.sla.field.min_stable_minutes'), type: 'number', step: '0.5', hint: LL.t('settings.sla.field.min_stable_minutes_hint') },
     { key: 'target_margin_pct', label: LL.t('settings.sla.field.target_margin_pct'), type: 'number', step: '1', hint: LL.t('settings.sla.field.target_margin_pct_hint') },
-    { key: 'step_detection_preset', label: LL.t('settings.sla.field.step_detection_preset'), type: 'select', options: null },
     { key: 'step_detection_enabled', label: LL.t('settings.sla.field.step_detection_enabled'), type: 'checkbox', term: 'step_profile' },
     { key: 'target_rps_allow_peak_fallback', label: LL.t('settings.sla.field.target_rps_allow_peak_fallback'), type: 'checkbox', term: 'peak_max' },
     { key: 'debug_peak_logging', label: LL.t('settings.sla.field.debug_peak_logging'), type: 'checkbox' }
@@ -2025,7 +2024,6 @@
     { key: 'load_model', label: LL.t('settings.sla.field.load_model'), type: 'select', options: null, hint: LL.t('settings.sla.field.load_model_hint') },
     { key: 'service_cpu_query', label: LL.t('settings.sla.field.service_cpu_query'), type: 'query', domain: 'jvm', hint: LL.t('settings.sla.field.service_cpu_query_hint') }
   ];
-  const SLA_PRESETS = [{ v: 'strict', l: LL.t('settings.sla.preset.strict') }, { v: 'balanced', l: LL.t('settings.sla.preset.balanced') }, { v: 'lenient', l: LL.t('settings.sla.preset.lenient') }];
   const LATENCY_UNIT_OPTIONS = [{ v: 'ms', l: LL.t('settings.sla.latency_unit.ms') }, { v: 's', l: LL.t('settings.sla.latency_unit.s') }];
   const LOAD_MODEL_OPTIONS = [{ v: 'open', l: LL.t('settings.sla.load_model.open') }, { v: 'closed', l: LL.t('settings.sla.load_model.closed') }];
 
@@ -2126,7 +2124,6 @@
     updateSlaDirty();
   }
   function slaFieldOptions(f) {
-    if (f.key === 'step_detection_preset') return SLA_PRESETS;
     if (f.key === 'load_model') return LOAD_MODEL_OPTIONS;
     if (f.key === 'latency_unit') return LATENCY_UNIT_OPTIONS;
     return f.options || [];
@@ -4994,7 +4991,7 @@
     Object.values(WIZARD_STEP_TITLES).forEach(push);
     [SLA_FIELDS, SLA_PEAK_FIELDS, SLA_FORECAST_FIELDS].forEach((list) => list.forEach((f) => { push(f.label); push(f.desc); push(f.hint); push(f.unit); }));
     push(SLA_SHARED_DESC);
-    [SLA_PRESETS, LATENCY_UNIT_OPTIONS, LOAD_MODEL_OPTIONS, LLM_PROVIDERS].forEach((list) => list.forEach((o) => push(o.l)));
+    [LATENCY_UNIT_OPTIONS, LOAD_MODEL_OPTIONS, LLM_PROVIDERS].forEach((list) => list.forEach((o) => push(o.l)));
     Object.values(SLA_QUERY_TITLES).forEach(push);
     [LEVEL_OPTIONS, DEP_KIND_OPTIONS, ARCH_STYLES].forEach((list) => list.forEach(([, text]) => push(text)));
     CONTEXT_GROUPS.forEach((group) => {

@@ -40,6 +40,7 @@ from loadlens_app.config_schema import (
 )
 from AI.providers import without_env_keys
 from AI.query_packs import prune_queries
+from AI.step_detector import without_retired_sla_keys
 from loadlens_app.config_secrets import SecretPlaceholderError, destination_changed, mask_secrets, restore_secrets
 from loadlens_app.connection_checks import (
     CHECKABLE_SECTIONS,
@@ -413,6 +414,8 @@ def update_config():
             validate_sla(payload)
         except SlaConfigError as exc:
             return jsonify({"error": str(exc)}), 400
+        # The former detector presets and their tuning are no longer read: a save drops them.
+        payload = without_retired_sla_keys(payload)
     if section == "appearance":
         try:
             validate_appearance(payload)

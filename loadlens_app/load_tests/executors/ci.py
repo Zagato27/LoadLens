@@ -21,7 +21,7 @@ from ..generators import Generator
 from ..messages import msg, t, text_of
 from ..tools import ToolTemplate, public_url
 from .base import LOG_TAIL_BYTES, CheckReport, GeneratorError, LaunchPlan, LaunchResult, Probe
-from .http import ApiClient, ApiError
+from .http import ApiClient, ApiError, response_tail, tail_request
 
 TOKEN_HEADER = "X-LoadLens-Token"
 GITLAB_WAITING = frozenset({"created", "waiting_for_resource", "preparing", "pending", "scheduled", "manual"})
@@ -97,6 +97,22 @@ def _variables_refused(exc: ApiError) -> bool:
     return exc.status in (400, 403) and "pipeline variables" in text
 
 
+def ci_api(generator: Generator) -> ApiClient:
+    """HTTP client of a CI generator: Jenkins with its user and token, GitLab with the API token when set.
+
+    ``executors.executor_for`` keeps one per generator, so the watcher and the pages share its connections
+    instead of opening a TLS session on every pass.
+    """
+    assert generator.ci is not None
+    cfg = generator.ci
+    if cfg.kind == "jenkins":
+        return ApiClient(cfg.url, name="Jenkins", verify=cfg.verify, auth=(cfg.username, cfg.api_token))
+    api = ApiClient(cfg.url, name="GitLab", verify=cfg.verify)
+    if cfg.api_token:
+        api.session.headers["PRIVATE-TOKEN"] = cfg.api_token
+    return api
+
+
 class CiExecutor:
     enforces_deadline = True  # CI jobs have their own timeout; the watcher also cancels after the run limit
     supports_signals = False
@@ -112,14 +128,7 @@ class CiExecutor:
         self.generator = generator
         self.cfg = generator.ci
         self.events = events or _store_events
-        if api is not None:
-            self.api = api
-        elif self.cfg.kind == "jenkins":
-            self.api = ApiClient(self.cfg.url, name="Jenkins", verify=self.cfg.verify, auth=(self.cfg.username, self.cfg.api_token))
-        else:
-            self.api = ApiClient(self.cfg.url, name="GitLab", verify=self.cfg.verify)
-            if self.cfg.api_token:
-                self.api.session.headers["PRIVATE-TOKEN"] = self.cfg.api_token
+        self.api = api if api is not None else ci_api(generator)
 
     # ---- refs: "<kind>:<run_id>:<index>:<pipeline id, or queue:/build path>" ----
 
@@ -307,11 +316,13 @@ class CiExecutor:
                 jobs = self.api.json("GET", f"{self._project}/pipelines/{rest}/jobs") or []
                 if not jobs:
                     return ""
-                trace = self.api.request("GET", f"{self._project}/jobs/{jobs[0].get('id')}/trace")
-                return trace.text[-max_bytes:]
+                # The whole trace may be far larger than the tail asked for: see tail_request.
+                trace = self.api.request("GET", f"{self._project}/jobs/{jobs[0].get('id')}/trace", **tail_request(max_bytes))
+                return response_tail(trace, max_bytes)
             if rest.startswith("queue:"):
                 return ""
-            return self.api.request("GET", f"{self._path(rest)}/consoleText").text[-max_bytes:]
+            console = self.api.request("GET", f"{self._path(rest)}/consoleText", **tail_request(max_bytes))
+            return response_tail(console, max_bytes)
         except ApiError as exc:
             if exc.status in (401, 403, 404):
                 return ""

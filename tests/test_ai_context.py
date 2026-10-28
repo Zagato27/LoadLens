@@ -16,6 +16,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from AI import pipeline as pipeline_module
+from AI import step_detector
 from AI import providers as providers_module
 from AI import scoring as scoring_module
 from AI.context_pack import (
@@ -1046,25 +1047,17 @@ def test_sla_window_falls_back_to_last_stable_step_where_latency_holds():
     assert result_bad["verdict"] == "fail"
 
 
-# Balanced detector preset; production feeds it per-minute buckets.
-BALANCED_STEP_CFG = {
-    "step_detection_resample_sec": 15, "step_detection_smooth_sec": 60, "step_confirm_hold_sec": 180,
-    "step_min_step_delta_rps": 8.0, "step_min_step_delta_pct": 0.08, "step_max_cv": 0.10,
-    "step_max_slope_rps_per_min": 0.5, "step_max_within_step_drop_pct": 0.08, "step_drop_hold_sec": 120,
-}
-
-
 def _bucket_profile(values, freq="1min"):
-    """Step detector with the balanced preset on RPS buckets starting at 10:00 UTC."""
+    """Step detector on RPS buckets starting at 10:00 UTC (production feeds it per-minute buckets)."""
     index = pd.date_range("2026-10-01T10:00:00Z", periods=len(values), freq=freq)
     series = pd.Series([float(v) for v in values], index=index)
-    return pipeline_module._find_stable_peak_step_profile(series, min_stable_minutes=5.0, cfg=BALANCED_STEP_CFG), index
+    return step_detector.find_step_profile(series, min_stable_minutes=5.0), index
 
 
 def _run_steps(values, index):
     return pipeline_module._derive_steps_for_run(
         lt_labeled=[{"label": "RPS", "df": pd.Series(values, index=index).to_frame("all")}],
-        perf_label="RPS", stable_cfg={**BALANCED_STEP_CFG, "use_step_profile": True}, min_stable_minutes=5.0,
+        perf_label="RPS", stable_cfg={"use_step_profile": True}, min_stable_minutes=5.0,
         start_ts=index[0].timestamp(), end_ts=(index[-1] + pd.Timedelta(minutes=1)).timestamp(), shift_hours=0,
     )
 
@@ -1078,18 +1071,17 @@ def test_plateau_after_rps_drop_is_not_stable_max():
         1673, 1450, 1400, 1431, 1398, 1384, 1384, 1751,
     ]
     index = pd.date_range("2026-09-22T15:37:00Z", periods=len(rps), freq="1min")
-    profile = pipeline_module._find_stable_peak_step_profile(
-        pd.Series([float(v) for v in rps], index=index), min_stable_minutes=5.0, cfg=BALANCED_STEP_CFG,
-    )
+    profile = step_detector.find_step_profile(pd.Series([float(v) for v in rps], index=index), min_stable_minutes=5.0)
     segments = profile["step_segments"]
     assert segments[-1]["stable"] is True and segments[-1]["after_drop"] is True
-    assert segments[-1]["level"] == pytest.approx(1415.5)
+    # The median of the samples after the fall (the former 2-sample smoothing reported 1415.5).
+    assert segments[-1]["level"] == pytest.approx(1400.0)
     assert not any(seg["dip"] for seg in segments)
     assert first_rps_drop(segments) == index[61]
     # The ramp-in minute of each step is not instability: the last step before the fall is the maximum.
     last_rising_stable = [seg for seg in segments if seg["stable"] and not seg["after_drop"]][-1]
     assert profile["stable_max"] == pytest.approx(last_rising_stable["level"])
-    assert profile["stable_max"] == pytest.approx(1596.5)
+    assert profile["stable_max"] == pytest.approx(1597.0)
     assert profile["stable_max"] > segments[-1]["level"]
 
     healthy_latency = pd.DataFrame({"group=::ADDRESSById": [60.0] * len(rps)}, index=index)
@@ -1119,15 +1111,15 @@ def test_one_minute_outliers_are_not_rps_drops(position, value):
         assert [round(seg["level"]) for seg in segments if seg["stable"]] == [100, 200, 300, 400]
 
 
-def test_dip_that_cuts_a_plateau_becomes_dip_time():
-    # A slow minute right before the next step still cuts that plateau, but RPS climbs back: not a drop.
+def test_one_slow_minute_before_a_step_neither_cuts_the_plateau_nor_drops():
+    # A slow minute near the end of a plateau is one sample of noise: RPS climbs back right away, so the
+    # 300 RPS plateau stays one stable step and nothing after it is a drop.
     rps = [100.0] * 8 + [200.0] * 8 + [300.0] * 8 + [400.0] * 8
     rps[20] = 240.0
     profile, index = _bucket_profile(rps)
     segments = profile["step_segments"]
-    cut = [seg for seg in segments if seg["dip_time"]]
-    assert len(cut) == 1 and pd.Timestamp(cut[0]["dip_time"]) == index[20]
-    assert cut[0]["drop_time"] is None and not cut[0]["dip"]
+    assert not any(seg["dip_time"] or seg["drop_time"] for seg in segments)
+    assert [round(seg["level"]) for seg in segments if seg["stable"]] == [100, 200, 300, 400]
     assert not any(seg["after_drop"] or seg["dip"] for seg in segments)
     assert first_rps_drop(segments) is None
     assert profile["stable_max"] == pytest.approx(400.0)
@@ -1138,7 +1130,8 @@ def test_recovered_dip_is_flagged_and_never_stable_max():
     rps = [100.0] * 10 + [200.0] * 10 + [300.0] * 10 + [180.0] * 8 + [300.0] * 10 + [400.0] * 10
     profile, index = _bucket_profile(rps)
     segments = profile["step_segments"]
-    assert [round(seg["level"]) for seg in segments if seg["dip"]] == [240, 180, 240]
+    # Only the sagged plateau is a dip: the ramp minutes into and out of it are not segments of their own.
+    assert [round(seg["level"]) for seg in segments if seg["dip"]] == [180]
     assert not any(seg["after_drop"] for seg in segments)
     assert profile["stable_max"] == pytest.approx(400.0)
 
@@ -1156,15 +1149,16 @@ def test_real_drop_after_recovered_dip_is_found():
     # Same run, but after 400 RPS the system gives up: RPS falls to 288 and stays there.
     rps = [100.0] * 10 + [200.0] * 10 + [300.0] * 10 + [180.0] * 8 + [300.0] * 10 + [400.0] * 10 + [288.0] * 8
     profile, index = _bucket_profile(rps)
-    assert [round(seg["level"]) for seg in profile["step_segments"] if seg["after_drop"]] == [344, 288]
+    assert [round(seg["level"]) for seg in profile["step_segments"] if seg["after_drop"]] == [288]
     assert profile["stable_max"] == pytest.approx(400.0)
 
     run = _run_steps(rps, index)
     steps = run.steps
     assert run.rps_drop is not None and abs((run.rps_drop - index[58]).total_seconds()) <= 60
     assert steps[3].dip is True and steps[3].after_drop is False
-    assert "drop_iso" in steps[-2].to_dict()
-    assert steps[-1].to_dict()["after_drop"] is True
+    # The fall opens the next step (flagged after_drop); the 400 RPS plateau itself did not drop.
+    assert "drop_iso" not in steps[-2].to_dict()
+    assert steps[-1].to_dict()["after_drop"] is True and round(steps[-1].rps_level) == 288
 
 
 def test_one_point_spike_at_five_minute_cadence():
@@ -1190,15 +1184,15 @@ def test_one_point_spike_at_five_minute_cadence():
     ],
 )
 def test_persistent_drop_start_skips_runs_that_recover(below, run_len, expected):
-    assert pipeline_module._persistent_drop_start(below, run_len) == expected
+    assert step_detector._persistent_drop_start(below, run_len) == expected
 
 
 def test_plateau_core_trims_ramp_edges_only():
     index = pd.date_range("2026-10-01T10:00:00Z", periods=7, freq="1min")
     plateau = pd.Series([150.0, 200.0, 201.0, 199.0, 200.0, 200.0, 230.0], index=index)
-    assert list(pipeline_module._plateau_core(plateau, 200.0, 8.0).index) == list(index[1:6])
+    assert list(step_detector._plateau_core(plateau, 200.0, 8.0).index) == list(index[1:6])
     ramp = pd.Series([100.0, 120.0, 200.0, 205.0], index=index[:4])
-    assert pipeline_module._plateau_core(ramp, 160.0, 8.0).equals(ramp)
+    assert step_detector._plateau_core(ramp, 160.0, 8.0).equals(ramp)
 
 
 def _decline_segments(levels, down_refs=None, drops=None):
@@ -1213,23 +1207,23 @@ def _decline_segments(levels, down_refs=None, drops=None):
 
 def test_classify_declines_marks_recovered_dips_and_unrecovered_drops():
     recovered = _decline_segments([300, 240, 180, 300, 400], down_refs={1: 300})
-    pipeline_module._classify_declines(recovered, 8.0, 0.08)
+    step_detector._classify_declines(recovered, 8.0, 0.08)
     assert [seg["dip"] for seg in recovered] == [False, True, True, False, False]
     assert not any(seg["after_drop"] for seg in recovered)
 
     partial = _decline_segments([600, 420, 520], down_refs={1: 600})
-    pipeline_module._classify_declines(partial, 8.0, 0.08)
+    step_detector._classify_declines(partial, 8.0, 0.08)
     assert [seg["after_drop"] for seg in partial] == [False, True, True]
     assert not any(seg["dip"] for seg in partial)
 
     moment = "2026-10-01 10:05:00+00:00"
     dip_inside = _decline_segments([300, 300], drops={0: moment})
-    pipeline_module._classify_declines(dip_inside, 8.0, 0.08)
+    step_detector._classify_declines(dip_inside, 8.0, 0.08)
     assert dip_inside[0]["drop_time"] is None and dip_inside[0]["dip_time"] == moment
     assert not any(seg["dip"] or seg["after_drop"] for seg in dip_inside)
 
     lost = _decline_segments([300, 200], drops={0: moment})
-    pipeline_module._classify_declines(lost, 8.0, 0.08)
+    step_detector._classify_declines(lost, 8.0, 0.08)
     assert lost[0]["drop_time"] == moment and lost[0]["after_drop"] is False
     assert lost[1]["after_drop"] is True
 

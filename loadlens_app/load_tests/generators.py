@@ -137,6 +137,10 @@ class CiSettings:
     # The pipeline passes LOADLENS_RUN_TAG to the tool, so run metrics can be told apart by the tag.
     tags_metrics: bool = False
 
+    def identity(self) -> tuple:
+        """What a cached HTTP client depends on."""
+        return (self.kind, self.url, self.username, self.api_token, self.verify)
+
 
 @dataclass(frozen=True)
 class GeneratorTool:

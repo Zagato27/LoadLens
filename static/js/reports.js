@@ -2033,10 +2033,30 @@
     if (safeStr(table.latency_series)) sourceBits.push(LL.t('report.steps.source_series', { series: safeStr(table.latency_series) }));
     else if (safeStr(table.latency_query)) sourceBits.push(LL.t('report.steps.source_max'));
     const note = sourceBits.length ? LL.t('report.steps.note_source', { source: sourceBits.join(', ') }) : LL.t('report.steps.note');
+    const detection = stepDetectionText(table);
     return [
       `<div class="rep-steprow" role="list" aria-label="${escapeHtml(LL.t('report.steps.title'))}">${cells}</div>`,
-      `<p class="rep-step-note">${escapeHtml(note)}</p>`
+      `<p class="rep-step-note">${escapeHtml(detection ? `${note} ${detection}` : note)}</p>`
     ].join('');
+  }
+  // How the step detector found the steps (table.detection, AI/step_detector.py) or why the report shows equal
+  // intervals; reports saved before the detector stated it have no detection and no sentence.
+  function stepDetectionText(table) {
+    const detection = table && isPlainObject(table.detection) ? table.detection : null;
+    if (!detection) return '';
+    const seconds = Number(detection.sample_sec);
+    const cadence = Number.isFinite(seconds) && seconds >= 60
+      ? LL.t('report.steps.cadence_min', { n: LL.fmt.number(seconds / 60, { maximumFractionDigits: 1 }) })
+      : LL.t('report.steps.cadence_sec', { n: LL.fmt.number(seconds, { maximumFractionDigits: 0 }) });
+    const minutes = LL.fmt.number(Number(detection.min_step_minutes), { maximumFractionDigits: 1 });
+    if (detection.reason === 'no_plateaus') return LL.t('report.steps.detector_no_plateaus', { cadence: cadence });
+    if (detection.reason === 'no_stable_step') return LL.t('report.steps.detector_no_stable_step', { minutes: minutes });
+    if (detection.reason === 'few_steps') return LL.t('report.steps.detector_few_steps', { minutes: minutes });
+    return LL.t('report.steps.detector_auto', {
+      cadence: cadence,
+      noise: LL.fmt.number(Number(detection.noise_pct), { maximumFractionDigits: 2 }),
+      threshold: LL.fmt.number(Number(detection.threshold_pct), { maximumFractionDigits: 1 })
+    });
   }
   // «UTC+3», «UTC-5», «UTC+5:30» for an offset in hours.
   function utcOffsetText(hours) {

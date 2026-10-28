@@ -19,7 +19,7 @@ from .base import (
     LaunchResult,
     Probe,
 )
-from .ci import TOKEN_HEADER, CiExecutor, check_ci_generator, events_url, jenkins_path, pipeline_variables
+from .ci import TOKEN_HEADER, CiExecutor, check_ci_generator, ci_api, events_url, jenkins_path, pipeline_variables
 from .docker import DockerExecutor, check_docker_generator, container_name, demux, docker_api
 from .http import ApiClient, ApiError
 from .kubernetes import KubernetesExecutor, check_kubernetes_generator, job_name, kubernetes_api
@@ -74,8 +74,8 @@ def default_executor_for(generator: Generator) -> Executor:
     if generator.type == "kubernetes" and generator.kubernetes is not None:
         identity = ("k8s",) + generator.kubernetes.identity()
         return KubernetesExecutor(generator, _cached_client(generator, identity, kubernetes_api))
-    if generator.is_ci:
-        return CiExecutor(generator)
+    if generator.is_ci and generator.ci is not None:
+        return CiExecutor(generator, api=_cached_client(generator, ("ci",) + generator.ci.identity(), ci_api))
     raise GeneratorError("lt.executor.type_unsupported", generator=generator.title, type=generator.type)
 
 

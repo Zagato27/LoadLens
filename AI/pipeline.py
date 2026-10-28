@@ -30,6 +30,7 @@ from AI.context_pack import (
     step_table,
 )
 from AI.i18n import with_locale
+from AI.step_detector import MAX_CV as STEP_MAX_CV, detect_steps, find_step_profile, retired_sla_keys
 from AI.i18n import t
 from AI.i18n import LocalizedError, Msg, msg, plural
 from AI.report_texts import LocaleTable
@@ -412,11 +413,13 @@ def _load_step_table_for_report(
     sla_cfg: Dict[str, Any],
     window: Optional[Dict[str, Any]],
     target_window: Optional[Dict[str, Any]] = None,
+    detection: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Compact step table stored with the report: step RPS and plateau latency p95.
 
     The step the verdict was decided on is ``selected``: the target step when there is one (with ``sla_role``;
-    the ceiling ``window`` gets ``ceiling`` when it is another step), else the ceiling.
+    the ceiling ``window`` gets ``ceiling`` when it is another step), else the ceiling. ``detection`` (what the
+    step detector derived, RunSteps.detection) goes with the table: the report states it under the step row.
     """
     if not steps:
         return None
@@ -436,6 +439,7 @@ def _load_step_table_for_report(
         selected_role=str(target.get("role") or "target") if target is not None else "",
         ceiling_level=stable.get("level") if other_ceiling else None,
         ceiling_start=str(stable["start"]) if other_ceiling and stable.get("start") else None,
+        detection=detection,
     )
     return report if report.get("steps") else None
 
@@ -1675,378 +1679,6 @@ def _cfg_bool(raw: Any, default: bool) -> bool:
     return default
 
 
-def _longest_true_run(values: List[bool]) -> int:
-    best = 0
-    cur = 0
-    for v in values:
-        if v:
-            cur += 1
-            best = max(best, cur)
-        else:
-            cur = 0
-    return best
-
-
-def _first_true_run_start(values: List[bool], run_len: int) -> Optional[int]:
-    need = max(1, int(run_len))
-    cur = 0
-    for idx, v in enumerate(values):
-        if v:
-            cur += 1
-            if cur >= need:
-                return idx - need + 1
-        else:
-            cur = 0
-    return None
-
-
-def _persistent_drop_start(values: List[bool], run_len: int) -> Optional[int]:
-    """Start of the first run of ``run_len`` low samples that is not followed by ``run_len`` recovered ones.
-
-    A low run that RPS climbs back from inside the same segment is a transient dip, not a drop.
-    """
-    need = max(1, int(run_len))
-    start: Optional[int] = None
-    idx = 0
-    while idx < len(values):
-        end = idx
-        while end < len(values) and values[end] == values[idx]:
-            end += 1
-        if values[idx] and end - idx >= need and start is None:
-            start = idx
-        elif not values[idx] and start is not None and end - idx >= need:
-            start = None
-        idx = end
-    return start
-
-
-def _slope_rps_per_min(series_vals: pd.Series) -> float:
-    if series_vals is None or len(series_vals) < 2:
-        return 0.0
-    try:
-        y = [float(v) for v in series_vals.values]
-    except Exception:
-        return 0.0
-    n = len(y)
-    if n < 2:
-        return 0.0
-    if isinstance(getattr(series_vals, "index", None), pd.DatetimeIndex):
-        t0 = series_vals.index[0]
-        x = [float((ts - t0).total_seconds()) / 60.0 for ts in series_vals.index]
-    else:
-        x = [float(i) for i in range(n)]
-    x_mean = sum(x) / n
-    y_mean = sum(y) / n
-    num = 0.0
-    den = 0.0
-    for xi, yi in zip(x, y):
-        dx = xi - x_mean
-        num += dx * (yi - y_mean)
-        den += dx * dx
-    if den <= 0:
-        return 0.0
-    return float(num / den)
-
-
-def _segment_end_sort_key(value: Any) -> float:
-    try:
-        return float(pd.Timestamp(value).value)
-    except Exception:
-        return float("-inf")
-
-
-def _step_delta_threshold(level: float, min_delta_rps: float, min_delta_pct: float) -> float:
-    """Smallest RPS change that counts as a new load level near ``level``."""
-    return max(float(min_delta_rps), abs(float(level)) * float(min_delta_pct))
-
-
-def _plateau_core(seg: pd.Series, level: float, tolerance: float) -> pd.Series:
-    """Segment without the leading/trailing samples farther than ``tolerance`` from ``level``.
-
-    At coarse cadence the first samples of a plateau are still the ramp into it and would fail
-    the slope check of an otherwise flat step. The whole segment is returned when trimming
-    would leave less than half of it: then it is not a plateau with ramp edges.
-    """
-    values = seg.values
-    lo, hi = 0, len(values)
-    while lo < hi and abs(float(values[lo]) - level) > tolerance:
-        lo += 1
-    while hi > lo and abs(float(values[hi - 1]) - level) > tolerance:
-        hi -= 1
-    if hi - lo < max(2, (len(values) + 1) // 2):
-        return seg
-    return seg.iloc[lo:hi]
-
-
-def _scan_step_boundaries(
-    smooth: pd.Series,
-    hold_samples: int,
-    min_delta_rps: float,
-    min_delta_pct: float,
-) -> tuple[List[int], Dict[int, float]]:
-    """Positions where the load level changes (with 0 and the length) and the level before every step down.
-
-    A change is confirmed only when the level does not come back in the window after the next
-    one, so a spike or dip of a few samples (GC pause, metrics gap) is not a load step. The
-    level before a candidate is the median of up to two windows, so an excursion right before
-    it does not shift the reference either.
-    """
-    values = smooth.values
-    n = len(values)
-    min_prev = max(2, hold_samples // 2)
-    boundaries = [0]
-    down_refs: Dict[int, float] = {}
-    i = hold_samples
-    while i < (n - hold_samples):
-        prev_vals = values[max(boundaries[-1], i - 2 * hold_samples):i]
-        if len(prev_vals) < min_prev:
-            i += 1
-            continue
-        prev_level = float(pd.Series(prev_vals).median())
-        next_level = float(pd.Series(values[i:i + hold_samples]).median())
-        threshold = _step_delta_threshold(prev_level, min_delta_rps, min_delta_pct)
-        if abs(next_level - prev_level) < threshold:
-            i += 1
-            continue
-        after_vals = values[i + hold_samples:i + 2 * hold_samples]
-        if len(after_vals) >= min_prev and abs(float(pd.Series(after_vals).median()) - prev_level) < threshold:
-            i += 1
-            continue
-        boundaries.append(i)
-        if next_level < prev_level:
-            down_refs[i] = prev_level
-        i += hold_samples
-    boundaries.append(n)
-    return boundaries, down_refs
-
-
-def _mark_decline(members: List[Dict[str, object]], opener: Optional[Dict[str, object]], recovered: bool) -> None:
-    """Flags a closed decline: ``dip`` when RPS came back to the level before it, ``after_drop`` otherwise.
-
-    The drops of a recovered decline become ``dip_time``: RPS fell there but was not lost.
-    """
-    for seg in members:
-        seg["dip" if recovered else "after_drop"] = True
-    if not recovered:
-        return
-    for seg in members + ([opener] if opener is not None else []):
-        if seg.get("drop_time") is not None:
-            seg["dip_time"] = seg["drop_time"]
-            seg["drop_time"] = None
-
-
-def _classify_declines(segments: List[Dict[str, object]], min_delta_rps: float, min_delta_pct: float) -> None:
-    """Sets ``after_drop`` / ``dip`` from the outcome of each RPS decline instead of a flag that never resets.
-
-    A decline starts at a step down (reference: the level before it) or at a persistent drop
-    inside a segment (reference: the segment's starting level). It is recovered when a later
-    segment climbs back within the detector's step threshold of the reference. Segments of a
-    recovered decline are ``dip``; segments of a decline RPS never recovered from are
-    ``after_drop``. The segment where an in-segment drop starts keeps its plateau before the
-    drop, so it is not part of the decline.
-    """
-    members: List[Dict[str, object]] = []
-    opener: Optional[Dict[str, object]] = None
-    reference: Optional[float] = None
-    for seg in segments:
-        down_ref = seg.get("_down_ref")
-        if down_ref is not None:
-            reference = float(down_ref) if reference is None else max(reference, float(down_ref))
-            members.append(seg)
-        elif reference is not None:
-            if float(seg.get("level", 0.0)) >= reference - _step_delta_threshold(reference, min_delta_rps, min_delta_pct):
-                _mark_decline(members, opener, recovered=True)
-                members, opener, reference = [], None, None
-            else:
-                members.append(seg)
-        if seg.get("drop_time") is not None:
-            level_ref = float(seg.get("_level_ref", seg.get("level", 0.0)))
-            if reference is None:
-                reference, opener = level_ref, seg
-            else:
-                reference = max(reference, level_ref)
-    if reference is not None:
-        _mark_decline(members, opener, recovered=False)
-
-
-def _select_step_profile_candidate(segments: List[Dict[str, object]]) -> Optional[Dict[str, object]]:
-    """Last stable step before the load first dropped.
-
-    A flat plateau after RPS fell (timeouts, ramp-down) is degradation, not a
-    load step, so segments flagged ``after_drop`` are never the stable maximum.
-    A recovered dip is not a load level either.
-    """
-    rising = [seg for seg in segments if not bool(seg.get("after_drop")) and not bool(seg.get("dip"))]
-    stable_segments = [seg for seg in rising if bool(seg.get("stable"))]
-    if not stable_segments:
-        return None
-    terminal_stable_segments: List[Dict[str, object]] = []
-    for idx, seg in enumerate(rising):
-        if not bool(seg.get("stable")):
-            continue
-        next_seg = rising[idx + 1] if idx + 1 < len(rising) else None
-        if next_seg is not None and bool(next_seg.get("stable")):
-            continue
-        terminal_stable_segments.append(seg)
-    if terminal_stable_segments:
-        return max(
-            terminal_stable_segments,
-            key=lambda seg: (_segment_end_sort_key(seg.get("end")), float(seg.get("level", 0.0))),
-        )
-    return max(
-        stable_segments,
-        key=lambda seg: (float(seg.get("level", 0.0)), _segment_end_sort_key(seg.get("end"))),
-    )
-
-
-def _find_stable_peak_step_profile(
-    col_series: pd.Series,
-    min_stable_minutes: float,
-    cfg: Dict[str, Any],
-) -> Optional[Dict[str, object]]:
-    """Load steps of an RPS series and the stable maximum among them.
-
-    Each exported segment has ``stable`` (plateau held for ``min_stable_minutes`` with low cv
-    and slope), ``drop_time`` (RPS fell inside it and did not recover), ``after_drop`` (it
-    follows a decline RPS never recovered from) and ``dip`` / ``dip_time`` (a decline RPS
-    recovered from: a transient dip, not a drop).
-    """
-    s = col_series.dropna()
-    try:
-        s = s.sort_index()
-    except Exception:
-        pass
-    if s.empty or len(s) < 3 or not isinstance(s.index, pd.DatetimeIndex):
-        return None
-
-    resample_sec = max(1, _cfg_int(cfg.get("step_detection_resample_sec"), 15))
-    smooth_sec = max(resample_sec, _cfg_int(cfg.get("step_detection_smooth_sec"), 60))
-    confirm_hold_sec = max(resample_sec, _cfg_int(cfg.get("step_confirm_hold_sec"), 180))
-    min_step_delta_rps = _cfg_float(cfg.get("step_min_step_delta_rps"), 15.0)
-    min_step_delta_pct = _cfg_float(cfg.get("step_min_step_delta_pct"), 0.08)
-    max_cv = _cfg_float(cfg.get("step_max_cv"), 0.10)
-    max_slope = _cfg_float(cfg.get("step_max_slope_rps_per_min"), 0.5)
-    max_drop_pct = _cfg_float(cfg.get("step_max_within_step_drop_pct"), 0.08)
-    drop_hold_sec = max(resample_sec, _cfg_int(cfg.get("step_drop_hold_sec"), 120))
-
-    rs = s.resample(f"{resample_sec}s").mean().dropna()
-    if len(rs) < 3:
-        return None
-    rs_deltas = rs.index.to_series().diff().dropna()
-    sample_sec = float(resample_sec)
-    if not rs_deltas.empty:
-        try:
-            sample_sec = float(rs_deltas.median().total_seconds())
-        except Exception:
-            sample_sec = float(resample_sec)
-    sample_sec = max(sample_sec, 1.0)
-
-    smooth_samples = max(2, int(round(smooth_sec / sample_sec)))
-    hold_samples = max(2, int(round(confirm_hold_sec / sample_sec)))
-    smooth = rs.rolling(window=smooth_samples, min_periods=max(2, smooth_samples // 2)).median().dropna()
-    if smooth.empty:
-        smooth = rs
-
-    boundaries, down_refs = _scan_step_boundaries(smooth, hold_samples, min_step_delta_rps, min_step_delta_pct)
-    drop_run_samples = max(1, int(round(drop_hold_sec / sample_sec)))
-
-    segments: List[Dict[str, object]] = []
-    # A step down whose segment is skipped below still opens the decline of the next kept segment.
-    pending_down_ref: Optional[float] = None
-    for bi in range(len(boundaries) - 1):
-        a = boundaries[bi]
-        b = boundaries[bi + 1]
-        if a in down_refs:
-            pending_down_ref = down_refs[a] if pending_down_ref is None else max(pending_down_ref, down_refs[a])
-        if b - a < 2:
-            continue
-        seg = smooth.iloc[a:b]
-        if seg.empty:
-            continue
-        base_window = seg.iloc[:max(2, min(len(seg), hold_samples))]
-        level_ref = float(base_window.median()) if not base_window.empty else float(seg.median())
-        drop_threshold = level_ref * (1.0 - max_drop_pct)
-        below = [bool(v < drop_threshold) for v in seg.values]
-        longest_bad_min = _longest_true_run(below) * (sample_sec / 60.0)
-        has_drop = _first_true_run_start(below, drop_run_samples) is not None
-        drop_start_idx = _persistent_drop_start(below, drop_run_samples)
-
-        eval_seg = seg
-        drop_time = None
-        if drop_start_idx is not None and drop_start_idx >= 2:
-            eval_seg = seg.iloc[:drop_start_idx]
-            drop_time = seg.index[drop_start_idx]
-        if eval_seg is None or eval_seg.empty or len(eval_seg) < 2:
-            continue
-
-        eval_st = eval_seg.index[0]
-        eval_en = eval_seg.index[-1]
-        eval_duration_min = ((eval_en - eval_st).total_seconds() + sample_sec) / 60.0
-        eval_level = float(eval_seg.median())
-        core = _plateau_core(
-            eval_seg, eval_level, 0.5 * _step_delta_threshold(eval_level, min_step_delta_rps, min_step_delta_pct)
-        )
-        core_mean = float(core.mean())
-        eval_cv = float(float(core.std(ddof=0)) / max(abs(core_mean), 1e-9))
-        eval_slope = _slope_rps_per_min(core)
-        slope_limit = max(float(max_slope), abs(eval_level) * 0.01)
-        is_stable = (
-            eval_duration_min >= float(min_stable_minutes)
-            and eval_cv <= max_cv
-            and abs(eval_slope) <= slope_limit
-        )
-        segments.append({
-            "start": eval_st,
-            "end": eval_en,
-            "level": eval_level,
-            "duration_min": float(max(eval_duration_min, 0.0)),
-            "cv": eval_cv,
-            "slope_rps_per_min": eval_slope,
-            "slope_limit_rps_per_min": float(slope_limit),
-            "longest_drop_min": float(longest_bad_min),
-            "drop_time": str(drop_time) if drop_time is not None else None,
-            "dip_time": None,
-            "had_drop": bool(has_drop),
-            "after_drop": False,
-            "dip": False,
-            "stable": bool(is_stable),
-            "_down_ref": pending_down_ref,
-            "_level_ref": level_ref,
-        })
-        pending_down_ref = None
-
-    _classify_declines(segments, min_step_delta_rps, min_step_delta_pct)
-    chosen = _select_step_profile_candidate(segments)
-    if not chosen:
-        return None
-    return {
-        "stable_max": float(chosen.get("level", 0.0)),
-        "stable_max_time": str(chosen.get("end")),
-        "stable_duration_min": float(chosen.get("duration_min", min_stable_minutes)),
-        "stable_start_time": str(chosen.get("start")),
-        "method": "step_profile",
-        "step_segments": [
-            {
-                "start": str(seg.get("start")),
-                "end": str(seg.get("end")),
-                "level": float(seg.get("level", 0.0)),
-                "duration_min": float(seg.get("duration_min", 0.0)),
-                "cv": float(seg.get("cv", 0.0)),
-                "slope_rps_per_min": float(seg.get("slope_rps_per_min", 0.0)),
-                "slope_limit_rps_per_min": float(seg.get("slope_limit_rps_per_min", 0.0)),
-                "longest_drop_min": float(seg.get("longest_drop_min", 0.0)),
-                "had_drop": bool(seg.get("had_drop", False)),
-                "drop_time": seg.get("drop_time"),
-                "dip_time": seg.get("dip_time"),
-                "after_drop": bool(seg.get("after_drop", False)),
-                "dip": bool(seg.get("dip", False)),
-                "stable": bool(seg.get("stable", False)),
-            }
-            for seg in segments
-        ],
-    }
-
-
 def _edge_change_pct(col_series: pd.Series) -> Optional[float]:
     """Relative change between the first and the last tenth of the samples."""
     values = col_series.dropna()
@@ -2149,19 +1781,11 @@ def _summarize_time_series_dataframe(
                     series_summary["min_minute_from_start"] = minutes_from(raw_min, start_ts)
             stable = None
             if include_stable_max and bool(det_cfg.get("use_step_profile")):
-                stable = _find_stable_peak_step_profile(
-                    col_series,
-                    min_stable_minutes=min_stable_minutes,
-                    cfg=det_cfg,
-                )
+                stable = find_step_profile(col_series, min_stable_minutes=min_stable_minutes)
                 if stable is None and debug_this_section:
                     logger.info("[RPS_DEBUG][summarize] series='%s' step_profile returned None -> fallback generic", col_name)
             if stable is None and include_stable_max:
-                stable = _find_stable_peak(
-                    col_series,
-                    min_stable_minutes=min_stable_minutes,
-                    max_cv=_cfg_float(det_cfg.get("step_max_cv"), 0.20),
-                )
+                stable = _find_stable_peak(col_series, min_stable_minutes=min_stable_minutes, max_cv=STEP_MAX_CV)
             if stable:
                 series_summary["stable_max"] = stable["stable_max"]
                 # Unshifted bounds match the metric index. Display times below are shifted.
@@ -2198,8 +1822,12 @@ def build_context_pack(
     start_ts: Optional[float] = None,
     anomaly_cfg: Optional[Dict[str, Any]] = None,
     include_stable_max: bool = True,
+    step_detection: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, object]:
     """Формирует компактное описание серий, таблицы по ступеням и аномалий по домену.
+
+    ``step_detection`` is what the step detector derived from the designated RPS series (cadence, noise,
+    threshold, why it found no steps); it is stored with the detector switches as ``stable_detection``.
 
     При переданных ``steps`` аномалии считаются относительно ступеней
     (elasticity / drift / shift), иначе остаётся порог mean+2σ.
@@ -2288,7 +1916,7 @@ def build_context_pack(
         out["load_steps"] = [step.to_dict() for step in steps]
         out["step_table"] = step_table(labeled_dfs, steps, top_n=min(int(top_n), 8))
     if isinstance(stable_detection_cfg, dict) and stable_detection_cfg:
-        out["stable_detection"] = dict(stable_detection_cfg)
+        out["stable_detection"] = {**stable_detection_cfg, **(step_detection or {})}
     return out
 
 
@@ -2322,9 +1950,33 @@ def _labels_with_data(labeled: List[Dict[str, object]]) -> List[str]:
 
 @dataclass(frozen=True)
 class RunSteps:
-    """Load steps of a run and the first moment its designated RPS fell and did not recover."""
+    """Load steps of a run and the first moment its designated RPS fell and did not recover.
+
+    ``detection`` is what the step detector derived from the designated RPS series (``DetectorParams.to_dict``
+    plus ``min_step_minutes`` and the ``reason`` the report fell back to equal time buckets); None when the
+    detector did not run (soak and spike tests, the detector switched off, no RPS series).
+    """
     steps: List[LoadStep]
     rps_drop: Optional[pd.Timestamp]
+    detection: Optional[Dict[str, Any]] = None
+
+
+# Why the report shows equal time buckets although the detector ran (``reason`` of RunSteps.detection).
+REASON_NO_STABLE_STEP = "no_stable_step"
+REASON_FEW_STEPS = "few_steps"
+_RETIRED_KEYS_WARNED: set = set()
+
+
+def _warn_retired_step_keys(sla: Dict[str, Any]) -> None:
+    """Logs once per process the step detector keys of ``sla`` that are no longer read (presets and tuning)."""
+    retired = [key for key in retired_sla_keys(sla) if key not in _RETIRED_KEYS_WARNED]
+    if not retired:
+        return
+    _RETIRED_KEYS_WARNED.update(retired)
+    logger.warning(
+        "SLA keys %s are ignored: the step detector derives its windows and threshold from the RPS series; "
+        "remove them from settings.py (the settings page drops them on save)", ", ".join(sorted(retired)),
+    )
 
 
 def _derive_steps_for_run(
@@ -2338,13 +1990,23 @@ def _derive_steps_for_run(
 ) -> RunSteps:
     """Load steps of the run: step detector on the designated RPS series, else equal time buckets."""
     segments = None
+    detection: Optional[Dict[str, Any]] = None
     rps_series = _designated_rps_series(lt_labeled, perf_label)
     if rps_series is not None and isinstance(stable_cfg, dict) and _cfg_bool(stable_cfg.get("use_step_profile"), default=False):
-        profile = _find_stable_peak_step_profile(rps_series, min_stable_minutes=min_stable_minutes, cfg=stable_cfg)
-        segments = (profile or {}).get("step_segments")
+        found = detect_steps(rps_series, min_stable_minutes=min_stable_minutes)
+        segments = (found.profile or {}).get("step_segments")
+        if found.params is not None:
+            detection = {**found.params.to_dict(), "min_step_minutes": float(min_stable_minutes)}
+            if detection["reason"] is None and found.profile is None:
+                detection["reason"] = REASON_NO_STABLE_STEP
     steps = derive_load_steps(segments, start_ts, end_ts, shift_hours, min_step_minutes=min_stable_minutes)
-    logger.info("Load steps for the run: %d (%s)", len(steps), steps[0].source if steps else "none")
-    return RunSteps(steps=steps, rps_drop=first_rps_drop(segments))
+    if detection is not None and detection["reason"] is None and steps and steps[0].source != "step_detector":
+        detection["reason"] = REASON_FEW_STEPS
+    logger.info(
+        "Load steps for the run: %d (%s), detector %s",
+        len(steps), steps[0].source if steps else "none", detection,
+    )
+    return RunSteps(steps=steps, rps_drop=first_rps_drop(segments), detection=detection)
 
 
 def _baseline_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -2902,82 +2564,11 @@ def _upload_from_llm(
     peak_performance_applicable = profile.peak_performance_applicable
     use_step_profile = resolve_step_detection(profile, sla_early)
     peak_not_applicable_reason = f"not_applicable_for_{profile.test_type or 'this'}_test"
-    preset_raw = str(sla_early.get("step_detection_preset") or "balanced").strip().lower()
-    preset_name = preset_raw if preset_raw in {"strict", "balanced", "lenient"} else "balanced"
-    preset_map: Dict[str, Dict[str, Any]] = {
-        "strict": {
-            "step_detection_resample_sec": 10,
-            "step_detection_smooth_sec": 45,
-            "step_confirm_hold_sec": 240,
-            "step_min_step_delta_rps": 20.0,
-            "step_min_step_delta_pct": 0.10,
-            "step_max_cv": 0.08,
-            "step_max_slope_rps_per_min": 0.35,
-            "step_max_within_step_drop_pct": 0.06,
-            "step_drop_hold_sec": 150,
-        },
-        "balanced": {
-            "step_detection_resample_sec": 15,
-            "step_detection_smooth_sec": 60,
-            "step_confirm_hold_sec": 180,
-            "step_min_step_delta_rps": 8.0,
-            "step_min_step_delta_pct": 0.08,
-            "step_max_cv": 0.10,
-            "step_max_slope_rps_per_min": 0.5,
-            "step_max_within_step_drop_pct": 0.08,
-            "step_drop_hold_sec": 120,
-        },
-        "lenient": {
-            "step_detection_resample_sec": 20,
-            "step_detection_smooth_sec": 90,
-            "step_confirm_hold_sec": 120,
-            "step_min_step_delta_rps": 10.0,
-            "step_min_step_delta_pct": 0.06,
-            "step_max_cv": 0.13,
-            "step_max_slope_rps_per_min": 0.8,
-            "step_max_within_step_drop_pct": 0.12,
-            "step_drop_hold_sec": 90,
-        },
-    }
-    preset = preset_map[preset_name]
+    _warn_retired_step_keys(sla_early)
     lt_stable_cfg: Dict[str, Any] = {
         "use_step_profile": bool(use_step_profile),
-        "step_detection_preset": preset_name,
         "debug_peak_logging": _cfg_bool(sla_early.get("debug_peak_logging"), default=False),
         "debug_target_label": str(sla_early.get("max_performance_query") or "").strip(),
-        "step_detection_resample_sec": _cfg_int(
-            sla_early.get("step_detection_resample_sec", preset["step_detection_resample_sec"]),
-            preset["step_detection_resample_sec"],
-        ),
-        "step_detection_smooth_sec": _cfg_int(
-            sla_early.get("step_detection_smooth_sec", preset["step_detection_smooth_sec"]),
-            preset["step_detection_smooth_sec"],
-        ),
-        "step_confirm_hold_sec": _cfg_int(
-            sla_early.get("step_confirm_hold_sec", preset["step_confirm_hold_sec"]),
-            preset["step_confirm_hold_sec"],
-        ),
-        "step_min_step_delta_rps": _cfg_float(
-            sla_early.get("step_min_step_delta_rps", preset["step_min_step_delta_rps"]),
-            preset["step_min_step_delta_rps"],
-        ),
-        "step_min_step_delta_pct": _cfg_float(
-            sla_early.get("step_min_step_delta_pct", preset["step_min_step_delta_pct"]),
-            preset["step_min_step_delta_pct"],
-        ),
-        "step_max_cv": _cfg_float(sla_early.get("step_max_cv", preset["step_max_cv"]), preset["step_max_cv"]),
-        "step_max_slope_rps_per_min": _cfg_float(
-            sla_early.get("step_max_slope_rps_per_min", preset["step_max_slope_rps_per_min"]),
-            preset["step_max_slope_rps_per_min"],
-        ),
-        "step_max_within_step_drop_pct": _cfg_float(
-            sla_early.get("step_max_within_step_drop_pct", preset["step_max_within_step_drop_pct"]),
-            preset["step_max_within_step_drop_pct"],
-        ),
-        "step_drop_hold_sec": _cfg_int(
-            sla_early.get("step_drop_hold_sec", preset["step_drop_hold_sec"]),
-            preset["step_drop_hold_sec"],
-        ),
     }
     if lt_stable_cfg["debug_peak_logging"]:
         logger.info(
@@ -3103,6 +2694,7 @@ def _upload_from_llm(
             top_n=15,
             min_stable_minutes=min_stable_min,
             stable_detection_cfg=lt_stable_cfg if key == "lt_framework" else None,
+            step_detection=run_steps.detection if key == "lt_framework" else None,
             include_stable_max=(key == "lt_framework" and peak_performance_applicable),
             steps=load_steps,
             start_ts=start_ts,
@@ -3213,6 +2805,7 @@ def _upload_from_llm(
         sla_cfg,
         sla_window if profile.mode != "stability" else None,
         sla_result.get("target_window") if is_capacity_like(profile.mode) else None,
+        detection=run_steps.detection,
     )
     sla_step_ctx = _sla_step_context(sla_result, load_steps, shift_hours)
     for key in domain_keys:
@@ -3266,6 +2859,7 @@ def _upload_from_llm(
             "load_steps": [step.to_dict() for step in load_steps],
             "rps_drop_iso": format_iso(run_steps.rps_drop, shift_hours) if run_steps.rps_drop is not None else None,
             "lt_series_labels": _labels_with_data(domain_data.get("lt_framework", {}).get("labeled") or []),
+            "step_detection": run_steps.detection,
             "timeline": build_timeline(
                 {k: (v.get("pack") or {}) for k, v in domain_data.items() if isinstance(v, dict) and _is_enabled(k)},
                 load_steps,

@@ -167,6 +167,7 @@ def _parse_segments(step_segments: Optional[Sequence[Dict[str, Any]]], min_step_
             parsed.append({
                 "start": to_utc(seg.get("start")),
                 "end": to_utc(seg.get("end")) if seg.get("end") is not None else None,
+                "plateau_start": to_utc(seg.get("plateau_start")) if seg.get("plateau_start") else None,
                 "drop": to_utc(seg.get("drop_time")) if seg.get("drop_time") else None,
                 "level": float(seg.get("level")) if seg.get("level") is not None else None,
                 "stable": (
@@ -231,7 +232,7 @@ def _detector_step(
         start=st, end=en,
         minute_from=minutes_from(st, start_ts), minute_to=minutes_from(en, start_ts),
         rps_level=level, stable=seg["stable"], source="step_detector", shift_hours=shift_hours,
-        plateau_start=max(seg["start"], st) if plateau_end is not None else None,
+        plateau_start=max(seg["plateau_start"] or seg["start"], st) if plateau_end is not None else None,
         plateau_end=plateau_end,
         drop_time=_tail_drop(seg, tail),
         after_drop=seg["after_drop"],
@@ -250,7 +251,7 @@ def derive_load_steps(
 
     Segments come from the step detector for the designated RPS series (keys
     ``start``, ``end``, ``level``, ``stable``, ``duration_min``, ``drop_time``, ``after_drop``,
-    ``dip``). Only segments held for
+    ``dip`` and optionally ``plateau_start``, where the plateau begins after the ramp samples). Only segments held for
     ``min_step_minutes`` become steps; a shorter one joins the step before it, or the
     first step when it precedes all of them. Steps are contiguous so every sample of
     the window belongs to exactly one step.
@@ -636,8 +637,12 @@ def load_step_report_from_frames(
     selected_role: str = "",
     ceiling_level: Any = None,
     ceiling_start: Optional[str] = None,
+    detection: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Per-step RPS level and latency p95 on the plateau, for the report table.
+
+    ``detection`` is what the step detector derived from the RPS series (AI.step_detector.DetectorParams with
+    ``min_step_minutes`` and ``reason``); the table keeps it so the report can state how the steps were found.
 
     ``selected_*`` is the step the SLA verdict was decided on (``selected``). On a step test with a target step
     that row also gets ``sla_role`` (``target`` or ``margin``), and the ceiling (``ceiling_*``: the last step on
@@ -697,6 +702,7 @@ def load_step_report_from_frames(
         "latency_series": lat_name or None,
         "note": _step_note(),
         "steps": rows,
+        **({"detection": dict(detection)} if isinstance(detection, dict) else {}),
     }
 
 

@@ -529,9 +529,9 @@ def _apply_options(params: list[CiParam], cfg: CiSettings) -> list[CiParam]:
 def read_params(generator: Generator, ref: str = "", api=None, sleep: Sleep = time.sleep) -> CiParams:
     assert generator.ci is not None
     if api is None:
-        from .executors.ci import CiExecutor
+        from .executors.ci import ci_api
 
-        api = CiExecutor(generator, events=lambda run_id, index: []).api
+        api = ci_api(generator)
     if generator.ci.kind == "gitlab":
         return read_gitlab(api, generator.ci, ref, sleep)
     return read_jenkins(api, generator.ci, ref)
@@ -540,9 +540,9 @@ def read_params(generator: Generator, ref: str = "", api=None, sleep: Sleep = ti
 def read_refs(generator: Generator, search: str = "", api=None) -> tuple[list[str], str]:
     assert generator.ci is not None
     if api is None:
-        from .executors.ci import CiExecutor
+        from .executors.ci import ci_api
 
-        api = CiExecutor(generator, events=lambda run_id, index: []).api
+        api = ci_api(generator)
     if generator.ci.kind == "gitlab":
         return gitlab_refs(api, generator.ci, search)
     return jenkins_refs(api, generator.ci)

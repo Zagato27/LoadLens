@@ -82,6 +82,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   span where the users (`lt.vus`) or the total RPS (`lt.rps_total`) are above zero inside the process time, so a
   tail where the stand is down and requests hang until their timeout keeps its users. The run message names the
   signal ([docs/running-load-tests.md](docs/running-load-tests.md#a-run-and-its-instances)).
+- **One automatic step detector instead of sensitivity presets.** The detector takes its confirmation window from
+  the data step of the RPS series and the minimum step jump from the noise of its plateaus (at least 2.5 % and
+  1 RPS), so minute and 5-minute buckets are no longer smoothed into each other. Before, the presets fixed the jump
+  in percent: a run of +10 % steps at 3-minute buckets under "strict" (10 %) got two steps instead of ten. A series
+  with no plateaus (two samples per load level) falls back to equal intervals, and RPS that swings between two
+  levels is no longer a stable step. The step row of the report and of the Confluence page says how the steps were
+  found (data step, plateau noise, threshold) or why the report shows equal intervals; the plateau of a step leaves
+  out the ramp samples that open it ([docs/configuration.md](docs/configuration.md)).
+
+### Removed
+
+- **`sla.step_detection_preset` and the step detector tuning keys** (`step_detection_resample_sec`,
+  `step_detection_smooth_sec`, `step_confirm_hold_sec`, `step_min_step_delta_rps`, `step_min_step_delta_pct`,
+  `step_max_cv`, `step_max_slope_rps_per_min`, `step_max_within_step_drop_pct`, `step_drop_hold_sec`) and the
+  "Step detector sensitivity" field of the SLA settings. They are ignored with a warning in the log and dropped when
+  the SLA block is saved; `min_stable_minutes` ("Min. step duration") stays.
 
 ### Fixed
 

@@ -736,3 +736,118 @@ def test_cached_params_reads_once_a_minute(monkeypatch):
     ci_params.cached_params(gen, "release")
     assert calls == ["main", "release"]
     ci_params.clear_cache()
+
+
+# ---- logs are read as a tail; one HTTP session per generator -------------------------------------------------
+
+
+def test_ci_logs_ask_for_the_tail_only():
+    from loadlens_app.load_tests.executors.http import tail_request
+
+    trace = ("x" * 5000 + "end ✓").encode("utf-8")
+    api = FakeApi({
+        ("GET", "/api/v4/projects/perf%2Fload/pipelines/77/jobs"): (200, [{"id": 5}]),
+        ("GET", "/api/v4/projects/perf%2Fload/jobs/5/trace"): (200, None, trace, {"Content-Type": "text/plain; charset=utf-8"}),
+        ("GET", "/job/perf/job/load-test/12/consoleText"): (200, None, b"console " * 100),
+    })
+    executor = CiExecutor(_gen(), events=lambda r, i: [], api=api)
+    text = executor.logs("gitlab:r1:0:77", 100)
+    assert text.endswith("end ✓") and len(text.encode("utf-8")) == 100
+    _method, path, kwargs = api.calls[-1]
+    assert path.endswith("/jobs/5/trace") and kwargs["stream"] is True and kwargs["headers"]["Range"] == "bytes=-100"
+    assert tail_request(100)["ok"] == (200, 206, 416)  # a partial answer and an empty log are not errors
+    jenkins = CiExecutor(_gen(JENKINS, "jenkins"), events=lambda r, i: [], api=api)
+    assert jenkins.logs("jenkins:r1:0:/job/perf/job/load-test/12", 16) == "console console "
+    assert api.calls[-1][2]["headers"]["Range"] == "bytes=-16"
+    assert tail_request(0)["headers"]["Range"] == "bytes=-1"
+
+
+class _StreamedResponse:
+    def __init__(self, chunks, status=200, headers=None):
+        self.chunks, self.status_code, self.headers, self.closed = list(chunks), status, headers or {}, False
+
+    def iter_content(self, chunk_size):
+        yield from self.chunks
+
+    @property
+    def content(self):
+        return b"".join(self.chunks)
+
+    def close(self):
+        self.closed = True
+
+
+def test_response_tail_keeps_the_end_only_and_closes_the_answer():
+    from loadlens_app.load_tests.executors.http import response_tail
+
+    streamed = _StreamedResponse(bytes([65 + i]) * 70_000 for i in range(12))  # 840 KB in 70 KB pieces, A..L
+    assert response_tail(streamed, 65_536) == "L" * 65_536 and streamed.closed
+    partial = _StreamedResponse([b"tail-bytes"], status=206)
+    assert response_tail(partial, 4) == "ytes" and partial.closed  # 206: the server sent the tail itself
+    empty = _StreamedResponse([b"ignored"], status=416)
+    assert response_tail(empty, 4) == "" and empty.closed
+    latin = _StreamedResponse(["caf\u00e9".encode("latin-1")], headers={"Content-Type": "text/plain; charset=latin-1"})
+    assert response_tail(latin, 10) == "caf\u00e9"
+    assert response_tail(_StreamedResponse(["\u2713\u2713".encode("utf-8")]), 4).endswith("\u2713")  # a cut character does not raise
+    assert response_tail(_StreamedResponse([b"ok"], headers={"Content-Type": "text/plain; charset=no-such"}), 9) == "ok"
+    assert response_tail(types.SimpleNamespace(status_code=200, content=b"plain content", headers={}), 7) == "content"
+
+
+def test_response_tail_over_http_with_and_without_range_support():
+    """The real client: a server that ignores Range is streamed, one that honours it answers 206, 416 is empty."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from loadlens_app.load_tests.executors.http import ApiClient, response_tail, tail_request
+
+    body = "".join(f"line {i:06d}\n" for i in range(20_000)).encode()
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            wanted = self.headers.get("Range", "")
+            seen.append((self.path, wanted))
+            if self.path == "/empty":
+                self.send_response(416)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            answer, status = body, 200
+            if self.path == "/ranged" and wanted.startswith("bytes=-"):
+                answer, status = body[-int(wanted[7:]):], 206
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(answer)))
+            self.end_headers()
+            self.wfile.write(answer)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        api = ApiClient(f"http://127.0.0.1:{server.server_address[1]}", name="CI")
+        for path in ("/whole", "/ranged"):
+            text = response_tail(api.request("GET", path, **tail_request(4096)), 4096)
+            assert text == body[-4096:].decode() and text.endswith("line 019999\n"), path
+        assert response_tail(api.request("GET", "/empty", **tail_request(4096)), 4096) == ""
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert [wanted for _, wanted in seen] == ["bytes=-4096"] * 3
+
+
+def test_ci_executors_share_one_http_session_per_generator(monkeypatch):
+    from loadlens_app.load_tests import executors
+
+    monkeypatch.setattr(executors, "_CLIENTS", {})
+    first = executors.default_executor_for(_gen())
+    assert isinstance(first, CiExecutor) and executors.default_executor_for(_gen()).api is first.api
+    assert first.api.session.headers["PRIVATE-TOKEN"] == "API"
+    raw = copy.deepcopy(GITLAB)
+    raw["gitlab"]["api_token"] = "OTHER"
+    assert executors.default_executor_for(_gen(raw)).api is not first.api  # changed settings: a new client
+    jenkins = executors.default_executor_for(_gen(JENKINS, "jenkins"))
+    assert jenkins.api.session.auth == ("bot", "JT")
+    assert executors.default_executor_for(_gen(JENKINS, "jenkins")).api is jenkins.api

@@ -48,6 +48,64 @@ def pem_file(text: str, suffix: str) -> str:
     return path
 
 
+# Job logs of CI grow for the whole test and several pages poll them: they are read as a tail.
+TAIL_CHUNK_BYTES = 64 * 1024
+
+
+def tail_request(max_bytes: int) -> dict[str, Any]:
+    """Keyword arguments of ``ApiClient.request`` for the last ``max_bytes`` of a text answer.
+
+    A server that honours ``Range`` sends the tail alone (206); one that ignores it sends everything, which
+    ``response_tail`` streams without keeping; 416 is an empty log.
+    """
+    return {"ok": (200, 206, 416), "stream": True, "headers": {"Range": f"bytes=-{max(1, int(max_bytes))}"}}
+
+
+def _charset(headers: Any) -> str:
+    """The charset of ``Content-Type``; UTF-8 when it names none (tool output is UTF-8, not Latin-1)."""
+    try:
+        content_type = str((headers or {}).get("Content-Type") or (headers or {}).get("content-type") or "")
+    except Exception:
+        return "utf-8"
+    for part in content_type.split(";")[1:]:
+        name, _, value = part.strip().partition("=")
+        if name.strip().lower() == "charset" and value.strip():
+            return value.strip().strip('"')
+    return "utf-8"
+
+
+def response_tail(response: Any, max_bytes: int) -> str:
+    """The last ``max_bytes`` of an answer as text, holding at most about twice that in memory.
+
+    A streamed answer is read in chunks and only its end is kept; a partial answer (206) is the tail already.
+    The response is closed either way, so its connection goes back to the session.
+    """
+    limit = max(1, int(max_bytes))
+    status = int(getattr(response, "status_code", 200) or 200)
+    try:
+        if status == 416:
+            return ""
+        reader = getattr(response, "iter_content", None)
+        if status == 206 or not callable(reader):
+            raw = bytes(getattr(response, "content", b"") or b"")[-limit:]
+        else:
+            data = bytearray()
+            for chunk in reader(chunk_size=TAIL_CHUNK_BYTES):
+                if chunk:
+                    data += chunk
+                    if len(data) > 2 * limit:
+                        del data[: len(data) - limit]
+            raw = bytes(data[-limit:])
+    finally:
+        close = getattr(response, "close", None)
+        if callable(close):
+            close()
+    try:
+        return raw.decode(_charset(getattr(response, "headers", None)), errors="replace")
+    except LookupError:
+        return raw.decode("utf-8", errors="replace")
+
+
 def _host(url: str) -> str:
     try:
         parts = urlsplit(url)

@@ -88,7 +88,7 @@ and in the area scope a line under the tabs names the services that skip it.
 | `max_error_rate_pct`, `max_p95_ms`, `max_p99_ms` | Limits of the error ratio and the latency percentiles; `error_rate_query`, `p95_query`, `p99_query` name the series |
 | `max_cpu_pct`, `max_memory_pct` | Node limits, read from `cpu_query` and `memory_query` (percent, key `node`). Step and stress tests check them on the target step |
 | `max_performance_query` | The total RPS series of the load tool: the step detector, the stable maximum and the live charts work on it |
-| `step_detection_enabled`, `step_detection_preset`, `min_stable_minutes` | Step detector (step and stress tests only; soak and spike derive their own windows), preset `strict`, `balanced` or `lenient`, shortest plateau that counts |
+| `step_detection_enabled`, `min_stable_minutes` | Step detector (step and stress tests only; soak and spike derive their own windows) and the shortest plateau that counts as a step. The detector has no other settings: it takes its window from the data step and its jump threshold from the plateau noise of the RPS series, and the report states both under the step row. The former `step_detection_preset` and `step_*` keys are ignored and dropped when the SLA block is saved |
 | `target_rps_allow_peak_fallback` | When no stable maximum was found, use the peak RPS of the window as the achieved RPS (default `True`) |
 | `mean_latency_query`, `vus_query`, `latency_unit`, `load_model` | Series and units of the capacity forecast: `latency_unit` is `ms` or `s`; `load_model` is `open` (concurrency = RPS x mean time) or `closed` (concurrency = VUs) |
 | `service_cpu_query` | CPU of one instance as a fraction 0..1, grouped by service and instance: the pod plan of the forecast |

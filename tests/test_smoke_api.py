@@ -19,11 +19,10 @@ from AI import pipeline as pipeline_module
 from loadlens_app import core
 from update_page import _scale_pipeline_percent, _span_percent
 from AI.pipeline import (
-    _find_stable_peak_step_profile,
     _has_meaningful_system_context,
     _reconcile_sla_for_test_profile,
-    _select_step_profile_candidate,
 )
+from AI.step_detector import _select_step_profile_candidate, find_step_profile
 from AI.scoring import parse_llm_analysis_strict
 
 
@@ -320,6 +319,14 @@ def test_post_config_area_override_is_scoped(client):
     runtime = json.loads(core.CONFIG_RUNTIME_PATH.read_text(encoding="utf-8"))
     assert runtime["per_area"]["demo"]["sla"]["target_rps"] == 555
     assert client.get("/config", query_string={"area": "demo"}).get_json()["sla"]["target_rps"] == 555
+
+
+def test_saving_sla_drops_the_former_step_detector_presets(client):
+    data = {"target_rps": 300, "min_stable_minutes": 6, "step_detection_preset": "strict", "step_min_step_delta_pct": 0.1}
+    resp = client.post("/config", json={"section": "sla", "area": "demo", "data": data})
+    assert resp.status_code == 200
+    stored = json.loads(core.CONFIG_RUNTIME_PATH.read_text(encoding="utf-8"))["per_area"]["demo"]["sla"]
+    assert stored == {"target_rps": 300, "min_stable_minutes": 6}
 
 
 def test_test_connection_endpoint(client, monkeypatch):
@@ -1788,20 +1795,9 @@ def test_select_step_profile_candidate_prefers_last_stable_before_unstable():
 def test_step_profile_uses_actual_series_cadence_for_sparse_points():
     idx = pd.date_range("2024-01-01T10:00:00Z", periods=8, freq="5min")
     series = pd.Series([190.0, 191.0, 225.0, 226.0, 225.5, 226.2, 160.0, 150.0], index=idx)
-    cfg = {
-        "step_detection_resample_sec": 20,
-        "step_detection_smooth_sec": 90,
-        "step_confirm_hold_sec": 120,
-        "step_min_step_delta_rps": 8.0,
-        "step_min_step_delta_pct": 0.05,
-        "step_max_cv": 0.20,
-        "step_max_slope_rps_per_min": 2.0,
-        "step_max_within_step_drop_pct": 0.10,
-        "step_drop_hold_sec": 90,
-    }
-    stable = _find_stable_peak_step_profile(series, min_stable_minutes=5.0, cfg=cfg)
+    stable = find_step_profile(series, min_stable_minutes=5.0)
     assert stable is not None
-    assert stable["stable_max"] == pytest.approx(225.625)
+    assert stable["stable_max"] == pytest.approx(225.75)  # median of 225, 226, 225.5, 226.2
     assert stable["method"] == "step_profile"
 
 

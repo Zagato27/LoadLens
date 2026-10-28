@@ -129,10 +129,10 @@ CONFIG = {
         "memory_query": "Nodes: Memory usage (%) by node",
         # Подпись запроса lt_framework, по которой считается stable_max
         "max_performance_query": "LT (InfluxQL): RPS sum by all groups",
+        # Shortest load step; the step detector takes its window and jump threshold from the RPS series itself
         "min_stable_minutes": 5.0,
         "target_rps_allow_peak_fallback": True,
         "step_detection_enabled": True,  # step and stress tests only; soak/spike derive their own steps
-        "step_detection_preset": "balanced",  # strict | balanced | lenient
         "debug_peak_logging": False,
         # Capacity forecast in the report («Прогноз мощностей»)
         "mean_latency_query": "LT (InfluxQL): http_req_duration mean(ms)",
