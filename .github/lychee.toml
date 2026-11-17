@@ -9,6 +9,8 @@ exclude_link_local = true
 exclude = [
   # Example hosts in the docs: gitlab.example.com, k8s.example.com:6443, jenkins.example.com.
   '^https?://([a-z0-9-]+\.)*example\.(ru|com|org|net)([:/]|$)',
+  # The VictoriaMetrics example uses a local service name, not a public website.
+  '^http://victoria:8428(/|$)',
   # Pages that exist only for a signed-in user (new advisory, new discussion) answer 404 to anonymous clients.
   '^https://github\.com/Zagato27/LoadLens/(security/advisories/new|discussions/new|issues/new)',
 ]
