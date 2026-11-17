@@ -19,7 +19,7 @@ atlassian-python-api==3.41.21
 beautifulsoup4==4.15.0
 pydantic==2.14.0
 # Text of PDF and Word documents for filling the system context (Settings → Context)
-pypdf==6.21.1
+pypdf==6.21.4
 python-docx==1.2.0
 # GigaChat LLM provider (llm.provider = "gigachat")
 langchain-core==1.6.8

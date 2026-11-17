@@ -208,6 +208,7 @@ consumers, configuration and the application/worker. Existing stored reports are
 
 ### Fixed
 
+- Update pypdf to 6.21.4 to fix denial-of-service vulnerabilities in malformed PDF parsing used by context imports.
 - Loki error totals and sampled lines stay within the requested test window, including partial first/last
   intervals; adjacent sample intervals no longer repeat a boundary event.
 - Scenario runs whose phases are all excluded or idle return `no_data` instead of assessing those phases again
