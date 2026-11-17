@@ -99,13 +99,28 @@ def build_app_config(logs_cfg: Dict[str, Any], resample_interval: str) -> AppCon
     )
 
 
-def _buckets_to_pack(
+def context_limits(logs_cfg: Dict[str, Any]) -> Dict[str, int]:
+    """How much of the aggregate reaches the model (``logs_source.aggregation.context_*``)."""
+    aggregation_cfg = _cfg_dict(logs_cfg.get("aggregation"))
+    return {
+        "top_intervals": _positive_cfg_int(aggregation_cfg, "context_top_intervals", 12),
+        "top_services_per_interval": _positive_cfg_int(aggregation_cfg, "context_top_services_per_interval", 3),
+        "top_error_types_per_service": _positive_cfg_int(aggregation_cfg, "context_top_error_types_per_service", 3),
+        "top_global_error_types": _positive_cfg_int(aggregation_cfg, "context_top_global_error_types", 25),
+        "samples_per_error_type": _positive_cfg_int(aggregation_cfg, "context_samples_per_error_type", 1),
+        "sample_max_length": _positive_cfg_int(aggregation_cfg, "context_sample_max_length", 160),
+        "error_type_max_length": _positive_cfg_int(aggregation_cfg, "context_error_type_max_length", 180),
+    }
+
+
+def buckets_to_pack(
     app_config: AppConfig,
     buckets: list[Any],
     events_count: int,
     truncated: bool,
     context_limits: Dict[str, int],
 ) -> Dict[str, Any]:
+    """The domain pack: totals, top services and error types, and the busiest intervals with their services."""
     intervals: list[Dict[str, Any]] = []
     total_errors = 0
     affected_services: set[str] = set()
@@ -211,16 +226,6 @@ def collect_application_logs(
     resample_interval: str,
 ) -> Dict[str, Any]:
     app_config = build_app_config(logs_cfg, resample_interval)
-    aggregation_cfg = _cfg_dict(logs_cfg.get("aggregation"))
-    context_limits = {
-        "top_intervals": _positive_cfg_int(aggregation_cfg, "context_top_intervals", 12),
-        "top_services_per_interval": _positive_cfg_int(aggregation_cfg, "context_top_services_per_interval", 3),
-        "top_error_types_per_service": _positive_cfg_int(aggregation_cfg, "context_top_error_types_per_service", 3),
-        "top_global_error_types": _positive_cfg_int(aggregation_cfg, "context_top_global_error_types", 25),
-        "samples_per_error_type": _positive_cfg_int(aggregation_cfg, "context_samples_per_error_type", 1),
-        "sample_max_length": _positive_cfg_int(aggregation_cfg, "context_sample_max_length", 160),
-        "error_type_max_length": _positive_cfg_int(aggregation_cfg, "context_error_type_max_length", 180),
-    }
     start = _to_utc_datetime(start_ts)
     end = _to_utc_datetime(end_ts)
     interval_seconds = parse_resample_interval_seconds(app_config.aggregation.resample_interval)
@@ -238,12 +243,12 @@ def collect_application_logs(
         events_count=len(fetch_result.events),
         truncated=fetch_result.truncated,
     )
-    pack = _buckets_to_pack(
+    pack = buckets_to_pack(
         app_config=app_config,
         buckets=buckets,
         events_count=len(fetch_result.events),
         truncated=fetch_result.truncated,
-        context_limits=context_limits,
+        context_limits=context_limits(logs_cfg),
     )
     ctx = json.dumps(
         {

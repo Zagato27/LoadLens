@@ -136,6 +136,11 @@ stopped by the duration limit, lost, cancelled. Run states: starting, running, s
 building the report, finished, failed to start, cancelled.
 
 - **Start delay** postpones an instance relative to the creation of the run.
+- **Release** (optional, up to 80 characters) marks the report of the run with that release when the report is
+  ready, by the accepted run rule of the archive (the first marked run of a release, service and test type is the
+  accepted one, and a later one takes over unless the accepted run was chosen by hand). CI sends it as `release` in
+  the body of `POST /load_tests`; Repeat copies it, presets do not keep it. A failure to set the mark is logged and
+  does not change the run.
 - **Stop.** "Stop" at an instance or "Stop run" uses the tool's graceful stop when it has one, else the signal of the
   template; a process still alive after `grace_seconds` gets `SIGKILL`. If the generator does not confirm the stop
   within two minutes, LoadLens closes the instance window with a note to check the process by hand.
@@ -223,7 +228,7 @@ service, who started it, instances, time against the limit, RPS of the last 15 m
 ratio, a stop button for your own runs), their number in the status line and a counter next to "Run a test" in the
 top bar. The report starts after the metrics delivery pause; if every job slot is busy it waits, and if the daily AI
 budget is exhausted it is built without the analysis. The New report form uses the same role `lt.rps_total` to
-suggest the windows of tests that were not started from LoadLens (`GET /lt_windows`).
+suggest the windows of tests of the last 30 days that were not started from LoadLens (`GET /lt_windows`).
 
 The optional `lt_generators` domain ("Load generator resources", pack `lt-generators-node-exporter` with matchers
 of the generator hosts) shows whether the generator itself ran out of CPU, memory, network or connections; it is

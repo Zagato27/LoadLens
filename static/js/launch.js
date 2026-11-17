@@ -523,6 +523,8 @@
     // Silent: a "change" here would reload the presets and drop the one being applied.
     if (spec.service && state.picker && state.picker.has(spec.service)) state.picker.setValue(spec.service, { silent: true });
     $('testType').value = spec.test_type || '';
+    // Presets carry no release: applying one keeps the release typed in the form.
+    if (Object.prototype.hasOwnProperty.call(spec, 'release')) $('release').value = spec.release || '';
     $('maxDuration').value = spec.max_duration_min || '';
     $('autoReport').checked = spec.auto_report !== false;
     $('useLlm').checked = spec.use_llm !== false;
@@ -537,6 +539,7 @@
     return {
       service: run.service,
       test_type: run.test_type,
+      release: run.release || '',
       max_duration_min: run.options && run.options.max_seconds ? Math.round(run.options.max_seconds / 60) : null,
       auto_report: !run.options || run.options.auto_report !== false,
       use_llm: !run.options || run.options.use_llm !== false,
@@ -663,6 +666,8 @@
       project_area: LL.activeProjectArea || '',
       test_type: $('testType').value,
       run_name: $('runName').value.trim(),
+      // The watcher marks the report with this release when it is ready (AI/release_marks.py).
+      release: $('release').value.trim(),
       max_duration_min: maxDuration ? Number(maxDuration) : null,
       auto_report: $('autoReport').checked,
       use_llm: $('useLlm').checked,
@@ -812,7 +817,7 @@
     }
   }
 
-  LL.launch = { _internals: { instanceSummary, cardsToCollapse, commandsByIndex, blankSecrets, extraText, ciSpecFromView, ciFieldValue, errorInstance, ciKindTitle, generatorOptions, toolOptions, state } };
+  LL.launch = { _internals: { instanceSummary, cardsToCollapse, commandsByIndex, blankSecrets, extraText, ciSpecFromView, ciFieldValue, errorInstance, ciKindTitle, generatorOptions, toolOptions, runToSpec, state } };
 
   async function init() {
     loadRuns();

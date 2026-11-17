@@ -112,6 +112,33 @@ CREATE TABLE IF NOT EXISTS public.report_verdicts (
 CREATE INDEX IF NOT EXISTS idx_report_verdicts_run_created
     ON public.report_verdicts (run_name, created_at DESC, id DESC);
 
+-- Релизные метки прогонов (AI/release_marks.py): строка на прогон с релизом и/или эталоном сервиса.
+-- Сервис и тип теста копируются из итогового отчёта; принятый прогон один на релиз × сервис × тип,
+-- эталон один на сервис × тип. Строка удаляется, когда у прогона нет ни релиза, ни эталона.
+CREATE TABLE IF NOT EXISTS public.release_marks (
+    run_name        TEXT        PRIMARY KEY,
+    run_id          TEXT        NOT NULL DEFAULT '',
+    service         TEXT        NOT NULL DEFAULT '',
+    test_type       TEXT        NOT NULL DEFAULT '',
+    release         TEXT        NOT NULL DEFAULT '',
+    accepted        BOOLEAN     NOT NULL DEFAULT false,
+    accepted_manual BOOLEAN     NOT NULL DEFAULT false,
+    baseline        BOOLEAN     NOT NULL DEFAULT false,
+    note            TEXT        NOT NULL DEFAULT '',
+    author          TEXT        NOT NULL DEFAULT '',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (release <> '' OR baseline),
+    CHECK (NOT accepted OR release <> '')
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_release_marks_accepted
+    ON public.release_marks (release, service, test_type) WHERE accepted;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_release_marks_baseline
+    ON public.release_marks (service, test_type) WHERE baseline;
+CREATE INDEX IF NOT EXISTS idx_release_marks_release ON public.release_marks (release);
+COMMENT ON TABLE public.release_marks IS 'Release marks of runs: release, accepted run of a release, pinned baseline of a service';
+
 -- ============================================================
 -- Итоги инженера
 -- ============================================================
@@ -234,6 +261,54 @@ CREATE TABLE IF NOT EXISTS public.forecast_explanations (
     inputs_hash TEXT        NOT NULL,
     payload     JSONB       NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ============================================================
+-- AI explanations of run comparisons (cache per pair: A assessed, B baseline)
+-- and their Confluence pages (mirror loadlens_app/compare_*.py)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS public.compare_explanations (
+    run_a       TEXT        NOT NULL,
+    run_b       TEXT        NOT NULL,
+    inputs_hash TEXT        NOT NULL,
+    payload     JSONB       NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (run_a, run_b)
+);
+
+CREATE TABLE IF NOT EXISTS public.compare_publications (
+    run_a          TEXT        NOT NULL,
+    run_b          TEXT        NOT NULL,
+    service        TEXT,
+    page_id        TEXT        NOT NULL,
+    page_url       TEXT,
+    space_key      TEXT,
+    parent_page_id TEXT,
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (run_a, run_b)
+);
+
+-- ============================================================
+-- Releases: the Jira ticket and note of a release and its Confluence page
+-- (mirror AI/release_data.py::ensure_release_tables; the marks of runs live in release_marks)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS public.releases (
+    name       TEXT        PRIMARY KEY,
+    ticket     TEXT        NOT NULL DEFAULT '',
+    note       TEXT        NOT NULL DEFAULT '',
+    author     TEXT        NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.release_publications (
+    release        TEXT        NOT NULL,
+    project_area   TEXT        NOT NULL DEFAULT '',
+    page_id        TEXT        NOT NULL,
+    page_url       TEXT,
+    space_key      TEXT,
+    parent_page_id TEXT,
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (release, project_area)
 );
 
 -- ============================================================

@@ -20,6 +20,17 @@
   худший всплеск. target_rps сравнивается с уровнем всплеска; отдельный критерий recovery —
   возврат задержек к фону. target/recovery нарушены → ``fail``, latency/errors в окне
   всплеска или CPU/memory → ``risk``. Без всплеска → ``no_data``.
+- phases (scenario): the windows are the phases of the run (``lt_pack["phase_profile"]``, AI/phases.py), each
+  threshold takes the worst phase; ``target_rps`` does not apply. Against the phases of the previous scenario run
+  (``lt_pack["phase_reference"]``) two secondary checks: ``phase_completeness`` (every earlier phase ran) and
+  ``phase_duration`` (the largest significant change of a phase duration within the tolerance). Latency/errors
+  ``fail``, CPU/memory and the phase checks ``risk``. Without phases the thresholds are checked on the whole window.
+
+Regression against the baseline run (``apply_regression``, AI/regression.py) comes after the mode verdict and never
+changes it for a report without ``regression_*`` thresholds or without a comparable baseline: the ``regression_*``
+checks (``category = regression``) compare p95, errors and the load reached with the baseline at a comparable load.
+A breached one with ``severity = warning`` turns ``pass`` into ``risk``, a ``critical`` one turns ``pass`` and
+``risk`` into ``fail``; ``fail`` and ``no_data`` stay.
 
 The verdict is a code (AI/verdicts.py). The summary and the rationale are narrative written in the language
 of the report (``format_sla_summary``, ``format_sla_rationale``); the summary is rebuilt from its parts
@@ -38,9 +49,33 @@ from typing import Any, Dict, List, Mapping, Optional
 import pandas as pd
 
 from AI.i18n import get_locale, normalize_lang, t, with_locale
+from AI.regression import (
+    CATEGORY_REGRESSION,
+    REASON_DISABLED,
+    REASON_MODE_UNSUPPORTED,
+    REASON_NO_BASELINE,
+    REASON_NO_BASELINE_SLA,
+    REASON_NO_CHECKS,
+    REASON_NO_VALUE,
+    REASON_OTHER_SERVICE,
+    REASON_OTHER_TYPE,
+    REASONS as REGRESSION_REASONS,
+    REGRESSION_CHECK_NAMES,
+    SEVERITY_CRITICAL,
+    compare_stored,
+    metric_limits as regression_metric_limits,
+    mode_of_test_type,
+    regression_checks,
+    scope_text as regression_scope_text,
+    signed_change,
+    summary_items as regression_summary_items,
+    thresholds_enabled,
+    thresholds_from_sla,
+    unit_text as regression_unit_text,
+)
 from AI.report_texts import LocaleTable, text_lang
 from AI.stability import hold_check
-from AI.test_profile import MODES, mode_of
+from AI.test_profile import MODES, mode_of, normalize_test_type
 from AI.verdicts import FAIL, NO_DATA, PASS, RISK, label as verdict_label, to_code
 
 logger = logging.getLogger(__name__)
@@ -65,7 +100,7 @@ ROLE_MARGIN = "margin"
 @dataclass(frozen=True)
 class StableWindow:
     """Window the SLA is evaluated on: a load step (``kind="step"``), the soak hold window
-    (``"hold"``) or a spike (``"spike"``); ``level`` is its RPS. ``role`` marks the target step
+    (``"hold"``), a spike (``"spike"``) or a scenario phase (``"phase"``); ``level`` is its RPS. ``role`` marks the target step
     (``"target"``) or the margin step (``"margin"``, with ``margin_pct``) of a step test. ``after_drop``
     marks a report step after an RPS drop: evidence of degradation, never a ceiling or a target step."""
 
@@ -116,6 +151,8 @@ def _scope_text(window: Optional[StableWindow]) -> str:
         if window.title:
             return t("sla.scope.spike_named", title=window.title, level=level)
         return t("sla.scope.spike", level=level)
+    if window.kind == "phase":
+        return t("sla.scope.phase", title=window.title, level=level)
     if window.role == ROLE_TARGET:
         return t("sla.scope.target_step", level=level)
     if window.role == ROLE_MARGIN:
@@ -128,11 +165,14 @@ def _empty_scope_text(window: StableWindow, query: str) -> str:
         return t("sla.check.empty_hold", query=query)
     if window.kind == "spike":
         return t("sla.check.empty_spike", query=query)
+    if window.kind == "phase":
+        return t("sla.check.empty_phase", query=query)
     return t("sla.check.empty_step", query=query)
 
 
 SLA_CHECK_NAMES = (
     "target_rps", "target_margin", "error_rate", "p95_latency", "p99_latency", "cpu_usage", "memory_usage", "recovery",
+    "phase_completeness", "phase_duration", *REGRESSION_CHECK_NAMES,
 )
 # Names of the checks (sla.check_title.*) in the language of the report being built.
 SLA_CHECK_TITLES = LocaleTable(SLA_CHECK_NAMES, lambda name: t(f"sla.check_title.{name}"))
@@ -164,7 +204,7 @@ def _format_check_line(check: Dict[str, Any], lang: Optional[str] = None) -> str
 ADJUST_RESOURCES = "resources_are_risks"
 ADJUST_TREND = "adverse_trend"
 # Parts of the summary by mode: modes with a note of their own and the names of the summary lists.
-_MODE_NOTES = ("stability", "spike")
+_MODE_NOTES = ("stability", "spike", "phases")
 _SUMMARY_LISTS = ("passed", "failed", "unknown")
 # Fields of ``headroom`` the summary is rebuilt from.
 _HEADROOM_SUMMARY_KEYS = ("role", "verdict_level", "margin_pct", "ceiling_level", "ratio", "above_target_failed")
@@ -290,6 +330,43 @@ def _headroom_items(headroom: Mapping[str, Any], lang: str) -> List[str]:
     return items
 
 
+def _regression_reason_text(reason: Any, lang: str) -> str:
+    code = str(reason or "")
+    return t(f"sla.regression.reason.{code}" if code in REGRESSION_REASONS else "sla.regression.reason.no_value", locale=lang)
+
+
+def _regression_summary_text(regression: Mapping[str, Any], lang: str) -> str:
+    """Summary item of the regression part: the breached deltas against the baseline, «no regression», or why there
+    was nothing to compare (only when a regression threshold is set: ``summary_parts`` has no part otherwise)."""
+    if regression.get("reason"):
+        return t("sla.summary.regression_skipped", locale=lang, reason=_regression_reason_text(regression.get("reason"), lang))
+    run = str(regression.get("baseline_run") or "")
+    scope = regression_scope_text(regression.get("kind"), regression.get("level"), lang)
+    scope_part = f" {scope}" if scope else ""
+    items = [item for item in regression.get("items") or [] if isinstance(item, Mapping)]
+    failed = [item for item in items if item.get("passed") is False]
+    if failed:
+        names = ", ".join(
+            "{name} {change} {unit}".format(
+                name=t(f"sla.regression.short.{_regression_short_key(item)}", locale=lang),
+                change=signed_change(item.get("change")),
+                unit=regression_unit_text(str(item.get("unit") or ""), lang),
+            )
+            for item in failed
+        )
+        return t("sla.summary.regression", locale=lang, run=run, scope=scope_part, items=names)
+    if any(item.get("passed") is True for item in items):
+        return t("sla.summary.regression_ok", locale=lang, run=run, scope=scope_part)
+    return ""
+
+
+def _regression_short_key(item: Mapping[str, Any]) -> str:
+    metric = str(item.get("metric") or "")
+    if metric == "p95" and item.get("stat") == "p99":
+        return "p99"
+    return metric if metric in ("p95", "errors", "capacity") else "p95"
+
+
 def format_sla_summary(parts: Mapping[str, Any], lang: Optional[str] = None) -> str:
     """Summary 'SLA verdict: <label>. Passed: …; Breached: …; <target step and headroom>; <mode note>;
     <adjustments>' in ``lang`` (default: the current locale)."""
@@ -308,6 +385,13 @@ def format_sla_summary(parts: Mapping[str, Any], lang: Optional[str] = None) -> 
         items.append(t(f"sla.summary.mode_{mode}", locale=lang, fail=fail_label))
     if mode == "spike" and parts.get("spike_detected") is False:
         items.append(t("sla.summary.no_spike", locale=lang))
+    if mode == "phases" and parts.get("spike_detected") is False:
+        items.append(t("sla.summary.no_phases", locale=lang))
+    regression = parts.get("regression")
+    if isinstance(regression, Mapping):
+        text = _regression_summary_text(regression, lang)
+        if text:
+            items.append(text)
     items.extend(_adjustment_text(item, lang, fail_label) for item in parts.get("adjustments") or [] if isinstance(item, Mapping))
     head = t("sla.summary.head", locale=lang, label=verdict_label(parts.get("verdict"), lang))
     return head + " " + "; ".join(items)
@@ -735,6 +819,23 @@ def _worst_series_p95(df: pd.DataFrame, start: Optional[pd.Timestamp] = None, en
     return best, best_name
 
 
+def _breach_minutes(df: pd.DataFrame, series: Optional[str], start: pd.Timestamp, end: pd.Timestamp, threshold: float) -> Optional[float]:
+    """How long ``series`` stays above ``threshold`` inside the window: its points over it times the data interval
+    (the same buckets ``_worst_series_p95`` reads)."""
+    if df is None or df.empty or not isinstance(df.index, pd.DatetimeIndex) or series is None:
+        return None
+    column = next((col for col in df.columns if str(col) == series), None)
+    if column is None:
+        return None
+    idx = pd.DatetimeIndex(df.index)
+    idx = idx.tz_localize("UTC") if idx.tz is None else idx.tz_convert("UTC")
+    width = _bin_width(idx)
+    values = pd.Series(pd.to_numeric(df[column], errors="coerce").to_numpy(), index=idx)
+    values = values[(values.index >= start) & (values.index + width <= end)].dropna()
+    step = width.total_seconds() / 60.0 if width > pd.Timedelta(0) else 1.0
+    return round(int((values > threshold).sum()) * step, 2)
+
+
 def _labeled_frame(labeled: Any, query: str) -> Optional[pd.DataFrame]:
     if not isinstance(labeled, list):
         return None
@@ -809,7 +910,7 @@ def _check_by_query_label(
         )
     passed = actual <= threshold
     series_note = t("sla.check.series_note", series=series) if series else ""
-    return _make_check(
+    check = _make_check(
         name=name,
         threshold=threshold,
         actual=round(actual, 3),
@@ -822,6 +923,11 @@ def _check_by_query_label(
         query_label=source_label,
         series=series,
     )
+    if not passed and window is not None and window.kind == "phase" and start is not None and end is not None:
+        # A phase is a few minutes long, so its 95th percentile is about its worst minute: how long the threshold
+        # stayed broken decides between a failure and a short excursion (``_phase_checks``).
+        check["breach_min"] = _breach_minutes(frame, series, start, end, threshold)
+    return check
 
 
 def _make_check(
@@ -1071,12 +1177,14 @@ def _stability_checks(
 
 
 def _worst_check(candidates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """The check of the worst window: a failed one with the highest value, else the highest value."""
+    """The check of the worst window: a failed one with the highest value (a sustained failure before a short
+    excursion of a phase), else the highest value."""
     if not candidates:
         return None
     failed = [c for c in candidates if c.get("passed") is False and c.get("actual") is not None]
-    if failed:
-        return max(failed, key=lambda c: float(c["actual"]))
+    sustained = [c for c in failed if not c.get("brief")]
+    if sustained or failed:
+        return max(sustained or failed, key=lambda c: float(c["actual"]))
     measured = [c for c in candidates if c.get("actual") is not None]
     if measured:
         return max(measured, key=lambda c: float(c["actual"]))
@@ -1194,6 +1302,140 @@ def _spike_checks(
     return checks, top, detected
 
 
+def _phase_windows(lt_pack: Dict[str, Any]) -> tuple[Dict[str, Any], List[Dict[str, Any]], List[StableWindow]]:
+    profile = lt_pack.get("phase_profile") if isinstance(lt_pack, dict) else None
+    profile = profile if isinstance(profile, dict) else {}
+    phases = [
+        item for item in (profile.get("phases") or [])
+        if isinstance(item, dict) and not item.get("idle") and not item.get("excluded")
+        and item.get("start_utc") and item.get("end_utc")
+    ]
+    windows = [
+        StableWindow(
+            start=str(item["start_utc"]), end=str(item["end_utc"]), level=float(item.get("rps_mean") or 0.0),
+            series=str(profile.get("label_key") or ""), label=str(profile.get("source_label") or ""),
+            kind="phase", title=str(item.get("label") or item.get("title") or ""),
+        )
+        for item in phases
+    ]
+    return profile, phases, windows
+
+
+def _phase_verdict(checks: List[Dict[str, Any]]) -> str:
+    failed = [c for c in checks if c.get("passed") is False]
+    if any(_fails_run(c) for c in failed):
+        return FAIL
+    if failed:
+        return RISK
+    return PASS if any(c.get("passed") is True for c in checks) else NO_DATA
+
+
+def _phase_reference_checks(profile: Dict[str, Any], phases: List[Dict[str, Any]], lt_pack: Dict[str, Any], sla_config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Completeness and phase durations against the phases of the previous scenario run (secondary)."""
+    from AI.phases import compare_phase_lists, phase_settings
+
+    reference = lt_pack.get("phase_reference") if isinstance(lt_pack, dict) else None
+    if not isinstance(reference, dict) or not reference.get("phases") or not profile.get("detected"):
+        return []
+    settings = phase_settings(sla_config)
+    run = str(reference.get("run_name") or "")
+    comparison = compare_phase_lists(reference["phases"], phases, settings.min_minutes, int(profile.get("interval_sec") or 60), settings)
+    missing = comparison["missing"]
+    ref_count = sum(
+        1 for item in reference["phases"]
+        if isinstance(item, dict) and not item.get("idle") and not item.get("excluded") and not settings.excludes(item)
+    )
+    checks = [_make_check(
+        name="phase_completeness", threshold=0, actual=len(missing), passed=not missing, severity="warning",
+        category="secondary",
+        message=(
+            t("sla.phases.missing", run=run, phases=", ".join(str(item.get("label") or item.get("title")) for item in missing))
+            if missing else t("sla.phases.complete", run=run, count=ref_count)
+        ),
+    )]
+    worst = comparison["worst_duration"]
+    tolerance = settings.duration_tolerance_pct
+    if worst is None:
+        if comparison["durations"]:
+            checks.append(_make_check(
+                name="phase_duration", threshold=tolerance, actual=0.0, passed=True, category="secondary",
+                message=t("sla.phases.duration_same", run=run),
+            ))
+        return checks
+    change = float(worst["change_pct"])
+    checks.append(_make_check(
+        name="phase_duration", threshold=tolerance, actual=round(abs(change), 1), passed=abs(change) <= tolerance,
+        severity="warning", category="secondary",
+        message=t(
+            "sla.phases.duration", title=str(worst.get("label") or worst.get("title") or ""),
+            reference=f"{float(worst['reference_min']):g}", current=f"{float(worst['current_min']):g}",
+            change=f"{change:+.0f}", tolerance=f"{tolerance:g}", run=run,
+        ),
+    ))
+    return checks
+
+
+def _phase_checks(
+    sla_config: Dict[str, Any],
+    lt_pack: Dict[str, Any],
+    lt_labeled: Any,
+    hr_labeled: Any,
+) -> tuple[List[Dict[str, Any]], Optional[StableWindow], bool, List[Dict[str, Any]]]:
+    """Checks of a scenario run: every threshold on its worst phase, then the phase checks against the reference.
+
+    Returns the checks, the window of the worst failed check (the phase the verdict points at; None when every
+    phase holds), whether phases were found and the verdict of every phase (``phase_results``).
+    """
+    from AI.phases import phase_settings
+
+    settings = phase_settings(sla_config)
+    profile, phases, windows = _phase_windows(lt_pack)
+    detected = bool(profile.get("detected")) and bool(windows)
+    if not windows:
+        if profile.get("phases"):
+            # Detected phases may all be excluded (or idle). Do not evaluate those same windows again via
+            # the missing-phase fallback: an exclusion must never turn into a failing whole-run check.
+            return [], None, bool(profile.get("detected")), []
+        checks = _checks_for_window(sla_config, PRIMARY_SPECS, lt_labeled, None, "primary")
+        checks.extend(_checks_for_window(sla_config, SECONDARY_SPECS, hr_labeled, None, "secondary"))
+        return checks, None, False, []
+    per_phase: List[tuple[Dict[str, Any], StableWindow, List[Dict[str, Any]]]] = []
+    window_of: Dict[int, StableWindow] = {}
+    for phase, window in zip(phases, windows):
+        phase_checks = _checks_for_window(sla_config, PRIMARY_SPECS, lt_labeled, window, "primary")
+        phase_checks.extend(_checks_for_window(sla_config, SECONDARY_SPECS, hr_labeled, window, "secondary"))
+        for check in phase_checks:
+            _mark_brief(check, settings.breach_minutes)
+        per_phase.append((phase, window, phase_checks))
+        for check in phase_checks:
+            window_of[id(check)] = window
+    checks: List[Dict[str, Any]] = []
+    for name, *_ in (*PRIMARY_SPECS, *SECONDARY_SPECS):
+        worst = _worst_check([check for _, _, items in per_phase for check in items if check["name"] == name])
+        if worst is not None:
+            checks.append(worst)
+    failed = [c for c in checks if c.get("passed") is False]
+    pick = (
+        next((c for c in failed if _fails_run(c)), None)
+        or next((c for c in failed if _is_primary(c)), None)
+        or (failed[0] if failed else None)
+    )
+    window = window_of.get(id(pick)) if pick is not None else None
+    results = [
+        {
+            "index": phase.get("index"),
+            "label": phase.get("label"),
+            "key": phase.get("key"),
+            "verdict": _phase_verdict(items),
+            "failed": [str(c["name"]) for c in items if c.get("passed") is False],
+            "worst": window is not None and phase_window is window,
+        }
+        for phase, phase_window, items in per_phase
+    ]
+    checks.extend(_phase_reference_checks(profile, phases, lt_pack, sla_config))
+    return checks, window, detected, results
+
+
 def _capacity_verdict(checks: List[Dict[str, Any]]) -> str:
     rps_check = next((c for c in checks if c["name"] == "target_rps"), None)
     others = [c for c in checks if c["name"] != "target_rps"]
@@ -1223,6 +1465,20 @@ def _is_primary(check: Mapping[str, Any]) -> bool:
     return str(check.get("category") or "primary") == "primary"
 
 
+def _fails_run(check: Mapping[str, Any]) -> bool:
+    """A broken primary threshold fails the run, unless it is a short excursion inside a phase (a risk)."""
+    return _is_primary(check) and not check.get("brief")
+
+
+def _mark_brief(check: Dict[str, Any], breach_minutes: float) -> None:
+    """Marks a failed primary check of a phase whose threshold stayed broken shorter than ``breach_minutes``."""
+    breach = check.get("breach_min")
+    if check.get("passed") is not False or not _is_primary(check) or breach is None or breach >= breach_minutes:
+        return
+    check["brief"] = True
+    check["message"] = f"{check.get('message') or ''} {t('sla.phases.brief', minutes=f'{float(breach):g}', limit=f'{breach_minutes:g}')}".strip()
+
+
 def _verdict_for_mode(mode: str, checks: List[Dict[str, Any]], detected: bool = True) -> str:
     """Deterministic verdict code by the policy of the test-profile mode (see module docstring)."""
     if mode in {"capacity", "stress"}:
@@ -1238,7 +1494,7 @@ def _verdict_for_mode(mode: str, checks: List[Dict[str, Any]], detected: bool = 
         if failed:
             return RISK
         return PASS if all_passed else NO_DATA
-    if any(_is_primary(c) for c in failed):
+    if any(_fails_run(c) for c in failed):
         return FAIL
     if failed:
         return RISK
@@ -1290,11 +1546,14 @@ def _evaluate_sla(
     detected = True
     verdict_window: Optional[StableWindow] = None
     headroom: Optional[Dict[str, Any]] = None
+    phase_results: Optional[List[Dict[str, Any]]] = None
 
     if test_mode == "stability":
         checks, window = _stability_checks(sla_config, target_rps, lt_pack, lt_labeled, hr_labeled)
     elif test_mode == "spike":
         checks, window, detected = _spike_checks(sla_config, target_rps, lt_pack, lt_labeled, hr_labeled)
+    elif test_mode == "phases":
+        checks, window, detected, phase_results = _phase_checks(sla_config, lt_pack, lt_labeled, hr_labeled)
     else:
         checks, window, verdict_window, headroom = _capacity_checks(
             sla_config, target_rps, perf_query, lt_pack, lt_labeled, hr_labeled,
@@ -1330,6 +1589,8 @@ def _evaluate_sla(
         result["target_window"] = verdict_window.to_dict()
     if headroom is not None:
         result["headroom"] = headroom
+    if phase_results is not None:
+        result["phase_results"] = phase_results
     return result
 
 
@@ -1376,3 +1637,128 @@ def _capacity_checks(
     if target_rps is not None and window is not None and verdict_window is not None:
         headroom = _headroom(sla_config, target_rps, margin_pct, window, verdict_window, hr_labeled, secondary)
     return checks, window, verdict_window, headroom
+
+
+def _apply_regression(verdict: Any, checks: List[Mapping[str, Any]]) -> str:
+    """Verdict code after the regression checks: a breached ``warning`` one turns ``pass`` into ``risk``, a breached
+    ``critical`` one turns ``pass`` and ``risk`` into ``fail``; ``fail`` and ``no_data`` stay."""
+    code = to_code(verdict)
+    if code in (FAIL, NO_DATA):
+        return code
+    failed = [
+        check for check in checks
+        if isinstance(check, Mapping) and str(check.get("category") or "") == CATEGORY_REGRESSION and check.get("passed") is False
+    ]
+    if any(str(check.get("severity") or "") == SEVERITY_CRITICAL for check in failed):
+        return FAIL
+    if failed and code == PASS:
+        return RISK
+    return code
+
+
+# Reasons a comparison is recorded in sla_details.regression without a summary item: scenario runs have their own
+# reference run, a run without checks has no summary to extend.
+_SILENT_REGRESSION_REASONS = (REASON_MODE_UNSUPPORTED, REASON_NO_CHECKS)
+
+
+def _type_mode(test_type: Any) -> str:
+    return mode_of_test_type(normalize_test_type(str(test_type or "")) or test_type)
+
+
+def apply_regression(
+    result: Optional[Mapping[str, Any]],
+    baseline: Optional[Mapping[str, Any]],
+    sla_config: Optional[Mapping[str, Any]],
+    lang: Optional[str] = None,
+    *,
+    step_table: Optional[Mapping[str, Any]] = None,
+    service: str = "",
+) -> Dict[str, Any]:
+    """Adds the regression against the baseline run to an SLA result (``evaluate_sla``) and recomputes its verdict.
+
+    ``baseline``: ``{available, run_name, run_id, release, mode, service, test_type, sla_details}`` (the baseline of
+    the model context and its stored final row). ``step_table`` is the load-step table of the run (the source of p95
+    and errors per step). Without ``regression_*`` thresholds the result only gets ``regression = {available: false,
+    reason: disabled}``: checks, verdict and summary stay as they are. Otherwise the ``regression_*`` checks are
+    appended, the verdict goes through ``_apply_regression`` and ``summary_parts.regression`` rebuilds the summary in
+    ``lang``. ``regression`` records the comparison (or the reason there was none) for ``sla_details``.
+    """
+    out = dict(result or {})
+    thresholds = thresholds_from_sla(sla_config)
+    if not thresholds_enabled(thresholds):
+        out["regression"] = {"available": False, "reason": REASON_DISABLED}
+        return out
+    checks = [dict(item) for item in out.get("checks") or [] if isinstance(item, Mapping)]
+    if not checks or not isinstance(out.get("summary_parts"), Mapping):
+        out["regression"] = {"available": False, "reason": REASON_NO_CHECKS}
+        return out
+    lang = normalize_lang(lang) or get_locale()
+    base = baseline if isinstance(baseline, Mapping) else {}
+    base_details = base.get("sla_details") if isinstance(base.get("sla_details"), Mapping) else {}
+    mode = str(out.get("test_mode") or "capacity")
+    record: Dict[str, Any] = {
+        "available": False,
+        "baseline_run_name": str(base.get("run_name") or ""),
+        "baseline_run_id": str(base.get("run_id") or ""),
+        "baseline_release": str(base.get("release") or ""),
+        "mode": str(base.get("mode") or ""),
+    }
+    reason = ""
+    comparison: Optional[Dict[str, Any]] = None
+    if mode == "phases":
+        reason = REASON_MODE_UNSUPPORTED
+    elif not base.get("available") or not record["baseline_run_name"]:
+        reason = REASON_NO_BASELINE
+    elif not base_details.get("checks"):
+        reason = REASON_NO_BASELINE_SLA
+    elif not str(service or "").strip() or str(base.get("service") or "").strip() != str(service).strip():
+        reason = REASON_OTHER_SERVICE
+    elif _type_mode(base.get("test_type")) != mode:
+        reason = REASON_OTHER_TYPE
+    else:
+        current: Dict[str, Any] = {key: out.get(key) for key in ("stable_window", "target_window", "headroom")}
+        current["checks"] = checks
+        if isinstance(step_table, Mapping):
+            current["load_step_table"] = step_table
+        comparison = compare_stored(current, base_details, mode, thresholds)
+        if not comparison.get("available"):
+            reason = str(comparison.get("reason") or "")
+    new_checks: List[Dict[str, Any]] = []
+    if comparison is not None:
+        record.update({key: comparison.get(key) for key in ("level", "kind", "step_label", "items", "skipped")})
+        if not reason:
+            new_checks = regression_checks(comparison, thresholds, lang, baseline_run=record["baseline_run_name"], mode=mode)
+            if not new_checks:
+                # Thresholds are set only for metrics that could not be compared.
+                limited = [
+                    item for item in comparison.get("skipped") or []
+                    if any(limit is not None for limit in regression_metric_limits(str(item.get("metric") or ""), thresholds))
+                ]
+                reason = str(limited[0].get("reason") or "") if limited else REASON_NO_VALUE
+    record["available"] = not reason
+    if reason:
+        record["reason"] = reason
+    out["regression"] = record
+    if reason in _SILENT_REGRESSION_REASONS:
+        return out
+    parts = summary_parts_from_checks(out)
+    if reason:
+        parts["regression"] = {"baseline_run": record["baseline_run_name"], "reason": reason}
+    else:
+        parts["regression"] = {
+            "baseline_run": record["baseline_run_name"],
+            "baseline_release": record["baseline_release"],
+            "mode": record["mode"],
+            "level": record.get("level"),
+            "kind": record.get("kind"),
+            "items": regression_summary_items(comparison or {}),
+        }
+    verdict = _apply_regression(out.get("verdict"), new_checks)
+    parts["verdict"] = verdict
+    out["checks"] = [*checks, *new_checks]
+    out["verdict"] = verdict
+    out["summary_parts"] = parts
+    out["summary"] = format_sla_summary(parts, lang)
+    if verdict != to_code(result.get("verdict") if isinstance(result, Mapping) else None):
+        logger.info("SLA verdict after the regression against '%s': %s", record["baseline_run_name"], verdict)
+    return out

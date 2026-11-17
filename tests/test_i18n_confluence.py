@@ -184,7 +184,7 @@ def stored_language_of(rows):
 
 
 def test_a_manual_verdict_and_the_window_notes_follow_the_locale():
-    row = {**_rows("en")[0], "manual_verdict": {"verdict": "pass", "author": "ivanov", "changed_at": "2026-10-17T12:20:00Z", "reason": "generator fault"}}
+    row = {**_rows("en")[0], "manual_verdict": {"verdict": "pass", "author": "engineer1", "changed_at": "2026-10-17T12:20:00Z", "reason": "generator fault"}}
     with with_locale("en"):
         body = confluence_export.render_llm_domain_body(row)
         hold = confluence_export.sla_window_note({"kind": "hold", "start": "2024-03-09T16:10:00+00:00", "end": "2024-03-09T16:20:00+00:00", "level": 300}, STEP_TABLE)
@@ -192,7 +192,7 @@ def test_a_manual_verdict_and_the_window_notes_follow_the_locale():
         stable = confluence_export.sla_window_note({"level": 300}, {"steps": []})
         empty = confluence_export.sla_criteria_block({"domain": "final"})
     assert "<th>Verdict</th><td>Passed</td>" in body and "<th>Automatic verdict</th><td>Risks found</td>" in body
-    assert "ivanov, 2026-10-17 12:20 UTC. Reason: generator fault" in body
+    assert "engineer1, 2026-10-17 12:20 UTC. Reason: generator fault" in body
     assert hold == "SLA checked on the hold window 19:10–19:20, mean RPS 300."
     assert spike == "SLA checked in the spike windows: the worst spike for each threshold."
     assert stable == "SLA checked on a stable step, window RPS 300."

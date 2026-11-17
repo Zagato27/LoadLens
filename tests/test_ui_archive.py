@@ -118,7 +118,9 @@ def test_runs_rows_carry_project_area_max_rps_and_type_key(client, monkeypatch):
     assert first["test_type"] == "Stability" and first["test_type_key"] == "soak"
     assert second["max_rps"] is None and second["project_area"] == "" and second["test_type_key"] == ""
     page_sql, _ = conn.log[0]
-    assert "project_area, max_rps, COUNT(*) OVER () AS total, manual_verdict, manual_reason, manual_author, manual_changed_at FROM joined" in page_sql
+    assert ("project_area, max_rps, COUNT(*) OVER () AS total, manual_verdict, manual_reason, manual_author, manual_changed_at, "
+            "release, release_accepted, baseline FROM joined") in page_sql
+    assert first["release"] == "" and first["release_accepted"] is False and first["baseline"] is False
     assert "->'peak_performance'->>'max_rps'" in page_sql
     assert "->'stability_under_load'->>'actual_rps'" in page_sql
     assert "->'spike_analysis'->>'max_spike_rps'" in page_sql
@@ -240,7 +242,7 @@ def test_compare_baseline_uses_service_area_type_and_time_of_the_run(client, mon
     assert resp.status_code == 200
     assert resp.get_json() == {
         "run_name": "nightly-0", "service": "checkout", "verdict": "pass",
-        "created_at": END.isoformat(), "mode": "previous",
+        "created_at": END.isoformat(), "mode": "previous", "release": "",
     }
     assert calls == [{
         "exclude_run_name": "nightly-1", "mode": "previous", "service": "checkout", "before": created,

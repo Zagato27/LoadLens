@@ -23,7 +23,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from loadlens_app import core  # noqa: E402  (before anything that imports update_page)
 from loadlens_app import celery_app as celery_module, job_runner, jobs, tasks  # noqa: E402
-from loadlens_app.blueprints import dashboard, forecast as forecast_api  # noqa: E402
+from loadlens_app.blueprints import compare as compare_api, dashboard, forecast as forecast_api  # noqa: E402
 from loadlens_app.limits import LimitError  # noqa: E402
 from tests.test_perf_job_store import JobsTable  # noqa: E402
 
@@ -105,13 +105,13 @@ def celery_mode(monkeypatch):
 
 
 class Broker:
-    """Stands in for apply_async of the three tasks; ``error`` makes every send fail with it."""
+    """Stands in for apply_async of the four tasks; ``error`` makes every send fail with it."""
 
     def __init__(self, monkeypatch):
         self.sent = []
         self.error = None
         self.on_send = None
-        for task in (tasks.report_task, tasks.publish_confluence_task, tasks.publish_forecast_task):
+        for task in (tasks.report_task, tasks.publish_confluence_task, tasks.publish_forecast_task, tasks.publish_compare_task):
             monkeypatch.setattr(task, "apply_async", self._sender(task.name))
 
     def _sender(self, name):
@@ -561,7 +561,7 @@ def test_soft_time_limit_in_a_thread_job_gives_the_same_error(web, threads, monk
 
 def test_report_tasks_carry_the_time_limits_and_ignore_results():
     soft, hard = celery_module.report_task_time_limits()
-    for name in ("loadlens.report", "loadlens.publish_confluence", "loadlens.publish_forecast"):
+    for name in ("loadlens.report", "loadlens.publish_confluence", "loadlens.publish_forecast", "loadlens.publish_compare"):
         task = tasks.celery_app.tasks[name]
         assert (task.soft_time_limit, task.time_limit, task.ignore_result) == (soft, hard, True)
         assert celery_module.celery_app.amqp.router.route({}, name)["queue"].name == "reports"
@@ -707,6 +707,54 @@ def test_a_failed_forecast_publication_in_the_worker_names_the_stage(web, worker
     deliver(monkeypatch, worker, broker.sent[0].name, broker.sent[0].kwargs)
 
     row = table.rows[job.job_id]
+    assert (row["status"], row["message"], row["error"]) == ("error", "Ошибка на этапе «Загрузка вложений»", "Confluence returned 500")
+
+
+@pytest.fixture
+def compare_pages(monkeypatch):
+    published = []
+
+    def fake_publish(run_a, run_b, source_url, progress):
+        progress("Сбор сравнения", 10)
+        published.append((run_a, run_b, source_url))
+        return {"page_id": "8", "page_url": "http://wiki/8"}
+
+    monkeypatch.setattr(compare_api, "publish_comparison", fake_publish)
+    return published
+
+
+def test_compare_publication_route_sends_the_job_to_the_worker(client, web, worker, broker, celery_mode, compare_pages, monkeypatch, refreshes, table):
+    response = client.post("/compare_confluence", json={"run_a": "nightly 2", "run_b": "nightly-1"})
+
+    assert response.status_code == 200
+    body = response.get_json()
+    [sent] = broker.sent
+    assert sent.name == "loadlens.publish_compare" and sent.options["queue"] == "reports"
+    assert sent.kwargs == {
+        "job_id": body["job_id"], "run_a": "nightly 2", "run_b": "nightly-1",
+        "source_url": "http://localhost/compare?run_a=nightly+2&run_b=nightly-1",
+    }
+    assert table.rows[body["job_id"]]["runner"] == jobs.JOB_RUNNER_CELERY
+    assert compare_pages == []
+
+    deliver(monkeypatch, worker, sent.name, sent.kwargs)
+
+    row = table.rows[body["job_id"]]
+    assert (row["status"], row["page_url"], row["page_id"], row["kind"]) == ("done", "http://wiki/8", "8", "compare_confluence")
+    assert row["report_url"] == "/compare?run_a=nightly+2&run_b=nightly-1"
+    assert compare_pages == [("nightly 2", "nightly-1", "http://localhost/compare?run_a=nightly+2&run_b=nightly-1")]
+
+
+def test_a_failed_compare_publication_in_the_worker_names_the_stage(client, web, worker, broker, celery_mode, monkeypatch, refreshes, table):
+    def failing(run_a, run_b, source_url, progress):
+        progress("Загрузка вложений", 60)
+        raise RuntimeError("Confluence returned 500")
+
+    monkeypatch.setattr(compare_api, "publish_comparison", failing)
+    body = client.post("/compare_confluence", json={"run_a": "a", "run_b": "b"}).get_json()
+    deliver(monkeypatch, worker, broker.sent[0].name, broker.sent[0].kwargs)
+
+    row = table.rows[body["job_id"]]
     assert (row["status"], row["message"], row["error"]) == ("error", "Ошибка на этапе «Загрузка вложений»", "Confluence returned 500")
 
 

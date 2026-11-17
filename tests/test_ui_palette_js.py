@@ -173,14 +173,16 @@ def test_slash_shortcut_ignores_text_fields_and_modifiers():
 
 def test_archive_parse_query_defaults():
     assert archive("A.parseQuery('')") == {
-        "page": 1, "sort": "end_time", "dir": "desc", "q": "", "service": "", "verdict": "", "testType": "",
+        "tab": "reports", "page": 1, "sort": "end_time", "dir": "desc", "q": "", "service": "", "verdict": "", "testType": "",
+        "release": "",
     }
 
 
 def test_archive_parse_query_reads_and_validates_every_field():
     # A shared link with the old label (?verdict=Провал) selects its code.
     state = archive("A.parseQuery('?q=%20night%20&service=checkout&verdict=%D0%9F%D1%80%D0%BE%D0%B2%D0%B0%D0%BB&test_type=Soak&sort=max_rps&page=3')")
-    assert state == {"page": 3, "sort": "max_rps", "dir": "desc", "q": "night", "service": "checkout", "verdict": "fail", "testType": "soak"}
+    assert state == {"tab": "reports", "page": 3, "sort": "max_rps", "dir": "desc", "q": "night", "service": "checkout",
+                     "verdict": "fail", "testType": "soak", "release": ""}
     assert archive("A.parseQuery('?verdict=no_data').verdict") == "no_data"
     bad = archive("A.parseQuery('?verdict=maybe&sort=drop&dir=up&page=0')")
     assert (bad["verdict"], bad["sort"], bad["dir"], bad["page"]) == ("", "end_time", "desc", 1)
@@ -193,7 +195,8 @@ def test_archive_parse_query_reads_and_validates_every_field():
 
 def test_archive_build_query_omits_defaults_and_round_trips():
     assert archive("A.buildQuery(A.defaultState())") == ""
-    state = {"page": 2, "sort": "run_name", "dir": "desc", "q": "50% x", "service": "НСИ", "verdict": "pass", "testType": "spike"}
+    state = {"tab": "reports", "page": 2, "sort": "run_name", "dir": "desc", "q": "50% x", "service": "Каталог", "verdict": "pass",
+             "testType": "spike", "release": ""}
     query = archive(f"A.buildQuery({js(state)})")
     assert query.startswith("?q=50%25+x&service=")
     assert "sort=run_name" in query and "dir=desc" in query and "page=2" in query

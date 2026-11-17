@@ -48,6 +48,11 @@ WINDOWS_MAX_HOURS = 24.0
 WINDOWS_GAP_STEPS = 3  # positive RPS points further apart than this many steps belong to different tests
 WINDOWS_KEEP = 3
 WINDOWS_RUNS_KEEP = 5
+# Older tests: when the fine pass over the last hours finds fewer than WINDOWS_KEEP stretches, one coarse query
+# looks this far back and a fine query per stretch it finds restores the exact bounds.
+WINDOWS_SEARCH_DAYS = 30
+WINDOWS_COARSE_STEP = 300  # seconds: 30 days are 8640 points, under the Prometheus limit of 11000 per series
+WINDOWS_REFINE_MARGIN_STEPS = 2  # coarse steps added on each side of a stretch before its fine query
 WINDOWS_CACHE_SEC = 60.0
 WINDOWS_CACHE_MAX = 128
 _windows_cache: dict[tuple[str, str, float, str], tuple[float, dict[str, Any]]] = {}
@@ -556,11 +561,13 @@ def clamp_hours(hours: Any) -> float:
     return min(WINDOWS_MAX_HOURS, max(WINDOWS_MIN_HOURS, value))
 
 
-def activity_segments(points: list[tuple[float, float]], step: float, gap_steps: int = WINDOWS_GAP_STEPS) -> list[dict[str, float]]:
+def activity_segments(points: list[tuple[float, float]], step: float, gap_steps: int = WINDOWS_GAP_STEPS,
+                      min_points: int = 2) -> list[dict[str, float]]:
     """Stretches of ``points`` with a value above zero, oldest first.
 
     Zero values and missing points are pauses; positive points more than ``gap_steps`` steps apart start a
-    new stretch. A single point is noise, not a test, and is dropped.
+    new stretch. A stretch of fewer than ``min_points`` points is noise, not a test, and is dropped: by default
+    a single point; the coarse pass of :func:`load_windows` keeps single points and lets their fine query decide.
     """
     segments: list[dict[str, float]] = []
     current: Optional[dict[str, float]] = None
@@ -575,20 +582,65 @@ def activity_segments(points: list[tuple[float, float]], step: float, gap_steps:
         else:
             current = {"start": ts, "end": ts, "peak": value, "points": 1}
             segments.append(current)
-    return [seg for seg in segments if seg["points"] >= 2]
+    return [seg for seg in segments if seg["points"] >= max(1, min_points)]
+
+
+def _max_points(cfg: dict) -> Optional[int]:
+    from loadlens_app.limits import limit
+
+    try:
+        return limit("max_points_per_series", cfg) or None
+    except Exception:
+        return None
 
 
 def _window_step(start: float, end: float, cfg: dict) -> int:
-    from loadlens_app.limits import limit
-
     step = choose_step(start, end)
-    try:
-        max_points = limit("max_points_per_series", cfg)
-    except Exception:
-        max_points = None
+    max_points = _max_points(cfg)
     if max_points:
         step = max(step, math.ceil((end - start) / max_points))
     return step
+
+
+def _limited_step(step: int, span: float, cfg: dict) -> int:
+    """``step`` made coarse enough for ``span`` to stay within the points limit (the first point counts too)."""
+    max_points = _max_points(cfg)
+    if max_points and max_points > 1:
+        step = max(step, math.ceil(span / (max_points - 1)))
+    return step
+
+
+def _merge_segments(segments: Iterable[dict[str, float]]) -> list[dict[str, float]]:
+    """Overlapping stretches joined into one (outer bounds, highest peak), oldest first."""
+    merged: list[dict[str, float]] = []
+    for seg in sorted(segments, key=lambda s: (s["start"], s["end"])):
+        if merged and seg["start"] <= merged[-1]["end"]:
+            last = merged[-1]
+            last["end"] = max(last["end"], seg["end"])
+            last["peak"] = max(last["peak"], seg["peak"])
+        else:
+            merged.append({"start": seg["start"], "end": seg["end"], "peak": seg["peak"]})
+    return merged
+
+
+def _refine(cfg: dict, lang: str, row: LiveRow, seg: dict[str, float], coarse_step: int, lo: float,
+            hi: float) -> list[dict[str, float]]:
+    """Stretches inside a coarse stretch read again with a fine step; raises on source errors.
+
+    The query covers the stretch and ``WINDOWS_REFINE_MARGIN_STEPS`` coarse steps on each side, within
+    ``lo``..``hi``. An empty answer means the coarse point was noise.
+    """
+    margin = WINDOWS_REFINE_MARGIN_STEPS * coarse_step
+    start, end = max(lo, seg["start"] - margin), min(hi, seg["end"] + margin)
+    step = _limited_step(choose_step(start, end), end - start, cfg)
+    if step >= coarse_step:  # a long stretch: the fine query would be no finer than the coarse one
+        return [seg]
+    return activity_segments(_fetch(cfg, lang, row, start, end, step, True), step)
+
+
+def _coarse_bounds(seg: dict[str, float], coarse_step: int, lo: float, hi: float) -> dict[str, float]:
+    """A coarse stretch whose fine query failed: one coarse step wider on each side, so it holds the test."""
+    return {"start": max(lo, seg["start"] - coarse_step), "end": min(hi, seg["end"] + coarse_step), "peak": seg["peak"]}
 
 
 def finished_runs(service: str, start: float, end: float, keep: int = WINDOWS_RUNS_KEEP) -> list[dict[str, Any]]:
@@ -617,23 +669,28 @@ def finished_runs(service: str, start: float, end: float, keep: int = WINDOWS_RU
 
 
 def load_windows(area: str, service: str, hours: Any = WINDOWS_DEFAULT_HOURS, now: Optional[float] = None) -> dict[str, Any]:
-    """Recent load of a service: stretches with RPS above zero and finished load test runs.
+    """Load of a service over the last 30 days: stretches with RPS above zero and finished load test runs.
 
     The RPS comes from the ``lt.rps_total`` row of the service's ``lt_framework`` queries (the summed row
-    of a complex run on PromQL), over the last ``hours`` with :func:`choose_step`. The three latest
-    stretches are returned newest first as ``{start, end, duration_sec, rps_peak, ongoing}``. Source errors
-    do not fail the call: ``ok`` is false, ``message`` says why in a few words and ``detail`` carries the
-    error text; the runs are still listed.
+    of a complex run on PromQL). The fine pass reads the last ``hours`` with :func:`choose_step`; when it finds
+    fewer than three stretches, a coarse pass reads the last ``WINDOWS_SEARCH_DAYS`` days with a five-minute
+    step and a fine query per older stretch restores its exact bounds. The three latest stretches are returned
+    newest first as ``{start, end, duration_sec, rps_peak, ongoing}``; the runs are those of the same 30 days.
+    Source errors do not fail the call: ``message`` says why in a few words and ``detail`` carries the error
+    text; ``ok`` is false when the fine pass failed and stays true when only the coarse one did. The runs are
+    listed either way.
     """
     span_hours = clamp_hours(hours)
     end = now if now is not None else time.time()
     start = end - span_hours * 3600
+    since = end - WINDOWS_SEARCH_DAYS * 86400
     out: dict[str, Any] = {
         "ok": True, "message": "", "detail": "", "service": service, "hours": span_hours,
+        "days": WINDOWS_SEARCH_DAYS, "since": _iso(since),
         "start": _iso(start), "end": _iso(end), "step_sec": None, "query": "", "windows": [], "runs": [],
     }
     try:
-        out["runs"] = finished_runs(service, start, end)
+        out["runs"] = finished_runs(service, since, end)
     except Exception:
         out["runs"] = []
     try:
@@ -655,8 +712,13 @@ def load_windows(area: str, service: str, hours: Any = WINDOWS_DEFAULT_HOURS, no
         out.update(ok=False, message=t("lt.live.source_unavailable"), detail=str(exc)[:300])
         return out
     segments = activity_segments(points, step)
+    if len(segments) < WINDOWS_KEEP:
+        try:
+            segments += _older_segments(cfg, lang, row, segments, since, start, end)
+        except Exception as exc:
+            out.update(message=t("lt.live.lookback_failed", days=WINDOWS_SEARCH_DAYS), detail=str(exc)[:300])
     windows = []
-    for seg in reversed(segments[-WINDOWS_KEEP:]):
+    for seg in reversed(_merge_segments(segments)[-WINDOWS_KEEP:]):
         windows.append({
             "start": _iso(seg["start"]),
             "end": _iso(seg["end"]),
@@ -666,6 +728,34 @@ def load_windows(area: str, service: str, hours: Any = WINDOWS_DEFAULT_HOURS, no
         })
     out["windows"] = windows
     return out
+
+
+def _older_segments(cfg: dict, lang: str, row: LiveRow, recent: list[dict[str, float]], since: float, start: float,
+                    end: float) -> list[dict[str, float]]:
+    """Stretches that began before ``start``, found by the coarse pass over ``since``..``end``; raises when it fails.
+
+    The coarse query covers the fine window too, so a test that crosses ``start`` is seen whole and later
+    merges with its tail from the fine pass. Only the stretches still missing to ``WINDOWS_KEEP`` are read again
+    with a fine step (one more when the newest of them is the head of the oldest recent stretch); a failed fine
+    query keeps the coarse bounds one coarse step wider, an empty one drops the stretch as noise.
+    """
+    coarse_step = _limited_step(WINDOWS_COARSE_STEP, end - since, cfg)
+    coarse = activity_segments(_fetch(cfg, lang, row, since, end, coarse_step, True), coarse_step, min_points=1)
+    older = [seg for seg in coarse if seg["start"] < start]
+    need = WINDOWS_KEEP - len(recent)
+    if older and recent and older[-1]["end"] >= recent[0]["start"] - WINDOWS_GAP_STEPS * coarse_step:
+        need += 1
+    picked = older[-need:] if need > 0 else []
+    results = _run_all(
+        (lambda seg=seg: _refine(cfg, lang, row, seg, coarse_step, since, end)) for seg in picked
+    )
+    found: list[dict[str, float]] = []
+    for seg, result in zip(picked, results):
+        if isinstance(result, Exception):
+            found.append(_coarse_bounds(seg, coarse_step, since, end))
+        else:
+            found.extend(result)
+    return found
 
 
 def cached_load_windows(area: str, service: str, hours: Any = WINDOWS_DEFAULT_HOURS) -> dict[str, Any]:

@@ -4,7 +4,6 @@ import os
 import sys
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-import numpy as np
 from requests.auth import HTTPBasicAuth
 import requests
 import shutil
@@ -26,9 +25,12 @@ def _prepare_render_url(image_url: str) -> str:
     if not isinstance(image_url, str) or "/render/" not in image_url:
         return image_url
     parts = urlsplit(image_url)
-    query_items = dict(parse_qsl(parts.query, keep_blank_values=True))
-    query_items.setdefault("timeout", str(_GRAFANA_RENDER_QUERY_TIMEOUT_SEC))
-    new_query = urlencode(query_items, doseq=True)
+    # Keep the query verbatim: repeated keys (var-X=a&var-X=b) are multi-value Grafana variables,
+    # and rebuilding the query through a dict would keep only the last value.
+    if any(key == "timeout" for key, _value in parse_qsl(parts.query, keep_blank_values=True)):
+        return image_url
+    timeout = urlencode({"timeout": _GRAFANA_RENDER_QUERY_TIMEOUT_SEC})
+    new_query = f"{parts.query}&{timeout}" if parts.query else timeout
     return urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
 
 
@@ -341,7 +343,7 @@ def getGroupDashboardStorage(dashboardTitle, utils, orientation):
 
 
 
-def getBISGroupStorage(utils):
+def getDashboardTabsStorage(utils):
     storage = "<ac:structured-macro ac:name=\"ui-tabs\"><ac:rich-text-body> \
             <p class=\"auto-cursor-target\"><br/></p>"
 #<ac:image><ri:attachment ri:filename=\""+util[1]+"\" /></ac:image> \
@@ -474,34 +476,5 @@ def grafanaGraphicsUrl(host, uid, token, pathResult, timeStart, timeTo):
                 graphicsUrl.append(['row', panelTitle, 'urlDoesNotNeed'])
             else:
                 graphicsUrl.append(['row', panel['title'], 'urlDoesNotNeed'])
-    # result = "<h2 class=\"auto-cursor-target\"><span style=\"color: rgb(0,51,102);\">     <strong>" + dashboardTitle +"</strong> </span> </h2> <p> <span style=\"color: rgb(0,51,102);\">*Цветом выделена ступень максимальной производительности</span> </p> <ac:structured-macro ac:macro-id=\"b39283d9-5567-4cfa-afb1-2d1068e9e957\" ac:name=\"ui-tabs\" ac:schema-version=\"1\"> <ac:rich-text-body> <p class=\"auto-cursor-target\"> <br/> </p> <ac:structured-macro ac:macro-id=\"2032033f-741a-4275-b0ab-7e58492b32c7\" ac:name=\"ui-tab\" ac:schema-version=\"1\"> <ac:parameter ac:name=\"title\">График выхода виртуальных пользователей</ac:parameter> <ac:rich-text-body> <p> <span style=\"color: rgb(0,51,102);\"> <em>Все пользователи были стартованы и выведены согласно расписания</em> </span> <span style=\"color: rgb(0,51,102);\"> <em> <br/> </em> </span> </p> <p> <ac:image> <ri:attachment ri:filename=\"image2022-12-30_12-19-28.png\"/> </ac:image> </p> </ac:rich-text-body> </ac:structured-macro> <p class=\"auto-cursor-target\"> <br/> </p> <ac:structured-macro ac:macro-id=\"b70a97c8-5e4e-431c-9ee5-e9598b3bef22\" ac:name=\"ui-tab\" ac:schema-version=\"1\"> <ac:parameter ac:name=\"title\">График усреднённого времени отправки сообщений MF LoadRunner</ac:parameter> <ac:rich-text-body> <p> <span style=\"color: rgb(0,51,102);\"> <em>Времена выполнения запросов по загрузке страниц сайта на протяжении всего теста соответствовали требованиям SLA.</em> </span> </p> <p> <ac:image> <ri:attachment ri:filename=\"image2022-12-30_12-24-10.png\"/> </ac:image> </p> </ac:rich-text-body> </ac:structured-macro> <p class=\"auto-cursor-target\"> <br/> </p> <ac:structured-macro ac:macro-id=\"f8e6695c-9f9a-4522-aed4-ea44c5b3ca9a\" ac:name=\"ui-tab\" ac:schema-version=\"1\"> <ac:parameter ac:name=\"title\">График распределения интенсивности отправки сообщений MF LoadRunner</ac:parameter> <ac:rich-text-body> <p> <span style=\"color: rgb(0,51,102);\"> <em> <ac:structured-macro ac:macro-id=\"e6a433e5-5dc5-4262-b82b-28a7ecb0615d\" ac:name=\"anchor\" ac:schema-version=\"1\"> <ac:parameter ac:name=\"\">Интенсивность</ac:parameter> </ac:structured-macro>Интенсивность запросов к сайту соответствует модели нагрузки.</em> </span> </p> <ac:image> <ri:attachment ri:filename=\"image2022-12-30_12-24-44.png\"/> </ac:image> </ac:rich-text-body> </ac:structured-macro> <p class=\"auto-cursor-target\"> <br/> </p> <ac:structured-macro ac:macro-id=\"0e89228c-a418-459f-ae72-bec544ba6afb\" ac:name=\"ui-tab\" ac:schema-version=\"1\"> <ac:parameter ac:name=\"title\">График распределения ошибок MF LoadRunner</ac:parameter> <ac:rich-text-body> <p> <span style=\"color: rgb(0,51,102);\"> <em>На графике можно видеть появление первой ошибки через 20 минут после после начала теста. </em> </span> <span style=\"color: rgb(0,51,102);\"> <em>Полный перечень ошибок см. <ac:link ac:anchor=\"Ошибки\"/> </em> </span> </p> <p> <ac:image> <ri:attachment ri:filename=\"image2022-12-30_12-25-24.png\"/> </ac:image> </p> </ac:rich-text-body> </ac:structured-macro> <p class=\"auto-cursor-target\"> <br/> </p> </ac:rich-text-body> </ac:structured-macro>"
 
     return dashboardTitle, graphicsUrl
-
-
-def grafanaImageRenderer(project, timeStart, timeTo, pathResult):
-
-
-    if project == "BIS":
-        host = [config['grafana_bis']['grafana_host'], config['grafana_lre']['grafana_host']]
-        uid = [config['grafana_bis']['uid'], config['grafana_lre']['uid']]
-        token = [config['grafana_bis']['token'], config['grafana_lre']['token']]
-    # elif project == "LRE":
-    #     host = config['grafana_lre']['grafana_host']
-    #     uid = config['grafana_lre']['uid']
-    #     token = config['grafana_lre']['token']
-
-
-    # host, uid, token = initGrafanaParam(project)
-
-    storage = ""
-    util_metrics_all = []
-    for i in range(len(host)):
-        dashboardTitle, util_metrics = grafanaGraphicsUrl(host[i], uid[i], token[i], pathResult, timeStart, timeTo)
-        if len(util_metrics_all) == 0:
-            util_metrics_all = util_metrics
-        else:
-            util_metrics_all = np.concatenate((util_metrics_all, util_metrics), axis=0)
-        storage = storage + getGroupDashboardStorage(dashboardTitle, util_metrics, "False")
-    return util_metrics_all, storage
-

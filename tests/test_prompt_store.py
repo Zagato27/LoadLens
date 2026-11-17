@@ -42,7 +42,7 @@ TEXT_FILES = [name for name in prompt_files("ru") if name.endswith(".txt")]
 # Files the code loads by name (besides the editable domains).
 LOADED_FILES = {
     "_context_guide.txt", "_response_format.txt", "verify_prompt.txt", "judge_safe_prompt.txt", "_system.txt",
-    "_system_json.txt", "_no_sla.txt", "forecast_limit_prompt.txt", "context_import_prompt.txt",
+    "_system_json.txt", "_no_sla.txt", "forecast_limit_prompt.txt", "context_import_prompt.txt", "compare_prompt.txt",
     "judge_rubrics/common.txt", "judge_rubrics/final.txt", "_strings.json",
     *(f"profiles/{name}.txt" for name in prompt_store.TEST_PROFILES),
 }
@@ -212,7 +212,8 @@ def _literal_keys() -> set[str]:
     pattern = re.compile(r"""(?:prompt_text|_prompt_text|\btext)\(\s*"([a-z_]+(?:\.[a-z_]+)+)\"""")
     keys = set()
     for rel in ("AI/pipeline.py", "AI/scoring.py", "AI/providers.py", "AI/prompt_assembly.py",
-                "loadlens_app/forecast_explanation.py", "loadlens_app/context_import.py"):
+                "loadlens_app/forecast_explanation.py", "loadlens_app/context_import.py",
+                "loadlens_app/compare_explanation.py"):
         keys |= set(pattern.findall((ROOT_DIR / rel).read_text(encoding="utf-8")))
     return keys
 

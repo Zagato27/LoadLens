@@ -248,7 +248,7 @@ def test_sticky_tabs_sit_under_the_topbar():
 # ---- manual verdict ---------------------------------------------------------------------------------
 
 # Verdicts are codes as the API sends them; the page shows the Russian labels.
-MANUAL = {"verdict": "pass", "reason": "сбой <генератора>", "author": "ivanov", "changed_at": "2026-10-17T12:00:00+00:00"}
+MANUAL = {"verdict": "pass", "reason": "сбой <генератора>", "author": "engineer1", "changed_at": "2026-10-17T12:00:00+00:00"}
 
 
 def test_verdict_source_names_the_manual_change_and_the_sla():
@@ -261,7 +261,7 @@ def test_verdict_source_names_the_manual_change_and_the_sla():
         {"sla_verdict": "Есть риски", "llm_verdict": "risk", "verdict": "risk"},  # an old label equals its code
     ]
     texts = run_js(REPORT_JS, f"{js(calls)}.map((row) => {I}.verdictSourceText(row))")
-    assert texts[0] == "Изменён вручную: ivanov, 2026-10-17 12:00. Автоматически: Провал."
+    assert texts[0] == "Изменён вручную: engineer1, 2026-10-17 12:00. Автоматически: Провал."
     assert texts[1] == "Определён по SLA-критериям."  # the stored model verdict equals the SLA one
     assert texts[2] == "Определён по SLA-критериям. Оценка ИИ: Провал."  # a report built before the SLA replaced it
     assert texts[3].startswith("SLA-критерии не заданы, поэтому автоматический вердикт — «Недостаточно данных»")
@@ -274,7 +274,7 @@ def test_verdict_dialog_and_history_markup():
         "verdict": "pass", "automatic": "fail", "manual": MANUAL, "reason_max": 1000,
         "choices": ["pass", "risk", "fail", "no_data"],
         "history": [
-            {"verdict": None, "previous_verdict": "risk", "auto_verdict": "fail", "reason": "", "author": "petrov",
+            {"verdict": None, "previous_verdict": "risk", "auto_verdict": "fail", "reason": "", "author": "engineer2",
              "changed_at": "2026-10-17T13:00:00+00:00"},
             {**MANUAL, "previous_verdict": "fail", "auto_verdict": "fail"},
         ],
@@ -300,7 +300,7 @@ def test_verdict_dialog_and_history_markup():
 
 def test_manual_verdict_tooltip_for_the_archive_and_the_dashboard():
     titles = run_js(REPORT_JS, f"[LL.manualVerdictTitle({js(MANUAL)}), LL.manualVerdictTitle(null), LL.manualVerdictTitle({{ verdict: 'fail' }})]")
-    assert titles == ["Изменён вручную: ivanov, 2026-10-17 12:00. Причина: сбой <генератора>", "", "Изменён вручную."]
+    assert titles == ["Изменён вручную: engineer1, 2026-10-17 12:00. Причина: сбой <генератора>", "", "Изменён вручную."]
 
 
 # ---- test-type sections from stored codes -----------------------------------------------------------

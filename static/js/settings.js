@@ -186,6 +186,30 @@
     { path: `${p}.context_window_tokens`, label: LL.t('settings.field.llm.context_window_tokens.label'), type: 'number', hint: LL.t('settings.field.llm.context_window_tokens.hint'), showIf: (m) => m.provider === p && (p === 'anthropic' || p === 'gigachat') }
   ]);
   const apiKeyField = (p) => ({ path: `${p}.api_key`, label: LL.t('settings.field.llm.api_key.label'), type: 'password', showIf: (m) => m.provider === p });
+  // Application logs: OpenSearch (no "type" in configs written before Loki) or Loki via Grafana or directly.
+  const isLoki = (m) => (m && m.type) === 'loki';
+  const lokiVia = (m) => !!(m && m.loki && m.loki.source);
+  const lokiSourceOptions = () => [{ v: '', l: LL.t('settings.field.logs_source.loki_source.direct') }].concat(
+    Object.entries((state.config && state.config.data_sources) || {})
+      .filter(([, entry]) => entry && entry.type === 'grafana_proxy')
+      .map(([id, entry]) => ({ v: id, l: entry.title ? `${entry.title} (${id})` : id }))
+  );
+  const lokiFields = [
+    { path: 'loki.source', label: LL.t('settings.field.logs_source.loki_source.label'), type: 'select', get options() { return lokiSourceOptions(); }, hint: LL.t('settings.field.logs_source.loki_source.hint'), showIf: isLoki },
+    { path: 'loki.datasource_name', label: LL.t('settings.field.logs_source.loki_datasource.label'), type: 'text', placeholder: 'Loki', hint: LL.t('settings.field.logs_source.loki_datasource.hint'), showIf: (m) => isLoki(m) && lokiVia(m) },
+    { path: 'loki.url', label: LL.t('settings.field.logs_source.loki_url.label'), type: 'text', placeholder: 'http://loki:3100', showIf: (m) => isLoki(m) && !lokiVia(m) },
+    { path: 'loki.org_id', label: LL.t('settings.field.logs_source.loki_org_id.label'), type: 'text', hint: LL.t('settings.field.logs_source.loki_org_id.hint'), showIf: (m) => isLoki(m) && !lokiVia(m) },
+    { path: 'loki.username', label: LL.t('settings.field.logs_source.username.label'), type: 'text', showIf: (m) => isLoki(m) && !lokiVia(m) },
+    { path: 'loki.password', label: LL.t('settings.field.logs_source.password.label'), type: 'password', showIf: (m) => isLoki(m) && !lokiVia(m) },
+    { path: 'loki.verify_ssl', label: LL.t('settings.field.logs_source.verify_ssl.label'), type: 'checkbox', defaultValue: true, showIf: (m) => isLoki(m) && !lokiVia(m) },
+    { path: 'loki.selector', label: LL.t('settings.field.logs_source.loki_selector.label'), type: 'text', placeholder: '{namespace="apps"}', hint: LL.t('settings.field.logs_source.loki_selector.hint'), showIf: isLoki },
+    { path: 'loki.service_label', label: LL.t('settings.field.logs_source.loki_service_label.label'), type: 'text', placeholder: 'app', hint: LL.t('settings.field.logs_source.loki_service_label.hint'), showIf: isLoki },
+    { path: 'loki.format', label: LL.t('settings.field.logs_source.loki_format.label'), type: 'select', options: [{ v: 'auto', l: LL.t('settings.field.logs_source.loki_format.auto') }, { v: 'json', l: 'JSON' }, { v: 'logfmt', l: 'logfmt' }, { v: 'text', l: LL.t('settings.field.logs_source.loki_format.text') }], hint: LL.t('settings.field.logs_source.loki_format.hint'), showIf: isLoki },
+    { path: 'loki.level_field', label: LL.t('settings.field.logs_source.loki_level_field.label'), type: 'text', placeholder: 'level', showIf: (m) => isLoki(m) && ((m.loki || {}).format || 'auto') !== 'text' },
+    { path: 'loki.message_field', label: LL.t('settings.field.logs_source.loki_message_field.label'), type: 'text', placeholder: 'message', hint: LL.t('settings.field.logs_source.loki_message_field.hint'), showIf: (m) => isLoki(m) && ['auto', 'json'].includes((m.loki || {}).format || 'auto') },
+    { path: 'loki.level_filter', label: LL.t('settings.field.logs_source.loki_level_filter.label'), type: 'text', placeholder: '|= "ERROR"', hint: LL.t('settings.field.logs_source.loki_level_filter.hint'), showIf: isLoki },
+    { path: 'loki.lines_per_query', label: LL.t('settings.field.logs_source.loki_lines.label'), type: 'number', placeholder: '300', hint: LL.t('settings.field.logs_source.loki_lines.hint'), showIf: isLoki }
+  ];
   const CONNECTION_CARDS = [
     {
       id: 'storage', section: 'storage.timescale', title: LL.t('settings.card.storage.title'), scope: 'global',
@@ -223,11 +247,13 @@
       desc: LL.t('settings.card.logs_source.desc'),
       fields: [
         { path: 'enabled', label: LL.t('settings.field.logs_source.enabled.label'), type: 'checkbox' },
-        { path: 'opensearch.base_url', label: 'URL OpenSearch Dashboards', type: 'text', placeholder: 'https://opensearch:5601' },
-        { path: 'opensearch.index_pattern', label: LL.t('settings.field.logs_source.index_pattern.label'), type: 'text', placeholder: 'app-logs-*' },
-        { path: 'opensearch.username_env', label: LL.t('settings.field.logs_source.username.label'), type: 'text' },
-        { path: 'opensearch.password_env', label: LL.t('settings.field.logs_source.password.label'), type: 'password' },
-        { path: 'opensearch.verify_ssl', label: LL.t('settings.field.logs_source.verify_ssl.label'), type: 'checkbox' }
+        { path: 'type', label: LL.t('settings.field.logs_source.type.label'), type: 'select', options: [{ v: 'opensearch', l: 'OpenSearch' }, { v: 'loki', l: 'Loki' }] },
+        { path: 'opensearch.base_url', label: 'URL OpenSearch Dashboards', type: 'text', placeholder: 'https://opensearch:5601', showIf: (m) => !isLoki(m) },
+        { path: 'opensearch.index_pattern', label: LL.t('settings.field.logs_source.index_pattern.label'), type: 'text', placeholder: 'app-logs-*', showIf: (m) => !isLoki(m) },
+        { path: 'opensearch.username_env', label: LL.t('settings.field.logs_source.username.label'), type: 'text', showIf: (m) => !isLoki(m) },
+        { path: 'opensearch.password_env', label: LL.t('settings.field.logs_source.password.label'), type: 'password', showIf: (m) => !isLoki(m) },
+        { path: 'opensearch.verify_ssl', label: LL.t('settings.field.logs_source.verify_ssl.label'), type: 'checkbox', showIf: (m) => !isLoki(m) },
+        ...lokiFields
       ]
     },
     {
@@ -235,20 +261,32 @@
       desc: LL.t('settings.card.confluence.desc'),
       fields: [
         { path: 'enabled', label: LL.t('settings.field.confluence.enabled.label'), type: 'checkbox' },
-        { path: 'base_url', label: 'URL Confluence', type: 'text', placeholder: 'https://confluence.example.ru' },
+        { path: 'base_url', label: 'URL Confluence', type: 'text', placeholder: 'https://confluence.example.com' },
         { path: 'username', label: LL.t('settings.field.confluence.username.label'), type: 'text' },
         { path: 'password', label: LL.t('settings.field.confluence.password.label'), type: 'password' },
         { path: 'space_key', label: LL.t('settings.field.confluence.space_key.label'), type: 'text' },
         { path: 'parent_page_id', label: LL.t('settings.field.confluence.parent_page_id.label'), type: 'text', hint: LL.t('settings.field.confluence.parent_page_id.hint') },
         { path: 'forecast_parent_page_id', label: LL.t('settings.field.confluence.forecast_parent_page_id.label'), type: 'text', hint: LL.t('settings.field.confluence.forecast_parent_page_id.hint') },
+        { path: 'compare_parent_page_id', label: LL.t('settings.field.confluence.compare_parent_page_id.label'), type: 'text', hint: LL.t('settings.field.confluence.compare_parent_page_id.hint') },
+        { path: 'release_parent_page_id', label: LL.t('settings.field.confluence.release_parent_page_id.label'), type: 'text', hint: LL.t('settings.field.confluence.release_parent_page_id.hint') },
         { path: 'verify_ssl', label: LL.t('settings.field.confluence.verify_ssl.label'), type: 'checkbox' }
+      ]
+    },
+    {
+      // Links of the release page to Jira only: LoadLens never calls Jira, so there is nothing to check.
+      id: 'jira', section: 'jira', title: LL.t('settings.card.jira.title'), scope: 'global', testable: false,
+      desc: LL.t('settings.card.jira.desc'),
+      fields: [
+        { path: 'enabled', label: LL.t('settings.field.jira.enabled.label'), type: 'checkbox' },
+        { path: 'base_url', label: LL.t('settings.field.jira.base_url.label'), type: 'text', placeholder: 'https://jira.example.com', hint: LL.t('settings.field.jira.base_url.hint') },
+        { path: 'project_key', label: LL.t('settings.field.jira.project_key.label'), type: 'text', placeholder: 'PROJ', hint: LL.t('settings.field.jira.project_key.hint') }
       ]
     },
     {
       id: 'confluence_template', section: 'confluence_template', title: LL.t('settings.card.confluence_template.title'), scope: 'global',
       desc: LL.t('settings.card.confluence_template.desc'),
       fields: [
-        { path: 'url_basic', label: 'URL Confluence', type: 'text', placeholder: 'https://confluence.example.ru' },
+        { path: 'url_basic', label: 'URL Confluence', type: 'text', placeholder: 'https://confluence.example.com' },
         { path: 'space_conf', label: LL.t('settings.field.confluence_template.space_conf.label'), type: 'text' },
         { path: 'user', label: LL.t('settings.field.confluence_template.user.label'), type: 'text' },
         { path: 'password', label: LL.t('settings.field.confluence_template.password.label'), type: 'password' },
@@ -410,7 +448,9 @@
     const model = state.models[card.id];
     const value = getPath(model, field.path);
     if (field.type === 'checkbox') {
-      wrap.innerHTML = `<label class="checkbox-row"><input type="checkbox" id="${id}" ${value ? 'checked' : ''}/> <span>${esc(field.label)}</span></label>${field.hint ? `<div class="field-hint">${esc(field.hint)}</div>` : ''}`;
+      // An unset value shows the server default (``defaultValue``), not an unchecked box.
+      const checked = value === undefined || value === null ? !!field.defaultValue : !!value;
+      wrap.innerHTML = `<label class="checkbox-row"><input type="checkbox" id="${id}" ${checked ? 'checked' : ''}/> <span>${esc(field.label)}</span></label>${field.hint ? `<div class="field-hint">${esc(field.hint)}</div>` : ''}`;
     } else if (field.type === 'select') {
       const options = (field.options || []).map((o) => (typeof o === 'string' ? { v: o, l: o } : o));
       const current = value === undefined || value === null ? '' : String(value);
@@ -601,6 +641,9 @@
         state.grafanaDatasources = {};
         const bindings = CONNECTION_CARDS.find((item) => item.id === 'domain_sources');
         if (bindings) renderBindingsBody(bindings);
+        // The Loki connection lists the Grafana sources of the catalog.
+        const logs = CONNECTION_CARDS.find((item) => item.id === 'logs_source');
+        if (logs) refreshCardFields(logs);
       }
       if (card.id === 'load_tools') {
         // Generators list the tools by their saved templates.
@@ -903,7 +946,7 @@
       );
     } else if (type === 'docker') {
       fields.push(
-        { path: p('docker.url'), label: LL.t('settings.field.gen.docker_url.label'), type: 'text', placeholder: 'https://gen2.example.ru:2376', group: 'main' },
+        { path: p('docker.url'), label: LL.t('settings.field.gen.docker_url.label'), type: 'text', placeholder: 'https://gen2.example.com:2376', group: 'main' },
         { path: p('network'), label: LL.t('settings.field.gen.network.label'), type: 'text', placeholder: LL.t('settings.field.gen.network.placeholder'), group: 'main' },
         { path: p('docker.verify'), label: LL.t('settings.field.gen.verify.label'), type: 'checkbox', group: 'auth' },
         { path: p('remove_finished'), label: LL.t('settings.field.gen.remove_finished.label'), type: 'checkbox', group: 'auth' },
@@ -920,7 +963,7 @@
     } else if (type === 'kubernetes') {
       const outside = (m) => !getPath(m, p('kubernetes.in_cluster'));
       fields.push(
-        { path: p('kubernetes.api_url'), label: LL.t('settings.field.gen.k8s_api_url.label'), type: 'text', placeholder: 'https://k8s.example.ru:6443', showIf: outside, group: 'main' },
+        { path: p('kubernetes.api_url'), label: LL.t('settings.field.gen.k8s_api_url.label'), type: 'text', placeholder: 'https://k8s.example.com:6443', showIf: outside, group: 'main' },
         { path: p('namespace'), label: LL.t('settings.field.gen.k8s_namespace.label'), type: 'text', placeholder: 'loadtest', group: 'main' },
         { path: p('kubernetes.in_cluster'), label: LL.t('settings.field.gen.k8s_in_cluster.label'), type: 'checkbox', group: 'auth' },
         { path: p('kubernetes.verify'), label: LL.t('settings.field.gen.verify.label'), type: 'checkbox', showIf: outside, group: 'auth' },
@@ -939,14 +982,14 @@
       );
     } else if (type === 'gitlab' || type === 'jenkins') {
       const ci = [
-        { path: p('loadlens_url'), label: LL.t('settings.field.gen.loadlens_url.label'), type: 'text', placeholder: 'https://loadlens.example.ru', hint: LL.t('settings.field.gen.loadlens_url.hint'), group: 'dirs' },
+        { path: p('loadlens_url'), label: LL.t('settings.field.gen.loadlens_url.label'), type: 'text', placeholder: 'https://loadlens.example.com', hint: LL.t('settings.field.gen.loadlens_url.hint'), group: 'dirs' },
         { path: p('tags_metrics'), label: LL.t('settings.field.gen.tags_metrics.label'), type: 'checkbox', hint: LL.t('settings.field.gen.tags_metrics.hint'), group: 'wide' },
         { path: p('param_options'), label: LL.t('settings.field.gen.param_options.label'), type: 'kv', rows: 2, placeholder: 'STAND=stage, preprod', hint: LL.t('settings.field.gen.param_options.hint'), group: 'wide' },
         parallel
       ];
       if (type === 'gitlab') {
         fields.push(
-          { path: p('gitlab.url'), label: LL.t('settings.field.gen.gitlab_url.label'), type: 'text', placeholder: 'https://gitlab.example.ru', group: 'main' },
+          { path: p('gitlab.url'), label: LL.t('settings.field.gen.gitlab_url.label'), type: 'text', placeholder: 'https://gitlab.example.com', group: 'main' },
           { path: p('gitlab.project'), label: LL.t('settings.field.gen.gitlab_project.label'), type: 'text', placeholder: LL.t('settings.field.gen.gitlab_project.placeholder'), group: 'main' },
           { path: p('gitlab.ref'), label: LL.t('settings.field.gen.gitlab_ref.label'), type: 'text', placeholder: LL.t('settings.field.gen.gitlab_ref.placeholder'), group: 'main' },
           { path: p('gitlab.api_token'), label: LL.t('settings.field.gen.gitlab_api_token.label'), type: 'password', hint: LL.t('settings.field.gen.gitlab_api_token.hint'), group: 'auth' },
@@ -957,7 +1000,7 @@
         );
       } else {
         fields.push(
-          { path: p('jenkins.url'), label: LL.t('settings.field.gen.jenkins_url.label'), type: 'text', placeholder: 'https://jenkins.example.ru', group: 'main' },
+          { path: p('jenkins.url'), label: LL.t('settings.field.gen.jenkins_url.label'), type: 'text', placeholder: 'https://jenkins.example.com', group: 'main' },
           { path: p('jenkins.job'), label: LL.t('settings.field.gen.jenkins_job.label'), type: 'text', placeholder: 'perf/load-test', group: 'main' },
           { path: p('jenkins.ref'), label: LL.t('settings.field.gen.jenkins_ref.label'), type: 'text', placeholder: LL.t('settings.field.gen.jenkins_ref.placeholder'), group: 'main' },
           { path: p('jenkins.username'), label: LL.t('settings.field.gen.jenkins_username.label'), type: 'text', group: 'auth' },
@@ -2024,6 +2067,25 @@
     { key: 'load_model', label: LL.t('settings.sla.field.load_model'), type: 'select', options: null, hint: LL.t('settings.sla.field.load_model_hint') },
     { key: 'service_cpu_query', label: LL.t('settings.sla.field.service_cpu_query'), type: 'query', domain: 'jvm', hint: LL.t('settings.sla.field.service_cpu_query_hint') }
   ];
+  // Scenario tests (AI/phases.py): which query the phases are read from and how they are cut.
+  const SLA_PHASE_FIELDS = [
+    { key: 'phase_query', label: LL.t('settings.sla.field.phase_query'), type: 'query', domain: 'lt_framework', role: 'lt.rps_by_request', hint: LL.t('settings.sla.field.phase_query_hint') },
+    { key: 'phase_min_minutes', label: LL.t('settings.sla.field.phase_min_minutes'), type: 'number', step: '0.5', hint: LL.t('settings.sla.field.phase_min_minutes_hint') },
+    { key: 'phase_max_count', label: LL.t('settings.sla.field.phase_max_count'), type: 'number', step: '1' },
+    { key: 'phase_level', label: LL.t('settings.sla.field.phase_level'), type: 'number', step: '1', hint: LL.t('settings.sla.field.phase_level_hint') },
+    { key: 'phase_duration_tolerance_pct', label: LL.t('settings.sla.field.phase_duration_tolerance_pct'), type: 'number', step: '1', hint: LL.t('settings.sla.field.phase_duration_tolerance_pct_hint') },
+    { key: 'phase_breach_minutes', label: LL.t('settings.sla.field.phase_breach_minutes'), type: 'number', step: '0.5', hint: LL.t('settings.sla.field.phase_breach_minutes_hint') },
+    { key: 'phase_exclude', label: LL.t('settings.sla.field.phase_exclude'), type: 'text', placeholder: 'DELETE', hint: LL.t('settings.sla.field.phase_exclude_hint') }
+  ];
+  // Regression against the baseline run (AI/regression.py): a risk and a failure threshold per metric; empty = off.
+  const SLA_REGRESSION_FIELDS = [
+    { key: 'regression_latency_risk_pct', label: LL.t('settings.sla.field.regression_latency_risk_pct'), type: 'number', step: '1', hint: LL.t('settings.sla.field.regression_latency_hint') },
+    { key: 'regression_latency_fail_pct', label: LL.t('settings.sla.field.regression_latency_fail_pct'), type: 'number', step: '1' },
+    { key: 'regression_errors_risk_pp', label: LL.t('settings.sla.field.regression_errors_risk_pp'), type: 'number', step: '0.1', hint: LL.t('settings.sla.field.regression_errors_hint') },
+    { key: 'regression_errors_fail_pp', label: LL.t('settings.sla.field.regression_errors_fail_pp'), type: 'number', step: '0.1' },
+    { key: 'regression_capacity_risk_pct', label: LL.t('settings.sla.field.regression_capacity_risk_pct'), type: 'number', step: '1', hint: LL.t('settings.sla.field.regression_capacity_hint') },
+    { key: 'regression_capacity_fail_pct', label: LL.t('settings.sla.field.regression_capacity_fail_pct'), type: 'number', step: '1' }
+  ];
   const LATENCY_UNIT_OPTIONS = [{ v: 'ms', l: LL.t('settings.sla.latency_unit.ms') }, { v: 's', l: LL.t('settings.sla.latency_unit.s') }];
   const LOAD_MODEL_OPTIONS = [{ v: 'open', l: LL.t('settings.sla.load_model.open') }, { v: 'closed', l: LL.t('settings.sla.load_model.closed') }];
 
@@ -2056,6 +2118,12 @@
     const block = domainBlock(domain, scope);
     const blockRoles = isPlainObject(block.roles) ? block.roles : {};
     return (Array.isArray(block.labels) ? block.labels : []).find((label) => wanted.includes(blockRoles[label])) || '';
+  }
+  // Query of a role that a scope field takes when it is empty (the phases of a scenario: lt.rps_by_request).
+  function roleLabelOf(role, domain, scope) {
+    const block = domainBlock(domain, scope);
+    const blockRoles = isPlainObject(block.roles) ? block.roles : {};
+    return (Array.isArray(block.labels) ? block.labels : []).find((label) => blockRoles[label] === role) || '';
   }
   function queryOptions(labels, current, autoLabel) {
     const options = labels.map((label) => ({ v: label, l: label }));
@@ -2119,6 +2187,8 @@
     renderSlaUnitRow(model);
     renderSlaFieldGroup($('slaPeakFields'), SLA_PEAK_FIELDS, model);
     renderSlaFieldGroup($('slaForecastFields'), SLA_FORECAST_FIELDS, model);
+    if ($('slaPhaseFields')) renderSlaFieldGroup($('slaPhaseFields'), SLA_PHASE_FIELDS, model);
+    if ($('slaRegressionFields')) renderSlaFieldGroup($('slaRegressionFields'), SLA_REGRESSION_FIELDS, model);
     ui.applyTerms($('sec-sla'));
     if (!skipJson) setJson(state.editors.ed_sla, model);
     updateSlaDirty();
@@ -2143,12 +2213,15 @@
       let options = slaFieldOptions(f);
       if (f.type === 'query') {
         const labels = domainLabels(f.domain, state.slaScope);
-        const autoLabel = roleRefLabel(f.key, f.domain, state.slaScope);
+        const autoLabel = f.role ? roleLabelOf(f.role, f.domain, state.slaScope) : roleRefLabel(f.key, f.domain, state.slaScope);
         options = queryOptions(labels, current, autoLabel);
         dead = deadRefText(labels, current, autoLabel);
       }
       wrap.innerHTML = `<label for="${id}">${labelHtml}</label><select id="${id}">${options.map((o) => `<option value="${esc(o.v)}" ${o.v === current ? 'selected' : ''}>${esc(o.l)}</option>`).join('')}</select>`
         + (dead ? `<div class="field-hint warn" role="status">${esc(dead)}</div>` : '')
+        + (f.hint ? `<div class="field-hint">${esc(f.hint)}</div>` : '');
+    } else if (f.type === 'text') {
+      wrap.innerHTML = `<label for="${id}">${labelHtml}</label><input type="text" id="${id}" spellcheck="false"${f.placeholder ? ` placeholder="${esc(f.placeholder)}"` : ''} value="${value === undefined || value === null ? '' : esc(value)}" />`
         + (f.hint ? `<div class="field-hint">${esc(f.hint)}</div>` : '');
     } else {
       wrap.innerHTML = `<label for="${id}">${labelHtml}</label><input type="number" id="${id}" step="${f.step || 'any'}" value="${value === undefined || value === null ? '' : esc(value)}" />`
@@ -2158,6 +2231,7 @@
     control.addEventListener('change', () => {
       if (f.type === 'checkbox') model[f.key] = control.checked;
       else if (f.type === 'number') { const n = Number(control.value); model[f.key] = control.value === '' || !Number.isFinite(n) ? null : n; }
+      else if (f.type === 'text') model[f.key] = control.value.trim() || null;
       else model[f.key] = control.value;
       afterSlaChange();
       if (f.type === 'query') renderSlaForm({ skipJson: true });
@@ -2671,7 +2745,7 @@
         <textarea class="ctx-import-text" rows="10" aria-label="${LL.tHtml('settings.ctx.import.text_aria')}" placeholder="${LL.tHtml('settings.ctx.import.text_placeholder')}"></textarea>
       </div>
       <div class="ctx-import-pane" data-pane="confluence" hidden>
-        <input type="url" class="ctx-import-url" aria-label="${LL.tHtml('settings.ctx.import.url_aria')}" placeholder="${esc(confluenceBase ? `${confluenceBase}/pages/viewpage.action?pageId=…` : 'https://confluence.example.ru/pages/viewpage.action?pageId=…')}" />
+        <input type="url" class="ctx-import-url" aria-label="${LL.tHtml('settings.ctx.import.url_aria')}" placeholder="${esc(confluenceBase ? `${confluenceBase}/pages/viewpage.action?pageId=…` : 'https://confluence.example.com/pages/viewpage.action?pageId=…')}" />
         <div class="field-hint">${confluenceBase
           ? LL.tHtml('settings.ctx.import.url_hint', { base: confluenceBase })
           : LL.tHtml('settings.ctx.import.url_hint_unset')}</div>
@@ -4989,7 +5063,7 @@
     toolFields('x').forEach(fieldTexts);
     Object.values(KITS).forEach((kit) => { push(kit.empty); push(kit.addLabel); push(kit.deleteLabel); push(kit.hint({})); push(kit.pill({})); });
     Object.values(WIZARD_STEP_TITLES).forEach(push);
-    [SLA_FIELDS, SLA_PEAK_FIELDS, SLA_FORECAST_FIELDS].forEach((list) => list.forEach((f) => { push(f.label); push(f.desc); push(f.hint); push(f.unit); }));
+    [SLA_FIELDS, SLA_PEAK_FIELDS, SLA_FORECAST_FIELDS, SLA_PHASE_FIELDS, SLA_REGRESSION_FIELDS].forEach((list) => list.forEach((f) => { push(f.label); push(f.desc); push(f.hint); push(f.unit); }));
     push(SLA_SHARED_DESC);
     [LATENCY_UNIT_OPTIONS, LOAD_MODEL_OPTIONS, LLM_PROVIDERS].forEach((list) => list.forEach((o) => push(o.l)));
     Object.values(SLA_QUERY_TITLES).forEach(push);

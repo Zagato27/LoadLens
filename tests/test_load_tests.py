@@ -43,7 +43,7 @@ from loadlens_app.load_tests.tools import (
 SSH_GENERATOR = {
     "title": "Gen 1",
     "type": "ssh",
-    "ssh": {"host": "10.0.0.5", "port": 22, "username": "loadlens", "password": "pw", "host_key": "ssh-ed25519 AAAA"},
+    "ssh": {"host": "192.0.2.5", "port": 22, "username": "loadlens", "password": "pw", "host_key": "ssh-ed25519 AAAA"},
     "work_dir": "/opt/loadlens/runs",
     "scripts_dir": "/opt/tests",
     "tools": {},
@@ -185,7 +185,7 @@ def test_generators_parse_and_hide_credentials():
     assert set(generators) == {"gen-1", "manual"}
     gen = generators["gen-1"]
     public = gen.to_public(effective_tools({}))
-    assert public["host"] == "10.0.0.5" and set(public["tools"]) == set(DEFAULT_TOOLS)
+    assert public["host"] == "192.0.2.5" and set(public["tools"]) == set(DEFAULT_TOOLS)
     assert "pw" not in str(public) and "password" not in str(public)
     assert generators["manual"].is_manual and generators["manual"].offers("anything")
 
@@ -322,14 +322,14 @@ def test_manual_window_closes_at_the_run_limit(world):
 def test_changed_or_cleared_host_key_is_a_new_destination_for_ssh_secrets():
     from loadlens_app.config_secrets import MASK, SecretDestinationChangedError, restore_secrets
 
-    stored = {"gen-1": {"type": "ssh", "ssh": {"host": "10.0.0.5", "password": "pw", "host_key": "ssh-ed25519 AAAA"}}}
+    stored = {"gen-1": {"type": "ssh", "ssh": {"host": "192.0.2.5", "password": "pw", "host_key": "ssh-ed25519 AAAA"}}}
     for key in ("ssh-ed25519 BBBB", ""):
-        incoming = {"gen-1": {"type": "ssh", "ssh": {"host": "10.0.0.5", "password": MASK, "host_key": key}}}
+        incoming = {"gen-1": {"type": "ssh", "ssh": {"host": "192.0.2.5", "password": MASK, "host_key": key}}}
         with pytest.raises(SecretDestinationChangedError):
             restore_secrets(incoming, stored)
     # Pinning the key the first check found keeps the stored password.
-    unpinned = {"gen-1": {"type": "ssh", "ssh": {"host": "10.0.0.5", "password": "pw", "host_key": ""}}}
-    incoming = {"gen-1": {"type": "ssh", "ssh": {"host": "10.0.0.5", "password": MASK, "host_key": "ssh-ed25519 AAAA"}}}
+    unpinned = {"gen-1": {"type": "ssh", "ssh": {"host": "192.0.2.5", "password": "pw", "host_key": ""}}}
+    incoming = {"gen-1": {"type": "ssh", "ssh": {"host": "192.0.2.5", "password": MASK, "host_key": "ssh-ed25519 AAAA"}}}
     assert restore_secrets(incoming, unpinned)["gen-1"]["ssh"]["password"] == "pw"
 
 
@@ -346,7 +346,7 @@ def test_check_details_have_the_same_keys_for_every_type():
 def test_verification_mark_follows_the_generator_endpoint():
     gen = parse_generator("gen-1", SSH_GENERATOR)
     target = gen.check_target()
-    assert target == "ssh://loadlens@10.0.0.5:22" and not gen.is_verified
+    assert target == "ssh://loadlens@192.0.2.5:22" and not gen.is_verified
     marked = parse_generator("gen-1", {**SSH_GENERATOR, "verified": {"at": "2026-10-15T10:00:00+00:00", "target": target}})
     assert marked.is_verified and marked.to_public({})["verified"] and marked.to_public({})["verified_at"].startswith("2026-10-15")
     moved = copy.deepcopy(SSH_GENERATOR)

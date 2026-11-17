@@ -64,6 +64,8 @@ def _log_store_failure(exc: BaseException, message: str, *args: object) -> None:
 JOB_KIND_REPORT = "report"
 JOB_KIND_CONFLUENCE = "confluence"
 JOB_KIND_FORECAST_CONFLUENCE = "forecast_confluence"
+JOB_KIND_COMPARE_CONFLUENCE = "compare_confluence"
+JOB_KIND_RELEASE_CONFLUENCE = "release_confluence"
 
 JOB_STATUS_RUNNING = "running"
 JOB_STATUS_DONE = "done"
@@ -1066,8 +1068,10 @@ __all__ = [
     "DEFAULT_STALE_MIN",
     "INTERRUPTED_KEY",
     "INTERRUPTED_MESSAGE",
+    "JOB_KIND_COMPARE_CONFLUENCE",
     "JOB_KIND_CONFLUENCE",
     "JOB_KIND_FORECAST_CONFLUENCE",
+    "JOB_KIND_RELEASE_CONFLUENCE",
     "JOB_KIND_REPORT",
     "JOB_RUNNER_CELERY",
     "JOB_RUNNER_THREAD",

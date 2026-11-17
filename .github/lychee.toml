@@ -7,7 +7,7 @@ exclude_private = true
 exclude_link_local = true
 
 exclude = [
-  # Example hosts in the docs: gitlab.example.ru, k8s.example.ru:6443, jenkins.example.ru.
+  # Example hosts in the docs: gitlab.example.com, k8s.example.com:6443, jenkins.example.com.
   '^https?://([a-z0-9-]+\.)*example\.(ru|com|org|net)([:/]|$)',
   # Pages that exist only for a signed-in user (new advisory, new discussion) answer 404 to anonymous clients.
   '^https://github\.com/Zagato27/LoadLens/(security/advisories/new|discussions/new|issues/new)',

@@ -24,7 +24,7 @@ GENERATORS = {
     "gen-1": {
         "title": "Gen 1",
         "type": "ssh",
-        "ssh": {"host": "10.0.0.5", "port": 22, "username": "loadlens", "private_key": "-----BEGIN KEY-----\nabc\n-----END KEY-----", "host_key": "ssh-ed25519 AAAA"},
+        "ssh": {"host": "192.0.2.5", "port": 22, "username": "loadlens", "private_key": "-----BEGIN KEY-----\nabc\n-----END KEY-----", "host_key": "ssh-ed25519 AAAA"},
         "work_dir": "/opt/loadlens/runs",
         "scripts_dir": "/opt/tests",
         "tools": {},
@@ -78,7 +78,7 @@ def env(monkeypatch, tmp_path):
 def test_options_list_generators_without_credentials(env):
     data = env.client.get("/load_tests/options").get_json()
     generators = {g["id"]: g for g in data["generators"]}
-    assert generators["gen-1"]["host"] == "10.0.0.5" and "k6" in generators["gen-1"]["tools"]
+    assert generators["gen-1"]["host"] == "192.0.2.5" and "k6" in generators["gen-1"]["tools"]
     assert generators["manual"]["tools"] == []
     assert "BEGIN KEY" not in json.dumps(data)
     assert {t["id"] for t in data["tools"]} >= {"k6", "jmeter", "locust", "gatling", "gatling_maven"}

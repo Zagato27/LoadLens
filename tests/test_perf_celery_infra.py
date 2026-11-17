@@ -94,7 +94,7 @@ def test_report_tasks_are_routed_to_the_reports_queue():
     assert conf.task_default_queue == "celery"
 
     router = celery_module.celery_app.amqp.router
-    for name in ("loadlens.report", "loadlens.publish_confluence", "loadlens.publish_forecast"):
+    for name in ("loadlens.report", "loadlens.publish_confluence", "loadlens.publish_forecast", "loadlens.publish_compare", "loadlens.publish_release"):
         assert router.route({}, name)["queue"].name == "reports"
     # Download and upload tasks (registered by update_page until it stops using Celery) keep the default queue.
     for name in ("update_page.download_grafana_image_task", "update_page.upload_attachment_task", "loadlens_app.tasks.helper"):

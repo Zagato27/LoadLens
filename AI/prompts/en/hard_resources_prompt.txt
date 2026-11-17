@@ -12,7 +12,17 @@ ANALYSIS FOCUS:
 3. Disk by PVC: whether usage grows over the test or stays stable; state the change change_vs_first_pct and the last value.
 4. Headroom: for each resource state the maximum value at the last step (per_step.max) — this is the actual
    headroom to 100 %. Take the comparison threshold only from the analysis guidance block (service SLA); if there is none, assess the headroom and the trend.
+   Compare the p95 of a step (per_step.p95) with the threshold, as the deterministic check does, not the maximum: a
+   single minute at 100 % is no breach of the threshold.
 5. If a baseline is given — compare utilization with the previous run (delta_mean_pct) for the nodes with the largest change.
+6. Node background: if the utilization of a node is about the same at the first and the last step (it does not grow
+   with the load, bursts to 100 % happen at any step), it is background work of the node (housekeeping, cache,
+   indexing), not an effect of the test. Describe it in one finding of severity medium at most, not tied to a load step.
+
+DOMAIN VERDICT:
+- CPU or memory above its threshold is "risk", not "fail"; these are secondary SLA criteria.
+- Use "fail" only when a resource ran out and the domain data show failures: OOMKilled, container restarts, missing
+  available replicas.
 
 EVIDENCE REQUIREMENTS:
 - component — the node or PVC name from the series name (node=..., persistentvolumeclaim=...); if there is none — "unknown".

@@ -336,9 +336,17 @@ def test_recording_connection_keeps_statements_and_transaction_semantics():
     assert inner.events == ["enter", "commit"] and inner.cursor_closed == 1
 
 
-def test_explain_refuses_a_working_tree():
+def test_explain_refuses_a_working_tree(tmp_path):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / ".git").mkdir()
+    (checkout / "settings.py").write_text("raise AssertionError('settings must not be imported')\n", encoding="utf-8")
+    runtime = checkout / "settings_runtime.json"
+    original = b'{"sentinel": true}\n'
+    runtime.write_bytes(original)
     with pytest.raises(SystemExit, match="not a sandbox copy"):
-        bench._load_sandbox_app(ROOT_DIR, allow_remote=False)
+        bench._load_sandbox_app(checkout, allow_remote=False)
+    assert runtime.read_bytes() == original
 
 
 def test_bench_arguments():
@@ -706,8 +714,15 @@ def test_setup_stubs_writes_a_sandbox_file_and_refuses_a_working_tree(tmp_path, 
     assert written["data_sources"]["prometheus"]["prometheus"]["url"] == "http://127.0.0.1:6092"
     with pytest.raises(SystemExit, match="prom-stub"):
         bench.main(["--setup-stubs", "--runtime-json", str(runtime), "--prom-stub", "http://prometheus.example.org:9090"])
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / ".git").write_text("gitdir: ../git/worktrees/checkout\n", encoding="utf-8")
+    checkout_runtime = checkout / "settings_runtime.json"
+    original = b'{"sentinel": true}\n'
+    checkout_runtime.write_bytes(original)
     with pytest.raises(SystemExit, match="working tree"):
-        bench.main(["--setup-stubs", "--runtime-json", str(ROOT_DIR / "settings_runtime.json")])
+        bench.main(["--setup-stubs", "--runtime-json", str(checkout_runtime)])
+    assert checkout_runtime.read_bytes() == original
     with pytest.raises(SystemExit, match="runtime-only"):
         empty = tmp_path / "empty" / "settings_runtime.json"
         empty.parent.mkdir()

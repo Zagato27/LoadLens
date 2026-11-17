@@ -41,8 +41,11 @@ from AI.providers import attach_usage_to_scores, reset_usage, usage_domain
 from AI.scoring import LLMAnalysis, VerificationSummary, fill_missing_verdict_rationale, llm_two_pass_self_consistency, make_failed_llm_analysis, parse_llm_analysis_strict
 from AI.verification import unverified_findings, verify_analysis
 from AI.db_store import (
-    BASELINE_MODE_PREVIOUS_SUCCESS,
-    find_previous_run,
+    BASELINE_MODE_PINNED,
+    BASELINE_MODE_PREVIOUS,
+    BASELINE_MODE_PREVIOUS_RELEASE,
+    BASELINE_MODES,
+    find_scenario_reference,
     load_run_metric_stats,
     save_domain_labeled,
     save_llm_results,
@@ -55,6 +58,8 @@ from AI.data_sources import (
     SourceGroup,
     domain_source_groups,
 )
+from AI.release_marks import find_baseline_run
+from AI.loki_logs import LOGS_TYPE_LOKI, collect_loki_logs, logs_source_type
 from AI.opensearch_logs import APPLICATION_LOGS_DOMAIN, collect_application_logs
 from AI.query_packs import (
     block_roles,
@@ -68,15 +73,32 @@ from AI.sla_evaluator import (
     ADJUST_RESOURCES,
     ADJUST_TREND,
     _find_section_by_label,
+    apply_regression,
     evaluate_sla,
     extract_target_rps_from_pack,
     format_sla_summary,
     summary_parts_from_checks,
 )
+from AI.db_store import load_run_report
+from AI.regression import (
+    CATEGORY_REGRESSION,
+    REASONS as REGRESSION_REASONS,
+    REGRESSION_CHECK_NAMES,
+    SEVERITY_CRITICAL,
+    summary_items as regression_summary_items,
+)
 from AI.test_profile import is_capacity_like, mode_of, normalize_test_type, profile_for, resolve_step_detection
 from AI.stability import build_stability_payload, compute_trends, hold_window_from_labeled
 from AI.spike import analyze_spikes, build_spike_payload, detect_spikes_from_labeled, spike_load_steps, spike_windows_ctx
 from AI.saturation import build_saturation
+from AI.phases import (
+    build_scenario_payload,
+    phase_load_steps,
+    phase_settings,
+    phases_ctx,
+    phases_from_labeled,
+    reference_from_scenario,
+)
 from AI.verdicts import DETERMINISTIC, FAIL, PASS, RISK, to_code
 from AI.verdicts import label as verdict_label
 
@@ -292,14 +314,34 @@ def _deterministic_sla_context(sla_result: Dict[str, Any] | None) -> Dict[str, A
         out["target_window"] = result["target_window"]
     if isinstance(result.get("headroom"), dict):
         out["headroom"] = result["headroom"]
+    # Regression against the baseline run (AI/regression.py), brief; absent when no regression threshold is set.
+    regression = result.get("regression")
+    if isinstance(regression, dict) and regression.get("reason") != "disabled":
+        if regression.get("available"):
+            out["regression"] = {
+                "baseline_run_name": regression.get("baseline_run_name"),
+                "baseline_release": regression.get("baseline_release") or "",
+                "mode": regression.get("mode") or "",
+                "level": regression.get("level"),
+                "kind": regression.get("kind"),
+                "items": regression_summary_items(regression),
+            }
+        else:
+            code = str(regression.get("reason") or "")
+            out["regression"] = {
+                "available": False,
+                "reason": code,
+                # Why there was nothing to compare, in the report language (the run is inside with_locale).
+                "reason_text": t(f"sla.regression.reason.{code if code in REGRESSION_REASONS else 'no_value'}"),
+            }
     return out
 
 
 def _step_window(window: Any) -> Optional[Dict[str, Any]]:
-    """An SLA window of a load step (not a hold window or a spike) with both ends, else None."""
+    """An SLA window of a load step or a scenario phase (not a hold window or a spike) with both ends, else None."""
     if not isinstance(window, dict) or not window.get("start") or not window.get("end"):
         return None
-    return window if str(window.get("kind") or "step") == "step" else None
+    return window if str(window.get("kind") or "step") in ("step", "phase") else None
 
 
 def _step_of_window(load_steps: List[LoadStep], window: Dict[str, Any]) -> Optional[LoadStep]:
@@ -357,6 +399,57 @@ def _sla_step_context(
 
 _SEVERE_FINDINGS = frozenset({"critical", "high"})
 _AFTER_STEP_TOLERANCE = pd.Timedelta(seconds=60)
+# The domain whose subject is the secondary SLA criteria (node CPU and memory): never a failure on its own.
+RESOURCES_DOMAIN = "hard_resources"
+
+
+def _primary_sla_held(sla_result: Optional[Dict[str, Any]]) -> bool:
+    """target_rps and the latency and error thresholds hold: some primary check passed and none failed for good
+    (a short excursion of a scenario phase, ``brief``, is a risk)."""
+    checks = [c for c in (sla_result or {}).get("checks") or [] if isinstance(c, dict)] if isinstance(sla_result, dict) else []
+    primary = [c for c in checks if str(c.get("category") or "primary") == "primary"]
+    if any(c.get("passed") is False and not c.get("brief") for c in primary):
+        return False
+    return any(c.get("passed") is True for c in primary)
+
+
+def _with_adjusted_verdict(raw: str, parsed: Dict[str, Any], note: str) -> tuple[str, Dict[str, Any]]:
+    """``fail`` -> ``risk``: the correction note (it names the model's assessment) before the model's rationale,
+    which is kept as written."""
+    rationale = str(parsed.get("verdict_rationale") or "").strip()
+    aligned = {
+        **parsed,
+        "verdict": RISK,
+        "verdict_adjusted_from": FAIL,
+        "verdict_rationale": f"{note}\n\n{rationale}" if rationale else note,
+    }
+    payload = json.loads(raw)
+    for key in ("verdict", "verdict_adjusted_from", "verdict_rationale"):
+        payload[key] = aligned[key]
+    return json.dumps(payload, ensure_ascii=False), aligned
+
+
+def _cap_resource_domain_verdict(
+    domain: str,
+    text: str,
+    parsed: Optional[Dict[str, Any]],
+    sla_result: Optional[Dict[str, Any]],
+    lang: Optional[str] = None,
+) -> Optional[tuple[str, Dict[str, Any]]]:
+    """Turns a ``fail`` of the resources domain into ``risk`` while the primary SLA holds.
+
+    Node CPU and memory are secondary SLA criteria in every test type: their overrun is a risk (the final verdict
+    follows the same rule). Returns None when the verdict stays unchanged.
+    """
+    if domain != RESOURCES_DOMAIN or not _primary_sla_held(sla_result):
+        return None
+    if not isinstance(parsed, dict) or to_code(parsed.get("verdict")) != FAIL:
+        return None
+    raw = str(text or "").strip()
+    if not (raw.startswith("{") and raw.endswith("}")):
+        return None
+    code = resolve_lang(lang)
+    return _with_adjusted_verdict(raw, parsed, prompt_text("verdict.resources_adjusted", code, label=verdict_label(FAIL, code)))
 
 
 def _align_domain_verdict_with_sla(
@@ -394,17 +487,7 @@ def _align_domain_verdict_with_sla(
     note = prompt_text(
         "verdict.sla_step_adjusted", code, step=sla_step.get("step_label") or "SLA", label=verdict_label(FAIL, code),
     )
-    rationale = str(parsed.get("verdict_rationale") or "").strip()
-    aligned = {
-        **parsed,
-        "verdict": RISK,
-        "verdict_adjusted_from": FAIL,
-        "verdict_rationale": f"{note}\n\n{rationale}" if rationale else note,
-    }
-    payload = json.loads(raw)
-    for key in ("verdict", "verdict_adjusted_from", "verdict_rationale"):
-        payload[key] = aligned[key]
-    return json.dumps(payload, ensure_ascii=False), aligned
+    return _with_adjusted_verdict(raw, parsed, note)
 
 
 def _load_step_table_for_report(
@@ -415,7 +498,8 @@ def _load_step_table_for_report(
     target_window: Optional[Dict[str, Any]] = None,
     detection: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Compact step table stored with the report: step RPS and plateau latency p95.
+    """Compact step table stored with the report: step RPS, plateau latency p95 and error rate (``error_rate_query``:
+    the regression against the baseline compares a step with the same step of the baseline run).
 
     The step the verdict was decided on is ``selected``: the target step when there is one (with ``sla_role``;
     the ceiling ``window`` gets ``ceiling`` when it is another step), else the ceiling. ``detection`` (what the
@@ -440,8 +524,39 @@ def _load_step_table_for_report(
         ceiling_level=stable.get("level") if other_ceiling else None,
         ceiling_start=str(stable["start"]) if other_ceiling and stable.get("start") else None,
         detection=detection,
+        error_query=str(cfg.get("error_rate_query") or "").strip(),
     )
     return report if report.get("steps") else None
+
+
+def _mark_phase_rows(table: Optional[Dict[str, Any]], scenario: Optional[Dict[str, Any]]) -> None:
+    """Rows of a scenario's step table: ``phase`` with the SLA verdict of the phase (``phase_verdict``), ``idle``
+    for a pause and ``excluded`` for a phase left out of the SLA; ``detection`` says how the phases were found (the report states it under the row)."""
+    if not isinstance(table, dict) or not isinstance(scenario, dict):
+        return
+    phases = {int(item.get("index") or 0): item for item in scenario.get("phases") or [] if isinstance(item, dict)}
+    for row in table.get("steps") or []:
+        phase = phases.get(int(row.get("index") or 0))
+        if phase is None:
+            continue
+        row["phase"] = True
+        # The worst phase is the SLA window; stored here so readers need not match it by time (phases touch).
+        row["selected"] = phase.get("worst") is True
+        if phase.get("idle"):
+            row["idle"] = True
+        if phase.get("excluded"):
+            row["excluded"] = True
+        if phase.get("verdict"):
+            row["phase_verdict"] = phase["verdict"]
+    table["detection"] = {
+        "phases": True,
+        "count": scenario.get("phase_count"),
+        "source_label": scenario.get("source_label"),
+        "label_key": scenario.get("label_key"),
+        "level": scenario.get("level"),
+        "min_phase_min": scenario.get("min_phase_min"),
+        "reason": scenario.get("reason"),
+    }
 
 
 def _pin_series_to_sla_window(pack: Dict[str, Any], window: Dict[str, Any]) -> None:
@@ -513,6 +628,10 @@ _PRIMARY_CHECK_NAMES = frozenset({"target_rps", "error_rate", "p95_latency", "p9
 _SECONDARY_CHECK_NAMES = frozenset({"cpu_usage", "memory_usage"})
 
 
+def _is_regression_check(item: Dict[str, Any]) -> bool:
+    return str(item.get("category") or "") == CATEGORY_REGRESSION or str(item.get("name") or "") in REGRESSION_CHECK_NAMES
+
+
 def _downgrade_verdict(result: Dict[str, Any], verdict: str, adjustment: Dict[str, Any], lang: Optional[str] = None) -> None:
     """Sets the reconciled verdict code and rebuilds the summary (in ``lang``) from its parts plus the adjustment."""
     parts = summary_parts_from_checks(result)
@@ -545,13 +664,21 @@ def _reconcile_sla_for_test_profile(
         return result
     result["test_mode"] = mode
 
+    # A breached regression check of severity warning is a secondary risk like CPU/memory; a critical one keeps the
+    # failure it caused (AI/sla_evaluator._apply_regression).
     failed_primary = [
         item for item in checks
-        if item.get("passed") is False and str(item.get("name") or "") in _PRIMARY_CHECK_NAMES
+        if item.get("passed") is False and (
+            str(item.get("name") or "") in _PRIMARY_CHECK_NAMES
+            or (_is_regression_check(item) and str(item.get("severity") or "") == SEVERITY_CRITICAL)
+        )
     ]
     failed_secondary = [
         item for item in checks
-        if item.get("passed") is False and str(item.get("name") or "") in _SECONDARY_CHECK_NAMES
+        if item.get("passed") is False and (
+            str(item.get("name") or "") in _SECONDARY_CHECK_NAMES
+            or (_is_regression_check(item) and str(item.get("severity") or "") != SEVERITY_CRITICAL)
+        )
     ]
     if failed_primary:
         return result
@@ -2012,7 +2139,13 @@ def _derive_steps_for_run(
 def _baseline_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
     llm_cfg = cfg.get("llm") if isinstance(cfg.get("llm"), dict) else (CONFIG.get("llm") or {})
     raw = llm_cfg.get("baseline") if isinstance(llm_cfg.get("baseline"), dict) else {}
-    return {"enabled": _cfg_bool(raw.get("enabled"), default=True), "mode": str(raw.get("mode") or BASELINE_MODE_PREVIOUS_SUCCESS)}
+    # pinned walks the chain pinned -> previous_release -> previous_success (AI/release_marks.find_baseline_run):
+    # without marks it is the old previous_success.
+    mode = str(raw.get("mode") or BASELINE_MODE_PINNED).strip().lower()
+    if mode not in BASELINE_MODES:
+        logger.warning("Unknown llm.baseline.mode '%s', using '%s'", mode, BASELINE_MODE_PINNED)
+        mode = BASELINE_MODE_PINNED
+    return {"enabled": _cfg_bool(raw.get("enabled"), default=True), "mode": mode}
 
 
 def _load_baseline_context(
@@ -2040,7 +2173,7 @@ def _load_baseline_context(
     try:
         conn = _db_connect(storage_cfg)
         try:
-            previous = find_previous_run(
+            previous = find_baseline_run(
                 conn, schema, str(storage_cfg.get("llm_table", "llm_reports")),
                 exclude_run_name=run_name, mode=settings["mode"], service=service or None,
                 services=services, project_area=project_area or None,
@@ -2048,8 +2181,9 @@ def _load_baseline_context(
                 test_type=test_type,
             )
             if previous is None:
-                # The reason is part of the model context: written in the report language.
-                key = "baseline.none_success" if settings["mode"] == BASELINE_MODE_PREVIOUS_SUCCESS else "baseline.none_any"
+                # The reason is part of the model context: written in the report language. The release modes end
+                # in previous_success.
+                key = "baseline.none_any" if settings["mode"] == BASELINE_MODE_PREVIOUS else "baseline.none_success"
                 scope = (
                     prompt_text("baseline.scope_area", name=project_area)
                     if project_area
@@ -2063,15 +2197,122 @@ def _load_baseline_context(
     except Exception as exc:
         logger.error("Baseline lookup failed for service '%s': %s", service, exc)
         return {"available": False, "reason": prompt_text("baseline.read_error", error=exc)}
+    mode = previous.mode or settings["mode"]
     return {
         "available": True,
-        "mode": settings["mode"],
+        "mode": mode,
+        "requested_mode": settings["mode"],
+        "release": previous.release,
+        "run_id": previous.run_id,
+        "service": previous.service,
+        "basis": _baseline_basis(settings["mode"], mode, previous.release),
         "test_type": test_type,
         "run_name": previous.run_name,
         "verdict": previous.verdict,
         "created_at": previous.created_at.isoformat() if previous.created_at else None,
         "stats": stats,
     }
+
+
+def _baseline_basis(requested: str, mode: str, release: str) -> str:
+    """Which run the baseline is, for the model (report language): the pinned baseline, the accepted run of a
+    release, or a note that the release modes found neither and fell back to the previous successful run."""
+    if mode == BASELINE_MODE_PINNED:
+        return prompt_text("baseline.scope_pinned")
+    if mode == BASELINE_MODE_PREVIOUS_RELEASE:
+        return prompt_text("baseline.scope_release", release=release)
+    if requested in (BASELINE_MODE_PINNED, BASELINE_MODE_PREVIOUS_RELEASE):
+        return prompt_text("baseline.mode_note")
+    return ""
+
+
+def _baseline_identity(baseline_ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """Mode, release and basis of the baseline for the model; absent keys stay out of the context."""
+    return {key: baseline_ctx[key] for key in ("mode", "release", "basis") if baseline_ctx.get(key)}
+
+
+def _load_phase_reference(
+    storage_cfg: Dict[str, Any],
+    run_meta: Optional[Dict[str, object]],
+    save_to_db: bool,
+    start_ts: float,
+) -> Optional[Dict[str, Any]]:
+    """Phases of the previous scenario run of the service (or its project area): the reference of this run.
+
+    Any verdict counts and runs are ordered by their test window (AI/db_store.find_scenario_reference).
+    """
+    if not save_to_db or not storage_cfg:
+        return None
+    service = str((run_meta or {}).get("service") or "").strip()
+    area_services = (run_meta or {}).get("area_services")
+    services = [service] if service else (
+        [str(item).strip() for item in area_services] if isinstance(area_services, list) else []
+    )
+    if not services:
+        return None
+    try:
+        conn = _db_connect(storage_cfg)
+        try:
+            found = find_scenario_reference(
+                conn, str(storage_cfg.get("schema", "public")), str(storage_cfg.get("llm_table", "llm_reports")),
+                exclude_run_name=str((run_meta or {}).get("run_name") or ""), services=services,
+                before_ms=int(start_ts * 1000), project_area=str((run_meta or {}).get("project_area") or "") or None,
+            )
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.error("Scenario reference lookup failed: %s", exc)
+        return None
+    return reference_from_scenario(*found) if found else None
+
+
+def _load_baseline_sla(
+    storage_cfg: Dict[str, Any],
+    baseline_ctx: Optional[Dict[str, Any]],
+    save_to_db: bool,
+) -> Dict[str, Any]:
+    """Stored final row of the baseline run (the one of the model context) for the regression check.
+
+    ``{available, run_name, run_id, release, mode, service, test_type, sla_details}``; ``available`` is False with a
+    ``reason`` (AI/regression.py codes) when there is no baseline, no storage or no stored SLA checks. Reads with its
+    own connection; the baseline itself is chosen by ``_load_baseline_context``.
+    """
+    ctx = baseline_ctx if isinstance(baseline_ctx, dict) else {}
+    out: Dict[str, Any] = {
+        "available": False,
+        "run_name": str(ctx.get("run_name") or ""),
+        "run_id": str(ctx.get("run_id") or ""),
+        "release": str(ctx.get("release") or ""),
+        "mode": str(ctx.get("mode") or ""),
+    }
+    if not ctx.get("available") or not out["run_name"] or not save_to_db or not storage_cfg:
+        out["reason"] = "no_baseline"
+        return out
+    try:
+        conn = _db_connect(storage_cfg)
+        try:
+            report = load_run_report(
+                conn, str(storage_cfg.get("schema", "public")), str(storage_cfg.get("llm_table", "llm_reports")),
+                out["run_name"],
+            )
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.error("Baseline SLA lookup failed for run '%s': %s", out["run_name"], exc)
+        out["reason"] = "no_baseline_sla"
+        return out
+    final = report.final if report is not None else None
+    if final is None or not isinstance(final.sla_details, dict) or not final.sla_details.get("checks"):
+        out["reason"] = "no_baseline_sla"
+        return out
+    out.update({
+        "available": True,
+        "run_id": out["run_id"] or final.run_id,
+        "service": final.service,
+        "test_type": final.test_type,
+        "sla_details": final.sla_details,
+    })
+    return out
 
 
 def _delta_pct(current: Optional[float], base: Optional[float]) -> Optional[float]:
@@ -2109,6 +2350,7 @@ def _baseline_for_domain(baseline_ctx: Dict[str, Any], domain: str, pack: Dict[s
         "run_name": baseline_ctx.get("run_name"),
         "verdict": baseline_ctx.get("verdict"),
         "created_at": baseline_ctx.get("created_at"),
+        **_baseline_identity(baseline_ctx),
         "sections": sections,
         "note": t("report.analysis.baseline_note"),
     }
@@ -2135,6 +2377,7 @@ def _baseline_for_overall(baseline_ctx: Dict[str, Any], domain_data: Dict[str, D
         "run_name": baseline_ctx.get("run_name"),
         "verdict": baseline_ctx.get("verdict"),
         "created_at": baseline_ctx.get("created_at"),
+        **_baseline_identity(baseline_ctx),
         "key_deltas": deltas[: max(int(max_rows), 1)],
     }
 
@@ -2440,6 +2683,18 @@ def _collect_source_frames(
     )
 
 
+def collect_logs_domain(cfg: dict, logs_cfg: dict, start_ts: float, end_ts: float, resample: str) -> Dict[str, Any]:
+    """The ``application_logs`` domain from the configured log system: Loki (``logs_source.type``) or OpenSearch."""
+    if logs_source_type(logs_cfg) == LOGS_TYPE_LOKI:
+        # AI.loki_client imports the Grafana helpers of this module, so it is loaded only when Loki is read.
+        from AI.loki_client import loki_fetcher
+
+        catalog = cfg.get("data_sources") if isinstance(cfg.get("data_sources"), dict) else CONFIG.get("data_sources")
+        fetch, _ = loki_fetcher(catalog or {}, logs_cfg)
+        return collect_loki_logs(start_ts=start_ts, end_ts=end_ts, logs_cfg=logs_cfg, resample_interval=resample, fetch=fetch)
+    return collect_application_logs(start_ts=start_ts, end_ts=end_ts, logs_cfg=logs_cfg, resample_interval=resample)
+
+
 def _prepare_metric_domains(cfg: dict, queries: dict, collect_keys: List[str]) -> Dict[str, List[SourceGroup]]:
     """Resolves the sources of every enabled domain before collection starts: one group per source and language.
 
@@ -2624,12 +2879,7 @@ def _upload_from_llm(
             )
             collected_count += 1
             if key == APPLICATION_LOGS_DOMAIN:
-                domain_data[key] = collect_application_logs(
-                    start_ts=start_ts,
-                    end_ts=end_ts,
-                    logs_cfg=logs_cfg,
-                    resample_interval=resample,
-                )
+                domain_data[key] = collect_logs_domain(cfg, logs_cfg, start_ts, end_ts, resample)
                 continue
             groups = metric_sources.get(key)
             if not groups:
@@ -2668,6 +2918,20 @@ def _upload_from_llm(
             run_steps = RunSteps(steps=spike_steps, rps_drop=None)
         lt_mode_entries["spike_profile"] = analyze_spikes(spike_profile, lt_labeled_all, sla_early, end_ts, shift_hours)
         logger.info("Spike detection: %d spike(s)", len(lt_mode_entries["spike_profile"].get("spikes") or []))
+    if profile.mode == "phases":
+        phase_profile = phases_from_labeled(lt_labeled_all, queries.get("lt_framework"), sla_early, start_ts, end_ts)
+        phase_steps = phase_load_steps(phase_profile, start_ts, shift_hours)
+        if phase_steps:
+            run_steps = RunSteps(steps=phase_steps, rps_drop=None)
+        lt_mode_entries["phase_profile"] = phase_profile.to_dict(shift_hours)
+        phase_reference = _load_phase_reference(storage_cfg, run_meta, save_to_db, start_ts)
+        if phase_reference:
+            lt_mode_entries["phase_reference"] = phase_reference
+        logger.info(
+            "Phase detection: %d phase(s), detected=%s, reason=%s, reference=%s",
+            len(phase_profile.phases), phase_profile.detected, phase_profile.reason,
+            (phase_reference or {}).get("run_name"),
+        )
     load_steps = run_steps.steps
     if profile.mode == "stability":
         hold = hold_window_from_labeled(lt_labeled_all, perf_label_early, load_steps)
@@ -2675,6 +2939,8 @@ def _upload_from_llm(
     anomaly_cfg = {
         "step_elasticity_threshold": _cfg_float(sla_early.get("step_elasticity_threshold"), 2.0),
         "step_drift_pct": _cfg_float(sla_early.get("step_drift_pct"), 20.0),
+        # Phases of a scenario carry different request mixes: only the drift inside a phase means something.
+        "cross_step": profile.mode != "phases",
     }
     time_range_ctx = {
         "start": start_ts,
@@ -2684,6 +2950,7 @@ def _upload_from_llm(
         "duration_min": round((end_ts - start_ts) / 60.0, 1),
     }
     baseline_ctx = _load_baseline_context(cfg, run_meta, storage_cfg, save_to_db, start_ts)
+    baseline_sla = _load_baseline_sla(storage_cfg, baseline_ctx, save_to_db)
     for key in domain_keys:
         payload = domain_data.get(key) or {}
         if key == APPLICATION_LOGS_DOMAIN or not _is_enabled(key) or payload.get("ctx"):
@@ -2746,6 +3013,20 @@ def _upload_from_llm(
     _progress(msg("job.progress.sla"), PROGRESS_SLA)
     sla_cfg = copy.deepcopy(sla_early)
     sla_result = evaluate_sla(domain_data, sla_cfg, test_profile=test_profile, lang=lang)
+    # The step table is built from the SLA windows; it is also where the regression reads p95 and errors per step.
+    evaluated_window = sla_result.get("stable_window") if isinstance(sla_result.get("stable_window"), dict) else None
+    load_step_table = _load_step_table_for_report(
+        load_steps,
+        (domain_data.get("lt_framework") or {}).get("labeled") or [],
+        sla_cfg,
+        evaluated_window if profile.mode != "stability" else None,
+        sla_result.get("target_window") if is_capacity_like(profile.mode) else None,
+        detection=run_steps.detection,
+    )
+    sla_result = apply_regression(
+        sla_result, baseline_sla, sla_cfg, lang,
+        step_table=load_step_table, service=str((run_meta or {}).get("service") or ""),
+    )
     soak_trends: List[Dict[str, Any]] = []
     if profile.mode == "stability":
         soak_trends = compute_trends(domain_data, sla_cfg, lt_mode_entries.get("hold_window"), anomaly_cfg["step_drift_pct"])
@@ -2788,6 +3069,14 @@ def _upload_from_llm(
             target_rps=(deterministic_sla.get("target_rps_check") or {}).get("threshold"),
             sla_summary=deterministic_sla.get("summary"),
         )
+    elif profile.mode == "phases":
+        mode_payloads["scenario"] = build_scenario_payload(
+            lt_mode_entries.get("phase_profile"),
+            lt_mode_entries.get("phase_reference"),
+            sla_result.get("phase_results"),
+            focus=profile.focus(lang),
+            settings=phase_settings(sla_cfg),
+        )
     elif profile.mode == "stress":
         mode_payloads["saturation"] = build_saturation(
             sla_window=sla_window,
@@ -2799,14 +3088,8 @@ def _upload_from_llm(
             shift_hours=shift_hours,
             designated_peak=designated_peak,
         )
-    load_step_table = _load_step_table_for_report(
-        load_steps,
-        (domain_data.get("lt_framework") or {}).get("labeled") or [],
-        sla_cfg,
-        sla_window if profile.mode != "stability" else None,
-        sla_result.get("target_window") if is_capacity_like(profile.mode) else None,
-        detection=run_steps.detection,
-    )
+    if profile.mode == "phases":
+        _mark_phase_rows(load_step_table, mode_payloads.get("scenario"))
     sla_step_ctx = _sla_step_context(sla_result, load_steps, shift_hours)
     for key in domain_keys:
         payload = domain_data.get(key)
@@ -2823,6 +3106,8 @@ def _upload_from_llm(
             ctx_obj["hold_window"] = lt_mode_entries["hold_window"]
         if profile.mode == "spike":
             ctx_obj["spike_windows"] = spike_windows_ctx(lt_mode_entries.get("spike_profile"))
+        if profile.mode == "phases":
+            ctx_obj["phases"] = phases_ctx(mode_payloads.get("scenario"))
         payload["ctx"] = json.dumps(ctx_obj, ensure_ascii=False)
 
     # Сохранение метрик доменов в TimescaleDB
@@ -2945,7 +3230,7 @@ def _upload_from_llm(
             final_payload["verdict"] = sla_verdict
             if sla_verdict == RISK and original_verdict == FAIL:
                 rationale = str(final_payload.get("verdict_rationale") or "").strip()
-                correction = prompt_text("verdict.final_adjusted", lang, test=profile.label(lang))
+                correction = prompt_text("verdict.final_adjusted", lang, test=profile.label(lang), label=verdict_label(FAIL, lang))
                 final_payload["verdict_rationale"] = f"{correction}\n\n{rationale}" if rationale else correction
                 final_payload["verdict_adjusted_from"] = FAIL
 
@@ -2979,6 +3264,7 @@ def _upload_from_llm(
             "sla_window": sla_result.get("stable_window"),
             "sla_target_window": sla_result.get("target_window"),
             "sla_headroom": sla_result.get("headroom"),
+            "sla_regression": sla_result.get("regression"),
             "load_step_table": load_step_table,
             "system_context": active_system_context,
         }
@@ -3195,6 +3481,11 @@ def _upload_from_llm(
         if aligned is not None:
             logger.info("Domain '%s' verdict aligned with SLA step: fail -> risk", k)
             results_map[k] = (aligned[0], aligned[1], scr)
+            continue
+        capped = _cap_resource_domain_verdict(k, txt, _parsed_to_dict(prs), sla_result, lang)
+        if capped is not None:
+            logger.info("Domain '%s' verdict capped while the primary SLA holds: fail -> risk", k)
+            results_map[k] = (capped[0], capped[1], scr)
 
     def _result_or_blank(key: str):
         if _is_enabled(key):
@@ -3248,8 +3539,8 @@ def _upload_from_llm(
             base_ctx["domains_tables_markdown"]["lt_framework"] = lt_full_data
         if GENERATORS_DOMAIN in domain_keys:
             base_ctx["domains_tables_markdown"][GENERATORS_DOMAIN] = generators_full_data
-    if APPLICATION_LOGS_DOMAIN in domain_keys:
-        base_ctx["domains_tables_markdown"][APPLICATION_LOGS_DOMAIN] = application_logs_full_data
+        if APPLICATION_LOGS_DOMAIN in domain_keys:
+            base_ctx["domains_tables_markdown"][APPLICATION_LOGS_DOMAIN] = application_logs_full_data
     overall_ctx = json.dumps(_compact_overall_context(base_ctx), ensure_ascii=False)
     logger.info("Final LLM context size: %d chars", len(overall_ctx))
     _progress(msg("job.progress.final_llm"), PROGRESS_FINAL_LLM)
@@ -3371,6 +3662,7 @@ def _upload_from_llm(
         "sla_window": sla_result.get("stable_window"),
         "sla_target_window": sla_result.get("target_window"),
         "sla_headroom": sla_result.get("headroom"),
+        "sla_regression": sla_result.get("regression"),
         "load_step_table": load_step_table,
         "system_context": active_system_context,
     }

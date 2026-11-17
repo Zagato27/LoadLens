@@ -30,6 +30,9 @@ from tests.test_smoke_api import RecordingConnection  # noqa: E402
         ("spike", "spike", "spike", False, False),
         ("Всплески", "spike", "spike", False, False),
         ("stress", "stress", "stress", True, True),
+        ("scenario", "scenario", "phases", False, False),
+        ("Сценарий", "scenario", "phases", False, False),
+        ("e2e", "scenario", "phases", False, False),
         ("", "", "capacity", True, True),
         ("garbage", "", "capacity", True, True),
     ],
@@ -63,6 +66,8 @@ def test_resolve_step_detection_respects_config_only_for_capacity_like_modes():
     # soak and spike use their own steps whatever the config says
     assert resolve_step_detection(profile_for("soak"), enabled) is False
     assert resolve_step_detection(profile_for("spike"), enabled) is False
+    # scenario phases replace the steps
+    assert resolve_step_detection(profile_for("scenario"), enabled) is False
     # untyped legacy runs: the detector runs only when the config enables it
     assert resolve_step_detection(profile_for(""), {}) is False
     assert resolve_step_detection(profile_for(""), enabled) is True
@@ -83,7 +88,7 @@ def test_sla_guidance_degradation_rule_only_for_capacity_modes():
 
 
 def test_overlays_cover_every_type_and_no_placeholders():
-    assert set(TEST_TYPE_OVERLAYS) == {"step", "soak", "spike", "stress"}
+    assert set(TEST_TYPE_OVERLAYS) == {"step", "soak", "spike", "stress", "scenario"}
     for text in TEST_TYPE_OVERLAYS.values():
         assert "X%" not in text and "recovery_time_s" not in text
 
@@ -97,7 +102,7 @@ def test_legacy_prompt_layers_are_gone():
         assert not hasattr(pipeline_module, name)
 
 
-@pytest.mark.parametrize("test_type, allowed", [("step", True), ("stress", True), ("soak", False), ("spike", False)])
+@pytest.mark.parametrize("test_type, allowed", [("step", True), ("stress", True), ("soak", False), ("spike", False), ("scenario", False)])
 def test_forecast_availability_follows_profile(test_type, allowed):
     status = forecast_availability(test_type, None, {})
     if allowed:

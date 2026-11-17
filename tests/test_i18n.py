@@ -43,7 +43,8 @@ DYNAMIC_PREFIXES = ("common.verdict.", "common.lang.", "common.role.", "common.d
                     "report.focus.", "report.peak_label.", "report.hold_note.", "report.spike_note.", "report.failure_mode.",
                     "report.saturation_note.", "sla.check_title.", "sla.rationale.", "sla.summary.",
                     "capacity.verdict.", "capacity.confidence.", "capacity.ceiling_source.", "capacity.scaling.",
-                    "report.step_label.")
+                    "report.step_label.", "compare.outcome.", "compare.reason.", "compare.flag.", "compare.assessment.",
+                    "compare.rps_kind.", "sla.regression.reason.", "sla.regression.short.", "sla.regression.scope.")
 # Definitions and docs of the helpers themselves are not usages.
 ENGINE_FILES = {"AI/i18n.py", "loadlens_app/i18n.py", "static/js/i18n.js"}
 TRANSLATE_CALLS = {"t", "tn", "tHtml", "msg", "plural", "translate", "LocalizedError"}

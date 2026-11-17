@@ -76,6 +76,14 @@ def _forecast_blueprint():
     return importlib.import_module("loadlens_app.blueprints.forecast")
 
 
+def _compare_blueprint():
+    return importlib.import_module("loadlens_app.blueprints.compare")
+
+
+def _release_blueprint():
+    return importlib.import_module("loadlens_app.blueprints.release_pages")
+
+
 # ---- the tasks ----------------------------------------------------------------------------------------------
 
 
@@ -170,6 +178,30 @@ def publish_forecast_task(
         return dict(status=JOB_STATUS_DONE, progress=100, message=msg("job.done"), page_url=result["page_url"], page_id=result["page_id"])
 
     _run_job(self, job_id, work, forecast._failure_message)
+
+
+@celery_app.task(name="loadlens.publish_compare", **_TASK_OPTIONS)
+def publish_compare_task(self, job_id: str, *, run_a: str, run_b: str, source_url: str) -> None:
+    """Publishes the comparison of two runs as its own Confluence page (``compare_confluence.publish_comparison``)."""
+    compare = _compare_blueprint()
+
+    def work(progress: Progress) -> Dict[str, Any]:
+        result = compare.publish_comparison(run_a, run_b, source_url, progress)
+        return dict(status=JOB_STATUS_DONE, progress=100, message=msg("job.done"), page_url=result["page_url"], page_id=result["page_id"])
+
+    _run_job(self, job_id, work, compare._failure_message)
+
+
+@celery_app.task(name="loadlens.publish_release", **_TASK_OPTIONS)
+def publish_release_task(self, job_id: str, *, release: str, project_area: str, source_url: str) -> None:
+    """Publishes a release (its runs of the project area) as its own Confluence page (``release_confluence.publish_release``)."""
+    pages = _release_blueprint()
+
+    def work(progress: Progress) -> Dict[str, Any]:
+        result = pages.publish_release(release, project_area, source_url, progress)
+        return dict(status=JOB_STATUS_DONE, progress=100, message=msg("job.done"), page_url=result["page_url"], page_id=result["page_id"])
+
+    _run_job(self, job_id, work, pages._failure_message)
 
 
 # ---- running a job ------------------------------------------------------------------------------------------
@@ -301,7 +333,9 @@ def __getattr__(name: str) -> str:
 __all__ = [
     "HEARTBEAT_INTERVAL_SEC",
     "SoftTimeLimitExceeded",
+    "publish_compare_task",
     "publish_confluence_task",
     "publish_forecast_task",
+    "publish_release_task",
     "report_task",
 ]

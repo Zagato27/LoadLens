@@ -17,6 +17,7 @@ the Russian original of this page is [docker/DOCKER_SETUP.md](../docker/DOCKER_S
 - [Health checks and migrations at start](#health-checks-and-migrations-at-start)
 - [Secrets and the image](#secrets-and-the-image)
 - [Updates](#updates)
+- [Updating a systemd installation from your computer](#updating-a-systemd-installation-from-your-computer)
 - [External database and other topologies](#external-database-and-other-topologies)
 - [Database tables](#database-tables)
 - [Troubleshooting](#troubleshooting)
@@ -201,6 +202,45 @@ the jobs of a new application. Migrations run at the next start (above). Release
 [CHANGELOG.md](../CHANGELOG.md); the running version is shown next to the logo in the top bar, in "Settings → About"
 and by `GET /about`.
 
+For an upgrade from 1.0, first read [Upgrading to LoadLens 2.0](upgrading-to-2.md): comparison API semantics and
+step-detector settings changed.
+
+## Updating a systemd installation from your computer
+
+When LoadLens runs from a git clone as systemd services (the application and the Celery worker, see "Local run
+without Docker" below), `tools/deploy.py` updates it in one command over one SSH session. The server fetches from its
+own `origin`, so it needs read access to the repository; the computer you run the tool on needs `git`, `ssh` and
+Python 3.10 or newer.
+
+```bash
+cp tools/deploy.example.json tools/deploy.local.json   # git-ignored; set host, user, app_dir, services
+python tools/deploy.py check      # read-only: lists LoadLens-like services, the checkout, the venv Python, health
+python tools/deploy.py            # deploy the local HEAD; it must be pushed (--push pushes the branch first)
+python tools/deploy.py rollback   # back to the commit the last deploy replaced
+```
+
+A deploy refuses to start when the server checkout has modified tracked files, is on another branch or has commits
+of its own. Otherwise it moves the checkout to the commit and runs `pip install -r requirements.txt` with the venv
+Python when that file changed. A failed install puts the previous commit back before anything restarts. Then it
+restarts the units and waits until they stay active and `health_url` answers (`http://127.0.0.1:5000/healthz` by
+default); if they do not, it prints the last journal lines and the rollback command. `settings.py`, the runtime
+JSON files and the venv are untracked and stay as they are. Restarting the worker interrupts the reports it is
+building, so deploy when no job is running.
+
+| Key | Meaning |
+|---|---|
+| `host`, `user`, `port`, `ssh_options` | SSH target; `ssh_options` adds arguments such as `["-J", "jump.example.com"]` |
+| `app_dir`, `services` | The checkout on the server and the units to restart, e.g. `["loadlens", "loadlens-worker"]` |
+| `branch` | Deployed branch (`main`); `--ref <commit>` deploys an older commit of it |
+| `health_url`, `health_wait_sec` | Checked on the server after the restart (`""` skips the URL); wait limit (90 s) |
+| `python` | venv interpreter for pip; by default taken from `ExecStart` of the units |
+| `run_as` | Owner of the checkout when it is not the SSH user: git and pip run as that user via `sudo -u` |
+
+`systemctl restart` runs through `sudo` unless you log in as root. The tool allocates a terminal, so sudo can ask
+for the password; for unattended runs allow the exact command instead, e.g.
+`deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart loadlens loadlens-worker`. The commit that a deploy replaced
+is kept in the ref `refs/loadlens/previous` of the server checkout, so a rollback needs no network.
+
 ## External database and other topologies
 
 - **External TimescaleDB.** Point `storage.timescale` at it and do not start the `timescaledb` service (or remove it
@@ -228,6 +268,9 @@ All tables are created by the application in `storage.timescale.schema`:
 | `llm_feedback`, `report_verdicts`, `engineer_reports` | Votes on findings; manual verdicts with author, reason and time (the last row wins); versions of the engineer summary |
 | `report_jobs` | Background jobs: state, progress, owner, runner (thread or worker), timestamps |
 | `confluence_publications`, `forecast_publications`, `forecast_explanations` | Published report and forecast pages; the cache of forecast explanations |
+| `compare_explanations`, `compare_publications` | The cache of comparison explanations and the published comparison pages, per pair of runs |
+| `release_marks`, `releases` | Release membership, accepted runs, pinned baselines and release metadata |
+| `release_publications` | Confluence release pages, keyed by release name and project area |
 | `load_test_runs`, `load_test_presets` | Runs started from LoadLens with their instances; presets of the run form |
 | `app_users`, `api_tokens`, `audit_log` | Users (scrypt hashes), token hashes, the audit log |
 | `app_migrations` | The registry of executed one-off migrations |

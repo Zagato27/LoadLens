@@ -6,7 +6,7 @@
 #  - default_params — шаг выборки и ресемплирование
 #  - data_sources — каталог подключений (Prometheus, Grafana, InfluxDB); общий для всех областей
 #  - domain_sources — какой источник читает домен; область может заменить привязки целиком
-#  - logs_source — необязательный домен application_logs: агрегированные ERROR-логи из OpenSearch
+#  - logs_source — необязательный домен application_logs: агрегированные ERROR-логи из OpenSearch или Loki
 #  - confluence — публикация готового веб-отчёта страницей Confluence (кнопка на странице отчёта)
 #  - storage.timescale — параметры TimescaleDB (в т.ч. таблицы engineer_reports, report_jobs, confluence_publications)
 #  - queries — набор доменных запросов и подписей (PromQL/Flux/InfluxQL)
@@ -41,8 +41,10 @@ CONFIG = {
             "critic_workers": 3,
             "pause_sec_between_calls": 0.0
         },
-        # Предыдущий прогон того же сервиса в пределах области уходит в контекст как baseline.
-        "baseline": {"enabled": True, "mode": "previous_success"},
+        # Прогон-база уходит в контекст как baseline. mode: pinned — закреплённый эталон сервиса, иначе принятый
+        # прогон прошлого релиза, иначе предыдущий успешный (без меток это previous_success); previous_release —
+        # без эталона; previous_success — предыдущий успешный прогон сервиса в пределах области; previous — любой.
+        "baseline": {"enabled": True, "mode": "pinned"},
         # Дополнительный вызов модели: вердикт только по находкам, чьи числа нашлись в метриках.
         "verification_pass": True,
         "perplexity": {
@@ -134,6 +136,30 @@ CONFIG = {
         "target_rps_allow_peak_fallback": True,
         "step_detection_enabled": True,  # step and stress tests only; soak/spike derive their own steps
         "debug_peak_logging": False,
+        # Scenario tests (test_type "scenario"): phases from the request groups of the load tool. Empty values take
+        # the defaults: the query of role lt.rps_by_request, the group key "group" (else transaction/scenario/request/
+        # name/label) and the smallest k6 nesting level on which at least two groups take turns.
+        "phase_query": "",
+        "phase_label_key": "",
+        "phase_level": 0,
+        "phase_min_minutes": 2.0,
+        "phase_max_count": 16,
+        "phase_duration_tolerance_pct": 25.0,
+        # A latency or error threshold fails a phase only when it stays broken this many minutes; a shorter
+        # excursion is a risk. Phases whose name (leading group and subgroup) matches phase_exclude (a regular
+        # expression, case-insensitive, e.g. "DELETE" for preparing and cleaning up test data) are shown but not judged.
+        "phase_breach_minutes": 2.0,
+        "phase_exclude": "",
+        # Regression against the baseline run (the one of llm.baseline): p95 and the load reached in % of the baseline,
+        # the error rate in percentage points, compared at the target step (else the lower ceiling) of both runs, the
+        # hold of a soak test or the spike level. Over a risk threshold "Risks found", over a failure threshold
+        # "Failed". None: off; all six None: no regression checks. Step, stress, soak and spike tests.
+        "regression_latency_risk_pct": 10.0,
+        "regression_latency_fail_pct": None,
+        "regression_errors_risk_pp": 0.5,
+        "regression_errors_fail_pp": None,
+        "regression_capacity_risk_pct": 10.0,
+        "regression_capacity_fail_pct": None,
         # Capacity forecast in the report («Прогноз мощностей»)
         "mean_latency_query": "LT (InfluxQL): http_req_duration mean(ms)",
         "vus_query": "LT (InfluxQL): VUs",
@@ -157,6 +183,30 @@ CONFIG = {
     # (запросы идут через /api/console/proxy). При enabled=true домен добавляется к анализу ИИ.
     "logs_source": {
         "enabled": False,
+        # Log system: "opensearch" (also when the key is absent) or "loki".
+        "type": "opensearch",
+        # Loki: through a Grafana source of data_sources ("source" + datasource name or uid) or directly ("url").
+        # Error counts come from a metric LogQL query (exact); error types from up to lines_per_query sampled
+        # lines per busy interval and service. level_filter empty: built from filters.error_levels, format and
+        # level_field, e.g. |~ "(?i)(error)" | json | level=~"(?i)(error)".
+        "loki": {
+            "source": "",
+            "datasource_name": "",
+            "datasource_uid": "",
+            "url": "",
+            "org_id": "",
+            "username": "",
+            "password": "",
+            "verify_ssl": True,
+            "selector": '{namespace="apps"}',
+            "service_label": "app",
+            "format": "auto",
+            "level_field": "level",
+            "message_field": "message",
+            "level_filter": "",
+            "lines_per_query": 300,
+            "request_timeout_sec": 120
+        },
         "opensearch": {
             "base_url": "https://opensearch-dashboards:5601",
             "index_pattern": "app-logs-*",
@@ -203,11 +253,25 @@ CONFIG = {
         "parent_page_id": "",
         # Parent page of forecast reports; empty — the parent page of test reports
         "forecast_parent_page_id": "",
+        # Parent page of run comparisons; empty — the parent page of test reports
+        "compare_parent_page_id": "",
+        # Parent page of release pages; empty — the parent page of test reports
+        "release_parent_page_id": "",
         "verify_ssl": False,
         "request_timeout_sec": 60,
         # Address of LoadLens for the links on published pages, e.g. "https://loadlens.example.com".
         # Empty: the address the browser used, which follows the Host header of the request.
         "app_url": ""
+    },
+
+    # Links from the release page to Jira; LoadLens never calls Jira. A release name is the fixVersion of its
+    # issues: «Issues in Jira» opens <base_url>/issues/?jql=project = <project_key> AND fixVersion = "<release>",
+    # the release ticket opens <base_url>/browse/<KEY-123>. base_url without a trailing «/», e.g. a Jira address
+    # with https://, and project_key in capital letters, e.g. PROJ.
+    "jira": {
+        "enabled": False,
+        "base_url": "",
+        "project_key": ""
     },
 
     # Limits that protect the server and the LLM budget; None switches a limit off.
@@ -305,7 +369,12 @@ CONFIG = {
             # Привязка отчётов к опубликованным страницам Confluence
             "confluence_table": "confluence_publications",
             # Разбор предела прогноза мощностей моделью (кэш на отчёт)
-            "forecast_table": "forecast_explanations"
+            "forecast_table": "forecast_explanations",
+            # Pages of capacity forecasts published to Confluence
+            "forecast_confluence_table": "forecast_publications",
+            # AI explanations of run comparisons (cache per pair A, B) and their Confluence pages
+            "compare_table": "compare_explanations",
+            "compare_confluence_table": "compare_publications"
         }
     },
 
@@ -353,7 +422,7 @@ CONFIG = {
         "manual": {"title": "Вручную", "type": "manual"},
         # "gen-1": {
         #     "title": "Генератор 1", "type": "ssh",
-        #     "ssh": {"host": "10.0.0.5", "port": 22, "username": "loadlens", "private_key": "", "host_key": ""},
+        #     "ssh": {"host": "192.0.2.5", "port": 22, "username": "loadlens", "private_key": "", "host_key": ""},
         #     "work_dir": "/opt/loadlens/runs", "scripts_dir": "/opt/loadlens/tests", "tools": {},
         # },
         # "docker-1": {
@@ -365,12 +434,12 @@ CONFIG = {
         # Пайплайн команды как есть: LoadLens выбирает ветку и значения параметров пайплайна (docs/load-tests.md).
         # "gitlab-1": {
         #     "title": "GitLab CI", "type": "gitlab",
-        #     "gitlab": {"url": "https://gitlab.example.ru", "project": "perf/load-tests", "ref": "", "api_token": ""},
-        #     "loadlens_url": "https://loadlens.example.ru", "tags_metrics": False,
+        #     "gitlab": {"url": "https://gitlab.example.com", "project": "perf/load-tests", "ref": "", "api_token": ""},
+        #     "loadlens_url": "https://loadlens.example.com", "tags_metrics": False,
         # },
         # "jenkins-1": {
         #     "title": "Jenkins", "type": "jenkins",
-        #     "jenkins": {"url": "https://jenkins.example.ru", "job": "perf/load-test", "username": "loadlens", "api_token": ""},
+        #     "jenkins": {"url": "https://jenkins.example.com", "job": "perf/load-test", "username": "loadlens", "api_token": ""},
         #     "param_options": {"STAND": ["stage", "preprod"]},
         # },
     },

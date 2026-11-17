@@ -10,6 +10,7 @@ is one table in `loadlens_app/auth/policy.py`, and a test refuses a route withou
 - [Runs and verdicts](#runs-and-verdicts)
 - [Comparison and series](#comparison-and-series)
 - [Capacity forecast](#capacity-forecast)
+- [Releases](#releases)
 - [Load tests (engineer)](#load-tests-engineer)
 - [Settings (administrator)](#settings-administrator)
 - [Projects, prompts and services](#projects-prompts-and-services)
@@ -30,7 +31,8 @@ is one table in `loadlens_app/auth/policy.py`, and a test refuses a route withou
   log).
 - **Roles**: Viewer reads dashboards, reports, comparisons and forecasts; Engineer also creates reports, starts and
   stops load tests, publishes to Confluence, writes the engineer summary, votes on findings, renames runs, overrides
-  verdicts and asks for forecast explanations; Administrator also edits settings, projects, prompts, users and tokens
+  verdicts and asks for forecast and comparison explanations; Administrator also edits settings, projects, prompts,
+  users and tokens
   and deletes runs.
 - **Verdicts** are codes: `pass`, `risk`, `fail`, `no_data`. Inputs also accept the legacy labels.
 - **Language**: messages and errors come in the interface language of the request (cookie `loadlens.lang`, `ru`
@@ -53,7 +55,7 @@ is one table in `loadlens_app/auth/policy.py`, and a test refuses a route withou
 
 | Endpoint | Body or parameters | Notes |
 |---|---|---|
-| `POST /create_report` | `start`, `end` (ISO 8601 with offset), `service`, `project_area?`, `test_type?` (`step`, `soak`, `spike`, `stress`), `use_llm?` (default true), `save_to_db?`, `web_only?`, `run_name?` | Returns `job_id` and the assigned `run_name`. Engineer |
+| `POST /create_report` | `start`, `end` (ISO 8601 with offset), `service`, `project_area?`, `test_type?` (`step`, `soak`, `spike`, `stress`, `scenario`), `use_llm?` (default true), `save_to_db?`, `web_only?`, `run_name?` | Returns `job_id` and the assigned `run_name`. Engineer |
 | `GET /job_status/<job_id>` | | Phase, progress, message, error and the link to the result |
 | `GET /jobs` | `status=running,error`, `limit` | Recent jobs; cached 3 s |
 | `POST /jobs/dismiss` | `{"job_ids": [...]}` | Hides finished jobs from the list; running ones are returned in `skipped_running`. Engineer |
@@ -77,18 +79,40 @@ curl -s -H "Authorization: Bearer ll_..." http://localhost:5000/job_status/<job_
 
 | Endpoint | Parameters | Notes |
 |---|---|---|
-| `GET /runs` | `q`, `service`, `verdict`, `test_type`, `offset`, `limit`, `sort`, `dir`, `include` | Runs of the active area; the total is in the header `X-Total-Count`. Sorting by verdict orders by severity: `pass`, `risk`, `fail`, `no_data`. `include=sla` adds the SLA summary of every run (below) |
+| `GET /runs` | `q`, `service`, `verdict`, `test_type`, `release`, `offset`, `limit`, `sort`, `dir`, `include` | Runs of the active area; the total is in the header `X-Total-Count`. Sorting by verdict orders by severity: `pass`, `risk`, `fail`, `no_data`. `include=sla` adds the SLA summary of every run (below). Every item has `release` (`""` when unmarked), `release_accepted` and `baseline`; `release=*` keeps the runs with a release mark, `release=<name>` the runs of that release; `sort=release` orders the releases by their newest report, then the runs of a release by report time |
 | `PATCH /runs/<run_name>` | new name | Rename. Engineer |
-| `DELETE /runs/<run_name>` | | Deletes all data of the run. Administrator, browser session |
+| `DELETE /runs/<run_name>` | `force=1` | Deletes all data of the run. The accepted run of a release and a pinned baseline answer 409 with `code: release_protected` unless `force=1`. Administrator, browser session |
 | `GET /runs/<run_name>/verdict` | | The automatic and the effective verdict and the history of manual changes |
 | `PUT /runs/<run_name>/verdict` | `{"verdict": "fail", "reason": "..."}` | Manual verdict; the reason is mandatory. Engineer |
 | `DELETE /runs/<run_name>/verdict` | | Back to the automatic verdict. Engineer |
+| `GET /runs/<run_name>/release` | | Release marks of the run (below) with `releases` (release names of the area), `name_max` and `note_max`; 404 without a final report |
+| `PUT /runs/<run_name>/release` | `{"release": "25.11", "note"?: "...", "accepted"?: true}` | Marks the run as a test of a release (1 to 80 characters, no control characters, case kept; a note up to 1000 characters, a missing `note` keeps the stored one). `accepted: true` accepts the run by hand. Engineer |
+| `DELETE /runs/<run_name>/release` | | Removes the release mark (a baseline stays); 404 without one. Engineer |
+| `PUT /runs/<run_name>/baseline` | `{"note"?: "..."}` | Pins the run as the baseline of its service and test type; the previous baseline is unpinned. Engineer |
+| `DELETE /runs/<run_name>/baseline` | | Unpins the baseline; 404 when the run is not one. Engineer |
+| `GET /releases_data` | | Releases of the area, newest first: `release`, `runs` (marked runs), `accepted`, `services`, `last_created_at` (the newest report) |
 | `GET /dashboard_data` | | The dashboard summary; verdict counters are keyed by code; `last_run` carries `checks` and `profile` (below); cached 10 s |
 | `GET /services` | | Services and domains of the active area |
 
 `/runs`, `/dashboard_data` and `/llm_reports` return the effective verdict plus `manual_verdict` (`verdict`,
 `reason`, `author`, `changed_at`) when one was set. Manual changes are written to the audit log as `report.verdict`
 and `report.verdict_reset`.
+
+Release marks (`GET`/`PUT`/`DELETE` of `/runs/<run_name>/release` and `/runs/<run_name>/baseline`) answer the state
+of the run: `run_name`, `run_id`, `service`, `test_type` (copied from the final report when a mark is set; the
+normalized type, `step` for runs without one), `release`, `accepted`, `accepted_manual`, `baseline`, `note`, `author`,
+`created_at`, `updated_at`. A release, service and test type has one accepted run: the first marked run becomes it, a
+newly marked run takes over from one accepted automatically, a run accepted by hand keeps it, and when the accepted
+run loses its mark the run with the newest report takes over. A service and test type has one pinned baseline.
+Viewers read the marks, engineers change them (API tokens included); a bad name or note answers 400, a concurrent
+change of the same marks 409. Changes are written to the audit log as `report.release`, `report.release_reset`,
+`report.baseline` and `report.baseline_reset`; a forced deletion carries `force` in the audit details.
+
+```bash
+curl -s -X PUT -H "Authorization: Bearer ll_..." -H "Content-Type: application/json" \
+  -d '{"release": "25.11"}' "http://localhost:5000/runs/checkout-2026-11-10/release"
+# {"run_name": "checkout-2026-11-10", "release": "25.11", "accepted": true, "accepted_manual": false, "baseline": false, ...}
+```
 
 `include` of `GET /runs` is a comma-separated list; the only known value is `sla`, unknown values are ignored, and
 without it the response is unchanged. With `include=sla` every item gets `sla`: `{"passed", "total", "p95_ms",
@@ -118,8 +142,24 @@ curl -s -H "Authorization: Bearer ll_..." "http://localhost:5000/runs?limit=1&in
 |---|---|
 | `GET /compare_summary` | `run_a`, `run_b`, `domain`, `agg` (`p95`, `avg`, `max`): verdicts, findings and metrics per domain |
 | `GET /compare_metric_summary` | `run_a`, `run_b`, `query_label`, `agg`: one series of both runs |
-| `GET /compare_baseline` | `run_name`, `mode=previous_success|previous`: the baseline run of the same service, type and area |
+| `GET /compare_baseline` | `run_name`, `mode=pinned|previous_release|previous_success|previous` (default `previous_success`): the baseline run of the same service, type and area. `pinned` takes the pinned baseline of the service and type, else continues as `previous_release`: the accepted run of another release with an earlier report, else the previous successful run. The answer names the mode that found the run (`mode`) and its `release`; 404 carries the requested `mode` |
 | `GET /domains_schema`, `GET /run_series`, `GET /compare_series` | Domain schema and time series for the charts |
+| `GET /compare_phases` | `run_a`, `run_b`: phases of two scenario runs aligned by their request groups, with the duration, mean RPS, SLA verdict and the p95 of the `lt.p95_total` and `lt.error_rate_pct` queries inside every phase; `available: false` unless both runs are scenarios |
+| `GET` / `POST /compare_explanation` | `run_a`, `run_b` (query for `GET`, JSON body for `POST`): the outcome of the comparison and the model's explanation (cached per pair). Engineer for `POST` |
+| `GET` / `POST /compare_confluence` | `run_a`, `run_b`: publication of the comparison page (background job). Engineer for `POST` |
+
+Run A is the assessed run and B the baseline. In the summaries `trend_pct` is the change of A relative to B,
+`(A − B) / |B| × 100`, and `direction` (`higher`, `lower`, `neutral`) tells whether a higher value of the metric is
+better: by the role of its query, else by the words of its label.
+
+`/compare_explanation` answers with `status` (`missing`, `ready`, `stale`, `unavailable`), `outcome` (`code`:
+`better`, `worse`, `same`, `mixed`, `incomparable`; `title` and `reasons` in the interface language), `flags`
+(`{code, text}`: what makes the comparison approximate), `metrics` (counts of the assessed p95 changes and
+`top_changes`), `findings` of both runs (`id` like `A:jvm:f1`), `explanation`, `check` (numbers of the answer found in
+the facts), `model`, `generated_at` and `llm_problem`. The program computes the outcome; the model only explains it.
+The explanation and the facts it got are in the language of the report of A. `POST` spends the daily
+`llm_explanations_per_user_per_day` budget; errors carry `code` (`busy` 409, `too_often` 429, `missing_llm` and
+`no_data` 422, `llm_failed` and `bad_answer` 502).
 
 ## Capacity forecast
 
@@ -138,6 +178,35 @@ which). Points after that step have the role `degraded`, their steps `degraded: 
 model and the pod plan (`excluded_degraded` counts them). `limit.kind` is `model`, `instability`, `sla` (the load of
 the first step above the maximum) or `none`; the lowest limit wins.
 
+## Releases
+
+A release is a name engineers mark runs with (the marks, the accepted run of a release and the pinned baseline are
+set by `/runs/<run_name>/release` and `/runs/<run_name>/baseline`). These routes show a release as a whole, for the
+services of the active project area.
+
+| Endpoint | Notes |
+|---|---|
+| `GET /releases_overview` | Releases of the area, newest first: `release`, `status`, `services_tested`, `services_required`, `verdicts` (`pass`, `risk`, `fail`, `no_data` counts of the accepted runs), `last_created_at`, `ticket` |
+| `GET /releases_data/<name>` | The release: `ticket`, `note`, `author`, `updated_at`, `jira` (`issues_url`, `ticket_url`; `null` while the Jira links are off), `status`, `rows`, `untested` (services of the area without an accepted run), `services_required`, `publication` (`page_id`, `page_url`, `updated_at` or `null`). 404 for a name with neither a mark in the area nor attributes |
+| `PUT /releases_data/<name>` | Body `{"ticket"?: "PROJ-123", "note"?: "..."}`: the Jira ticket (`^[A-Z][A-Z0-9_]*-\d+$`, empty clears it) and a note up to 1000 characters; a key that is not sent keeps its value. Engineer |
+| `DELETE /releases_data/<name>` | Deletes the ticket, the note and the record of the Confluence page; the marks of the runs stay. Administrator, browser session only |
+| `GET /release_trend?service=&test_type=&limit=12` | Accepted runs of a service and test type over the releases (`limit` 1..50), oldest first: `release`, `run_name`, `run_id`, `created_at`, `verdict`, `kind`, `level`, `p95`, `errors`, `capacity`, `baseline`. A service outside the area gives no points |
+| `GET /release_publications/<name>` | Saved Confluence publication of the release: `release`, `page_id`, `page_url`, `updated_at` |
+| `POST /releases/<name>/confluence` | Publish the release page (background job `release_confluence`, the same job limits as the other publications). Engineer; needs a JSON body (`{}`) |
+
+`status` is `incomplete` while a service of the area has no accepted run, else the worst verdict of the accepted runs
+(`fail`, `risk`, `no_data`, `pass`). A row of `rows` is one service and test type: `run` (the accepted run: `run_name`,
+`run_id`, `created_at`, `verdict`, `manual_verdict`, `max_rps`), `attempts` (every marked run of the pair with
+`accepted`), `previous` (the accepted run of the previous release: `release`, `run_name`, `run_id`, `created_at`,
+`verdict`, or `null`), `deltas`, `stored_regression` (the `regression` block saved with the report, which may name
+another baseline), `report_url`, `compare_url` and `baseline` (the run is the pinned baseline). `deltas` is computed
+when the page is read: `available` (else a `reason` such as `no_previous`), `kind` and `level` of the comparison
+(`target` step, `ceiling`, `hold`, `spike`) and `items` with `metric` (`p95`, `errors`, `capacity`), `current` and
+`baseline` (ms, %, RPS), `change` (signed; p95 and capacity in percent, errors in percentage points), `delta`
+(positive is worse), `unit` (`pct`, `pp`) and `tone` (`ok`, `warn`, `fail` against the `regression_*` thresholds of
+the service SLA, `neutral` without them). Changes are written to the audit log as `release.update`, `release.delete`
+and `release.publish`.
+
 ## Load tests (engineer)
 
 | Endpoint | Body or parameters |
@@ -146,16 +215,16 @@ the first step above the maximum) or `none`; the lowest limit wins.
 | `GET /load_tests/scripts?generator=&tool=` | Scripts of a tool on a generator (SSH, Docker, Kubernetes ConfigMap) |
 | `GET /load_tests/hints?service=&tool=` | Metrics output flags and variables for the service's store |
 | `POST /load_tests/preview` | Validation of the form and the assembled commands, nothing is started |
-| `POST /load_tests` | `service`, `project_area?`, `test_type?`, `run_name?`, `max_duration_min?`, `auto_report?`, `use_llm?`, `instances: [{name, generator, tool, script, params, env, start_delay_sec}]`; a CI instance has `ci_ref`, `ci_params`, `ci_extra` instead of tool, script, params and env. Returns `run_id`, `run_name`, `run_tag`, `warnings`, `url` |
+| `POST /load_tests` | `service`, `project_area?`, `test_type?`, `run_name?`, `release?` (up to 80 characters: the report gets this release mark when it is ready), `max_duration_min?`, `auto_report?`, `use_llm?`, `instances: [{name, generator, tool, script, params, env, start_delay_sec}]`; a CI instance has `ci_ref`, `ci_params`, `ci_extra` instead of tool, script, params and env. Returns `run_id`, `run_name`, `run_tag`, `warnings`, `url` |
 | `GET /load_tests/runs?active=1&limit=`, `GET /load_tests/runs/<run_id>` | Runs of the active area; one run with its instances and `report_url` once the report exists |
-| `GET /load_tests/history?q=&service=&status=&offset=&limit=` | Runs of the active area for the archive's Runs tab, newest first, **viewer** and up. No commands, scripts, parameters or CI values: `run_id`, `run_name`, `service`, `test_type`, `status`, `status_title`, `active`, `owner`, `created_at`, `started_at`, `finished_at`, `instances` (count), `tools`, `report` (`{url, run_name}` of the run's report, found by report id, or `null`), `has_report` (`null` when the report database did not answer), `can_delete`. `status` takes `active`, `done`, `failed`, `cancelled` joined by commas; `limit` up to 100. The match count is in `total` and `X-Total-Count` |
-| `POST /load_tests/runs/delete` | `{"run_ids": [...], "with_reports": false}`, up to 100 ids. Deletes finished runs: an engineer their own, an administrator anyone's; running and foreign runs are skipped. Answers `deleted`, `skipped` (`run_id`, `code`: `not_found`, `active` or `forbidden`, `message`), `reports_deleted`, `reports_failed`. `with_reports` (administrator only) deletes the runs' reports too. Browser session only |
+| `GET /load_tests/history?q=&service=&status=&offset=&limit=` | Runs of the active area for the archive's Runs tab, newest first, **viewer** and up. No commands, scripts, parameters or CI values: `run_id`, `run_name`, `service`, `test_type`, `release`, `status`, `status_title`, `active`, `owner`, `created_at`, `started_at`, `finished_at`, `instances` (count), `tools`, `report` (`{url, run_name}` of the run's report, found by report id, or `null`), `has_report` (`null` when the report database did not answer), `can_delete`. `status` takes `active`, `done`, `failed`, `cancelled` joined by commas; `limit` up to 100. The match count is in `total` and `X-Total-Count` |
+| `POST /load_tests/runs/delete` | `{"run_ids": [...], "with_reports": false}`, up to 100 ids. Deletes finished runs: an engineer their own, an administrator anyone's; running and foreign runs are skipped. Answers `deleted`, `skipped` (`run_id`, `code`: `not_found`, `active` or `forbidden`, `message`), `reports_deleted`, `reports_failed`. `with_reports` (administrator only) deletes the runs' reports too, except the accepted run of a release and a pinned baseline: those stay and appear in `reports_failed` with `code: release_protected`. Browser session only |
 | `DELETE /load_tests/runs/<run_id>?with_report=1` | One finished run; 404 unknown, 409 still running, 403 someone else's run. Browser session only |
 | `GET /load_tests/active?limit=5&live=1` | Running runs for the dashboard: `total`, state, instance progress, `can_stop` and, with `live=1`, RPS and error ratio of the last 15 minutes |
 | `POST /load_tests/runs/<run_id>/stop` | `{"index": N}` to stop one instance, empty for the whole run |
 | `GET /load_tests/runs/<run_id>/logs?index=&bytes=` | Tail of the instance log |
 | `GET /load_tests/runs/<run_id>/live?window=&since=&mode=` | Live series by role, per-instance RPS, events, SLA lines, `fresh_at`, `step_sec` |
-| `GET /lt_windows?service=&hours=6` | Recent load windows of a service for the New report form (`hours` 0.25 to 24) |
+| `GET /lt_windows?service=&hours=6` | Load windows of a service for the New report form: the last `hours` (0.25 to 24) with a fine step, then, when fewer than three windows are found, the last 30 days with a five-minute step and a fine query per older window. Finished LoadLens runs of the same 30 days in `runs`; `days` and `since` give the depth and the start of the search. A failed 30-day search keeps `ok: true` and sets `message` |
 | `GET /load_tests/presets?service=`, `POST /load_tests/presets`, `DELETE /load_tests/presets/<id>` | Presets of the run form (`name`, `service`, `spec`); variable values are not stored |
 | `GET /load_tests/ci_params?generator=&ref=`, `GET /load_tests/ci_refs?generator=&search=` | Pipeline parameters and branches of a CI generator |
 | `POST /load_tests/ci/<run_id>/<index>/events` | Without a login, with the instance secret in `X-LoadLens-Token`: `{"event": "started"}` or `{"event": "finished", "exit_code": N, "message": "..."}` |

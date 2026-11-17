@@ -19,6 +19,8 @@ import requests
 
 from AI.data_sources import ResolvedSource
 from AI.i18n import t
+from AI.loki_client import loki_fetcher
+from AI.loki_logs import LOGS_TYPE_LOKI, count_query, logs_source_type, loki_settings, resolve_line_format, total_lines_query
 from AI.pipeline import _resolve_grafana_influx_ds_id, _resolve_grafana_prom_ds_id
 from AI.providers import SUPPORTED_PROVIDERS, _get_gigachat_client, _normalize_llm_base_url, ask_llm_with_text_data
 from loadlens_app.confluence_export import ConfluenceClient
@@ -338,6 +340,54 @@ def check_opensearch(logs_cfg: dict) -> CheckResult:
     return _timed(run)
 
 
+LOKI_CHECK_WINDOW_SEC = 900
+LOKI_CHECK_TIMEOUT_SEC = 30
+
+
+def _last_values(payload: dict) -> list[float]:
+    values: list[float] = []
+    for item in ((payload.get("data") or {}).get("result") or []) if isinstance(payload, dict) else []:
+        points = item.get("values") if isinstance(item, dict) else None
+        if points:
+            try:
+                values.append(float(points[-1][1]))
+            except (TypeError, ValueError, IndexError):
+                continue
+    return values
+
+
+def check_loki(logs_cfg: dict, catalog: dict) -> CheckResult:
+    """Reads the last 15 minutes: all lines of the selector, the line format (``auto``) and the error lines per service."""
+    def run() -> CheckResult:
+        settings = loki_settings(logs_cfg)
+        fetch, where = loki_fetcher(catalog, logs_cfg, timeout=LOKI_CHECK_TIMEOUT_SEC)
+        end_ns = int(time.time()) * 1_000_000_000
+        window = dict(start_ns=end_ns - LOKI_CHECK_WINDOW_SEC * 1_000_000_000, end_ns=end_ns,
+                      step_seconds=LOKI_CHECK_WINDOW_SEC, limit=None, direction=None)
+        lines = int(sum(_last_values(fetch(query=total_lines_query(settings, LOKI_CHECK_WINDOW_SEC), **window))))
+        if lines <= 0:
+            selector = "{" + settings.stream + "}"
+            return CheckResult(ok=False, message=t("server.connection.loki_no_lines", via=where, selector=selector), details={"lines": 0})
+        settings = resolve_line_format(settings, fetch, window["start_ns"], end_ns)
+        per_service = [value for value in _last_values(fetch(query=count_query(settings, LOKI_CHECK_WINDOW_SEC), **window)) if value > 0]
+        errors = int(sum(per_service))
+        return CheckResult(
+            ok=True,
+            message=t("server.connection.loki_ok", via=where, lines=lines, errors=errors, services=len(per_service),
+                      format=settings.line_format),
+            details={"lines": lines, "errors": errors, "services": len(per_service), "filter": settings.level_filter,
+                     "format": settings.line_format},
+        )
+    return _timed(run)
+
+
+def check_logs_source(logs_cfg: dict, catalog: dict | None = None) -> CheckResult:
+    """The configured log system: Loki or OpenSearch (``logs_source.type``)."""
+    if logs_source_type(logs_cfg) == LOGS_TYPE_LOKI:
+        return check_loki(logs_cfg, catalog or {})
+    return check_opensearch(logs_cfg)
+
+
 def check_confluence(cfg: dict) -> CheckResult:
     def run() -> CheckResult:
         if not str(cfg.get("base_url") or "").strip():
@@ -537,8 +587,8 @@ def check_llm(llm_cfg: dict) -> CheckResult:
 
 # ---- dispatcher --------------------------------------------------------------
 
-def run_check(section: str, data: dict) -> CheckResult:
-    """Runs the check matching a configuration section name."""
+def run_check(section: str, data: dict, catalog: dict | None = None) -> CheckResult:
+    """Runs the check matching a configuration section name; ``catalog`` resolves a Loki source read via Grafana."""
     payload = _cfg(data)
     if section in ("storage", "storage.timescale"):
         timescale = _cfg(payload.get("timescale")) if section == "storage" else payload
@@ -548,7 +598,7 @@ def run_check(section: str, data: dict) -> CheckResult:
     if section == "domain_sources":
         return CheckResult(ok=False, message=t("server.connection.domain_required"))
     if section == "logs_source":
-        return check_opensearch(payload)
+        return check_logs_source(payload, catalog)
     if section == "confluence":
         return check_confluence(payload)
     if section == "confluence_template":
@@ -561,7 +611,7 @@ def run_check(section: str, data: dict) -> CheckResult:
 __all__ = [
     "CHECKABLE_SECTIONS", "CheckResult", "run_check", "check_timescale", "check_grafana", "check_prometheus",
     "check_influxdb", "check_data_source", "check_resolved_source", "check_grafana_auth",
-    "check_opensearch", "check_confluence", "check_confluence_template", "check_llm",
+    "check_opensearch", "check_loki", "check_logs_source", "check_confluence", "check_confluence_template", "check_llm",
     "list_grafana_datasources", "DatasourceListResult", "GrafanaDatasource",
     "list_llm_models", "ModelListResult",
 ]

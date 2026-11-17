@@ -26,12 +26,14 @@
   const RPS_LABELS = {
     soak: () => LL.t('dashboard.rps.label_soak'),
     spike: () => LL.t('dashboard.rps.label_spike'),
-    stress: () => LL.t('dashboard.rps.label_stress')
+    stress: () => LL.t('dashboard.rps.label_stress'),
+    scenario: () => LL.t('dashboard.rps.label_scenario')
   };
   const RPS_CAPTIONS = {
     soak: () => LL.t('dashboard.rps.caption_soak'),
     spike: () => LL.t('dashboard.rps.caption_spike'),
-    stress: () => LL.t('dashboard.rps.caption_stress')
+    stress: () => LL.t('dashboard.rps.caption_stress'),
+    scenario: () => LL.t('dashboard.rps.caption_scenario')
   };
   const rpsLabel = (type) => (RPS_LABELS[type] ? RPS_LABELS[type]() : '');
   const rpsCaption = (type) => (RPS_CAPTIONS[type] ? RPS_CAPTIONS[type]() : '');

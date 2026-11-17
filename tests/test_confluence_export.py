@@ -69,10 +69,10 @@ def test_confluence_request_retries_429(monkeypatch):
 
 
 def test_html_to_storage_keeps_safe_markup():
-    html = '<p>Итог: <b>успех</b></p><a href="https://example.ru">ссылка</a><script>alert(1)</script>'
+    html = '<p>Итог: <b>успех</b></p><a href="https://example.com">ссылка</a><script>alert(1)</script>'
     converted = html_to_storage(html)
     assert "<b>успех</b>" in converted
-    assert 'href="https://example.ru"' in converted
+    assert 'href="https://example.com"' in converted
     assert "<script>" not in converted
 
 
@@ -87,8 +87,8 @@ def test_wrap_ui_tabs_uses_ui_tab_macro():
 def test_build_page_body_includes_report_sections():
     body = build_page_body(
         run_name="nt-run-1",
-        service="NSI",
-        source_url="http://localhost/reports/NSI/nt-run-1",
+        service="CATALOG",
+        source_url="http://localhost/reports/CATALOG/nt-run-1",
         llm_rows=[
             {
                 "domain": "final",
@@ -108,7 +108,7 @@ def test_build_page_body_includes_report_sections():
                         }
                     ],
                 },
-                "system_context": {"system": {"name": "NSI", "description": "Реестр"}},
+                "system_context": {"system": {"name": "CATALOG", "description": "Реестр"}},
             },
             {
                 "domain": "jvm",
@@ -257,7 +257,7 @@ def _report_rows(coded: bool) -> list[dict]:
 
 
 def test_old_and_new_reports_publish_the_same_page():
-    kwargs = {"run_name": "soak-1", "service": "NSI", "source_url": "http://localhost/reports/NSI/soak-1", "engineer_html": "", "charts": []}
+    kwargs = {"run_name": "soak-1", "service": "CATALOG", "source_url": "http://localhost/reports/CATALOG/soak-1", "engineer_html": "", "charts": []}
     old = build_page_body(llm_rows=_report_rows(False), **kwargs)
     new = build_page_body(llm_rows=_report_rows(True), **kwargs)
     _well_formed(new)

@@ -46,6 +46,7 @@ def test_fields_keep_the_dashboard_priority():
         ("peak_performance", "max_rps"),
         ("stability_under_load", "actual_rps"),
         ("spike_analysis", "max_spike_rps"),
+        ("scenario", "rps_mean"),
     )
     assert dashboard.RUNS_MAX_RPS_FIELDS is db_store.MAX_RPS_FIELDS
 
@@ -123,9 +124,9 @@ def test_parsed_without_a_level_gives_none(parsed):
 def test_sql_rule_uses_the_same_fields_and_pattern():
     rule = db_store.max_rps_sql("parsed")
     assert rule.startswith("COALESCE(CASE WHEN TRIM(parsed->'peak_performance'->>'max_rps') ~ ")
-    assert rule.index("'peak_performance'") < rule.index("'stability_under_load'") < rule.index("'spike_analysis'")
-    assert rule.count(f"'{db_store.MAX_RPS_NUMBER_PATTERN}'") == 3
-    assert rule.count("::numeric END") == 3
+    assert rule.index("'peak_performance'") < rule.index("'stability_under_load'") < rule.index("'spike_analysis'") < rule.index("'scenario'")
+    assert rule.count(f"'{db_store.MAX_RPS_NUMBER_PATTERN}'") == len(db_store.MAX_RPS_FIELDS)
+    assert rule.count("::numeric END") == len(db_store.MAX_RPS_FIELDS)
     assert "%" not in rule  # safe inside statements with psycopg2 parameters
 
 

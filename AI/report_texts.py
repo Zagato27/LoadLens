@@ -23,8 +23,9 @@ def text_lang(lang: Any) -> str:
     return normalize_lang(lang) or DEFAULT
 
 
-# Templates of the load-step labels a report stores (AI/context_pack.py, AI/spike.py); the more specific first.
-STEP_LABEL_KEYS = ("step_level", "step", "background_level", "background", "spike", "interval")
+# Templates of the load-step labels a report stores (AI/context_pack.py, AI/spike.py, AI/phases.py); the more
+# specific first. A phase title comes from the load script and is kept as it is.
+STEP_LABEL_KEYS = ("step_level", "step", "background_level", "background", "spike", "interval", "phase", "pause")
 _STEP_LABEL_PARAMS = {"index": r"\d+", "level": r"-?\d+(?:[.,]\d+)?", "start": r"\d{1,2}:\d{2}", "end": r"\d{1,2}:\d{2}"}
 
 

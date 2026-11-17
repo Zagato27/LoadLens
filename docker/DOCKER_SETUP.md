@@ -285,6 +285,10 @@ git commit -m "chore: stop tracking local configs; add examples"
   cd docker && docker compose up -d --build
   ```
 
+- Установка без Docker (git-клон под systemd) обновляется с вашего компьютера одной командой:
+  `python tools/deploy.py` (сначала `python tools/deploy.py check`, настройки в `tools/deploy.local.json`), откат —
+  `python tools/deploy.py rollback`. Подробности — в [docs/deployment.md](../docs/deployment.md#updating-a-systemd-installation-from-your-computer).
+
 ### 8) Подключение приложения к внешней БД (не из compose)
 
 В `settings.py` укажите реальные `host`, `port`, `dbname`, `user`, `password` целевой TimescaleDB. В таком случае сервис `timescaledb` из compose можно не поднимать (или удалить из `docker-compose.yml`).

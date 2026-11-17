@@ -227,6 +227,7 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(store, "_store", memory)
     reports = {}
     deleted_reports = []
+    lookup_report_refs = dashboard._lookup_report_refs
 
     def lookup(ids):
         if reports.get("__fail__"):
@@ -253,7 +254,8 @@ def env(monkeypatch, tmp_path):
     app = create_app()
     app.config["TESTING"] = True
     return types.SimpleNamespace(client=app.test_client(), store=memory, reports=reports,
-                                 deleted_reports=deleted_reports, area_services=area_services)
+                                 deleted_reports=deleted_reports, area_services=area_services,
+                                 lookup_report_refs=lookup_report_refs)
 
 
 def test_launch_accepts_the_name_of_a_finished_run_but_not_of_a_running_one_or_a_report(env):
@@ -271,13 +273,13 @@ def test_history_lists_runs_without_commands_or_parameters(env):
     assert resp.status_code == 200 and resp.headers["X-Total-Count"] == "1"
     row = resp.get_json()["runs"][0]
     assert set(row) == {
-        "run_id", "run_name", "service", "test_type", "status", "status_title", "active", "owner", "created_at",
-        "started_at", "finished_at", "instances", "tools", "report", "has_report", "can_delete",
+        "run_id", "run_name", "service", "test_type", "release", "status", "status_title", "active", "owner",
+        "created_at", "started_at", "finished_at", "instances", "tools", "report", "has_report", "can_delete",
     }
     assert row["instances"] == 1 and row["tools"] == ["k6"] and row["status_title"] == "Завершён"
     assert row["can_delete"] is True and row["report"] is None and row["has_report"] is False
     text = json.dumps(resp.get_json())
-    for secret in ("s3cret", "secret/path.js", "--vus", "TOKEN", "gen-1", "10.0.0.5"):
+    for secret in ("s3cret", "secret/path.js", "--vus", "TOKEN", "gen-1", "192.0.2.5"):
         assert secret not in text
 
 
@@ -362,6 +364,39 @@ def test_a_report_that_cannot_be_deleted_is_reported_and_the_run_still_goes(env)
     assert data["status"] == "ok" and data["report_deleted"] is False
     assert data["reports_failed"][0]["run_name"] == "locked-report" and "locked-report" in data["reports_failed"][0]["message"]
     assert env.store.get("a") is None
+
+
+@pytest.mark.parametrize("bulk", [True, False])
+def test_deletion_keeps_reports_when_release_protection_cannot_be_read(env, monkeypatch, bulk):
+    from loadlens_app.blueprints import dashboard
+
+    env.store.create(_run("a", report_url="/reports/rid-1"))
+    conn = Conn(rows=[("rid-1", "accepted-report", "checkout")])
+    monkeypatch.setattr(dashboard, "_ts_conn", lambda: conn)
+    monkeypatch.setattr(dashboard, "_lookup_report_refs", env.lookup_report_refs)
+
+    def unavailable(conn, schema, names):
+        assert names == ["accepted-report"]
+        raise RuntimeError("release protection query timed out")
+
+    monkeypatch.setattr(dashboard, "protected_runs", unavailable)
+    response = (
+        env.client.post("/load_tests/runs/delete", json={"run_ids": ["a"], "with_reports": True})
+        if bulk else env.client.delete("/load_tests/runs/a?with_report=1")
+    )
+    assert response.status_code == 200
+    data = response.get_json()
+    assert env.store.get("a") is None  # deleting the load-test history is independent of its report
+    assert env.deleted_reports == []
+    if bulk:
+        assert data["reports_deleted"] == [] and data["deleted"][0]["run_id"] == "a"
+    else:
+        assert data["report_deleted"] is False
+    assert data["reports_failed"] == [{
+        "run_id": "a", "run_name": "", "code": "report_lookup_failed",
+        "message": data["reports_failed"][0]["message"],
+    }]
+    assert data["reports_failed"][0]["message"]
 
 
 def test_single_delete_answers_404_409_and_200(env):

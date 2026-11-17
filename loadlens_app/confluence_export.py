@@ -29,7 +29,9 @@ from psycopg2 import sql
 
 from AI import report_markers
 from AI.i18n import SUPPORTED, LocalizedError, fmt_number, get_locale, msg, t, with_locale
+from AI.regression import REASONS as REGRESSION_REASONS, unit_text as regression_unit_text
 from AI.report_sections import test_type_section
+from AI.sla_evaluator import SLA_CHECK_NAMES
 from AI.test_profile import normalize_test_type, test_type_label
 from AI.verdicts import NO_DATA, is_deterministic_report, normalize_report, optional_code, to_code
 from AI.verdicts import label as verdict_label
@@ -392,16 +394,16 @@ def step_detection_text(table: dict[str, Any] | None) -> str:
 
 # ---- SLA criteria (same content as the block at the top of the report page) ----
 
-# Checks with a title in report.sla_check.<name> (the same titles as on the report page).
-SLA_CHECK_NAMES = (
-    "target_rps", "target_margin", "error_rate", "p95_latency", "p99_latency", "cpu_usage", "memory_usage", "recovery",
-)
+# Checks with a title in report.sla_check.<name> (the same titles as on the report page): the names of the evaluator,
+# phase and regression checks included (SLA_CHECK_NAMES is imported from AI.sla_evaluator).
 # Confluence status lozenge per check result: passed, failed, no data (colour, title key).
 _SLA_STATUS = {
     True: ("Green", "confluence.sla.status_pass"),
     False: ("Red", "confluence.sla.status_fail"),
     None: ("Grey", "confluence.sla.status_na"),
 }
+# A phase that broke the threshold for less than sla.phase_breach_minutes: a risk, not a failure.
+_SLA_STATUS_BRIEF = ("Yellow", "confluence.sla.status_brief")
 # Offset the report page assumes when the step times carry none (the page does the same).
 _DEFAULT_OFFSET_HOURS = 3.0
 
@@ -507,7 +509,7 @@ def _target_window_note(target: dict[str, Any], window: dict[str, Any], steps: l
 
 def sla_window_note(window: dict[str, Any], step_table: dict[str, Any] | None, target: dict[str, Any] | None = None) -> str:
     """Where the thresholds were checked: the load step (the target step and the ceiling of a step test decided on
-    its target step), the soak hold window or the spikes."""
+    its target step), the soak hold window, the spikes or the worst phase of a scenario."""
     if not window:
         return ""
     steps = [step for step in ((step_table or {}).get("steps") or []) if isinstance(step, dict)]
@@ -523,6 +525,8 @@ def sla_window_note(window: dict[str, Any], step_table: dict[str, Any] | None, t
     kind = str(window.get("kind") or "step")
     if kind == "spike":
         return t("report.steps.sla_spike") + "."
+    if kind == "phase":
+        return t("report.steps.sla_phase_worst", label=str(window.get("title") or "")) + "."
     if kind == "hold":
         key = "report.steps.sla_hold" + ("_span" if span else "") + ("_level" if level else "")
         return t(key, span=span, level=level) + "."
@@ -557,16 +561,17 @@ def sla_criteria_block(final_row: dict[str, Any], step_table: dict[str, Any] | N
     for check in checks:
         name = str(check.get("name") or "")
         passed = check.get("passed") if isinstance(check.get("passed"), bool) else None
-        colour, title_key = _SLA_STATUS[passed]
+        colour, title_key = _SLA_STATUS_BRIEF if passed is False and check.get("brief") is True else _SLA_STATUS[passed]
         note = str(check.get("message") or "").strip()
         label = xml_text(sla_check_label(name) or "—")
         criterion = label + (f"<br />{xml_text(note)}" if note else "")
+        unit = _regression_unit(check)
         rows.append(
             "<tr>"
             f"<td>{status_macro(t(title_key), colour)}</td>"
             f"<td>{criterion}</td>"
-            f"<td>{xml_text(_number_text(check.get('threshold')))}</td>"
-            f"<td>{xml_text(_number_text(check.get('actual')))}</td>"
+            f"<td>{xml_text(_number_text(check.get('threshold')) + unit)}</td>"
+            f"<td>{xml_text(_number_text(check.get('actual')) + unit)}</td>"
             "</tr>"
         )
     head = "<tr>" + "".join(
@@ -576,7 +581,44 @@ def sla_criteria_block(final_row: dict[str, Any], step_table: dict[str, Any] | N
     table = f"<table><thead>{head}</thead><tbody>{''.join(rows)}</tbody></table>"
     summary = str(_as_dict(final_row.get("sla_details")).get("summary") or "").strip()
     note = sla_window_note(sla_window_of(final_row), step_table, sla_target_window_of(final_row))
-    return table + (p(summary) if summary else "") + (p(note) if note else "")
+    baseline = regression_baseline_text(_as_dict(final_row.get("sla_details")))
+    return table + (p(summary) if summary else "") + (p(note) if note else "") + (p(baseline) if baseline else "")
+
+
+def _regression_unit(check: dict[str, Any]) -> str:
+    """Unit after the threshold and the delta of a regression check (« %», « п.п.»); '' for other checks."""
+    if str(check.get("category") or "") != "regression" or not check.get("unit"):
+        return ""
+    return " " + regression_unit_text(str(check.get("unit")))
+
+
+# Visible kind of the baseline a report was compared with (report.baseline.mode.*; the report page uses them too).
+_BASELINE_MODE_KEYS = {
+    "pinned": "report.baseline.mode.pinned",
+    "previous_release": "report.baseline.mode.previous_release",
+    "previous_success": "report.baseline.mode.previous_success",
+    "previous": "report.baseline.mode.previous",
+}
+
+
+def regression_baseline_text(sla_details: dict[str, Any]) -> str:
+    """Line under the SLA table: the baseline run the report was compared with and how it was chosen, or why there
+    was no comparison; '' when the report has no regression thresholds (or predates them)."""
+    regression = _as_dict(sla_details.get("regression"))
+    reason = str(regression.get("reason") or "")
+    if not regression or reason == "disabled":
+        return ""
+    reason_text = t(f"sla.regression.reason.{reason}") if reason in REGRESSION_REASONS else ""
+    run = str(regression.get("baseline_run_name") or "").strip()
+    if not run:
+        return t("confluence.sla.baseline_none", reason=reason_text or t("sla.regression.reason.no_baseline"))
+    mode_key = _BASELINE_MODE_KEYS.get(str(regression.get("mode") or ""))
+    release = str(regression.get("baseline_release") or "").strip()
+    mode = t(mode_key) if mode_key else ""
+    if release:
+        mode = t("report.baseline.release", release=release) + (f", {mode}" if mode else "")
+    text = t("confluence.sla.baseline", run=run, mode=f" ({mode})" if mode else "")
+    return text + (t("confluence.sla.baseline_reason", reason=reason_text) if reason_text else "")
 
 
 def two_col_table(left_title: str, right_title: str, rows: list[tuple[str, str]]) -> str:
@@ -1691,14 +1733,16 @@ def build_page_body(
     charts: list[dict[str, str]],
     step_table: dict[str, Any] | None = _UNRESOLVED,
     run_meta: dict[str, Any] | None = None,
+    mark: dict[str, Any] | None = None,
 ) -> str:
     """Storage-format page of the report, in the language the report was written in (``ru`` for older reports).
 
     ``run_meta`` (``service``, ``start_ms``, ``end_ms``) heads the page of a run without stored report rows,
-    which is written in the current locale.
+    which is written in the current locale. ``mark`` (AI/release_marks.load_mark) adds the release and baseline
+    rows to the header.
     """
     with with_locale(_page_language(llm_rows)):
-        return _page_body(run_name, service, source_url, llm_rows, engineer_html, charts, step_table, run_meta)
+        return _page_body(run_name, service, source_url, llm_rows, engineer_html, charts, step_table, run_meta, mark)
 
 
 def _page_language(llm_rows: list[dict[str, Any]]) -> str:
@@ -1712,6 +1756,39 @@ def _llm_domain_title(domain: str, stored_titles: dict[str, str]) -> str:
     return t("common.domain.final") if domain == "final" else LLM_DOMAIN_TITLES.get(domain, domain)
 
 
+def _mark_rows(mark: dict[str, Any] | None) -> list[tuple[str, str]]:
+    """Header rows of the release marks: the release (and that the run is its accepted one) and the baseline."""
+    if not isinstance(mark, dict):
+        return []
+    rows: list[tuple[str, str]] = []
+    release = str(mark.get("release") or "")
+    if release:
+        value = release + (", " + t("confluence.header.release_accepted") if mark.get("accepted") else "")
+        rows.append((t("confluence.header.release"), value))
+    if mark.get("baseline"):
+        rows.append((t("confluence.header.baseline"), t("confluence.header.baseline_value")))
+    return rows
+
+
+def load_release_mark(run_name: str) -> dict[str, Any] | None:
+    """Release marks of the run (AI/release_marks.load_mark); None without marks or when the database fails."""
+    from AI.release_marks import load_mark
+
+    try:
+        conn = _ts_conn()
+    except Exception:
+        logger.warning("Release marks of %s not read: no database connection", run_name)
+        return None
+    try:
+        with conn:
+            return load_mark(conn, _storage_cfg().get("schema", "public"), run_name)
+    except Exception as exc:
+        logger.warning("Release marks of %s not read: %s", run_name, exc)
+        return None
+    finally:
+        conn.close()
+
+
 def _page_body(
     run_name: str,
     service: str,
@@ -1721,6 +1798,7 @@ def _page_body(
     charts: list[dict[str, str]],
     step_table: Any,
     run_meta: dict[str, Any] | None = None,
+    mark: dict[str, Any] | None = None,
 ) -> str:
     first = llm_rows[0] if llm_rows else (run_meta or {})
     test_type = next((str(row.get("test_type")) for row in llm_rows if row.get("test_type")), "")
@@ -1741,6 +1819,7 @@ def _page_body(
             (t("confluence.header.run"), run_name),
             (t("confluence.header.test_time"), f"{start_text} — {end_text}"),
             *([(t("report.section.test_type"), type_label)] if type_label else []),
+            *_mark_rows(mark),
         ]),
     ]
     if source_url:
@@ -1897,6 +1976,7 @@ def _report_page(
         charts=charts,
         step_table=step_table,
         run_meta=run_meta,
+        mark=load_release_mark(run_name) if llm_rows else None,
     )
     return title, body, attachments
 
@@ -1928,3 +2008,54 @@ def upsert_page(
     _progress(progress_callback, msg("confluence.progress.updating_page"), 90)
     updated = client.update_page(page_id, title, body, version)
     return str(updated.get("id") or page_id), client.page_url(updated)
+
+
+# ---- shared by the pages of forecasts and releases -------------------------------------------------------------
+
+
+def figure(width: float, height: float, rows: int = 1, cols: int = 1) -> tuple[Any, Any, Any]:
+    """``(plt, fig, ax)`` of a white matplotlib figure (Agg backend); ``ax`` is an array for several subplots."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(rows, cols, figsize=(width, height), dpi=110)
+    fig.patch.set_facecolor("#ffffff")
+    return plt, fig, ax
+
+
+def png(plt: Any, fig: Any) -> bytes:
+    """PNG bytes of a figure made by :func:`figure`; the figure is closed."""
+    fig.tight_layout()
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png")
+    plt.close(fig)
+    return buffer.getvalue()
+
+
+def load_publications(run_names: Iterable[str]) -> dict[str, dict[str, Any]]:
+    """``{run_name: {page_id, page_url, updated_at}}`` of the published report pages of the runs, in one query."""
+    names = sorted({str(name) for name in run_names if name})
+    if not names:
+        return {}
+    cfg = _storage_cfg()
+    schema = cfg.get("schema", "public")
+    table = cfg.get("confluence_table", "confluence_publications")
+    conn = _ts_conn()
+    try:
+        ensure_publications_table(conn, cfg)
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("SELECT run_name, page_id, page_url, updated_at FROM {}.{} WHERE run_name = ANY(%s)").format(
+                    sql.Identifier(schema), sql.Identifier(table)
+                ),
+                (names,),
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    return {
+        str(row[0]): {"page_id": str(row[1]), "page_url": str(row[2] or ""), "updated_at": row[3].isoformat() if row[3] else None}
+        for row in rows
+    }

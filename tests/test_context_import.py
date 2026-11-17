@@ -404,7 +404,7 @@ class _ConfluenceResponse:
 def confluence(monkeypatch):
     from loadlens_app import confluence_export
 
-    monkeypatch.setattr(confluence_export, "confluence_config", lambda: {"base_url": "https://wiki.example.ru", "username": "reader", "password": "secret"})
+    monkeypatch.setattr(confluence_export, "confluence_config", lambda: {"base_url": "https://wiki.example.com", "username": "reader", "password": "secret"})
     calls = []
 
     def fake_request(self, method, path, action, **kwargs):
@@ -421,7 +421,7 @@ def confluence(monkeypatch):
 def test_confluence_page_as_the_source(env, confluence):
     client, _runtime, calls = env
     resp = client.post("/config/system_context/import", json={
-        "confluence_url": "https://wiki.example.ru/pages/viewpage.action?pageId=42", "area": "shop", "mode": "fill",
+        "confluence_url": "https://wiki.example.com/pages/viewpage.action?pageId=42", "area": "shop", "mode": "fill",
     })
     assert resp.status_code == 200, resp.get_json()
     source = resp.get_json()["source"]
@@ -441,5 +441,5 @@ def test_confluence_link_to_another_host_spends_nothing(env, confluence):
 def test_missing_model_is_reported_before_reading_confluence(env, confluence, monkeypatch):
     client, _runtime, _calls = env
     monkeypatch.setitem(core.CONFIG, "llm", {"provider": ""})
-    resp = client.post("/config/system_context/import", json={"confluence_url": "https://wiki.example.ru/pages/viewpage.action?pageId=42"})
+    resp = client.post("/config/system_context/import", json={"confluence_url": "https://wiki.example.com/pages/viewpage.action?pageId=42"})
     assert resp.status_code == 422 and confluence == []

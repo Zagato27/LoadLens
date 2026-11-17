@@ -14,7 +14,7 @@ from loadlens_app import confluence_export  # noqa: E402
 from loadlens_app import confluence_page as cp  # noqa: E402
 from loadlens_app.context_import import ContextImportError  # noqa: E402
 
-BASE = "https://wiki.example.ru/confluence"
+BASE = "https://wiki.example.com/confluence"
 PAGE_HTML = (
     "<h1>Checkout</h1><p>Сервис <strong>checkout-api</strong> оформляет заказы и вызывает <a href='#'>payments</a>.</p>"
     "<ul><li>Java, Spring Boot</li><li>PostgreSQL orders-db</li></ul>"
@@ -32,7 +32,7 @@ PAGE_HTML = (
         (f"{BASE}/display/SHOP/%D0%90%D1%80%D1%85%D0%B8%D1%82%D0%B5%D0%BA%D1%82%D1%83%D1%80%D0%B0", cp.PageRef(space_key="SHOP", title="Архитектура")),
         (f"{BASE}/pages/viewpage.action?spaceKey=SHOP&title=Checkout+architecture", cp.PageRef(space_key="SHOP", title="Checkout architecture")),
         (f"{BASE}/x/AbC_d-1", cp.PageRef(short_code="AbC_d-1")),
-        ("https://WIKI.example.ru:443/confluence/pages/viewpage.action?pageId=5#comments", cp.PageRef(page_id="5")),
+        ("https://WIKI.example.com:443/confluence/pages/viewpage.action?pageId=5#comments", cp.PageRef(page_id="5")),
     ],
 )
 def test_page_links(url, expected):
@@ -43,10 +43,10 @@ def test_page_links(url, expected):
     "url",
     [
         "https://evil.example.com/confluence/pages/viewpage.action?pageId=1",
-        "http://wiki.example.ru/confluence/pages/viewpage.action?pageId=1",
-        "https://wiki.example.ru:8443/confluence/pages/viewpage.action?pageId=1",
-        "https://wiki.example.ru/other/pages/viewpage.action?pageId=1",
-        "https://wiki.example.ru/confluenceX/pages/viewpage.action?pageId=1",
+        "http://wiki.example.com/confluence/pages/viewpage.action?pageId=1",
+        "https://wiki.example.com:8443/confluence/pages/viewpage.action?pageId=1",
+        "https://wiki.example.com/other/pages/viewpage.action?pageId=1",
+        "https://wiki.example.com/confluenceX/pages/viewpage.action?pageId=1",
     ],
 )
 def test_links_outside_the_configured_confluence_are_refused(url):
@@ -54,7 +54,7 @@ def test_links_outside_the_configured_confluence_are_refused(url):
         cp.page_ref(url, BASE)
 
 
-@pytest.mark.parametrize("url", ["", "wiki.example.ru/page", f"{BASE}/dashboard.action", f"{BASE}/pages/viewpage.action?pageId=abc"])
+@pytest.mark.parametrize("url", ["", "wiki.example.com/page", f"{BASE}/dashboard.action", f"{BASE}/pages/viewpage.action?pageId=abc"])
 def test_links_without_a_page(url):
     with pytest.raises(ContextImportError):
         cp.page_ref(url, BASE)
@@ -111,7 +111,7 @@ def _page(page_id="12345", title="Архитектура Checkout", view=PAGE_HT
 def test_read_page_by_id_uses_the_rendered_view(confluence):
     confluence["routes"]["/rest/api/content/12345"] = FakeResponse(200, _page())
     page = cp.read_page(f"{BASE}/pages/viewpage.action?pageId=12345")
-    assert page.title == "Архитектура Checkout" and page.page_id == "12345" and page.host == "wiki.example.ru"
+    assert page.title == "Архитектура Checkout" and page.page_id == "12345" and page.host == "wiki.example.com"
     assert page.extracted.text.startswith("Архитектура Checkout\n\nCheckout")
     assert "checkout-api | оформление" in page.extracted.text and "alert" not in page.extracted.text
     assert page.extracted.format == "confluence"

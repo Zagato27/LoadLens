@@ -868,11 +868,47 @@ class Watcher:
             run.status = RUN_DONE
             run.report_url = job.page_url or job.report_url
             _say(run, msg("lt.watcher.report.ready"))
+            _mark_release(run)
         elif job.status == JOB_STATUS_ERROR:
             run.status = RUN_DONE
             _say(run, msg("lt.watcher.report.failed", error=_job_message(job)))
         else:
             _say(run, msg("lt.watcher.report.progress", stage=_job_message(job), progress=int(job.progress)))
+
+
+def _set_release_mark(run_name: str, release: str, author: str) -> dict:
+    """Marks the report ``run_name`` as a test of ``release`` (AI/release_marks.set_release, accepted run rule)."""
+    from AI import release_marks
+    from AI.db_store import _ensure_llm_reports_table
+    from loadlens_app import response_cache
+    from loadlens_app.core import CONFIG, _ts_conn
+
+    cfg = (CONFIG.get("storage", {}) or {}).get("timescale", {}) or {}
+    conn = _ts_conn()
+    try:
+        try:
+            _ensure_llm_reports_table(conn, cfg)
+        except Exception:
+            pass
+        with conn:
+            state = release_marks.set_release(
+                conn, cfg.get("schema", "public"), cfg.get("llm_table", "llm_reports"), run_name, release, author=author,
+            )
+    finally:
+        conn.close()
+    response_cache.invalidate(response_cache.DASHBOARD)
+    return state
+
+
+def _mark_release(run: RunRecord) -> None:
+    """The release of the launch form goes to the finished report; a failure is logged and the run stays done."""
+    release = str((run.options or {}).get("release") or "").strip()
+    if not release or not run.run_name:
+        return
+    try:
+        _set_release_mark(run.run_name, release, run.owner or "")
+    except Exception as exc:
+        logger.warning("Release mark '%s' of load test run %s (report '%s') not set: %s", release, run.run_id, run.run_name, exc)
 
 
 def _job_message(job: Any) -> Any:

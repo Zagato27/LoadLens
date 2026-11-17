@@ -710,6 +710,76 @@ def _influx_aux(binding: DomainBinding) -> dict:
     return aux
 
 
+LOGS_DOMAIN = "application_logs"
+
+
+def _logs_loki_block(logs_cfg: object) -> Optional[dict]:
+    """``logs_source.loki`` when the logs source reads Loki, else ``None``."""
+    if not isinstance(logs_cfg, dict) or str(logs_cfg.get("type") or "").strip().lower() != "loki":
+        return None
+    loki = logs_cfg.get("loki")
+    return loki if isinstance(loki, dict) else {}
+
+
+def _loki_text(loki: Mapping[str, Any], key: str) -> str:
+    value = loki.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def logs_source_problems(logs_cfg: object, catalog: object, *, place: str = "", missing_kind: str = "missing") -> list[str]:
+    """Problems of the catalog entry a Loki logs source reads through Grafana; a direct Loki has none here.
+
+    ``missing_kind="used"`` words a missing entry as "the source is in use" (the catalog is being saved).
+    """
+    loki = _logs_loki_block(logs_cfg)
+    source_id = _loki_text(loki, "source") if loki is not None else ""
+    if not source_id:
+        return []
+    catalog_map = catalog if isinstance(catalog, dict) else {}
+    entry = catalog_map.get(source_id)
+    if not isinstance(entry, dict):
+        if missing_kind == "used":
+            return [t("server.data_sources.logs_source_in_use", source=source_id, where=place or t("server.data_sources.place.logs_global"))]
+        return [_scoped(place, t("server.data_sources.logs_source_missing", source=source_id))]
+    if entry.get("type") != "grafana_proxy":
+        return [_scoped(place, t("server.data_sources.logs_source_not_grafana", source=source_id))]
+    if not _loki_text(loki, "datasource_uid") and not _loki_text(loki, "datasource_name"):
+        return [_scoped(place, t("server.data_sources.logs_no_datasource", source=source_id))]
+    return []
+
+
+def resolve_logs_loki(catalog: object, logs_cfg: Mapping[str, Any]) -> dict:
+    """Connection of the Loki logs source.
+
+    ``{"mode": "grafana", "source_id", "datasource", "grafana": {..., "loki_datasource"}}`` when it reads a Grafana
+    datasource of the catalog, ``{"mode": "direct", "url", "org_id", "username", "password", "verify_ssl"}`` when it
+    reads Loki itself. Raises ``DataSourceConfigError``.
+    """
+    loki = logs_cfg.get("loki") if isinstance(logs_cfg.get("loki"), dict) else {}
+    source_id = _loki_text(loki, "source")
+    if source_id:
+        problems = logs_source_problems({**logs_cfg, "type": "loki"}, catalog)
+        if problems:
+            raise DataSourceConfigError(problems[0])
+        entry = catalog[source_id]  # type: ignore[index]
+        uid, name = _loki_text(loki, "datasource_uid"), _loki_text(loki, "datasource_name")
+        grafana = _grafana_block(entry, DomainBinding(LOGS_DOMAIN, source_id, uid, name, "", ""))
+        grafana["loki_datasource"] = {"id": None, "uid": uid, "name": name}
+        return {"mode": "grafana", "source_id": source_id, "datasource": name or uid, "grafana": grafana}
+    url = _loki_text(loki, "url")
+    if not url:
+        raise DataSourceConfigError(t("server.data_sources.logs_loki_url_missing"))
+    verify = loki.get("verify_ssl")
+    return {
+        "mode": "direct",
+        "url": url,
+        "org_id": _loki_text(loki, "org_id"),
+        "username": _loki_text(loki, "username"),
+        "password": loki.get("password") if isinstance(loki.get("password"), str) else "",
+        "verify_ssl": verify if isinstance(verify, bool) else True,
+    }
+
+
 def _has_queries(qcfg: dict, language: str) -> bool:
     if not isinstance(qcfg, dict):
         return False
@@ -744,6 +814,7 @@ __all__ = [
     "domain_query_language",
     "domain_rows_language",
     "domain_source_groups",
+    "logs_source_problems",
     "mixed_language_warnings",
     "normalize_binding",
     "normalize_row_sources",
@@ -751,6 +822,7 @@ __all__ = [
     "pick_row_language",
     "resolve_binding",
     "resolve_domain_source",
+    "resolve_logs_loki",
     "resolve_row_source",
     "row_languages",
     "row_name",

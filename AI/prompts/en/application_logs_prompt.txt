@@ -1,10 +1,14 @@
-TASK: analysis of application ERROR logs from OpenSearch during a load test.
+TASK: analysis of application ERROR logs from the log system (OpenSearch or Loki) during a load test.
 
 DOMAIN DATA:
 - intervals[] — errors aggregated by time interval; the aggregation interval matches the resample_interval of the metrics.
 - The service name is in the hostname field; the error type is built from the normalized message (identifiers, UUIDs and long
   numbers are replaced with placeholders); samples are examples of the original messages, only to illustrate the type.
 - The truncated/max_documents flag means the data is truncated and the picture may be incomplete.
+- summary.source="loki": total_errors of intervals and services are exact; the error types and their count come from a
+  sample of lines (summary.error_types_from_sample, sampled_lines of the service, at most summary.lines_per_query per
+  interval and service). sample_complete=false — the type counts cover only part of the service's errors: compare types
+  by share, take the number of errors from total_errors.
 
 ANALYSIS FOCUS:
 1. Were there significant error bursts and in which intervals; match the intervals with load_steps (by time) to state

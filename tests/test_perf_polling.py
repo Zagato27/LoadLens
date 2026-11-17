@@ -32,7 +32,7 @@ GENERATORS = {
     "gen-1": {
         "title": "Gen 1",
         "type": "ssh",
-        "ssh": {"host": "10.0.0.5", "port": 22, "username": "loadlens", "private_key": "-----BEGIN KEY-----\nabc\n-----END KEY-----", "host_key": "ssh-ed25519 AAAA"},
+        "ssh": {"host": "192.0.2.5", "port": 22, "username": "loadlens", "private_key": "-----BEGIN KEY-----\nabc\n-----END KEY-----", "host_key": "ssh-ed25519 AAAA"},
         "work_dir": "/opt/loadlens/runs",
         "scripts_dir": "/opt/tests",
         "tools": {},
@@ -334,6 +334,7 @@ def test_run_changes_invalidate_the_dashboard(app_env, monkeypatch, action):
     from loadlens_app.blueprints import dashboard
 
     monkeypatch.setattr(dashboard, "_delete_run_data", lambda name: None)
+    monkeypatch.setattr(dashboard, "_release_protected", lambda name: False)  # its own connection
     monkeypatch.setattr(dashboard, "_rename_run_data", lambda old, new: {"run_name": new})
     monkeypatch.setattr(dashboard, "_lookup_report_ref", lambda **kwargs: None)
     monkeypatch.setattr(dashboard, "seed_demo_run", lambda: {"run_name": "demo-1", "area": ""})
@@ -620,6 +621,7 @@ def test_templates_use_versioned_static_links_and_defer_chart_js():
         text = path.read_text(encoding="utf-8")
         assert not re.search(r'(?:src|href)="/static/', text), f"{path.name}: link /static/ through url_for('static', ...)"
         chart_tags += [(path.name, tag) for tag in re.findall(r"<script[^>]*chart\.umd\.js[^>]*>", text)]
-    assert len(chart_tags) == 4
+    # compare, forecast_report, launch_run, reports and the two release pages
+    assert len(chart_tags) == 6
     assert "dashboard.html" not in {name for name, _ in chart_tags}
     assert all(re.search(r"\sdefer[\s>]", tag) for _, tag in chart_tags), chart_tags

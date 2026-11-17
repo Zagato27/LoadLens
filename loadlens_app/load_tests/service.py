@@ -57,7 +57,7 @@ from .tools import (
 
 logger = logging.getLogger(__name__)
 
-TEST_TYPES = ("step", "soak", "spike", "stress")
+TEST_TYPES = ("step", "soak", "spike", "stress", "scenario")
 MAX_NAME_CHARS = 60
 MAX_DELAY_SEC = 24 * 3600
 TOOL_FAMILIES = ("k6", "jmeter", "gatling", "locust")
@@ -393,6 +393,15 @@ def plan_run(data: Mapping[str, Any], owner: str, catalog: Optional[Catalog] = N
         "use_llm": _bool(data.get("use_llm"), True),
         "max_seconds": max_minutes * 60,
     }
+    # Optional release the run tests: the watcher marks the report with it when the report is ready.
+    release = _text(data, "release")
+    if release:
+        from AI.release_marks import validate_release_name
+
+        try:
+            options["release"] = validate_release_name(release)
+        except ValueError as exc:
+            raise LaunchError(exc) from exc
 
     run_id = uuid.uuid4().hex
     run_tag = make_tag(run_name, f"run-{run_id[:8]}")
@@ -825,6 +834,7 @@ def run_view(run: RunRecord, cat: Optional[Catalog] = None, with_report: bool = 
             "use_llm": bool(run.options.get("use_llm", True)),
             "max_seconds": int(run.options.get("max_seconds") or 0),
         },
+        "release": str(run.options.get("release") or ""),
         "report_job_id": run.report_job_id,
         "report_url": run.report_url or (report or {}).get("page_url"),
         "report": report,
@@ -930,6 +940,7 @@ def history_view(run: RunRecord, cat: Catalog, reports: Optional[dict[str, dict[
         "run_name": run.run_name,
         "service": run.service,
         "test_type": run.test_type,
+        "release": str(run.options.get("release") or ""),
         "status": run.status,
         "status_title": RUN_STATUS_TITLES.get(run.status, run.status),
         "active": run.active,
@@ -965,7 +976,11 @@ def _skipped(run_id: str, code: str, run: Optional[RunRecord] = None) -> dict[st
 
 
 def _delete_reports(runs: list[RunRecord]) -> tuple[list[str], list[dict[str, str]]]:
-    """Deletes the reports of deleted runs, found by report id under their current name."""
+    """Deletes the reports of deleted runs, found by report id under their current name.
+
+    Reports of the accepted run of a release and of a baseline stay: ``reports_failed`` names them with
+    ``code: release_protected``.
+    """
     from loadlens_app.core import _delete_run_data
 
     ids = {run.run_id: report_id_of(run) for run in runs}
@@ -977,12 +992,18 @@ def _delete_reports(runs: list[RunRecord]) -> tuple[list[str], list[dict[str, st
         if not report_id:
             continue
         if refs is None:
-            failed.append({"run_id": run.run_id, "run_name": "", "message": t("lt.history.report_lookup_failed")})
+            failed.append({"run_id": run.run_id, "run_name": "", "code": "report_lookup_failed",
+                           "message": t("lt.history.report_lookup_failed")})
             continue
         ref = refs.get(report_id)
         if ref is None or ref.get("run_name") in deleted:
             continue  # already gone: nothing to delete
         name = str(ref.get("run_name") or "")
+        if ref.get("protected"):
+            # The accepted run of a release or a baseline: deleted one by one with a confirmation only.
+            failed.append({"run_id": run.run_id, "run_name": name, "code": "release_protected",
+                           "message": t("lt.history.report_protected", run=name)})
+            continue
         try:
             _delete_run_data(name)
         except Exception as exc:

@@ -20,7 +20,13 @@ from flask import request
 
 from AI import prompt_store, storage_state
 from AI.i18n import t as translate
-from AI.db_store import _ensure_engineer_reports_table, _ensure_llm_reports_table, _ensure_schema_and_table
+from AI.db_store import (
+    _ensure_engineer_reports_table,
+    _ensure_llm_reports_table,
+    _ensure_schema_and_table,
+    delete_pair_rows,
+    rename_pair_rows,
+)
 from metrics_config import METRICS_CONFIG
 from settings import CONFIG
 
@@ -859,6 +865,7 @@ def _run_tables(cfg: dict) -> tuple[str, tuple[str, ...]]:
     so the run_index primary key cannot collide.
     """
     from AI.db_store import REPORT_VERDICTS_TABLE, RUN_INDEX_TABLE
+    from AI.release_marks import RELEASE_MARKS_TABLE
 
     schema = cfg.get("schema", "public")
     tables = (
@@ -868,9 +875,20 @@ def _run_tables(cfg: dict) -> tuple[str, tuple[str, ...]]:
         cfg.get("confluence_table", "confluence_publications"),
         cfg.get("llm_feedback_table", "llm_feedback"),
         REPORT_VERDICTS_TABLE,
+        RELEASE_MARKS_TABLE,
         RUN_INDEX_TABLE,
     )
     return schema, tables
+
+
+def _run_pair_tables(cfg: dict) -> tuple[str, ...]:
+    """Tables keyed by a pair of runs (``run_a``, ``run_b``): the comparison explanations and publications."""
+    from AI.db_store import COMPARE_EXPLANATIONS_TABLE, COMPARE_PUBLICATIONS_TABLE
+
+    return (
+        cfg.get("compare_table", COMPARE_EXPLANATIONS_TABLE),
+        cfg.get("compare_confluence_table", COMPARE_PUBLICATIONS_TABLE),
+    )
 
 
 def _delete_run_data(run_name: str) -> None:
@@ -886,6 +904,14 @@ def _delete_run_data(run_name: str) -> None:
             except Exception:
                 cur.execute("ROLLBACK TO SAVEPOINT run_delete")
                 logger.exception("Не удалось удалить данные запуска '%s' из %s.%s", run_name, schema, table)
+        # Comparisons that name the run on either side; the tables may not exist yet.
+        for table in _run_pair_tables(cfg):
+            try:
+                cur.execute("SAVEPOINT run_delete")
+                delete_pair_rows(cur, schema, table, run_name)
+                cur.execute("RELEASE SAVEPOINT run_delete")
+            except Exception:
+                cur.execute("ROLLBACK TO SAVEPOINT run_delete")
     conn.close()
 
 
@@ -967,6 +993,14 @@ def _rename_run_data(old_run_name: str, new_run_name: str) -> dict:
                     cur.execute("RELEASE SAVEPOINT run_name_rename")
                 except Exception:
                     cur.execute("ROLLBACK TO SAVEPOINT run_name_rename")
+            # Comparisons keep naming the run on their side; their rows are not counted as run data.
+            for table in _run_pair_tables(cfg):
+                try:
+                    cur.execute("SAVEPOINT run_name_rename")
+                    rename_pair_rows(cur, schema, table, old_name, new_name)
+                    cur.execute("RELEASE SAVEPOINT run_name_rename")
+                except Exception:
+                    cur.execute("ROLLBACK TO SAVEPOINT run_name_rename")
         return {"status": "ok", "renamed": renamed, "run_name": new_name, "old_run_name": old_name}
     finally:
         conn.close()
@@ -1010,6 +1044,16 @@ def _delete_service_data(area_name: str, service_name: str) -> None:
             except Exception as exc:
                 cur.execute("ROLLBACK TO SAVEPOINT service_delete")
                 logger.warning("Не удалось удалить данные сервиса '%s' из %s.%s: %s", service_name, schema, table, exc)
+        # Release marks of the service's runs (AI/release_marks.py); the table may not exist yet.
+        try:
+            from AI.release_marks import delete_service_marks
+
+            cur.execute("SAVEPOINT release_marks_delete")
+            delete_service_marks(conn, schema, service_name)
+            cur.execute("RELEASE SAVEPOINT release_marks_delete")
+        except Exception as exc:
+            cur.execute("ROLLBACK TO SAVEPOINT release_marks_delete")
+            logger.warning("Could not delete the release marks of service '%s': %s", service_name, exc)
     conn.close()
 
     # Finished load test runs of the service go too; active ones stay with the watcher, which stops their instances.

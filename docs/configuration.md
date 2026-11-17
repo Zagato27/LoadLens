@@ -39,8 +39,9 @@ save; `POST /config` answers with `warnings` for unknown keys.
 | `sla` | Thresholds, the assigned RPS query, the step detector and the series of the capacity forecast |
 | `llm` | Provider, models, token limits, parallelism and self-consistency of the AI analysis. See [ai-analysis.md](ai-analysis.md) |
 | `default_params` | Sampling step of the queries and the resampling interval before the analysis |
-| `logs_source` | OpenSearch Dashboards for the optional `application_logs` domain (off by default) |
-| `confluence` | Publication of the web report and the forecast as Confluence pages |
+| `logs_source` | OpenSearch Dashboards or Grafana Loki for the optional `application_logs` domain (off by default) |
+| `confluence` | Publication of the web report, the forecast, the comparison and the release as Confluence pages |
+| `jira` | Links of the release page to Jira (the issues of the release and its ticket); LoadLens never calls Jira |
 | `limits` | Report window, points per series, parallel jobs, daily LLM budgets, active load tests |
 | `load_generators` | Generators of the "Run a test" page: `ssh`, `docker`, `kubernetes`, `gitlab`, `jenkins`, `manual`. See [running-load-tests.md](running-load-tests.md) |
 | `load_tools` | Deviations from the built-in command templates of k6, JMeter, Locust and Gatling, and custom tools |
@@ -93,6 +94,13 @@ and in the area scope a line under the tabs names the services that skip it.
 | `mean_latency_query`, `vus_query`, `latency_unit`, `load_model` | Series and units of the capacity forecast: `latency_unit` is `ms` or `s`; `load_model` is `open` (concurrency = RPS x mean time) or `closed` (concurrency = VUs) |
 | `service_cpu_query` | CPU of one instance as a fraction 0..1, grouped by service and instance: the pod plan of the forecast |
 | `debug_peak_logging` | Verbose log of the step detector |
+| `phase_query`, `phase_label_key`, `phase_level` | Scenario tests: the query the phases are read from (empty: the query of role `lt.rps_by_request`), the series key that names the request group (empty: `group`, else `transaction`, `scenario`, `request`, `name`, `label`) and the nesting level of k6 groups (`::A::B`; empty: the smallest level on which at least two groups take turns) |
+| `phase_min_minutes`, `phase_max_count`, `phase_duration_tolerance_pct` | Scenario tests: a shorter phase joins its neighbour (2), the largest number of phases (16) and how much a phase may change its duration against the previous scenario run before the `phase_duration` check is a risk (25 %) |
+| `phase_breach_minutes` | Scenario tests: how many minutes a latency or error threshold must stay broken for the phase to fail (2); a shorter excursion is a risk. A phase lasts a few minutes, so its 95th percentile is about its worst minute |
+| `phase_exclude` | Scenario tests: a regular expression (case-insensitive) over the name of a phase — its leading group and subgroup, as in its label — e.g. `DELETE`; groups running in the background of a phase (authentication, say) do not exclude it. Matching phases are shown with «not judged» and take no part in the SLA and in the comparison with the previous run — for preparing and cleaning up test data |
+| `regression_latency_risk_pct`, `regression_latency_fail_pct` | Regression against the baseline run (the one of `llm.baseline`): growth of p95 in percent of the baseline at a comparable load. Over the risk threshold the `regression_latency` check fails and a `pass` becomes `risk`; over the failure threshold the verdict becomes `fail`. `None` disables a threshold (example: risk 10, failure off) |
+| `regression_errors_risk_pp`, `regression_errors_fail_pp` | The same for the error rate, in percentage points (`regression_errors`; example: risk 0.5, failure off) |
+| `regression_capacity_risk_pct`, `regression_capacity_fail_pct` | The same for the load reached (the ceiling of a step or stress test, the spike level of a spike test), as a drop in percent (`regression_capacity`; example: risk 10, failure off). With all six thresholds empty the report has no regression checks |
 
 ### llm
 
@@ -102,7 +110,7 @@ and in the area scope a line under the tabs names the services that skip it.
 | `max_domain_workers` | Domains analysed in parallel |
 | `self_consistency_k` | Candidates generated per domain; with `1` the judge is skipped |
 | `self_consistency` | Throttling inside a domain: `max_candidates`, `parallel_candidates`, `parallel_critics`, `candidate_workers`, `critic_workers`, `pause_sec_between_calls` |
-| `baseline` | `enabled` and `mode` (`previous_success` or `previous`): the previous run of the service in the analysis context |
+| `baseline` | `enabled` and `mode`: the run the analysis compares with. `pinned` (default) takes the pinned baseline of the service and test type, else the accepted run of an earlier release, else the previous successful run; `previous_release` starts at the accepted run of an earlier release; `previous_success` is the previous successful run of the service within the area; `previous` any earlier run. Without release marks `pinned` behaves as `previous_success` |
 | `verification_pass` | An extra model call that bases the verdict only on findings whose numbers were found in the metrics |
 | `include_markdown_tables_in_context` | Debug: markdown tables of the series in the prompt |
 
@@ -121,7 +129,7 @@ The optional provider key `max_tokens_cap` (or `LOADLENS_LLM_MAX_TOKENS_CAP`) ca
 | `max_report_window_hours` | 168 | Longest window one report may cover |
 | `max_points_per_series` | 11000 | Window divided by `step`; Prometheus refuses more |
 | `max_parallel_jobs`, `max_parallel_jobs_per_user` | 4, 2 | Reports and publications running or queued at once, counted in `report_jobs` |
-| `llm_reports_per_user_per_day`, `llm_explanations_per_user_per_day`, `llm_context_imports_per_user_per_day` | 20, 50, 20 | Daily budgets of reports with AI analysis, forecast explanations and context imports from documents |
+| `llm_reports_per_user_per_day`, `llm_explanations_per_user_per_day`, `llm_context_imports_per_user_per_day` | 20, 50, 20 | Daily budgets of reports with AI analysis, forecast and comparison explanations and context imports from documents |
 | `max_parallel_load_tests`, `max_parallel_load_tests_per_user`, `max_load_test_instances`, `max_load_test_hours` | 5, 3, 20, 24 | Active load test runs, instances per run, longest run |
 
 `None` switches a limit off. Except the parallel jobs, the counters live in the process: with several gunicorn
@@ -135,14 +143,14 @@ processes each one enforces its own share.
 | `connect_timeout_sec`, `retry_seconds` | Wait for a connection at most 5 s; then answer "Storage unavailable" for 10 s without new attempts (recovery mode) |
 | `pool_max`, `pool_idle_sec` | Connections the process keeps for reuse (`0` disables the pool) and the idle time after which one is closed |
 | `table`, `batch_size`, `make_hypertable`, `ensure_extension`, `chunk_interval` | The metrics hypertable |
-| `llm_table`, `engineer_table`, `llm_feedback_table`, `jobs_table`, `confluence_table`, `forecast_table` | Names of the report, summary, feedback, jobs, publication and forecast explanation tables |
+| `llm_table`, `engineer_table`, `llm_feedback_table`, `jobs_table`, `confluence_table`, `forecast_table`, `forecast_confluence_table`, `compare_table`, `compare_confluence_table` | Names of the report, summary, feedback, jobs, publication, forecast explanation, forecast publication, comparison explanation and comparison publication tables |
 
 ### appearance
 
 | Key | Meaning |
 |---|---|
 | `accent` | Accent color of the installation, `#rrggbb` |
-| `language` | Language of new reports, prompts, forecast explanations and document imports: `ru` or `en`. Also the interface language of a browser that has not chosen one. A report job takes the language when it is queued |
+| `language` | Language of new reports, prompts, forecast explanations and document imports: `ru` or `en` (a comparison is explained in the language of the report of run A). Also the interface language of a browser that has not chosen one. A report job takes the language when it is queued |
 | `language_switch` | `false` ignores the `loadlens.lang` cookie, so everyone sees the interface in `language`; `POST /config` applies it without a restart |
 
 ### auth
@@ -163,16 +171,33 @@ processes each one enforces its own share.
 | Key | Meaning |
 |---|---|
 | `enabled`, `base_url`, `username`, `password`, `verify_ssl`, `request_timeout_sec` | The Confluence connection used to publish reports and forecasts and to read pages for the context import |
-| `space_key`, `parent_page_id`, `forecast_parent_page_id` | Where the report pages and the forecast pages are created |
+| `space_key`, `parent_page_id`, `forecast_parent_page_id`, `compare_parent_page_id`, `release_parent_page_id` | Where the report, forecast, comparison and release pages are created (an empty forecast, comparison or release parent means `parent_page_id`) |
 | `app_url` | Address of LoadLens for the links on published pages; empty uses the address the browser used |
+
+### jira
+
+Global, edited on the Jira card of the settings page. LoadLens only builds links from it and never calls Jira, so
+the card has no connection check. A release name is the `fixVersion` of its issues.
+
+| Key | Meaning |
+|---|---|
+| `enabled` | Shows the Jira links on the release page and on its Confluence page |
+| `base_url` | Address of Jira, `http://` or `https://`, without a trailing `/`. «Issues in Jira» opens `<base_url>/issues/?jql=project = <project_key> AND fixVersion = "<release>"`, the release ticket opens `<base_url>/browse/<KEY-123>` |
+| `project_key` | Key of the Jira project: capital Latin letters, digits and `_` |
 
 ### logs_source
 
-`enabled` switches the `application_logs` domain on. `opensearch` holds `base_url`, `index_pattern`,
-`username_env`, `password_env` (historical names: the values are the login and the password), `verify_ssl` and
-`request_timeout_sec`; `fields` maps the timestamp, level, hostname and message fields; `filters` lists
-`error_levels` and `hostnames`; `aggregation` limits the documents read and the number of error types, services and
-samples that reach the context; `report` sets the output of the command-line report.
+`enabled` switches the `application_logs` domain on; `type` is `opensearch` (also when absent) or `loki`.
+`opensearch` holds `base_url`, `index_pattern`, `username_env`, `password_env` (historical names: the values are the
+login and the password), `verify_ssl` and `request_timeout_sec`; `fields` maps the timestamp, level, hostname and
+message fields. `loki` holds the connection — `source` (a `grafana_proxy` source of `data_sources`) with
+`datasource_name` or `datasource_uid`, or, with an empty `source`, `url`, `org_id`, `username`, `password` and
+`verify_ssl` — and the reading: `selector`, `service_label` (`app`), `format` (`auto`, `json`, `logfmt`, `text`),
+`level_field` (`level`), `message_field` (`message`), `level_filter` (empty builds it from the levels and the format),
+`lines_per_query` (300, at most 5000) and `request_timeout_sec` (120). A catalogue source read by the logs cannot be
+removed. `filters` lists `error_levels` and `hostnames` (for Loki, values of the service label); `aggregation` limits
+the documents read and the number of error types, services and samples that reach the context; `report` sets the
+output of the command-line report. See [data-sources.md](data-sources.md#application-logs-from-opensearch-or-loki).
 
 ### system_context
 

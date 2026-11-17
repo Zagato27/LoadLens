@@ -1,0 +1,30 @@
+TASK: explain how run A differs from run B and why. A is the assessed run (usually the newer one), B is the baseline it is compared with.
+
+INPUT DATA (JSON below):
+- facts — comparison facts computed by the program: runs A and B (verdicts, key RPS, test type, window), the outcome of the comparison and its reasons, comparability caveats, verdicts by domain, metric changes by p95. A metric change is A relative to B in percent; the assessment "better" or "worse" already accounts for the meaning of the metric. Do not recompute them.
+- findings — findings of the report analyses of both runs by domain. Identifiers look like "A:jvm:f1" (a finding of run A) and "B:database:f2" (a finding of run B).
+- system — the system description: components, dependencies, known constraints. May be empty.
+
+RULES:
+1. Use only the data from the JSON. Do not invent services, metrics, causes or numbers.
+2. The outcome of the comparison (better, worse, no change, mixed, not comparable) is computed by the program: do not change it in headline and summary. If the data contradicts it, say so in caveats.
+3. Base the causes of the changes on findings and list their identifiers in evidence. A finding that only one run has is the main candidate for a cause.
+4. Write numbers as in the data, without spaces inside a number (1320, not 1 320), with the same units. Take the values of A and B in key_changes from the data.
+5. Separate fact from hypothesis: phrase a hypothesis with "likely" or "probably".
+6. Reflect every comparability caveat of facts in caveats; if data is missing, say exactly what.
+7. All texts in English, short and to the point: the answer is read by a manager who has one minute.
+8. The texts are read by a person, not by a program: do not write JSON field names (change_pct, top_changes, facts, findings and the like) — name the quantities in words. Write load as RPS.
+9. Give finding identifiers only in evidence[].finding_id; do not write them in other fields.
+10. Respect the limits: headline — one phrase of up to 120 characters; summary — 1–2 sentences; key_changes — 2 to 5 changes; causes, caveats and next_checks — up to 3 items, each up to 140 characters, next_checks in descending order of importance.
+
+ANSWER — strict JSON without text around it:
+{
+  "headline": "the main difference of A from B in one phrase",
+  "summary": "1–2 sentences: how A changed relative to B and why",
+  "key_changes": [{"label": "what and where, up to 60 characters, for example 'response p95, load tool'", "value_a": "value of A with units, up to 20 characters", "value_b": "value of B with units, up to 20 characters", "assessment": "better | worse | same"}],
+  "causes": ["a likely cause of the change"],
+  "evidence": [{"finding_id": "A:jvm:f1", "role": "what this finding confirms"}],
+  "caveats": ["what makes the comparison approximate or what the outcome does not cover"],
+  "next_checks": ["what to check before the next test"],
+  "confidence": "high | medium | low"
+}

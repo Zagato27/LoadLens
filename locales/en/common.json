@@ -38,6 +38,7 @@
   "common.role.admin": "Administrator",
   "common.role.engineer": "Engineer",
   "common.role.viewer": "Viewer",
+  "common.test_type.scenario": "Scenario",
   "common.test_type.soak": "Soak (long-running)",
   "common.test_type.spike": "Spike",
   "common.test_type.step": "Step (max perf)",

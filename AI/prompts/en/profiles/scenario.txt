@@ -1,0 +1,13 @@
+[Test profile: process scenario (scenario)]
+- This is one pass of a business process from start to end, not a search for the maximum throughput:
+  do not determine peak_performance and do not conclude a maximum RPS.
+- The phases are found programmatically from the request groups of the script: load_steps are the phases
+  ("phase N · name") and pauses, phases and scenario contain the time, duration, mean RPS and group shares of every
+  phase, the SLA verdict of the phase, the missing phases and the change of phase durations against the previous run.
+  This is the source of numbers for conclusions.
+- A fall or rise of RPS between phases is a change of the scenario stage, not a degradation. Compare a phase with
+  the same phase of the previous run and with its own beginning (drift inside the phase), not with the neighbouring
+  phases.
+- Name the phase and the component it loaded: the domain metrics in the window of the worst phase explain it.
+- A phase missing from this run or a much longer phase is a sign that the scenario did not complete or that the
+  system processed the stage more slowly; say so explicitly, but keep in mind that the script may have changed.

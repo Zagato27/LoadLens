@@ -253,8 +253,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(
         "\nNext steps (by hand):\n"
-        "  git diff                                   # review the changes\n"
-        f"  git commit -am \"Release {version}\"\n"
+        "  git status --short                         # include new files in the review\n"
+        "  git diff                                   # review tracked changes\n"
+        "  git add <reviewed paths>                    # stage reviewed files, including new ones\n"
+        "  git diff --cached                          # review exactly what will be committed\n"
+        f"  git commit -s -m \"Release {version}\"\n"
         f"  git tag -a v{version} -m \"LoadLens {version}\"\n"
         f"  git push origin main v{version}            # the tag starts .github/workflows/release.yml"
     )
@@ -262,4 +265,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # Redirected release notes must preserve Unicode on Windows as well as Unix.
+    sys.stdout.reconfigure(encoding="utf-8")
     sys.exit(main())

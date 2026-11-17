@@ -147,7 +147,10 @@ def test_compose_and_env_example_defaults_match_the_code(monkeypatch):
 def test_documented_task_names_are_the_registered_tasks():
     registered = {name for name in celery_module.celery_app.tasks.keys() if name.startswith(celery_module.TASK_NAME_PREFIX)}
     documented = set(re.findall(r"\bloadlens\.[a-z_]+\b", _read(JOBS_DOC)))
-    assert registered == {tasks.report_task.name, tasks.publish_confluence_task.name, tasks.publish_forecast_task.name}
+    assert registered == {
+        tasks.report_task.name, tasks.publish_confluence_task.name, tasks.publish_forecast_task.name,
+        tasks.publish_compare_task.name, tasks.publish_release_task.name,
+    }
     assert documented == registered
 
 

@@ -16,6 +16,7 @@ from AI.data_sources import (
     DataSourceConfigError,
     binding_errors,
     domain_rows_language,
+    logs_source_problems,
     mixed_language_warnings,
     normalize_binding,
     normalize_row_sources,
@@ -42,6 +43,7 @@ from AI.providers import without_env_keys
 from AI.query_packs import prune_queries
 from AI.step_detector import without_retired_sla_keys
 from loadlens_app.config_secrets import SecretPlaceholderError, destination_changed, mask_secrets, restore_secrets
+from loadlens_app.jira_links import JiraConfigError, validate_jira
 from loadlens_app.connection_checks import (
     CHECKABLE_SECTIONS,
     check_data_source,
@@ -248,6 +250,8 @@ def get_config():
             "storage": {"timescale": copy.deepcopy((CONFIG.get("storage", {}) or {}).get("timescale", {}))},
             "queries": _area_section(area, "queries"),
             "confluence": copy.deepcopy(CONFIG.get("confluence", {}) or {}),
+            # Links of the release page to Jira; no secrets, LoadLens never calls Jira.
+            "jira": copy.deepcopy(CONFIG.get("jira") or {}),
             "appearance": copy.deepcopy(CONFIG.get("appearance", {}) or {}),
             "load_generators": copy.deepcopy(CONFIG.get("load_generators") or {}),
             # Effective templates: defaults with the saved overrides applied.
@@ -431,10 +435,20 @@ def update_config():
         rejected = _reject_domain_sources(payload)
         if rejected is not None:
             return rejected
+    if section == "logs_source":
+        # A Loki read through Grafana must name a Grafana source of the catalog and its datasource.
+        problems = logs_source_problems(payload, _config_node("data_sources"))
+        if problems:
+            return jsonify({"error": "; ".join(problems)}), 400
     if section == "load_generators":
         try:
             validate_generators_section(payload)
         except GeneratorConfigError as exc:
+            return jsonify({"error": str(exc)}), 400
+    if section == "jira":
+        try:
+            validate_jira(payload)
+        except JiraConfigError as exc:
             return jsonify({"error": str(exc)}), 400
     if section == "load_tools":
         try:
@@ -561,9 +575,30 @@ def _reject_data_sources(payload: dict):
     # Query rows of every scope that read a source of their own.
     for place, queries in _stored_query_scopes():
         errors.extend(row_source_messages(queries, payload, place=place, missing_kind="used"))
+    # Application logs read from Loki through a Grafana source of the catalog.
+    for place, logs_cfg in _stored_logs_scopes():
+        errors.extend(logs_source_problems(logs_cfg, payload, place=place, missing_kind="used"))
     if errors:
         return jsonify({"error": "; ".join(errors)}), 400
     return None
+
+
+def _stored_logs_scopes() -> list[tuple[str, dict]]:
+    """Saved ``logs_source`` of the global scope and of every area that has its own, with their place in messages."""
+    runtime = _load_settings_runtime_data()
+    scopes: list[tuple[str, dict]] = []
+    global_logs = runtime.get("logs_source") if isinstance(runtime.get("logs_source"), dict) else CONFIG.get("logs_source")
+    if isinstance(global_logs, dict):
+        scopes.append((translate("server.data_sources.place.logs_global"), global_logs))
+    file_areas = runtime.get("per_area") if isinstance(runtime.get("per_area"), dict) else {}
+    config_areas = CONFIG.get("per_area") if isinstance(CONFIG.get("per_area"), dict) else {}
+    for name in sorted(set(file_areas) | set(config_areas)):
+        file_entry = file_areas.get(name) if isinstance(file_areas.get(name), dict) else {}
+        config_entry = config_areas.get(name) if isinstance(config_areas.get(name), dict) else {}
+        area_logs = file_entry.get("logs_source") if isinstance(file_entry.get("logs_source"), dict) else config_entry.get("logs_source")
+        if isinstance(area_logs, dict):
+            scopes.append((translate("server.data_sources.place.logs_area", area=name), area_logs))
+    return scopes
 
 
 def _stored_query_scopes() -> list[tuple[str, dict]]:
@@ -683,6 +718,9 @@ def test_connection():
         # Server-wide provider keys belong to the saved address, not to one typed into the form.
         with without_env_keys():
             result = run_check(section, restored)
+    elif section == "logs_source":
+        # Loki may be read through a Grafana source of the catalog: its address and credentials live there.
+        result = run_check(section, restored, catalog=_config_node("data_sources"))
     else:
         result = run_check(section, restored)
     return jsonify(result.to_dict()), 200

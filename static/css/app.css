@@ -772,12 +772,14 @@ abbr.term.rep-verdict-term { text-decoration: none; }
 .rep-glyph.ok { color: var(--ok); }
 .rep-glyph.fail { color: var(--fail); }
 .rep-glyph.na { color: var(--na); }
+.rep-glyph.risk { color: var(--warn); }
 .rep-sla-table td.name { font-weight: 500; overflow-wrap: anywhere; }
 .rep-sla-table td.name[title] { cursor: help; }
 .rep-sla-table td .sub { display: block; margin-top: 2px; color: var(--dim); font: 400 11px/1.4 var(--mono); overflow-wrap: anywhere; }
 .rep-sla-table td.n { padding-left: 18px; text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .rep-sla-table td.th { color: var(--muted); }
 .rep-sla-table tr.is-fail td.act { color: var(--fail); }
+.rep-sla-table tr.is-risk td.act { color: var(--warn); }
 .rep-sla-table td.bar { width: 108px; }
 .rep-sla-table .fig-bar { width: 90px; margin: 0 0 0 auto; }
 .rep-verdict .rep-sla-note { margin-top: 10px; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
@@ -834,6 +836,26 @@ abbr.term.rep-verdict-term { text-decoration: none; }
 .rep-step.is-bad, .rep-step.is-bad b { color: var(--fail); }
 .rep-step.is-unstable b { color: var(--muted); }
 .rep-step-note { margin: 8px 0 0; color: var(--dim); font-size: 12px; }
+/* Phases of a scenario: every cell is exactly as wide as its phase on the time axis of the profile above (no
+   minimum width, no gaps, one line), the top border carries the verdict tone; a narrow cell keeps only the number,
+   the name stays in its tooltip. */
+.rep-steprow.is-phases { flex-wrap: nowrap; gap: 0; }
+.rep-steprow.is-phases .rep-step { flex-basis: 0; min-width: 0; padding: 6px 0; border-top-width: 2px; box-shadow: inset 2px 0 0 var(--bg); container-type: inline-size; }
+/* Horizontal padding on the lines, not the cell: padding of a flex item is added to its share of the width. */
+.rep-steprow.is-phases .rep-step > * { padding: 0 4px 0 6px; }
+.rep-steprow.is-phases .rep-step b, .rep-steprow.is-phases .rep-step-sub, .rep-step-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rep-step-name { display: block; color: var(--muted); }
+.rep-step.is-risk b { color: var(--warn); }
+.rep-step.is-idle { color: var(--dim); }
+.rep-steprow.is-phases .rep-step.is-bad { border-top-color: var(--fail); }
+.rep-steprow.is-phases .rep-step.is-risk { border-top-color: var(--warn); }
+/* A phase left out of the SLA (sla.phase_exclude): drawn, not judged. */
+.rep-step.is-excluded, .rep-step.is-excluded b { color: var(--dim); }
+.rep-steprow.is-phases .rep-step.is-excluded { border-top-style: dashed; }
+@container (max-width: 112px) {
+  .rep-steprow.is-phases .rep-step-rps, .rep-steprow.is-phases .rep-step-tag,
+  .rep-steprow.is-phases .rep-step-name, .rep-steprow.is-phases .rep-step-sub { display: none; }
+}
 @media (max-width: 720px) { .rep-step { flex-basis: calc(50% - 2px); min-width: 0; } }
 
 /* Analysis tabs: status square and text; panes without boxes, key-value blocks as hairline tables. */
@@ -1225,6 +1247,9 @@ table.archive-table.lt-runs-table td.select-cell input.row-select:disabled { opa
 .compare-page .compare-agg { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .compare-page .agg-note { margin: 0 0 6px; color: var(--dim); font-size: 12px; }
 .compare-page .verdict-compare { margin-top: 16px; }
+.compare-page .phases-compare { margin-top: 16px; }
+.compare-page .phases-table td { vertical-align: top; }
+.compare-page .phases-table tr.is-unpaired td { background: var(--bg-2); }
 .compare-page .verdict-grid { display: grid; grid-template-columns: minmax(180px, 1.2fr) minmax(0, 1fr) minmax(0, 1fr); gap: 0; }
 .compare-page .verdict-grid > div { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 34px; padding: 7px 14px 7px 0; border-bottom: 1px solid var(--line); }
 .compare-page .verdict-grid > div:nth-child(3n) { padding-right: 0; }
@@ -1267,6 +1292,44 @@ table.archive-table.lt-runs-table td.select-cell input.row-select:disabled { opa
 .compare-page .cmp-legend .legend-chip[data-name^="B · "] .legend-chip-swatch { background: repeating-linear-gradient(90deg, var(--chip-color, var(--dim)) 0 4px, transparent 4px 7px); }
 .compare-page .cmp-legend .legend-chip[data-name^="B · "][aria-pressed="false"] .legend-chip-swatch { background: var(--line-2); }
 .compare-page .series-table-wrap { margin-top: 12px; overflow-x: auto; }
+/* AI explanation of the comparison: the outcome on a status rule, the largest changes, then the model's answer. */
+.compare-page .compare-publish { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.compare-page #compareConfluenceStatus { font: 12px var(--mono); }
+.compare-page .compare-explain-body { padding-top: 14px; }
+.compare-page .compare-outcome { margin: 0 0 12px; padding: 2px 0 2px 14px; border-left: 2px solid var(--na); line-height: 1.5; }
+.compare-page .compare-outcome.is-ok { border-left-color: var(--ok); }
+.compare-page .compare-outcome.is-warn { border-left-color: var(--warn); }
+.compare-page .compare-outcome.is-fail { border-left-color: var(--fail); }
+.compare-page .compare-outcome.is-muted { border-left-style: dashed; }
+.compare-page .compare-outcome-title { margin: 0 0 4px; color: var(--text); font-size: 15px; font-weight: 600; }
+.compare-page .compare-outcome-reasons, .compare-page .compare-flags ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+.compare-page .compare-flags { margin-top: 8px; }
+.compare-page .compare-flags-title { color: var(--dim); font: 500 11px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; }
+.compare-page .compare-counts { margin: 0 0 6px; font-size: 12px; }
+.compare-page .compare-top summary, .compare-page .compare-findings-list summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.compare-page .compare-top .table-wrap { margin-top: 6px; }
+.compare-page .compare-explain-ai { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.compare-page .compare-explain-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; margin-bottom: 8px; }
+.compare-page .compare-explain-headline { margin: 0 0 4px; color: var(--text); font-size: 15px; font-weight: 600; line-height: 1.4; }
+.compare-page .compare-explain-summary { margin: 0 0 8px; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.compare-page .compare-changes { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 24px; margin: 12px 0 14px; }
+.compare-page .compare-change { display: flex; flex-direction: column; gap: 3px; padding-left: 10px; border-left: 2px solid var(--line-2); }
+.compare-page .compare-change.is-better { border-left-color: var(--ok); }
+.compare-page .compare-change.is-worse { border-left-color: var(--fail); }
+.compare-page .compare-change-label { color: var(--muted); font-size: 12px; }
+.compare-page .compare-change-values { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--text); font: 500 14px var(--mono); font-variant-numeric: tabular-nums; }
+.compare-page .compare-explain-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px 24px; }
+.compare-page .compare-explain-columns h5 { margin: 0 0 6px; font-size: 13px; }
+.compare-page .compare-explain-columns ul, .compare-page .compare-explain-columns ol { margin: 0; padding-left: 20px; line-height: 1.5; }
+.compare-page .compare-explain-columns li + li { margin-top: 4px; }
+.compare-page .compare-explain-columns p { margin: 0; }
+.compare-page .compare-more summary { cursor: pointer; margin-top: 4px; color: var(--dim); font-size: 12px; }
+.compare-page .compare-findings-list { margin-top: 12px; }
+.compare-page .compare-findings-list ul { margin: 8px 0 0; padding-left: 18px; line-height: 1.5; }
+.compare-page .compare-findings-list li + li { margin-top: 4px; }
+.compare-page .compare-finding-meta { margin-right: 6px; color: var(--dim); font: 11px var(--mono); }
+.compare-page .compare-explain-meta { margin: 10px 0 0; font-size: 12px; }
+.compare-page .compare-explain-error { margin: 8px 0 0; color: var(--fail); }
 @media (max-width: 900px) {
   .compare-page .compare-pickers, .compare-page .findings-compare { grid-template-columns: 1fr; }
 }
@@ -1770,3 +1833,73 @@ table.forecast-list { margin-top: 16px; }
   .is-highlighted { animation: none; }
   html { scroll-behavior: auto; }
 }
+
+/* ===== page: releases ===== */
+/* Release list and the page of a release (templates/releases.html, release.html, static/js/releases.js). */
+.pill.rel-incomplete, .st.rel-incomplete { color: var(--run); }
+.release-verdict-counts { display: inline-flex; gap: 12px; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.releases-page .section-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 16px; margin: 30px 0 6px; }
+.release-head-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.release-note { margin: 4px 0 12px; max-width: 900px; white-space: pre-wrap; color: var(--muted); }
+.release-publish { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 6px 0 4px; }
+.release-table td .sub { white-space: nowrap; }
+.release-table .rel-badge { display: inline-block; margin-left: 8px; font: 500 11px/1.3 var(--mono); letter-spacing: 0.04em; text-transform: uppercase; color: var(--accent); }
+.release-table .rel-badge.dim { color: var(--dim); }
+.rel-delta { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.rel-delta.tone-ok { color: var(--ok); }
+.rel-delta.tone-warn { color: var(--warn); }
+.rel-delta.tone-fail { color: var(--fail); font-weight: 600; }
+.rel-delta.tone-neutral { color: var(--text); }
+.rel-stale { color: var(--warn); }
+.release-no-deltas { font-size: 13px; }
+.release-deltas-note, .release-trend-note { margin: 8px 0 0; max-width: 900px; font-size: 13px; }
+.release-attempts-row > td { background: var(--bg-2); padding: 10px 14px; }
+.release-attempts-title { margin-bottom: 6px; font-weight: 500; }
+.release-attempts ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.release-attempts li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.release-attempts .rel-badge { margin-left: 0; }
+.release-untested-list { margin: 8px 0 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 8px 24px; }
+.release-untested-list li { display: inline-flex; gap: 10px; align-items: baseline; }
+.release-trend-pick { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+.release-trend-pick label { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+.release-trend-charts { margin-top: 12px; }
+.release-trend-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px 24px; }
+.release-trend-chart { margin: 0; min-width: 0; }
+.release-trend-chart figcaption { font: 500 11px/1.3 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--dim); margin-bottom: 6px; }
+.release-trend-canvas { position: relative; height: 220px; }
+.release-dialog .field { display: grid; gap: 6px; margin-bottom: 10px; }
+.release-dialog .field input, .release-dialog .field textarea { width: 100%; }
+@media (max-width: 1024px) { .release-trend-grid { grid-template-columns: minmax(0, 1fr); } }
+/* ===== end page: releases ===== */
+/* ===== feature: regression ===== */
+/* «База: <run> · релиз · эталон · Сравнить» under the verdict summary of a report (sla_details.regression). */
+.rep-baseline { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 6px; overflow-wrap: anywhere; }
+.rep-baseline-k { color: var(--muted); font-weight: 500; }
+.rep-baseline .sep { color: var(--na); }
+.rep-baseline a { color: inherit; text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 2px; }
+.rep-baseline a:hover, .rep-baseline a:focus-visible { color: var(--text); text-decoration-color: currentColor; }
+/* Regression checks follow the checks of the run: a hairline above the first of them. */
+.rep-sla-table tr:not(.is-regression) + tr.is-regression td { border-top: 1px dashed var(--line); }
+/* The regression thresholds of the SLA form. */
+#slaRegressionFields .hint { margin: 0 0 8px; }
+/* ===== end feature: regression ===== */
+/* ===== feature: release marks ===== */
+/* Marks of a run (AI/release_marks.py): in the archive name cell (static/js/archive.js), the line under the verdict
+   of the report (static/js/reports.js) and the release dialog of both. Text marks, no fills or frames. */
+.release-pill { display: inline-flex; align-items: center; gap: 5px; margin-left: 8px; color: var(--dim); font: 400 11px var(--mono); white-space: nowrap; }
+.release-pill.accepted { color: var(--text); }
+.release-pill.accepted::before { content: ''; width: 5px; height: 5px; flex: 0 0 auto; background: var(--ok); }
+.release-pill.baseline { color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
+.rep-release { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 6px; overflow-wrap: anywhere; }
+.rep-release .sep { color: var(--na); }
+.rep-release-name { color: var(--text); font-family: var(--mono); }
+.rep-release-actions { display: inline-flex; gap: 6px; margin-left: 8px; }
+.rep-release-actions .btn { min-height: 0; padding: 0 6px; font-size: 12px; }
+.release-mark-dialog { display: grid; gap: 10px; min-width: min(420px, 80vw); }
+.release-mark-dialog p { margin: 0; }
+.release-mark-field { display: grid; gap: 6px; }
+.release-mark-field input, .release-mark-field textarea { width: 100%; }
+.release-mark-dialog .checkbox-line { display: flex; align-items: center; gap: 8px; }
+.release-mark-dialog .checkbox-line input { width: auto; }
+.release-mark-hint { font-size: 12px; }
+/* ===== end feature: release marks ===== */

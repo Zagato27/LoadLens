@@ -24,6 +24,8 @@
       <div class="picker-title"><span>{{ t('compare.picker.run_b') }} <span class="picker-badge b">B</span></span><span id="runBMeta" class="dim"></span></div>
       <div id="runBPicker"></div>
       <div class="picker-actions">
+        <button type="button" class="btn btn-sm" id="baselinePinnedBtn" disabled title="{{ t('compare.baseline.pinned_hint') }}">{{ t('compare.baseline.pinned') }}</button>
+        <button type="button" class="btn btn-sm" id="baselineReleaseBtn" disabled title="{{ t('compare.baseline.previous_release_hint') }}">{{ t('compare.baseline.previous_release') }}</button>
         <button type="button" class="btn btn-sm" id="baselineSuccessBtn" disabled>{{ t('compare.baseline.previous_success') }}</button>
         <button type="button" class="btn btn-sm" id="baselinePrevBtn" disabled>{{ t('compare.baseline.previous') }}</button>
         <span class="dim" id="baselineNote"></span>
@@ -42,6 +44,23 @@
       <summary><span>{{ t('compare.findings.title') }}</span><small class="report-collapsible-subtitle">{{ t('compare.findings.subtitle') }}</small></summary>
       <div class="report-collapsible-body"><div class="findings-compare" id="findingsCompare"></div></div>
     </details>
+  </section>
+
+  <section id="phasesCompare" class="phases-compare" hidden>
+    <div class="section-head"><h3>{{ t('compare.phases.title') }}</h3><span class="dim" id="phasesNote"></span></div>
+    <div class="table-wrap" id="phasesTable"></div>
+  </section>
+
+  <section id="compareExplain" class="compare-explain" hidden>
+    <div class="section-head">
+      <h3>{{ t('compare.explain.title') }}</h3>
+      <div class="compare-publish">
+        <button type="button" class="btn btn-sm" id="compareConfluence" data-min-role="engineer" hidden>{{ t('compare.confluence.add') }}</button>
+        <a id="compareConfluenceLink" class="link" target="_blank" rel="noopener noreferrer" hidden>{{ t('compare.confluence.open') }}</a>
+        <span id="compareConfluenceStatus" class="dim" aria-live="polite"></span>
+      </div>
+    </div>
+    <div class="card compare-explain-body" id="compareExplainBody"></div>
   </section>
 
   <section id="metricsCompare" hidden>

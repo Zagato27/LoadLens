@@ -818,7 +818,15 @@ def save_manual_verdict(
 
 BASELINE_MODE_PREVIOUS_SUCCESS = "previous_success"
 BASELINE_MODE_PREVIOUS = "previous"
-BASELINE_MODES = (BASELINE_MODE_PREVIOUS_SUCCESS, BASELINE_MODE_PREVIOUS)
+# Release-aware modes (AI/release_marks.find_baseline_run): the pinned baseline of the service, the accepted run
+# of an earlier release; both fall back to previous_success.
+BASELINE_MODE_PINNED = "pinned"
+BASELINE_MODE_PREVIOUS_RELEASE = "previous_release"
+BASELINE_MODES = (
+    BASELINE_MODE_PINNED, BASELINE_MODE_PREVIOUS_RELEASE, BASELINE_MODE_PREVIOUS_SUCCESS, BASELINE_MODE_PREVIOUS,
+)
+# Modes find_previous_run handles itself.
+PREVIOUS_RUN_MODES = (BASELINE_MODE_PREVIOUS_SUCCESS, BASELINE_MODE_PREVIOUS)
 
 
 @dataclass(frozen=True)
@@ -827,6 +835,11 @@ class BaselineRun:
     service: str
     verdict: str
     created_at: Optional[datetime]
+    # Mode that actually found the run (a release-aware mode may fall back), the release of the run when it is
+    # marked, and the run id of its final report.
+    mode: str = ""
+    release: str = ""
+    run_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -875,17 +888,18 @@ def find_previous_run(
     Rows saved before ``project_area`` existed stay eligible when their area is empty.
     ``test_type`` (normalized step/soak/spike/stress) limits the lookup to runs of the same
     type, matching any stored alias; step runs also accept rows saved without a type.
-    ``BaselineRun.verdict`` is a code.
+    ``BaselineRun.verdict`` is a code; ``mode`` is the mode given and ``run_id`` the id of the final report.
+    The release-aware modes are handled by ``AI.release_marks.find_baseline_run``, which falls back to this one.
     """
-    if mode not in BASELINE_MODES:
-        raise ValueError(f"Unknown baseline mode '{mode}', expected one of {BASELINE_MODES}")
+    if mode not in PREVIOUS_RUN_MODES:
+        raise ValueError(f"Unknown baseline mode '{mode}', expected one of {PREVIOUS_RUN_MODES}")
     manual_cte = sql.SQL(manual_verdicts_cte(schema, manual_verdicts_ready(conn, schema)))
     success_filter = (
         sql.SQL(f"AND {effective_verdict_sql('r', fallback=False)} = '{PASS}'")
         if mode == BASELINE_MODE_PREVIOUS_SUCCESS
         else sql.SQL("")
     )
-    columns = sql.SQL(f"r.run_name, r.service, {effective_verdict_sql('r')}, r.created_at")
+    columns = sql.SQL(f"r.run_name, r.service, {effective_verdict_sql('r')}, r.created_at, COALESCE(r.run_id, '')")
     table_ref = sql.SQL("{}.{}").format(sql.Identifier(schema), sql.Identifier(llm_table))
     area = str(project_area or "").strip()
     area_sql = sql.SQL("AND (COALESCE(r.project_area, '') = '' OR r.project_area = %s)") if area else sql.SQL("")
@@ -957,7 +971,55 @@ def find_previous_run(
         service=str(row[1] or ""),
         verdict=to_code(row[2]),
         created_at=row[3],
+        mode=mode,
+        run_id=str(row[4] or "") if len(row) > 4 else "",
     )
+
+
+def find_scenario_reference(
+    conn,
+    schema: str,
+    llm_table: str,
+    *,
+    exclude_run_name: str,
+    services: Sequence[str],
+    before_ms: int,
+    project_area: Optional[str] = None,
+) -> Optional[tuple[str, Dict[str, Any]]]:
+    """``(run_name, scenario)`` of the latest earlier scenario run of the services: the reference of its phases.
+
+    Any verdict counts: the phases are a property of the script, not of the result. Runs are ordered by their test
+    window (``start_ms``), not by the time the report was built, so a report rebuilt later still precedes the runs
+    after it. ``scenario`` is the ``scenario`` object of the final payload (AI/phases.build_scenario_payload).
+    """
+    names = [str(item).strip() for item in services or [] if str(item).strip()]
+    if not names:
+        return None
+    area = str(project_area or "").strip()
+    area_sql = sql.SQL("AND (COALESCE(project_area, '') = '' OR project_area = %s)") if area else sql.SQL("")
+    query = sql.SQL(
+        """
+        SELECT run_name, parsed->'scenario'
+        FROM {table}
+        WHERE domain = 'final' AND service = ANY(%s) AND run_name <> %s AND start_ms < %s
+          AND jsonb_typeof(parsed->'scenario') = 'object'
+          {area_sql}
+        ORDER BY start_ms DESC, created_at DESC LIMIT 1
+        """
+    ).format(table=sql.SQL("{}.{}").format(sql.Identifier(schema), sql.Identifier(llm_table)), area_sql=area_sql)
+    params: tuple = (names, exclude_run_name, int(before_ms)) + ((area,) if area else ())
+    with conn.cursor() as cur:
+        cur.execute(query, params)
+        row = cur.fetchone()
+    if not row:
+        return None
+    scenario = row[1]
+    if isinstance(scenario, (str, bytes)):
+        try:
+            scenario = json.loads(scenario)
+        except ValueError:
+            return None
+    return (str(row[0]), scenario) if isinstance(scenario, dict) else None
 
 
 def load_run_metric_stats(conn, schema: str, metrics_table: str, run_name: str) -> RunMetricStats:
@@ -1225,6 +1287,230 @@ def save_forecast_explanation(conn, schema: str, table: str, run_id: str, inputs
     conn.commit()
 
 
+# ---- comparison of two runs ---------------------------------------------------------------------------------
+
+COMPARE_EXPLANATIONS_TABLE = "compare_explanations"
+COMPARE_PUBLICATIONS_TABLE = "compare_publications"
+
+
+@dataclass(frozen=True)
+class StoredRunRow:
+    """The newest row of one domain of a run (``final`` included); ``verdict`` is the code of the SLA or stored verdict."""
+
+    domain: str
+    run_id: str
+    service: str
+    test_type: str
+    project_area: str
+    start_ms: Optional[int]
+    end_ms: Optional[int]
+    verdict: Optional[str]
+    sla_verdict: Optional[str]
+    parsed: Dict[str, Any]
+    sla_details: Dict[str, Any]
+    system_context: Dict[str, Any]
+    created_at: Optional[datetime]
+
+
+@dataclass(frozen=True)
+class StoredRunReport:
+    """Rows of the latest report of a run by domain and the manual verdict in force (a code or None)."""
+
+    run_name: str
+    rows: Dict[str, StoredRunRow]
+    manual_verdict: Optional[str] = None
+
+    @property
+    def final(self) -> Optional[StoredRunRow]:
+        return self.rows.get("final")
+
+    @property
+    def verdict(self) -> Optional[str]:
+        """The verdict the run shows: the manual one, else the verdict of the final row."""
+        if self.manual_verdict:
+            return self.manual_verdict
+        return self.final.verdict if self.final is not None else None
+
+    def findings(self) -> List[StoredFinding]:
+        """Findings of the domain analyses (the final row and the engineer notes are not domain analyses)."""
+        out: List[StoredFinding] = []
+        for domain in sorted(self.rows):
+            if domain == "final":
+                continue
+            raw_findings = self.rows[domain].parsed.get("findings")
+            for position, raw in enumerate(raw_findings if isinstance(raw_findings, list) else []):
+                if isinstance(raw, dict):
+                    out.append(_stored_finding(domain, raw, position))
+        return out
+
+
+def load_run_report(conn, schema: str, llm_table: str, run_name: str) -> Optional[StoredRunReport]:
+    """Rows of the latest report of a run, by name: the newest row of every domain of the newest final row's
+    ``run_id`` (all rows when that id is empty), with the manual verdict. None when the run has no rows."""
+    query = sql.SQL(
+        """
+        WITH latest AS (
+          SELECT COALESCE(run_id, '') AS run_id FROM {table}
+          WHERE run_name = %s AND domain = 'final'
+          ORDER BY created_at DESC LIMIT 1
+        )
+        SELECT DISTINCT ON (r.domain)
+               r.domain, COALESCE(r.run_id, ''), COALESCE(r.service, ''), COALESCE(r.test_type, ''),
+               COALESCE(r.project_area, ''), r.start_ms, r.end_ms, r.verdict, r.sla_verdict, r.parsed,
+               r.sla_details, r.system_context, r.created_at
+        FROM {table} r
+        WHERE r.run_name = %s AND r.domain <> 'engineer'
+          AND COALESCE((SELECT run_id FROM latest), '') IN ('', COALESCE(r.run_id, ''))
+        ORDER BY r.domain, r.created_at DESC
+        """
+    ).format(table=sql.Identifier(schema, llm_table))
+    with conn.cursor() as cur:
+        cur.execute(query, (run_name, run_name))
+        rows = cur.fetchall()
+    if not rows:
+        return None
+    by_domain: Dict[str, StoredRunRow] = {}
+    for row in rows:
+        domain = str(row[0])
+        by_domain[domain] = StoredRunRow(
+            domain=domain,
+            run_id=str(row[1] or ""),
+            service=str(row[2] or ""),
+            test_type=str(row[3] or ""),
+            project_area=str(row[4] or ""),
+            start_ms=_millis(row[5]),
+            end_ms=_millis(row[6]),
+            verdict=optional_code(row[8] or row[7]),
+            sla_verdict=optional_code(row[8]),
+            parsed=normalize_report(_coerce_json_object(row[9]) or {}) or {},
+            sla_details=_coerce_json_object(row[10]) or {},
+            system_context=_coerce_json_object(row[11]) or {},
+            created_at=row[12] if isinstance(row[12], datetime) else None,
+        )
+    manual = None
+    if "final" in by_domain:
+        state = load_verdict_state(conn, schema, llm_table, run_name)
+        if state is not None and state.get("manual"):
+            manual = state["manual"].get("verdict")
+    return StoredRunReport(run_name=run_name, rows=by_domain, manual_verdict=manual)
+
+
+def load_pair_summary(
+    conn, run_a: str, run_b: str, aggregate_sql: str, services: Sequence[str] = (),
+) -> List[tuple]:
+    """``(domain, query_label, value_a, value_b)`` of every metric either run stored, aggregated per run.
+
+    ``aggregate_sql`` is a trusted aggregate over ``value`` (the whitelist of the compare blueprint); ``services``
+    limits the rows to the active project area, as the compare endpoints do.
+    """
+    svc_where = " AND service = ANY(%s)" if services else ""
+    svc_params: list = [list(services)] if services else []
+    query = f"""
+        WITH raw AS (
+          SELECT domain, query_label, run_name, value
+          FROM public.metrics
+          WHERE run_name IN (%s, %s){svc_where}
+        ), p AS (
+          SELECT domain, query_label, run_name, {aggregate_sql} AS agg_value
+          FROM raw GROUP BY domain, query_label, run_name
+        )
+        SELECT domain, query_label,
+               MAX(agg_value) FILTER (WHERE run_name = %s) AS value_a,
+               MAX(agg_value) FILTER (WHERE run_name = %s) AS value_b
+        FROM p GROUP BY domain, query_label ORDER BY domain, query_label
+    """
+    with conn.cursor() as cur:
+        cur.execute(query, (run_a, run_b, *svc_params, run_a, run_b))
+        return list(cur.fetchall())
+
+
+@dataclass(frozen=True)
+class StoredPairExplanation:
+    run_a: str
+    run_b: str
+    inputs_hash: str
+    payload: Dict[str, Any]
+    created_at: Optional[datetime]
+
+
+def _ensure_pair_explanations_table(conn, schema: str, table: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(sql.SQL(
+            """
+            CREATE TABLE IF NOT EXISTS {} (
+                run_a       TEXT        NOT NULL,
+                run_b       TEXT        NOT NULL,
+                inputs_hash TEXT        NOT NULL,
+                payload     JSONB       NOT NULL,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (run_a, run_b)
+            )
+            """
+        ).format(sql.Identifier(schema, table)))
+    conn.commit()
+
+
+def load_compare_explanation(conn, schema: str, table: str, run_a: str, run_b: str) -> Optional[StoredPairExplanation]:
+    """Cached LLM explanation of the comparison of run A with run B."""
+    _ensure_pair_explanations_table(conn, schema, table)
+    with conn.cursor() as cur:
+        cur.execute(
+            sql.SQL("SELECT run_a, run_b, inputs_hash, payload, created_at FROM {} WHERE run_a = %s AND run_b = %s").format(
+                sql.Identifier(schema, table)
+            ),
+            (run_a, run_b),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return StoredPairExplanation(
+        run_a=str(row[0]),
+        run_b=str(row[1]),
+        inputs_hash=str(row[2]),
+        payload=_coerce_json_object(row[3]) or {},
+        created_at=row[4] if isinstance(row[4], datetime) else None,
+    )
+
+
+def save_compare_explanation(conn, schema: str, table: str, run_a: str, run_b: str, inputs_hash: str, payload: Dict[str, Any]) -> None:
+    """Replaces the cached explanation of the pair."""
+    _ensure_pair_explanations_table(conn, schema, table)
+    with conn.cursor() as cur:
+        cur.execute(
+            sql.SQL(
+                """
+                INSERT INTO {} (run_a, run_b, inputs_hash, payload, created_at) VALUES (%s, %s, %s, %s, now())
+                ON CONFLICT (run_a, run_b) DO UPDATE SET
+                    inputs_hash = EXCLUDED.inputs_hash, payload = EXCLUDED.payload, created_at = now()
+                """
+            ).format(sql.Identifier(schema, table)),
+            (run_a, run_b, inputs_hash, Json(payload)),
+        )
+    conn.commit()
+
+
+def delete_pair_rows(cur, schema: str, table: str, run_name: str) -> None:
+    """Deletes the rows of the pair tables that name the run on either side."""
+    cur.execute(
+        sql.SQL("DELETE FROM {} WHERE run_a = %s OR run_b = %s").format(sql.Identifier(schema, table)),
+        (run_name, run_name),
+    )
+
+
+def rename_pair_rows(cur, schema: str, table: str, old_name: str, new_name: str) -> int:
+    """Renames the run on both sides of the pair tables; returns the number of updated rows."""
+    renamed = 0
+    for column in ("run_a", "run_b"):
+        cur.execute(
+            sql.SQL("UPDATE {} SET {} = %s WHERE {} = %s").format(
+                sql.Identifier(schema, table), sql.Identifier(column), sql.Identifier(column)
+            ),
+            (new_name, old_name),
+        )
+        renamed += int(getattr(cur, "rowcount", 0) or 0)
+    return renamed
+
+
 def load_run_frames(
     conn,
     schema: str,
@@ -1266,6 +1552,7 @@ MAX_RPS_FIELDS = (
     ("peak_performance", "max_rps"),
     ("stability_under_load", "actual_rps"),
     ("spike_analysis", "max_spike_rps"),
+    ("scenario", "rps_mean"),
 )
 # A plain decimal number; the exponent is bounded so the numeric cast cannot overflow. The LLM sometimes
 # writes text such as «~1200», which is not a load level and is skipped in favour of the next field.
@@ -1431,6 +1718,9 @@ def save_llm_results(
                 run_sla_details["target_window"] = results.get("sla_target_window")
             if isinstance(results.get("sla_headroom"), dict):
                 run_sla_details["headroom"] = results.get("sla_headroom")
+            # Regression against the baseline run (AI/regression.py), fixed when the report is built.
+            if isinstance(results.get("sla_regression"), dict):
+                run_sla_details["regression"] = results.get("sla_regression")
             if results.get("report_language"):
                 # Readers of the run row (forecast, SLA block) find the report language without the final JSON.
                 run_sla_details["report_language"] = results.get("report_language")

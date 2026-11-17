@@ -321,7 +321,7 @@ def test_jenkins_urls_from_answers_stay_on_the_configured_address():
 
     # Jenkins names URLs by its own "Jenkins URL" setting: another host, same paths.
     assert jenkins_path("https://evil.example/queue/item/5/", "https://jenkins.example") == "/queue/item/5"
-    assert jenkins_path("http://ci.internal/jenkins/job/a/3/", "https://ci.example/jenkins") == "/job/a/3"
+    assert jenkins_path("http://ci-private.example/jenkins/job/a/3/", "https://ci.example/jenkins") == "/job/a/3"
     client = ApiClient("https://jenkins.example", name="Jenkins", auth=("bot", "JT"))
     assert client.url_for("/queue/item/5/api/json") == "https://jenkins.example/queue/item/5/api/json"
     assert client.url_for("https://jenkins.example/job/a/1/api/json") == "https://jenkins.example/job/a/1/api/json"

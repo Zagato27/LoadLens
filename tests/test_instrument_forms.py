@@ -119,7 +119,7 @@ def test_new_report_type_rows_and_result_links(client):
     html = client.get("/new").get_data(as_text=True)
     style = _page_style(html)
     assert ".type-card::before" in style and ".type-card:has(input:checked)::before" in style
-    assert html.count('<input type="radio" name="test_type"') == 4
+    assert html.count('<input type="radio" name="test_type"') == 5
     assert '<a id="webLink" class="reportLink btn btn-primary" href="#">' in html
     assert ".phase-list li.done::before" in style and "var(--ok)" in style
     script = _read("static/js/new.js")

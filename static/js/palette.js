@@ -17,6 +17,7 @@
     '/': 'главная обзор дэшборд дашборд dashboard home overview',
     '/launch': 'запуск теста запустить нагрузку генератор launch run test',
     '/reports': 'архив отчёты список история archive reports history',
+    '/releases': 'релизы релиз регресс деградация тренд releases release regression trend',
     '/compare': 'сравнение сравнить baseline compare',
     '/forecasting': 'прогнозирование прогноз мощности usl forecasting capacity',
     '/settings': 'настройки конфигурация источники сервисы settings configuration',

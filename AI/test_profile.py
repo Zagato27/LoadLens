@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """Single source of truth for load-test types and their analysis profiles.
 
-A run carries a free-form ``test_type`` string (UI sends step/soak/spike/stress, the API
+A run carries a free-form ``test_type`` string (UI sends step/soak/spike/stress/scenario, the API
 accepts anything). Every layer — SLA evaluation, step derivation, prompts, forecast gating,
-web and Confluence rendering — resolves it through :func:`profile_for` so the four types are
+web and Confluence rendering — resolves it through :func:`profile_for` so the five types are
 handled consistently:
 
 - ``step``   → mode ``capacity``: search for the last stable load step (max performance);
 - ``soak``   → mode ``stability``: hold a given load for the whole run, watch for drift;
 - ``spike``  → mode ``spike``: reaction to sudden load bursts and recovery afterwards;
-- ``stress`` → mode ``stress``: capacity semantics, the result is reported as a saturation point.
+- ``stress`` → mode ``stress``: capacity semantics, the result is reported as a saturation point;
+- ``scenario`` → mode ``phases``: one pass of a business process; the run is split into phases by the request
+  groups of the load tool (AI/phases.py) and checked phase by phase.
 
 Unknown or empty types fall back to the step profile with ``test_type=""`` (legacy behaviour).
 """
@@ -22,8 +24,8 @@ from typing import Any, Dict, Mapping, Optional
 from AI.i18n import t
 from AI.report_texts import LanguageTable, text_lang
 
-TEST_TYPES = ("step", "soak", "spike", "stress")
-MODES = ("capacity", "stability", "spike", "stress")
+TEST_TYPES = ("step", "soak", "spike", "stress", "scenario")
+MODES = ("capacity", "stability", "spike", "stress", "phases")
 CAPACITY_LIKE_MODES = frozenset({"capacity", "stress"})
 
 TEST_TYPE_ALIASES: Dict[str, tuple[str, ...]] = {
@@ -37,6 +39,10 @@ TEST_TYPE_ALIASES: Dict[str, tuple[str, ...]] = {
     ),
     "spike": ("spike", "burst", "всплеск", "всплески"),
     "stress": ("stress", "стресс"),
+    "scenario": (
+        "scenario", "process", "e2e", "end_to_end", "journey", "business", "business_process",
+        "сценарий", "сценарный", "процессный", "сквозной", "бизнес_процесс",
+    ),
 }
 # Substring markers recognise free-form soak names such as "night-stability-run".
 SOAK_MARKERS = ("stabil", "soak", "endurance", "longevity", "reliability", "стабил", "длительн")
@@ -70,7 +76,7 @@ def test_type_text(key: Optional[str], field: str, lang: Optional[str] = DEFAULT
 
 
 def test_type_label(key: Optional[str], lang: Optional[str] = DEFAULT_LANG) -> str:
-    """Visible name of a normalized test type (step/soak/spike/stress); '' for an unknown type."""
+    """Visible name of a normalized test type (step/soak/spike/stress/scenario); '' for an unknown type."""
     return test_type_text(key, "label", lang)
 
 
@@ -149,6 +155,13 @@ _PROFILE_FIELDS: Dict[str, Dict[str, Any]] = {
         "step_detection_configurable": True,
         "forecast_allowed": True,
     },
+    "scenario": {
+        "mode": "phases",
+        "peak_performance_applicable": False,
+        "step_detection_default": False,
+        "step_detection_configurable": False,
+        "forecast_allowed": False,
+    },
 }
 
 
@@ -179,7 +192,7 @@ def _canonical(raw: Optional[str]) -> str:
 
 
 def normalize_test_type(raw: Optional[str]) -> str:
-    """Maps user-facing test type names (RU/EN) to step/soak/spike/stress, '' when unknown."""
+    """Maps user-facing test type names (RU/EN) to step/soak/spike/stress/scenario, '' when unknown."""
     value = _canonical(raw)
     if not value:
         return ""

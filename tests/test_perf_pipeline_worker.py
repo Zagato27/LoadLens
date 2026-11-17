@@ -524,7 +524,8 @@ def test_update_page_no_longer_imports_celery():
         assert not hasattr(getattr(update_page, legacy), "delay")
 
 
-# Modules the three background jobs run in a worker: update_report, publish_report, publish_forecast.
+# Modules the four background jobs run in a worker: update_report, publish_report, publish_forecast,
+# publish_comparison.
 WORKER_PATH_MODULES = sorted(
     {
         "update_page.py",
@@ -532,6 +533,8 @@ WORKER_PATH_MODULES = sorted(
         "loadlens_app/forecast_confluence.py",
         "loadlens_app/forecast.py",
         "loadlens_app/forecast_explanation.py",
+        "loadlens_app/compare_confluence.py",
+        "loadlens_app/compare_explanation.py",
     }
     | {str(p.relative_to(ROOT_DIR)).replace("\\", "/") for p in (ROOT_DIR / "AI").glob("*.py")}
     | {str(p.relative_to(ROOT_DIR)).replace("\\", "/") for p in (ROOT_DIR / "confluence_manager").glob("*.py")}

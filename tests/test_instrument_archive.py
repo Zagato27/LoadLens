@@ -78,7 +78,7 @@ def test_runs_without_include_keep_the_statement_and_the_keys(client, monkeypatc
 
     (text, _params), = conn.log
     assert "sla_checks" not in text and "sla_details" not in text
-    assert "manual_author, manual_changed_at FROM joined" in text
+    assert "manual_author, manual_changed_at, release, release_accepted, baseline FROM joined" in text
     assert "sla" not in body[0]
 
 
@@ -96,8 +96,8 @@ def test_runs_include_sla_reads_the_checks_of_the_page_rows_in_the_same_statemen
     (text, params), = conn.log  # still one statement
     assert ("manual_changed_at, (SELECT COALESCE(NULLIF(r.sla_details->'checks', '[]'::jsonb), "
             "r.parsed->'deterministic_sla'->'checks') FROM public.llm_reports r WHERE r.domain = 'final' "
-            "AND r.run_name = joined.run_name AND r.created_at = joined.report_created_at LIMIT 1) AS sla_checks "
-            "FROM joined") in text
+            "AND r.run_name = joined.run_name AND r.created_at = joined.report_created_at LIMIT 1) AS sla_checks, "
+            "release, release_accepted, baseline FROM joined") in text
     assert text.endswith("OFFSET %s LIMIT %s")
     assert params == ("%x%", "%x%", 20, 3)  # no new parameters
     body = resp.get_json()

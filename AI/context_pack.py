@@ -409,6 +409,9 @@ def detect_step_anomalies(col_series: pd.Series, steps: Sequence[LoadStep], cfg:
     - elasticity: the metric grows much faster than the load between steps;
     - drift: the metric changes noticeably inside a single step;
     - shift: for equal time buckets (no load levels), a bucket deviates from the first one.
+
+    ``cfg["cross_step"] = False`` keeps the drift only: the phases of a scenario run carry different request mixes,
+    so comparing a phase with the first one says nothing about the system.
     """
     options = cfg or {}
     elasticity_threshold = float(options.get("step_elasticity_threshold", DEFAULT_ELASTICITY_THRESHOLD))
@@ -426,7 +429,7 @@ def detect_step_anomalies(col_series: pd.Series, steps: Sequence[LoadStep], cfg:
     base = next((s for s in stats if s), None)
     base_step = next((steps[i] for i, s in enumerate(stats) if s), None)
     has_levels = all(step.rps_level is not None for step in steps)
-    if base and base_step is not None and abs(base["mean"]) > 1e-9:
+    if options.get("cross_step", True) and base and base_step is not None and abs(base["mean"]) > 1e-9:
         for i, current in enumerate(stats):
             step = steps[i]
             if current is None or step.index == base_step.index:
@@ -638,8 +641,13 @@ def load_step_report_from_frames(
     ceiling_level: Any = None,
     ceiling_start: Optional[str] = None,
     detection: Optional[Dict[str, Any]] = None,
+    error_query: str = "",
 ) -> Dict[str, Any]:
     """Per-step RPS level and latency p95 on the plateau, for the report table.
+
+    ``error_query`` (the SLA error-rate query) adds ``error_rate`` to every row: the worst plateau p95 among the
+    series of that query, the statistic the SLA error check uses, so a step can be compared with the same step of
+    another run (AI/regression.py). Without the query (or its data) the rows have no ``error_rate``.
 
     ``detection`` is what the step detector derived from the RPS series (AI.step_detector.DetectorParams with
     ``min_step_minutes`` and ``reason``); the table keeps it so the report can state how the steps were found.
@@ -665,8 +673,14 @@ def load_step_report_from_frames(
     elif same_query:
         lat_label = ""
     rps_stats = _step_stats(rps_series, steps) if rps_series is not None else [None] * len(steps)
+    error_section = _match_label(labeled, error_query) if str(error_query or "").strip() else None
+    error_frame = error_section.get("df") if isinstance(error_section, dict) else None
+    error_label = str(error_section.get("label") or "") if isinstance(error_section, dict) else ""
+    errors: Optional[List[Optional[float]]] = None
+    if isinstance(error_frame, pd.DataFrame) and not error_frame.empty and error_label != rps_label:
+        errors = _worst_p95_by_step(error_frame, steps)
     rows: List[Dict[str, Any]] = []
-    for step, rps, latency_p95 in zip(steps, rps_stats, lat_p95):
+    for position, (step, rps, latency_p95) in enumerate(zip(steps, rps_stats, lat_p95)):
         payload = step.to_dict()
         level = payload.get("rps_level")
         mean = _round_num((rps or {}).get("mean"), 1)
@@ -685,6 +699,8 @@ def load_step_report_from_frames(
             "latency_p95": latency_p95,
             "selected": False,
         })
+        if errors is not None:
+            rows[-1]["error_rate"] = errors[position]
     _select_step(rows, selected_level, selected_start)
     if selected_role:
         for row in rows:
@@ -700,6 +716,7 @@ def load_step_report_from_frames(
         "rps_series": rps_name or None,
         "latency_query": lat_label or None,
         "latency_series": lat_name or None,
+        **({"error_query": error_label} if errors is not None else {}),
         "note": _step_note(),
         "steps": rows,
         **({"detection": dict(detection)} if isinstance(detection, dict) else {}),

@@ -23,7 +23,7 @@
   "projects.form.description": "Описание",
   "projects.form.edit_title": "Проект «{title}»",
   "projects.form.id": "Идентификатор",
-  "projects.form.id_placeholder": "без пробелов, например NSI",
+  "projects.form.id_placeholder": "без пробелов, например demo",
   "projects.form.id_value": "Идентификатор: {id}",
   "projects.form.no_copy": "Не копировать",
   "projects.form.title": "Отображаемое имя",

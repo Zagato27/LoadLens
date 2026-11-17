@@ -1333,6 +1333,7 @@ _REF_STEMS: Dict[str, Tuple[str, ...]] = {
     "spike": ("всплеск", "spike", "фон", "восстанов", "overshoot", "p95", "ошиб", "rps", "background", "recover", "error"),
     "saturation": ("насыщ", "saturation", "ступен", "rps", "ресурс", "cpu", "памят", "memory", "saturat", "step", "resource"),
     "trend": ("тренд", "дрейф", "рост", "trend", "drift", "growth"),
+    "phase": ("фаз", "phase", "сценари", "scenario", "длительн", "duration", "rps", "мин", "min"),
 }
 
 
@@ -1445,7 +1446,8 @@ _SATURATION_KEYS = _REF_STEMS["saturation"]
 
 
 def _add_test_type_numeric_references(ctx_obj: Dict[str, Any], add: Any) -> None:
-    """Registers numbers of the soak hold window and trends, spike analysis and stress saturation via ``add``."""
+    """Registers numbers of the soak hold window and trends, spike analysis, scenario phases and stress saturation
+    via ``add``."""
     holds: List[Any] = [ctx_obj.get("hold_window")]
     spikes: List[Any] = []
     for pack in _context_packs(ctx_obj):
@@ -1482,6 +1484,28 @@ def _add_test_type_numeric_references(ctx_obj: Dict[str, Any], add: Any) -> None
             if isinstance(stats, dict):
                 for field in ("p95", "error_rate_pct"):
                     add("spike_analysis", name, f"{phase}_{field}", stats.get(field), _SPIKE_KEYS)
+    phases: List[Any] = list(ctx_obj.get("phases") or [])
+    scenario = ctx_obj.get("scenario")
+    if isinstance(scenario, dict):
+        phases.extend(scenario.get("phases") or [])
+        add("scenario", "scenario", "rps_mean", scenario.get("rps_mean"), _REF_STEMS["phase"])
+        reference = scenario.get("reference")
+        if isinstance(reference, dict):
+            for item in reference.get("durations") or []:
+                if isinstance(item, dict):
+                    for field in ("reference_min", "current_min", "change_pct"):
+                        add("scenario", item.get("label"), f"duration_{field}", item.get(field), _REF_STEMS["phase"])
+    for pack in _context_packs(ctx_obj):
+        profile = pack.get("phase_profile")
+        if isinstance(profile, dict):
+            phases.extend(profile.get("phases") or [])
+    for phase in phases:
+        if isinstance(phase, dict):
+            for field in ("duration_min", "rps_mean"):
+                add("phases", phase.get("label"), field, phase.get(field), _REF_STEMS["phase"])
+            for group in phase.get("groups") or []:
+                if isinstance(group, dict) and group.get("share") is not None:
+                    add("phases", phase.get("label"), "group_share_pct", round(float(group["share"]) * 100.0, 1), _REF_STEMS["phase"])
     saturation = ctx_obj.get("saturation")
     if isinstance(saturation, dict):
         for field in ("saturation_rps", "first_degraded_rps"):

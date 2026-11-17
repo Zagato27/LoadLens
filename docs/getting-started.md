@@ -132,6 +132,7 @@ follow them; hand-written queries should too.
 | `max_performance_query` | The assigned total RPS series: the step detector and the stable maximum work on it |
 | `step_detection_enabled`, `min_stable_minutes` | Step detector switch (step and stress tests) and the shortest plateau that counts as a step; the detector reads its window and threshold from the RPS series itself |
 | `mean_latency_query`, `vus_query`, `load_model`, `latency_unit`, `service_cpu_query` | Series for the capacity forecast and the pod plan |
+| `regression_*` | "Regression against the baseline": risk and failure thresholds for the growth of p95 (%), of the error rate (pp) and the drop of the load reached (%) against the baseline run at a comparable load ([details](ai-analysis.md#regression-against-the-baseline)) |
 
 Query references that are left empty are resolved by role from the installed packs; the form shows such a reference
 as "auto by role". Thresholds can differ per project area and per service.
@@ -142,11 +143,11 @@ as "auto by role". Thresholds can differ per project area and per service.
 
 1. Pick the service (recent ones first) and, if you use several, the project area.
 2. Set the test window. Quick presets cover the last hours; after you choose a service the form looks for recent
-   load windows in the load tool metrics of the last 6 hours ("Detected runs") and offers them, together with the runs
+   load windows in the load tool metrics of the last 30 days ("Detected runs") and offers them, together with the runs
    started from LoadLens. Tests started from the "Run a test" page get their report automatically for the run window
    ([running-load-tests.md](running-load-tests.md)).
-3. Choose the test type: step (maximum performance), soak, spike or stress. It selects the deterministic analysis,
-   the SLA window and the instructions for the model.
+3. Choose the test type: step (maximum performance), soak, spike, stress or scenario (one pass of a business process,
+   analysed phase by phase). It selects the deterministic analysis, the SLA window and the instructions for the model.
 4. Choose whether to run the AI analysis and whether to publish to Confluence, and start the job.
 
 The job runs in the background with progress per phase; the page keeps the link `/new?job=<id>`, so the tab can be
@@ -198,8 +199,9 @@ without cards, figures and dates are set in a monospaced face, and a status is a
 - **Engineer summary and manual verdict.** An engineer writes the summary, and can override the verdict with a
   mandatory reason; the automatic verdict stays visible and can be restored.
 - **Publishing, comparison, forecast.** The report and the forecast go to Confluence as separate pages; the archive
-  compares two runs with an automatically chosen baseline; the capacity forecast (step and stress tests) estimates the
-  limit, the safe maximum and the number of pods for a target load.
+  compares two runs with an automatically chosen baseline, says whether the newer run is better or worse and, on
+  request, has the AI explain the difference and publishes the comparison to Confluence; the capacity forecast (step
+  and stress tests) estimates the limit, the safe maximum and the number of pods for a target load.
 
 ## Next steps
 

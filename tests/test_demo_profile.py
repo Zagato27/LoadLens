@@ -208,7 +208,7 @@ def test_stubs_accept_a_container_host_and_refuse_others(stub):
     assert module.parse_args(["--host", "0.0.0.0", "--port", "0"]).host == "0.0.0.0"
     assert module.parse_args(["--port", "0"]).host == "127.0.0.1"
     with pytest.raises(SystemExit):
-        module.parse_args(["--host", "10.0.0.5", "--port", "0"])
+        module.parse_args(["--host", "192.0.2.5", "--port", "0"])
 
 
 def test_demo_workflow_runs_the_documented_command():

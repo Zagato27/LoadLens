@@ -1,4 +1,5 @@
 {
+  "job.compare_failed": "Publishing the comparison failed",
   "job.dismiss_unsupported": "Clearing the job list is unavailable: the job table has no dismissed_at column and the application may not add it",
   "job.done": "Done",
   "job.error.attachment_upload": "Could not upload the attachment {path}",
@@ -43,9 +44,12 @@
   "job.progress.web_finalizing": "Finalizing the web report…",
   "job.progress.web_ready": "Web report ready ✅",
   "job.progress.web_started": "Building the web report (without Confluence)…",
+  "job.publishing_compare": "Publishing the comparison to Confluence…",
   "job.publishing_confluence": "Publishing to Confluence…",
   "job.publishing_forecast": "Publishing the forecast to Confluence…",
+  "job.publishing_release": "Publishing the release to Confluence…",
   "job.queued_too_long": "Job interrupted: no worker took it from the queue",
+  "job.release_failed": "Publishing the release failed",
   "job.replaced": "Job restarted in the web process",
   "job.stale": "Job interrupted: the worker does not respond",
   "job.time_limit": "Job interrupted: the job ran out of time"

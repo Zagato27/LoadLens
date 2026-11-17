@@ -37,6 +37,12 @@
       "reason": "offline evaluation tool error (CLI usage, not localized)"
     }
   ],
+  "AI/metric_direction.py": [
+    {
+      "literal": "ошиб",
+      "reason": "word of user query labels (any language) that marks an error metric, as in static/js/compare.js"
+    }
+  ],
   "AI/report_markers.py": [
     {
       "literal": "(?:запрос|query) «([^»]*)»",
@@ -179,6 +185,22 @@
     {
       "literal": "(?<![A-Za-zА-Яа-яЁё])(-?\\d+(?:[.,]\\d+)?)\\s*(%|ms|sec|secs|seconds|s|rps|qps)?\\b",
       "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "фаз",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "сценари",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "длительн",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
+    },
+    {
+      "literal": "мин",
+      "reason": "parsing synonyms/stems for free-text LLM output and reference matching (ru alongside en), not shown"
     }
   ],
   "AI/storage_state.py": [
@@ -242,6 +264,26 @@
     },
     {
       "literal": "длительн",
+      "reason": "test type aliases and soak markers accepted as input"
+    },
+    {
+      "literal": "сценарий",
+      "reason": "test type aliases and soak markers accepted as input"
+    },
+    {
+      "literal": "сценарный",
+      "reason": "test type aliases and soak markers accepted as input"
+    },
+    {
+      "literal": "процессный",
+      "reason": "test type aliases and soak markers accepted as input"
+    },
+    {
+      "literal": "сквозной",
+      "reason": "test type aliases and soak markers accepted as input"
+    },
+    {
+      "literal": "бизнес_процесс",
       "reason": "test type aliases and soak markers accepted as input"
     }
   ],
@@ -365,7 +407,7 @@
   ],
   "AI/verification.py": [
     {
-      "literal": "(ступен[иьяе]|интервал[аеы]?|шаг[аеи]?|фон[аеу]?|всплеск[аеу]?|step|interval|background|spike)\\s*№?\\s*\\d+",
+      "literal": "(ступен[иьяе]|интервал[аеы]?|шаг[аеи]?|фон[аеу]?|всплеск[аеу]?|фаз[аеуы]|пауз[аеуы]|step|interval|background|spike|phase|pause)\\s*№?\\s*\\d+",
       "reason": "regexes that read step references and units in ru and en LLM answers"
     },
     {
@@ -558,6 +600,10 @@
     },
     {
       "literal": "архив отчёты список история archive reports history",
+      "reason": "PAGE_KEYWORDS: bilingual search words, the palette finds pages in both languages"
+    },
+    {
+      "literal": "релизы релиз регресс деградация тренд releases release regression trend",
       "reason": "PAGE_KEYWORDS: bilingual search words, the palette finds pages in both languages"
     },
     {

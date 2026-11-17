@@ -147,8 +147,28 @@ def legacy_row():
     return {"domain": "final", "parsed": json.dumps(parsed, ensure_ascii=False), "sla_details": None}
 
 
+def scenario_row(worst=True):
+    """A scenario: phases are the steps (``phase``), the SLA window is the worst phase when a check failed."""
+    steps = _steps()
+    for step in steps:
+        step.update({"label": f"фаза {step['index']} · G{step['index']}", "phase": True, "phase_verdict": "pass"})
+    phases = [{"index": s["index"], "label": s["label"], "start_iso": s["start_iso"], "end_iso": s["end_iso"]} for s in steps]
+    checks = [
+        {"name": "p95_latency", "threshold": 300, "actual": 340.0 if worst else 250.0, "passed": not worst, "query_label": "Latency", "series": "all",
+         "message": "p95 (фазы «фаза 2 · G2» ≈100 RPS, запрос «Latency»)"},
+        {"name": "phase_completeness", "threshold": 0, "actual": 1, "passed": False, "category": "secondary", "message": "Не пройдены фазы"},
+    ]
+    sla = {"checks": checks, "load_step_table": {"rps_query": "RPS total", "steps": steps}}
+    if worst:
+        steps[1]["phase_verdict"] = "fail"
+        sla["stable_window"] = {"start": steps[1]["start_iso"], "end": steps[1]["end_iso"], "level": 100.0, "kind": "phase", "title": steps[1]["label"]}
+    return {"domain": "final", "parsed": {"test_profile": {"mode": "phases"}, "scenario": {"phases": phases}}, "sla_details": sla}
+
+
 ROWS = {
     "demo": demo_row,
+    "scenario": scenario_row,
+    "scenario_all_pass": lambda: scenario_row(worst=False),
     "stress": stress_row,
     "soak": soak_row,
     "soak_window_only": soak_window_only_row,
@@ -273,6 +293,19 @@ def test_soak_spike_and_legacy_markers():
     assert legacy[0]["label"] == "SLA: ступень 3"
     assert legacy[0]["t"] == rm.moment_ms("2026-10-15T14:47:00Z")
     assert legacy[-1]["role"] == "rps_drop" and legacy[-1]["label"] == "падение RPS 18:06"
+
+
+def test_scenario_markers_worst_phase_band_and_phase_ticks():
+    row = scenario_row()
+    steps = row["sla_details"]["load_step_table"]["steps"]
+    markers = rm.markers_for(row)
+    assert markers[0] == {"kind": "band", "t": rm.moment_ms(steps[1]["start_iso"]), "to": rm.moment_ms(steps[1]["end_iso"]),
+                          "label": "худшая фаза: фаза 2 · G2", "tone": "warn", "role": "phase"}
+    assert [m["t"] for m in markers[1:]] == [rm.moment_ms(s["start_iso"]) for s in steps[1:]]
+    assert {m["role"] for m in markers[1:]} == {"phase"}
+    assert [m["role"] for m in rm.markers_for(scenario_row(worst=False))] == ["phase"] * 4
+    # The phase checks draw no threshold line.
+    assert [t["name"] for t in rm.thresholds_for(row)] == ["p95_latency"]
 
 
 def test_thresholds_prefer_explicit_fields_then_message_then_window_and_table():

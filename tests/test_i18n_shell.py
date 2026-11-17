@@ -20,7 +20,7 @@ from tests.test_auth import Browser, _isolated, add_user, app, logged_in, repo, 
 
 BASE_JS = ["static/js/common.js", "static/js/ui.js"]
 SHELL_JS = BASE_JS + ["static/js/palette.js", "static/js/charts.js"]
-ADMIN_PAGES = ["/", "/reports", "/compare", "/forecasting", "/launch", "/new", "/settings", "/account"]
+ADMIN_PAGES = ["/", "/reports", "/releases", "/compare", "/forecasting", "/launch", "/new", "/settings", "/account"]
 
 
 def _html_lang(html):
@@ -71,12 +71,12 @@ def test_nav_labels_and_theme_menu_in_both_languages(logged_in):
     labels = lambda html: re.findall(r'<span class="nav-label">([^<]*)</span>', html)  # noqa: E731
     en = _page(browser, "/", "en")
     # Stage 5: the theme menu became the "View" menu with a theme group and a language group.
-    assert labels(en) == ["Dashboard", "New report", "Run a test", "Archive", "Compare tests", "Forecasting", "Settings", "Search", "View"]
+    assert labels(en) == ["Dashboard", "New report", "Run a test", "Archive", "Releases", "Compare tests", "Forecasting", "Settings", "Search", "View"]
     for text in ("<span>System</span>", "<span>Light</span>", "<span>Dark</span>", 'title="Interface theme and language"',
                  'aria-label="Interface theme"', 'aria-label="Interface language"', "<span>English</span>", "<span>Русский</span>"):
         assert text in en
     ru = _page(browser, "/", "ru")
-    assert labels(ru) == ["Дэшборд", "Новый отчёт", "Запуск теста", "Архив", "Сравнение тестов", "Прогнозирование", "Настройки", "Поиск", "Вид"]
+    assert labels(ru) == ["Дэшборд", "Новый отчёт", "Запуск теста", "Архив", "Релизы", "Сравнение тестов", "Прогнозирование", "Настройки", "Поиск", "Вид"]
     for text in ("<span>Как в системе</span>", "<span>Светлая</span>", "<span>Тёмная</span>", '<a class="skip-link" href="#main">К содержимому</a>',
                  '<span class="user-role">Администратор</span>', 'aria-label="LoadLens — на дэшборд"', 'aria-label="Открыть меню"'):
         assert text in ru
@@ -129,7 +129,7 @@ HELPERS = r"""(async () => {
   out.tables = [Object.assign({}, LL.DOMAIN_TITLES), Object.assign({}, LL.TEST_TYPE_LABELS), Object.assign({}, LL.VERDICT_LABELS)];
   out.keys = [Object.keys(LL.DOMAIN_TITLES), Object.keys(LL.TEST_TYPE_LABELS), Object.keys(LL.VERDICT_LABELS)];
   out.labels = ['pass', 'Провал', 'есть риски', null].map((v) => LL.verdictLabel(v)).concat(['soak', ''].map((k) => LL.testTypeLabel(k)), ['final', 'x'].map((k) => LL.domainTitle(k)));
-  out.manual = [LL.manualVerdictTitle({ verdict: 'fail', author: 'ivanov', changed_at: '2026-10-17T12:00:00Z', reason: 'r' }), LL.manualVerdictTitle({ verdict: 'pass' })];
+  out.manual = [LL.manualVerdictTitle({ verdict: 'fail', author: 'engineer1', changed_at: '2026-10-17T12:00:00Z', reason: 'r' }), LL.manualVerdictTitle({ verdict: 'pass' })];
   LL.role = 'admin';
   const btn = LL.jobDismissButton({ job_id: 'j', run_name: 'run-1', status: 'done' }, () => {});
   out.button = [btn.textContent, btn.title, btn.getAttribute('aria-label'), LL.jobDismissButton({ job_id: 'j', status: 'done' }, () => {}).getAttribute('aria-label')];
@@ -154,10 +154,10 @@ def test_common_helpers_speak_english():
     assert out["tables"][1]["soak"] == "Soak (long-running)" and out["tables"][0]["hard_resources"] == "Node resources"
     assert out["keys"] == [
         ["final", "jvm", "database", "kafka", "microservices", "hard_resources", "lt_framework", "lt_generators", "application_logs"],
-        ["step", "soak", "spike", "stress"], ["pass", "risk", "fail", "no_data"],
+        ["step", "soak", "spike", "stress", "scenario"], ["pass", "risk", "fail", "no_data"],
     ]
     assert out["labels"] == ["Passed", "Failed", "Risks found", "Insufficient data", "Soak (long-running)", "—", "Summary", "x"]
-    assert out["manual"] == ["Changed manually: ivanov, 2026-10-17 12:00. Reason: r", "Changed manually."]
+    assert out["manual"] == ["Changed manually: engineer1, 2026-10-17 12:00. Reason: r", "Changed manually."]
     assert out["button"] == ["Hide", "Remove the job from the list. It stays available by its link.", "Hide job run-1", "Hide job"]
     assert out["toasts"] == [
         ["Could not clear the job list (HTTP 500)", "error"], ["Jobs hidden: 2", "ok"],
@@ -172,7 +172,7 @@ def test_common_helpers_keep_the_russian_output():
     assert out["rel"] == ["только что", "5 мин назад", "3 ч назад", "вчера в 10:00", "2 дн назад", "3 дн назад"]
     assert out["dur"] == ["45 с", "59 мин", "1 ч 05 мин", "1 д 3 ч"]
     assert out["labels"] == ["Успешно", "Провал", "Есть риски", "Недостаточно данных", "Долговременный (soak)", "—", "Итог", "x"]
-    assert out["manual"] == ["Изменён вручную: ivanov, 2026-10-17 12:00. Причина: r", "Изменён вручную."]
+    assert out["manual"] == ["Изменён вручную: engineer1, 2026-10-17 12:00. Причина: r", "Изменён вручную."]
     assert out["button"] == ["Скрыть", "Убрать задачу из списка. Она останется доступна по ссылке.", "Скрыть задачу run-1", "Скрыть задачу"]
     assert out["toasts"] == [
         ["Не удалось очистить список задач (HTTP 500)", "error"], ["Скрыто задач: 2", "ok"],
@@ -254,7 +254,7 @@ def test_ui_components_speak_english():
     assert out["themes"] == ["System", "Light", "Dark"]
     assert out["toastClose"] == "Dismiss notification"
     assert 'aria-label="Clear"' in out["combobox"]
-    assert out["terms"] == 27 and out["glossary"]["p95"].startswith("95th percentile")
+    assert out["terms"] == 29 and out["glossary"]["p95"].startswith("95th percentile")
     assert 'data-tip="95th percentile' in out["term"]
     assert not CYRILLIC.search(json.dumps(out, ensure_ascii=False))
 
@@ -338,13 +338,13 @@ def test_palette_keeps_the_russian_output():
 
 
 @pytest.mark.parametrize("locale, labels", [
-    ("en", ["Dashboard", "Run a test", "Archive", "Compare tests", "Forecasting", "Settings", "Profile and API tokens"]),
-    ("ru", ["Дэшборд", "Запуск теста", "Архив", "Сравнение тестов", "Прогнозирование", "Настройки", "Профиль и API-токены"]),
+    ("en", ["Dashboard", "Run a test", "Archive", "Releases", "Compare tests", "Forecasting", "Settings", "Profile and API tokens"]),
+    ("ru", ["Дэшборд", "Запуск теста", "Архив", "Релизы", "Сравнение тестов", "Прогнозирование", "Настройки", "Профиль и API-токены"]),
 ])
 def test_pages_are_found_by_their_name_in_either_language(locale, labels):
-    hrefs = ["/", "/launch", "/reports", "/compare", "/forecasting", "/settings", "/account"]
+    hrefs = ["/", "/launch", "/reports", "/releases", "/compare", "/forecasting", "/settings", "/account"]
     links = [{"href": href, "label": label} for href, label in zip(hrefs, labels)]
-    queries = ["дэшборд", "dashboard", "запуск", "run", "архив", "archive", "сравнение", "compare", "прогнозирование",
+    queries = ["дэшборд", "dashboard", "запуск", "run", "архив", "archive", "релизы", "releases", "сравнение", "compare", "прогнозирование",
                "forecasting", "настройки", "settings", "профиль", "profile"]
     found = run_js(SHELL_JS, f"""(() => {{
       const P = LL.palette._internals;

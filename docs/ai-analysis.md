@@ -43,7 +43,7 @@ saving); the job page shows it with the elapsed and the usual time. The entry po
 
 ## Test types and deterministic analysis
 
-The test type of a report (`step`, `soak`, `spike`, `stress`; `AI/test_profile.py` maps aliases, including the
+The test type of a report (`step`, `soak`, `spike`, `stress`, `scenario`; `AI/test_profile.py` maps aliases, including the
 Russian names) selects the analysis mode, the SLA window and the profile text added to the prompts.
 
 | Type | Computed in code | SLA window and the meaning of `target_rps` | Verdict rules |
@@ -52,12 +52,58 @@ Russian names) selects the analysis mode, the SLA window and the profile text ad
 | Soak (`soak`) | The hold window without ramp-up and ramp-down, average and minimum RPS per interval, trends of p95, errors, CPU and memory (`stability_under_load`, `AI/stability.py`) | The hold window; `target_rps` must be held: the average not more than 5 % below, no interval more than 15 % below | Any latency, error or hold violation: `fail`; CPU, memory or an adverse trend: `risk` |
 | Spike (`spike`) | Spike windows (RPS above the baseline by 1.5x for longer than a minute), overshoot of p95 and errors against the baseline, recovery time (`spike_analysis`, `AI/spike.py`) | The spike windows, the worst value per threshold; `target_rps` is the spike level; a separate "recovery" criterion | Level not reached or latencies not back to the baseline within 15 min: `fail`; latency and errors inside the spike: `risk`; no spike found: `no_data` |
 | Stress (`stress`) | As step, plus the saturation point, the first degraded step, the degradation pattern and the limiting resource (`saturation`, `AI/saturation.py`) | As step | As step |
+| Scenario (`scenario`) | Phases from the request groups of the load tool (query role `lt.rps_by_request`): each interval goes to the group with the largest share of RPS, segments shorter than `phase_min_minutes` join their neighbours, the nesting level of k6 groups is chosen automatically; the phases replace the load steps; the phases of the previous scenario run of the service, aligned by their group keys (`scenario`, `AI/phases.py`) | Every phase, the worst phase per threshold; `target_rps` does not apply; `phase_completeness` (phases of the previous run missing in this one) and `phase_duration` (the largest change of a phase duration beyond the data step, against `phase_duration_tolerance_pct`) | Latency or errors over the threshold in a phase: `fail`; CPU, memory, a missing phase or a changed duration: `risk` |
 
-Peak performance is reported only where the total RPS series exists; for soak and spike it is marked
+Peak performance is reported only where the total RPS series exists; for soak, spike and scenario it is marked
 `not_applicable`. The forecast is built for step and stress tests. It takes the ceiling (`stable_window`) from the
 report: steps above it are marked red, stay out of the model and set the load limit, so a run that went past its
 SLA maximum is not shown as safe there. The verdict policy per mode is documented in the docstring of
 `AI/sla_evaluator.py`.
+
+## The baseline run
+
+The baseline of a report is the run the final prompt and the regression checks compare with. `llm.baseline.mode`
+chooses it (`AI/release_marks.find_baseline_run`):
+
+| Mode | Baseline |
+|---|---|
+| `pinned` (default) | The pinned baseline of the service and test type (archive or report page, «Pin as baseline»), unless it is the run itself; else as `previous_release` |
+| `previous_release` | The accepted run of another release of the same service and test type whose report is earlier than the test (the release of the run itself is skipped); else as `previous_success` |
+| `previous_success` | The previous run of the service (within the project area) with the effective verdict `pass` |
+| `previous` | The previous run of the service, any verdict |
+
+The release modes look in the same service only; without release marks `pinned` is the old `previous_success`. The
+context of the model names the baseline (`mode`, `release`, `basis`: the pinned baseline, the accepted run of a
+release, or a note that neither was found).
+
+## Regression against the baseline
+
+After the verdict of the mode the report compares its own measured values with the baseline run of the analysis
+(`llm.baseline`, the same run the final prompt sees) and adds deterministic checks (`AI/regression.py`). The
+thresholds live in the SLA of the service (`regression_*` keys, see the configuration reference); with all six empty
+there are no such checks and the verdict is exactly the verdict of the mode.
+
+| Check | Value | Compared at |
+|---|---|---|
+| `regression_latency` | Growth of p95 in percent of the baseline (p99 when neither run has p95) | Step and stress: the target step of both runs (the lower one), else the lower of the two ceilings, the row of that step in the step table (2 % tolerance); soak: the hold; spike: the highest spike |
+| `regression_errors` | Growth of the error rate in percentage points | As `regression_latency` |
+| `regression_capacity` | Drop of the load reached in percent: the ceiling of a step or stress test, the spike level of a spike test | Not compared for soak tests |
+
+- Two runs are comparable when their levels differ by no more than 5 %: the hold of a soak test, the spike of a spike
+  test, or the ceilings of step reports saved without a step row at that level (older reports; then the values of the
+  checks are used). The step table stores the error rate of every step (`error_rate`, the plateau p95 of the
+  `error_rate_query` series, the statistic of the SLA check) for this comparison.
+- The baseline must be the same service and the same test type; scenario tests are not compared (they have their own
+  reference run, `phase_completeness` and `phase_duration`).
+- A delta over the risk threshold fails its check with `severity = warning` and turns `pass` into `risk`; over the
+  failure threshold `severity = critical` turns `pass` and `risk` into `fail`. `fail` and `no_data` stay. Soak and
+  spike tests keep treating a warning-level regression like a CPU or memory overrun.
+- The result is fixed when the report is built: `sla_details.regression` keeps the baseline run (name, id, release,
+  how it was chosen), the level, every delta and the metrics that could not be compared with the reason. Pinning
+  another baseline later does not change the report; the release page shows live deltas with the same functions.
+- The report shows the deltas as rows of the SLA table (units `%` and pp) and a line «Baseline: run · how it was
+  chosen · Compare» under the verdict summary; without a comparison the line names the reason. The Confluence page
+  has the same rows and line.
 
 ## Candidates, judge and verification
 
@@ -96,7 +142,8 @@ overall block contain:
 
 The overall block adds fields computed by the pipeline, not the model: `report_language` (`ru` or `en`; missing
 means `ru`), `test_profile`, `deterministic_sla` (`verdict`, `checks[]`, `stable_window` with its `kind`: step,
-`hold` or `spike`), `stability_under_load` (soak), `spike_analysis` (spike), `saturation` (stress) and
+`hold` or `spike`; `regression` with the baseline run, the level and the deltas when regression thresholds are set),
+`stability_under_load` (soak), `spike_analysis` (spike), `saturation` (stress) and
 `domain_titles` for domains whose title comes from the installed packs. The report verdict shown in the UI is the
 SLA verdict; the model's verdicts are per domain. An engineer can override the report verdict with a reason
 (`PUT /runs/<run_name>/verdict`); the analysis itself does not change.
@@ -118,7 +165,7 @@ Prompt files live in `AI/prompts/ru/` and `AI/prompts/en/` with identical names:
 | `_system.txt`, `_system_json.txt` | The default system prompt and its JSON part |
 | `profiles/{step,soak,spike,stress,none}.txt` | The test profile paragraph of the guidance |
 | `critic_prompt.txt`, `verify_prompt.txt`, `judge_prompt.txt`, `judge_safe_prompt.txt`, `judge_rubrics/*.txt` | Critic, verification pass, judge (with and without a rubric) and the rubrics |
-| `forecast_limit_prompt.txt`, `context_import_prompt.txt` | Explanation of the forecast limit; import of a document into the system context (not editable in the UI) |
+| `forecast_limit_prompt.txt`, `compare_prompt.txt`, `context_import_prompt.txt` | Explanation of the forecast limit; explanation of a comparison of two runs; import of a document into the system context (not editable in the UI) |
 | `_strings.json` | Short glue strings (headings of the guidance block, verdict notes, fallback rationale, document separators), the same keys in both languages |
 
 The guidance block that precedes a domain prompt is built from the settings: the SLA, the rules of the system
@@ -179,6 +226,17 @@ context import, the document text are sent to the provider you configure; nothin
 - **Forecast explanation.** "Explain with AI" on the forecast page links the USL limit to the findings of the report
   (`forecast_limit_prompt.txt`), in the language of the report; the answer is cached per report
   (`forecast_explanations`). Limit: `limits.llm_explanations_per_user_per_day`.
+- **Comparison explanation.** On the compare page, A is the assessed run and B the baseline. The program computes
+  the outcome (`better`, `worse`, `same`, `mixed`, `incomparable`): the final verdicts first, then the maximum RPS of
+  a step test (5 % tolerance), then the p95 metrics whose change of A relative to B reaches 10 %. Whether a change is
+  better or worse follows the role of the query (`AI/metric_direction.py`), else the words of its label. Caveats
+  (other service or test type, windows of different length, a baseline newer than A, a run without a report or
+  without verified findings, other load) are listed beside it. "Analyse with AI" sends these facts and up to 8
+  verified findings of each run to the model (`compare_prompt.txt`), which explains the differences without changing
+  the outcome; its numbers are checked against the facts. The explanation is in the language of the report of A and
+  is cached per pair (`compare_explanations`); "Add comparison to Confluence" publishes the outcome, the verdicts, the
+  largest changes and the cached explanation (or the findings of both runs) as its own page. Limit:
+  `limits.llm_explanations_per_user_per_day`.
 - **Reports without AI.** `use_llm: false` builds the deterministic report: the SLA verdict and checks, the load
   steps, the peak RPS with its peak and degradation times or the test-type figures (saturation, spikes, stability),
   the charts and the engineer summary. The report page and the Confluence page mark it "no AI analysis" and have

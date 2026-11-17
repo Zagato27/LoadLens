@@ -6,7 +6,9 @@ The web page (static/js/reports.js) renders the same sections in JavaScript; kee
 - soak   → «Стабильность под нагрузкой» from ``stability_under_load`` (v1 payloads have only
   target_rps / actual_rps / sla_summary / focus and still render);
 - spike  → «Всплески нагрузки» from ``spike_analysis``;
-- stress → «Точка насыщения» from ``saturation`` (plus peak times from ``peak_performance``).
+- stress → «Точка насыщения» from ``saturation`` (plus peak times from ``peak_performance``);
+- scenario → «Сценарий по фазам» from ``scenario``: the phases found, the worst one, the previous scenario run
+  and one row per phase.
 
 Labels, titles and the texts of stored codes (test type, focus, notes, failure mode, metric names) are
 dictionary texts (``report.*``) in the current locale of ``AI.i18n``: the request locale on the web,
@@ -25,6 +27,7 @@ from AI.saturation import failure_mode_title, saturation_note_text
 from AI.spike import spike_note_text
 from AI.stability import hold_note_text
 from AI.test_profile import mode_of, stored_type_label, test_type_text
+from AI.verdicts import label as verdict_label
 
 Rows = List[Tuple[str, str]]
 
@@ -77,6 +80,8 @@ def _mapping(value: Any) -> Mapping[str, Any]:
 
 def report_mode(report: Mapping[str, Any]) -> str:
     """Mode of a stored final report: payload keys first, then ``test_profile``."""
+    if isinstance(report.get("scenario"), Mapping):
+        return "phases"
     if isinstance(report.get("spike_analysis"), Mapping):
         return "spike"
     if isinstance(report.get("saturation"), Mapping):
@@ -236,10 +241,81 @@ def saturation_rows(report: Mapping[str, Any]) -> Rows:
     return rows
 
 
+# Why a scenario has no phases (AI/phases.py reasons); literal keys (tests/test_i18n.py).
+_PHASE_REASON_KEYS = {
+    "no_group_query": "report.section.phases_reason_no_group_query",
+    "no_data": "report.section.phases_reason_no_data",
+    "one_group": "report.section.phases_reason_one_group",
+}
+
+
+def _phase_labels(items: Any) -> str:
+    return ", ".join(
+        _text(item.get("label") or item.get("title"), "") for item in items or [] if isinstance(item, Mapping)
+    ).strip(", ")
+
+
+def _duration_text(reference: Mapping[str, Any]) -> str:
+    worst = _mapping(reference.get("worst_duration"))
+    if not worst:
+        return t("report.section.duration_same")
+    return t(
+        "report.section.duration_worst", label=_text(worst.get("label") or worst.get("title")),
+        reference=_num(worst.get("reference_min")) or "—", current=_num(worst.get("current_min")) or "—",
+        change=_signed(worst.get("change_pct"), "") or "0",
+    )
+
+
+def scenario_rows(report: Mapping[str, Any]) -> Rows:
+    """The phases found, the worst one, the previous scenario run and one row per phase (as reports.js)."""
+    scenario = _mapping(report.get("scenario"))
+    rows: Rows = [
+        (t("report.section.test_type"), _type_label(report, "scenario")),
+        (t("report.section.focus"), _text(_type_focus(report, scenario.get("focus")))),
+    ]
+    if scenario.get("detected"):
+        phases = t("report.section.phases_found", count=_num(scenario.get("phase_count"), 0) or "0",
+                   key=_text(scenario.get("label_key"), ""), level=_num(scenario.get("level"), 0) or "1")
+    else:
+        phases = t(_PHASE_REASON_KEYS.get(_text(scenario.get("reason"), ""), _PHASE_REASON_KEYS["no_data"]))
+    rows.append((t("report.section.phases"), phases))
+    rps = _num(scenario.get("rps_mean"))
+    rows.append((t("report.section.mean_rps"), f"{rps} RPS" if rps is not None else "—"))
+    worst = _mapping(scenario.get("worst_phase"))
+    rows.append((
+        t("report.section.worst_phase"),
+        f"{_text(worst.get('label'))} · {_hhmm(worst.get('start_iso'))}–{_hhmm(worst.get('end_iso'))}" if worst
+        else t("report.section.worst_phase_none"),
+    ))
+    reference = _mapping(scenario.get("reference"))
+    if reference.get("available"):
+        rows.append((t("report.section.reference_run"), _text(reference.get("run_name"))))
+        rows.append((t("report.section.missing_phases"), _phase_labels(reference.get("missing")) or t("report.section.missing_none")))
+        rows.append((t("report.section.duration_change"), _duration_text(reference)))
+    else:
+        rows.append((t("report.section.reference_run"), t("report.section.reference_none")))
+    for phase in scenario.get("phases") or []:
+        if not isinstance(phase, Mapping):
+            continue
+        if phase.get("idle"):
+            verdict = "—"
+        elif phase.get("excluded"):
+            verdict = t("report.section.phase_excluded")
+        else:
+            verdict = verdict_label(phase.get("verdict"), get_locale()) if phase.get("verdict") else "—"
+        rows.append((_text(phase.get("label")), t(
+            "report.section.phase_value", span=f"{_hhmm(phase.get('start_iso'))}–{_hhmm(phase.get('end_iso'))}",
+            minutes=_num(phase.get("duration_min")) or "—", rps=_num(phase.get("rps_mean")) or "—", verdict=verdict,
+        )))
+    return rows
+
+
 def test_type_section(report: Any) -> Optional[Tuple[str, Rows]]:
     """(title, rows) of the test-type section, or None for step reports (peak table instead)."""
     report = report if isinstance(report, Mapping) else {}
     mode = report_mode(report)
+    if mode == "phases":
+        return t("report.section.title_scenario"), scenario_rows(report)
     if mode == "stability":
         return t("report.section.title_stability"), stability_rows(report)
     if mode == "spike":

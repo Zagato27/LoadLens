@@ -287,8 +287,25 @@ def test_release_check_rejects_a_mismatched_tag():
 
 def test_release_notes_print_the_section_of_a_version():
     result = subprocess.run([sys.executable, "-I", str(ROOT_DIR / "tools" / "release.py"), "--notes", version.__version__],
-                            cwd=str(ROOT_DIR), capture_output=True, text=True)
+                            cwd=str(ROOT_DIR), capture_output=True, text=True, encoding="utf-8")
     assert result.returncode == 0 and "### Added" in result.stdout
+
+
+def test_release_notes_preserve_unicode_with_an_ascii_stdout(tmp_path):
+    tool_dir = tmp_path / "tools"
+    tool_dir.mkdir()
+    script = tool_dir / "release.py"
+    script.write_bytes((ROOT_DIR / "tools" / "release.py").read_bytes())
+    notes = "### Fixed\n\n- Comparison: A \u2192 B; \u2713."
+    (tmp_path / "CHANGELOG.md").write_text("## [2.0.0] - 2026-11-17\n\n" + notes + "\n", encoding="utf-8")
+    runner = (
+        "import runpy, sys; sys.stdout.reconfigure(encoding='ascii'); "
+        "sys.argv = [sys.argv[1], '--notes', '2.0.0']; runpy.run_path(sys.argv[0], run_name='__main__')"
+    )
+    result = subprocess.run([sys.executable, "-I", "-c", runner, str(script)],
+                            capture_output=True, text=True, encoding="utf-8")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == notes + "\n"
 
 
 def test_release_version_bump_moves_unreleased_entries(tmp_path, monkeypatch):

@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% set active_nav = 'releases' %}
+{% set i18n_ns = ['charts', 'releases'] %}
+{% block title %}{{ t('releases.list.title') }}{% endblock %}
+{% block container_class %}releases-page{% endblock %}
+{% block head %}
+<script defer src="{{ url_for('static', filename='vendor/chart.umd.js') }}"></script>
+{% endblock %}
+{% block content %}
+  <div class="page-header">
+    <div class="page-heading">
+      <h2>{{ t('releases.list.title') }}</h2>
+      <p class="page-subtitle">{{ t('releases.list.subtitle') }}</p>
+    </div>
+  </div>
+  <div id="releasesHint" class="report-note" hidden></div>
+  <div class="table-wrap">
+    <table class="data-table releases-table" id="releasesTable">
+      <thead>
+        <tr>
+          <th>{{ t('releases.list.col_release') }}</th>
+          <th>{{ t('releases.list.col_status') }}</th>
+          <th>{{ t('releases.list.col_services') }}</th>
+          <th>{{ t('releases.list.col_verdicts') }}</th>
+          <th>{{ t('releases.list.col_last_run') }}</th>
+          <th>{{ t('releases.list.col_ticket') }}</th>
+        </tr>
+      </thead>
+      <tbody id="releaseRows"></tbody>
+    </table>
+  </div>
+
+  <section class="release-trend" id="trendSection">
+    <div class="section-head">
+      <h3>{{ t('releases.trend.title') }}</h3>
+      <div class="release-trend-pick">
+        <label><span class="dim">{{ t('releases.trend.service') }}</span> <select id="trendService"></select></label>
+        <label><span class="dim">{{ t('releases.trend.type') }}</span> <select id="trendType"></select></label>
+      </div>
+    </div>
+    <p class="dim release-trend-note">{{ t('releases.trend.note') }}</p>
+    <div id="trendCharts" class="release-trend-charts"></div>
+  </section>
+{% endblock %}
+{% block scripts %}
+<script defer src="{{ url_for('static', filename='js/charts.js') }}"></script>
+<script defer src="{{ url_for('static', filename='js/releases.js') }}"></script>
+{% endblock %}

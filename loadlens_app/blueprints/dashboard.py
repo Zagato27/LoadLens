@@ -33,6 +33,7 @@ from AI.db_store import (
     upsert_llm_feedback,
 )
 from AI.i18n import t as translate
+from AI.release_marks import protected_runs, release_marks_cte, release_marks_ready
 from AI.scoring import parse_llm_analysis_strict
 from AI.verdicts import CODES as VERDICT_CODES, FAIL, RISK, code_sql, exact_code, normalize_report, optional_code, rank_sql, to_code
 from settings import CONFIG
@@ -216,7 +217,8 @@ def _lookup_report_ref(run_id: str = "", run_name: str = "", service: str = "") 
 
 
 def _lookup_report_refs(run_ids: list[str]) -> dict[str, dict]:
-    """Existing reports among ``run_ids``: id -> ``{run_id, run_name, service}``, in two queries for any number.
+    """Existing reports among ``run_ids``: id -> ``{run_id, run_name, service, protected}``, in two queries for any
+    number plus one for the release marks (``protected``: the accepted run of a release or a baseline).
 
     ``run_index`` answers for reports with metrics, ``llm_reports`` for the rest. A missing table means no
     reports there; a database that does not answer raises, so callers can tell "no report" from "unknown".
@@ -255,6 +257,20 @@ def _lookup_report_refs(run_ids: list[str]) -> dict[str, dict]:
                     report_id, name = str(row[0] or ""), str(row[1] or "")
                     if report_id and name and report_id not in found:
                         found[report_id] = {"run_id": report_id, "run_name": name, "service": str(row[2] or "")}
+            if found:
+                # The accepted run of a release and a baseline: bulk deletion keeps them (AI/release_marks.py).
+                cur.execute("SAVEPOINT report_refs")
+                try:
+                    protected = protected_runs(conn, schema, [ref["run_name"] for ref in found.values()])
+                    cur.execute("RELEASE SAVEPOINT report_refs")
+                except Exception as exc:
+                    cur.execute("ROLLBACK TO SAVEPOINT report_refs")
+                    logger.warning("Release marks lookup failed: %s", exc)
+                    # Unknown protection must never authorize bulk deletion. A missing marks table already
+                    # returns an empty set; an actual lookup failure makes the caller keep every report.
+                    raise
+                for ref in found.values():
+                    ref["protected"] = ref["run_name"] in protected
     finally:
         conn.close()
     return found
@@ -564,10 +580,10 @@ _DASHBOARD_PROFILE_STEP_FIELDS = (
 def _dashboard_profile_parsed_sql(column: str) -> str:
     """The keys of a final row's ``parsed`` the chart markers read (AI/report_markers), as one small JSON object.
 
-    The whole analysis stays in the database: the marker mode (spike, hold, step), the stress RPS drop and the
-    load-step table and SLA window of older rows (before ``sla_details`` held them).
+    The whole analysis stays in the database: the marker mode (phase, spike, hold, step), the phase boundaries,
+    the stress RPS drop and the load-step table and SLA window of older rows (before ``sla_details`` held them).
     """
-    keys = ("spike_analysis", "stability_under_load", "test_profile", "saturation", "load_step_table")
+    keys = ("spike_analysis", "stability_under_load", "test_profile", "saturation", "load_step_table", "scenario")
     pairs = ", ".join(f"'{key}', {column}->'{key}'" for key in keys)
     return (
         f"jsonb_build_object({pairs}, "
@@ -1109,9 +1125,15 @@ RUNS_SORT_COLUMNS = {
     "test_type": "test_type",
     "report_created_at": "report_created_at",
     "max_rps": "max_rps",
+    # Releases by their newest report (newer releases first with dir=desc), then the runs of a release.
+    "release": "release_newest",
 }
 # Sort keys whose column may be NULL (no saved report, no load level); such runs stay at the end.
-RUNS_NULLS_LAST_SORTS = frozenset({"report_created_at", "max_rps"})
+RUNS_NULLS_LAST_SORTS = frozenset({"report_created_at", "max_rps", "release"})
+# Extra order inside equal sort values, before the run name.
+RUNS_SORT_TIEBREAKS = {"release": ", release ASC, report_created_at DESC NULLS LAST"}
+# ``release`` request param of /runs that selects every marked run.
+RUNS_ANY_RELEASE = "*"
 # Final-analysis fields with the run's load level, in priority order (as on the dashboard):
 # the peak for step/stress runs, the held RPS for soak runs, the spike level for spike runs.
 # Re-export: the rule lives in AI.db_store (MAX_RPS_FIELDS), shared with save_llm_results.
@@ -1169,12 +1191,13 @@ def _runs_float(value) -> float | None:
     return number if number == number and abs(number) != float("inf") else None
 
 
-def _runs_item(row) -> dict:
+def _runs_item(row, marks_at: int = 17) -> dict:
     """One ``/runs`` item from (run_name, start_time, end_time, service, verdict, llm_verdict,
-    sla_verdict, report_created_at, test_type, run_id, project_area, max_rps)."""
+    sla_verdict, report_created_at, test_type, run_id, project_area, max_rps), the total, the manual verdict (4)
+    and, from ``marks_at`` on, the release marks (release, release_accepted, baseline)."""
     from AI.test_profile import normalize_test_type
 
-    cols = list(row) + [None] * max(0, 17 - len(row))
+    cols = list(row) + [None] * max(0, marks_at + 3 - len(row))
     test_type = str(cols[8] or "")
     return {
         "run_name": cols[0],
@@ -1192,6 +1215,9 @@ def _runs_item(row) -> dict:
         "max_rps": _runs_float(cols[11]) if cols[11] is not None else None,
         # cols[12] is the total of the page query.
         "manual_verdict": _manual_verdict_view(cols[13:17]),
+        "release": str(cols[marks_at] or ""),
+        "release_accepted": bool(cols[marks_at + 1]),
+        "baseline": bool(cols[marks_at + 2]),
     }
 
 
@@ -1266,6 +1292,10 @@ def list_runs():
     With ``include=sla`` every item also carries ``sla``: ``{passed, total, p95_ms, p95_passed}`` of the SLA
     checks of the final report (``_runs_sla_view``), null without evaluated checks. The same single statement
     reads it for the rows of the page only.
+
+    Release marks (AI/release_marks.py): every item has ``release`` ('' when unmarked), ``release_accepted`` and
+    ``baseline``. ``release=*`` keeps the runs with a release, ``release=<name>`` the runs of that release;
+    ``sort=release`` orders releases by their newest report, then the runs of a release by report time.
     """
     try:
         cfg = _storage_cfg()
@@ -1276,6 +1306,7 @@ def list_runs():
         service_filter = (request.args.get("service") or "").strip()
         verdict_filter = (request.args.get("verdict") or "").strip()
         test_type_filter = (request.args.get("test_type") or "").strip()
+        release_filter = (request.args.get("release") or "").strip()
         include_sla = RUNS_INCLUDE_SLA in _runs_include(request.args.get("include", ""))
         try:
             offset = min(RUNS_MAX_OFFSET, max(0, int(request.args.get("offset", "0") or 0)))
@@ -1290,7 +1321,7 @@ def list_runs():
         # Runs without a saved report have no creation time or load level; keep them at the end.
         nulls_sql = " NULLS LAST" if sort_key in RUNS_NULLS_LAST_SORTS else ""
         # Equal sort values (same service, verdict...) need a fixed order, or pages overlap.
-        tiebreak_sql = "" if sort_sql == "run_name" else ", run_name ASC"
+        tiebreak_sql = RUNS_SORT_TIEBREAKS.get(sort_key, "") + ("" if sort_sql == "run_name" else ", run_name ASC")
 
         svc_where, svc_params = _services_clause(services_filter)
         base_params: list = [*svc_params]
@@ -1314,7 +1345,17 @@ def list_runs():
             # ``test_type`` of ``joined`` is the normalized type, so any stored synonym matches.
             filter_clauses.append("test_type = %s")
             filter_params.append(_runs_test_type_filter(test_type_filter))
+        if release_filter == RUNS_ANY_RELEASE:
+            filter_clauses.append("release <> ''")
+        elif release_filter:
+            filter_clauses.append("release = %s")
+            filter_params.append(release_filter)
         where_filters = (" WHERE " + " AND ".join(filter_clauses)) if filter_clauses else ""
+        # Newest report of the run's release: computed only for sort=release (a window over all runs).
+        release_newest_sql = (
+            "CASE WHEN rm.release <> '' THEN MAX(f.created_at) OVER (PARTITION BY rm.release) END"
+            if sort_key == "release" else "NULL::timestamptz"
+        )
         test_type_sql = _runs_test_type_sql("f.test_type", "f.run_name IS NULL")
         max_rps_sql = _runs_max_rps_sql("parsed")
         # Manual verdict of a run with a report, else its SLA or stored verdict; codes, old labels mapped.
@@ -1343,7 +1384,7 @@ def list_runs():
               FROM {schema}.{llm_table}
               WHERE domain = 'final'{svc_where}
               ORDER BY run_name, created_at DESC
-            ), {{manual_cte}}, joined AS (
+            ), {{manual_cte}}, {{release_cte}}, joined AS (
               SELECT b.run_name, b.start_time, b.end_time, b.service,
                      {verdict_sql} AS verdict,
                      {verdict_rank_sql} AS verdict_rank,
@@ -1355,10 +1396,15 @@ def list_runs():
                      {test_type_sql} AS test_type,
                      COALESCE(NULLIF(f.run_id, ''), NULLIF(b.run_id, ''), '') AS run_id,
                      COALESCE(f.project_area, '') AS project_area,
-                     f.max_rps
+                     f.max_rps,
+                     COALESCE(rm.release, '') AS release,
+                     COALESCE(rm.accepted, false) AS release_accepted,
+                     COALESCE(rm.baseline, false) AS baseline,
+                     {release_newest_sql} AS release_newest
               FROM base b
               LEFT JOIN final f ON f.run_name = b.run_name
               LEFT JOIN manual_verdicts mv ON mv.run_name = b.run_name
+              LEFT JOIN release_marks rm ON rm.run_name = b.run_name
             )
         """
 
@@ -1372,8 +1418,10 @@ def list_runs():
         except Exception:
             pass
         runs_cte = runs_cte.replace("{manual_cte}", manual_verdicts_cte(schema, manual_verdicts_ready(conn, schema)))
-        # Column 17 of a page row with include=sla; the default statement stays as it was.
+        runs_cte = runs_cte.replace("{release_cte}", release_marks_cte(schema, release_marks_ready(conn, schema)))
+        # Column 17 of a page row with include=sla; the release marks follow it (column 17 or 18 on).
         sla_select = f", {_runs_sla_checks_sql(schema, llm_table)} AS sla_checks" if include_sla else ""
+        marks_at = 18 if include_sla else 17
         with conn, conn.cursor() as cur:
             # One statement: the page plus the number of matching runs (the window runs before OFFSET/LIMIT).
             cur.execute(
@@ -1382,7 +1430,8 @@ def list_runs():
                 SELECT run_name, start_time, end_time, service,
                        verdict, llm_verdict, sla_verdict, report_created_at, test_type_raw, run_id,
                        project_area, max_rps, COUNT(*) OVER () AS total,
-                       manual_verdict, manual_reason, manual_author, manual_changed_at{sla_select}
+                       manual_verdict, manual_reason, manual_author, manual_changed_at{sla_select},
+                       release, release_accepted, baseline
                 FROM joined
                 {where_filters}
                 ORDER BY {sort_sql} {dir_sql}{nulls_sql}{tiebreak_sql}
@@ -1404,7 +1453,7 @@ def list_runs():
             else:
                 total = 0
         conn.close()
-        out = [_runs_item(r) for r in rows]
+        out = [_runs_item(r, marks_at) for r in rows]
         if include_sla:
             for item, row in zip(out, rows):
                 item["sla"] = _runs_sla_view(row[17] if len(row) > 17 else None)
@@ -1662,14 +1711,36 @@ def dismiss_jobs():
     return jsonify({"dismissed": dismissed, "skipped_running": skipped}), 200
 
 
+def _release_protected(run_name: str) -> bool:
+    """True when the run is the accepted run of a release or a baseline (AI/release_marks.py)."""
+    cfg = _storage_cfg()
+    conn = _ts_conn()
+    try:
+        with conn:
+            return run_name in protected_runs(conn, cfg.get("schema", "public"), [run_name])
+    finally:
+        conn.close()
+
+
 @dashboard_bp.route("/runs/<run_name>", methods=["DELETE"])
 def delete_run(run_name: str):
-    """Удаляет все артефакты конкретного запуска."""
+    """Удаляет все артефакты конкретного запуска.
+
+    The accepted run of a release and a baseline answer 409 ``release_protected`` unless ``force=1``.
+    """
     if not run_name:
         return jsonify({"error": translate("api.required.run_name")}), 400
+    force = (request.args.get("force") or "").strip().lower() in ("1", "true", "yes")
     try:
+        if not force and _release_protected(run_name):
+            return jsonify({
+                "error": translate("api.release.protected", run_name=run_name),
+                "code": "release_protected",
+            }), 409
         _delete_run_data(run_name)
         response_cache.invalidate(response_cache.DASHBOARD)
+        if force:
+            g.audit_extra = {"force": "1"}
         return jsonify({"status": "ok", "message": translate("api.dashboard.run_deleted")})
     except Exception as e:  # pragma: no cover
         return internal_error(e)

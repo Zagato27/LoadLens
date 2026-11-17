@@ -176,6 +176,11 @@ def _numbers(value: Any) -> list[float]:
     return []
 
 
+# Public names for other explanations that check their numbers the same way (loadlens_app/compare_explanation.py).
+ungrouped = _grouped
+numbers_in = _numbers
+
+
 def _explanation_text(explanation: LimitExplanation) -> str:
     parts = [
         explanation.headline,
@@ -214,6 +219,8 @@ __all__ = [
     "ScalingAssessment",
     "check_explanation",
     "finding_payload",
+    "numbers_in",
     "parse_explanation",
     "related_findings",
+    "ungrouped",
 ]

@@ -162,7 +162,7 @@ def test_verdict_line_under_the_sla_table():
     line = re.search(r'<div class="rep-verdict-line" data-min-role="engineer">(.*?)</span></div>', html).group(1)
     assert line.index("Вердикт верен?") < line.index('data-vote="agree"') < line.index('data-verdict-action="change"')
     assert 'data-verdict-action="reset"' not in line
-    manual = dict(DEMO, manual_verdict={"verdict": "pass", "reason": "сбой <генератора>", "author": "ivanov", "changed_at": "2026-10-17T12:00:00+00:00"},
+    manual = dict(DEMO, manual_verdict={"verdict": "pass", "reason": "сбой <генератора>", "author": "engineer1", "changed_at": "2026-10-17T12:00:00+00:00"},
                   verdict="pass", auto_verdict="risk")
     html = hero(manual)
     assert '<div class="rep-verdict tone-ok" data-verdict="pass">' in html

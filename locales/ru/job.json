@@ -1,4 +1,5 @@
 {
+  "job.compare_failed": "Ошибка публикации сравнения",
   "job.dismiss_unsupported": "Очистка списка задач недоступна: в таблице задач нет колонки dismissed_at, а у приложения нет прав её добавить",
   "job.done": "Готово",
   "job.error.attachment_upload": "Не удалось загрузить вложение {path}",
@@ -44,9 +45,12 @@
   "job.progress.web_finalizing": "Финализация веб-отчёта…",
   "job.progress.web_ready": "Отчёт (веб) готов ✅",
   "job.progress.web_started": "Создание веб-отчёта (без Confluence) начато…",
+  "job.publishing_compare": "Публикация сравнения в Confluence…",
   "job.publishing_confluence": "Публикация в Confluence…",
   "job.publishing_forecast": "Публикация прогноза в Confluence…",
+  "job.publishing_release": "Публикация релиза в Confluence…",
   "job.queued_too_long": "Задача прервана: воркер не взял её из очереди",
+  "job.release_failed": "Ошибка публикации релиза",
   "job.replaced": "Задача перезапущена в веб-процессе",
   "job.stale": "Задача прервана: воркер не отвечает",
   "job.time_limit": "Задача прервана: превышено время задачи"

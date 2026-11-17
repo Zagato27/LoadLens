@@ -17,6 +17,7 @@ from typing import Any, Iterable
 
 from AI.i18n import t
 from AI.query_packs.blocks import DESCRIPTION_MAX_CHARS
+from AI.regression import THRESHOLD_KEYS
 from loadlens_app.appearance import AppearanceError, parse_accent, parse_language, parse_language_switch
 
 SETTINGS_PATH = Path(__file__).resolve().parent.parent / "settings.py"
@@ -26,6 +27,7 @@ EXAMPLE_PATH = Path(__file__).resolve().parent.parent / "settings.example.py"
 VALIDATED_SECTIONS = frozenset({
     "llm", "logs_source", "confluence",
     "storage", "storage.timescale", "default_params", "sla", "appearance", "limits",
+    "jira",
 })
 
 
@@ -121,11 +123,32 @@ class SlaConfigError(ValueError):
     """sla values outside the allowed choices."""
 
 
+def _regression_threshold(key: str, value: Any) -> float | None:
+    """A ``regression_*`` threshold: a number ≥ 0, or None / '' (off)."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    number: float | None = None
+    if not isinstance(value, bool):
+        try:
+            number = float(str(value).strip().replace(",", ".")) if isinstance(value, str) else float(value)
+        except (TypeError, ValueError):
+            number = None
+    if number is None or number != number or number < 0 or number in (float("inf"), float("-inf")):
+        raise SlaConfigError(t("server.config.sla_regression_number", key=key, value=value))
+    return number
+
+
 def validate_sla(payload: dict) -> None:
-    """Choice fields of ``sla`` must hold one of the allowed values."""
+    """Choice fields of ``sla`` must hold one of the allowed values; the ``regression_*`` thresholds are numbers ≥ 0
+    or empty, and the failure threshold of a metric is not below its risk threshold (when both are sent)."""
     for key, allowed in SLA_CHOICES.items():
         if key in payload and payload[key] not in allowed:
             raise SlaConfigError(t("server.config.sla_choice", key=key, allowed=", ".join(allowed), value=payload[key]))
+    for risk_key, fail_key in THRESHOLD_KEYS.values():
+        risk = _regression_threshold(risk_key, payload.get(risk_key)) if risk_key in payload else None
+        fail = _regression_threshold(fail_key, payload.get(fail_key)) if fail_key in payload else None
+        if risk is not None and fail is not None and fail < risk:
+            raise SlaConfigError(t("server.config.sla_regression_order", risk=risk_key, fail=fail_key))
 
 
 def validate_appearance(payload: dict) -> None:

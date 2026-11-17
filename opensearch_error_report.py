@@ -531,9 +531,7 @@ def render_markdown(
     events_count: int,
     truncated: bool,
 ) -> str:
-    lines: list[str] = [
-        "# OpenSearch Error Logs Report",
-        "",
+    header: list[str] = [
         f"- Period: `{to_opensearch_datetime(start)}` - `{to_opensearch_datetime(end)}`",
         f"- Interval: `{config.aggregation.resample_interval}`",
         f"- Error levels: `{', '.join(config.filters.error_levels)}`",
@@ -542,10 +540,22 @@ def render_markdown(
         f"- Fetched ERROR documents: `{events_count}`",
     ]
     if config.filters.hostnames:
-        lines.append(f"- Hostname filter: `{', '.join(config.filters.hostnames)}`")
+        header.append(f"- Hostname filter: `{', '.join(config.filters.hostnames)}`")
     if truncated:
-        lines.append(f"- Warning: result was truncated by `max_documents={config.aggregation.max_documents}`")
+        header.append(f"- Warning: result was truncated by `max_documents={config.aggregation.max_documents}`")
+    return render_buckets_markdown(
+        "OpenSearch Error Logs Report", header, buckets, config.aggregation.top_error_types_per_service,
+    )
 
+
+def render_buckets_markdown(
+    title: str,
+    header: Sequence[str],
+    buckets: Sequence[IntervalBucket],
+    top_error_types_per_service: int,
+) -> str:
+    """Markdown of aggregated error buckets; ``header`` lists the source-specific facts under the title."""
+    lines: list[str] = [f"# {title}", "", *header]
     lines.extend(["", "## Summary", ""])
     if not buckets:
         lines.append("No ERROR logs were found for the selected period.")
@@ -573,13 +583,13 @@ def render_markdown(
             lines.extend([f"#### `{markdown_escape(hostname)}`", "", f"Errors: **{host_bucket.total_errors}**", ""])
             lines.extend(["| Count | Normalized Error Type | Samples |", "|---:|---|---|"])
             error_types = sorted(host_bucket.error_types.items(), key=lambda item: item[1].count, reverse=True)
-            for error_type, error_bucket in error_types[: config.aggregation.top_error_types_per_service]:
+            for error_type, error_bucket in error_types[:top_error_types_per_service]:
                 samples = "<br><br>".join(markdown_escape(sample) for sample in error_bucket.samples)
                 lines.append(
                     f"| {error_bucket.count} | `{markdown_escape(error_type)}` | {samples or '-'} |"
                 )
-            if len(error_types) > config.aggregation.top_error_types_per_service:
-                hidden_count = len(error_types) - config.aggregation.top_error_types_per_service
+            if len(error_types) > top_error_types_per_service:
+                hidden_count = len(error_types) - top_error_types_per_service
                 lines.append(f"| - | Hidden by top limit | {hidden_count} more error types |")
             lines.append("")
 

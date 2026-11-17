@@ -11,7 +11,7 @@ every pack is [query-packs.en.md](query-packs.en.md) (built from the TOML files 
 - [Queries, labels, roles and units](#queries-labels-roles-and-units)
 - [Query packs](#query-packs)
 - [Load tools and their packs](#load-tools-and-their-packs)
-- [Application logs from OpenSearch](#application-logs-from-opensearch)
+- [Application logs from OpenSearch or Loki](#application-logs-from-opensearch-or-loki)
 - [Troubleshooting](#troubleshooting)
 
 ## Sources
@@ -43,7 +43,7 @@ and the languages found.
 | `kafka` | Kafka | Brokers, topics, consumer lag, clients |
 | `hard_resources` | Node resources | CPU, memory, disk, network of the nodes; Kubernetes node and workload health |
 | `lt_generators` | Load generator resources | Optional: CPU, memory, network and connections of the load generator hosts, so the report can tell when the generator itself was the bottleneck |
-| `application_logs` | Application logs | Optional: aggregated ERROR logs from OpenSearch for the test window (see below) |
+| `application_logs` | Application logs | Optional: aggregated ERROR logs from OpenSearch or Loki for the test window (see below) |
 
 `domain_sources` maps domains to sources: the `default` entry serves every domain without a line of its own, and each
 domain may name another source. A binding carries `source` and, depending on the source type, `datasource_uid` or
@@ -205,14 +205,49 @@ Several tools in one combined run write to the same store (for example k6 throug
 Graphite into VictoriaMetrics); with more than one "total RPS" query in the domain, "Total RPS of the tools" in the
 Queries section adds a row that sums them and makes it the SLA throughput query (PromQL only).
 
-## Application logs from OpenSearch
+## Application logs from OpenSearch or Loki
 
-`logs_source` switches on the optional `application_logs` domain: LoadLens queries OpenSearch Dashboards through
-`/api/console/proxy` for ERROR-level documents of the test window, groups them by service and error type with samples,
-and passes the aggregate to the model as one more domain. The block names the index pattern, the field names
-(timestamp, level, hostname, message), the levels and hosts to filter and the aggregation limits; the keys are listed
-in [configuration.md](configuration.md#logs_source). The same aggregator powers the `opensearch_error_report.py`
-command-line report.
+`logs_source` switches on the optional `application_logs` domain: LoadLens reads the ERROR logs of the test window,
+groups them by interval, service and error type with samples, and passes the aggregate to the model as one more
+domain. `logs_source.type` picks the log system: `opensearch` (also when the key is absent) or `loki`. The keys are
+listed in [configuration.md](configuration.md#logs_source).
+
+**OpenSearch.** LoadLens queries OpenSearch Dashboards through `/api/console/proxy` for ERROR-level documents. The
+block names the index pattern, the field names (timestamp, level, hostname, message), the levels and hosts to filter
+and the aggregation limits. The same aggregator powers the `opensearch_error_report.py` command-line report.
+
+**Loki.** Loki is read through a Grafana source of the catalogue (`loki.source` plus `loki.datasource_name` or
+`loki.datasource_uid`: Grafana adds the tenant and the credentials of its data source) or directly (`loki.url`, with
+`org_id` for `X-Scope-OrgID` and basic auth when needed). Only LogQL that Loki 2.x already had is used, so Loki 2.x
+and 3.x answer alike. Each run makes two kinds of reads:
+
+- the error counts: one metric query, `sum by (<service_label>) (count_over_time(<selector> <error filter> [<interval>]))`
+  with the step equal to the aggregation interval. The counts per interval and service are exact for the whole window;
+- the error types and samples: log queries of up to `loki.lines_per_query` lines (300 by default, at most 5000) for
+  the busiest intervals and their busiest services only (the `context_top_intervals` and
+  `context_top_services_per_interval` limits). The pack marks this: `summary.source` is `loki`, every service carries
+  `sampled_lines` and `sample_complete`, and the model compares error types by share when the sample is partial.
+
+The stream selector (`loki.selector`, e.g. `{namespace="apps"}`, line filters may follow the braces) and the label
+with the service name (`loki.service_label`, `app` by default) come from your labels. The error filter is built from
+`filters.error_levels`, `loki.format` and `loki.level_field`, always a cheap line filter first and then the level:
+
+- `json`: `|~ "(?i)(error)" | json | level=~"(?i)(error)"`;
+- `logfmt`: the same with the `logfmt` parser;
+- `text` (Logback, log4j, Python logging, nginx; ANSI colours are fine): the `regexp` parser takes the leftmost level
+  word of the line, delimited by spaces, brackets, `|`, `:` or colour codes, so the header's level wins and a WARN
+  record whose stack trace says `ERROR` stays a warning;
+- `auto` (the default): before counting, LoadLens reads up to 100 lines of the window that mention an error level and
+  takes the format most of them have (a JSON line counts only when it has the level field). The report header and
+  `summary.line_format` show the result. In a namespace that mixes formats set the format explicitly.
+
+Put a whole LogQL fragment into `loki.level_filter` to use your own (for example `|= "ERROR"`). For JSON lines the
+error type is built from `loki.message_field` (`message` by default, nested keys with dots); for text lines from what
+follows the level word on the first line, without colour codes and leading `[thread]` groups, plus the exception line
+under it (`java.lang.IllegalStateException: ...`), so the time and the thread do not split one error into many types.
+"Check" in the settings reads the last 15 minutes and reports the lines the selector found, the line format and the
+error lines per service. The Grafana proxy route is used first; when Grafana closes it, LoadLens queries
+`/api/ds/query` instead.
 
 ## Troubleshooting
 

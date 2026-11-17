@@ -9,8 +9,10 @@
   // so the dictionary of the page is used, not the one present when the file loaded.
   const serviceHint = () => LL.t('new.service.hint');
   const testTypeHint = () => LL.t('new.test_type.hint');
-  // Test window hint: how far back /lt_windows looks and how many chips are shown.
+  // Test window hint: the hours of the fine pass of /lt_windows (the server adds a coarse pass over the last
+  // WINDOWS_DAYS days, the value of the answer wins) and how many chips are shown.
   const WINDOWS_HOURS = 6;
+  const WINDOWS_DAYS = 30;
   const WINDOWS_MAX_CHIPS = 5;
   // Progress card: "usually about N min" is the median of this many latest finished report jobs.
   const TYPICAL_SAMPLE = 10;
@@ -208,7 +210,8 @@
       const message = String(data.message || '').slice(0, 200).replace(/\.$/, '');
       const lower = message ? message.charAt(0).toLowerCase() + message.slice(1) : '';
       if (data.ok === false && lower) windowsHint(LL.t('new.windows.undetected', { reason: lower }), 'warn', data.detail);
-      else if (!items.length) windowsHint(LL.t('new.windows.none', { hours: data.hours || WINDOWS_HOURS }));
+      else if (message) windowsHint(message, '', data.detail); // the coarse pass failed, the last hours are shown
+      else if (!items.length) windowsHint(LL.t('new.windows.none', { days: data.days || WINDOWS_DAYS }));
       else windowsHint('');
     } catch (error) {
       if (seq !== windowsSeq) return;
@@ -633,6 +636,8 @@
     const bits = [];
     if (job.kind === 'confluence') bits.push(LL.t('new.job.kind_confluence'));
     if (job.kind === 'forecast_confluence') bits.push(LL.t('new.job.kind_forecast_confluence'));
+    if (job.kind === 'compare_confluence') bits.push(LL.t('new.job.kind_compare_confluence'));
+    if (job.kind === 'release_confluence') bits.push(LL.t('new.job.kind_release_confluence'));
     if (job.service) bits.push(job.service);
     if (job.status === 'running') bits.push(`${Number(job.progress) || 0}% — ${job.message || ''}`);
     else bits.push(job.message || '');

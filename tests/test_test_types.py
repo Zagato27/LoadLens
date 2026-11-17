@@ -492,7 +492,39 @@ def test_confluence_export_and_legacy_markdown_render_test_type_sections():
 
 # ---- pipeline -----------------------------------------------------------------
 
+GROUP_LABEL = "LT RPS by group"
+SCENARIO_GROUPS = ("Catalog", "Cart", "Pay")
+
+
+def _scenario_frames():
+    """Three 20-minute phases: one k6 group leads each (``::Scenario::<group>``), auth requests run throughout."""
+    minute = np.arange(60)
+    lead = {name: np.where(minute // 20 == i, 80.0 - 20.0 * i, 2.0) for i, name in enumerate(SCENARIO_GROUPS)}
+    groups = pd.DataFrame(
+        {
+            **{f"group=::Scenario::{name}|name=req-{name.lower()}": lead[name] + np.abs(NOISE) for name in SCENARIO_GROUPS},
+            "group=::Scenario::Auth|name=token": np.full(60, 5.0),
+        },
+        index=INDEX,
+    )
+    total = groups.sum(axis=1).to_frame("sum_all")
+    p95 = pd.DataFrame({"p95_all": np.full(60, 120.0) + NOISE}, index=INDEX)
+    return [total, p95, groups]
+
+
+def pipeline_queries(kind):
+    """The lt_framework block of the pipeline tests; a scenario run also reads RPS by group (role lt.rps_by_request)."""
+    if kind == "scenario":
+        return {
+            "promql_queries": ["a", "b", "c"], "label_keys_list": [[], [], ["group", "name"]],
+            "labels": [RPS_LABEL, P95_LABEL, GROUP_LABEL], "roles": {GROUP_LABEL: "lt.rps_by_request"},
+        }
+    return {"promql_queries": ["a", "b"], "label_keys_list": [[], []], "labels": [RPS_LABEL, P95_LABEL]}
+
+
 def _pipeline_frames(kind):
+    if kind == "scenario":
+        return _scenario_frames()
     if kind in ("step", "stress"):
         rps = np.repeat([100.0, 200.0, 300.0, 400.0], 15) + NOISE
         p95 = np.repeat([100.0, 110.0, 130.0, 130.0], 15) + NOISE
@@ -507,6 +539,7 @@ PIPELINE_CASES = {
     "stress": ({"target_rps": 250, "max_p95_ms": 300}, "stress", "saturation", "sla_step"),
     "soak": ({"target_rps": 290, "max_p95_ms": 300}, "stability", "stability_under_load", "hold_window"),
     "spike": ({"target_rps": 350, "max_p95_ms": 500}, "spike", "spike_analysis", "spike_windows"),
+    "scenario": ({"target_rps": 1000, "max_p95_ms": 300}, "phases", "scenario", "phases"),
 }
 
 
@@ -518,7 +551,7 @@ def test_upload_from_llm_payload_per_test_type(monkeypatch, kind):
         "default_params": {"step": "1m", "resample_interval": "1T"},
         "data_sources": {"prom": {"title": "Prometheus", "type": "prometheus", "prometheus": {"url": "http://prometheus:9090"}}},
         "domain_sources": {"default": {"source": "prom"}, "lt_framework": {"source": "prom"}},
-        "queries": {"lt_framework": {"promql_queries": ["a", "b"], "label_keys_list": [[], []], "labels": [RPS_LABEL, P95_LABEL]}},
+        "queries": {"lt_framework": pipeline_queries(kind)},
         "sla": {"max_performance_query": RPS_LABEL, "p95_query": P95_LABEL, **sla},
     }
     captured = {}
@@ -547,7 +580,7 @@ def test_upload_from_llm_payload_per_test_type(monkeypatch, kind):
     assert final["deterministic_sla"]["verdict"] in {"pass", "risk", "fail", "no_data"}
     assert lt_prompt.count("[Профиль теста") == 1
     assert ctx_key in lt_ctx
-    for other in {"sla_step", "hold_window", "spike_windows"} - {ctx_key}:
+    for other in {"sla_step", "hold_window", "spike_windows", "phases"} - {ctx_key}:
         assert other not in lt_ctx
     if payload_key:
         assert payload_key in final and payload_key in final_ctx

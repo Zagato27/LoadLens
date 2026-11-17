@@ -182,7 +182,7 @@ def dashboard_expressions():
         "service_row": f"{I}.serviceRowHtml({js(SERVICE)})",
         "service_row_alone": f"{I}.serviceRowHtml({js(dict(SERVICE, history=HISTORY[3:], test_type=''))})",
         "job_row": f"{I}.jobRowHtml({js(JOB)})",
-        "manual_pill": f"{I}.verdictPill('risk', '', {js({'verdict': 'risk', 'author': 'ivanov'})})",
+        "manual_pill": f"{I}.verdictPill('risk', '', {js({'verdict': 'risk', 'author': 'engineer1'})})",
         "hero_empty": f"{HERO}(null, null)",
         "hero_no_data": f"{HERO}(null, null, LL.t('dashboard.no_data'))",
         "hero_last": f"{HERO}({{ ...{js(last)}, created_at: {FIVE_MIN_AGO} }}, {{}})",
@@ -266,7 +266,7 @@ def test_dashboard_builders_keep_russian():
 # ---- projects.js (the Projects section of the settings page) ---------------------------------------------------
 
 PROJECT = {
-    "id": "nsi", "title": "NSI", "description": "", "reports": 4, "last_report_at": "2026-10-15T10:00:00Z", "last_verdict": "fail",
+    "id": "catalog", "title": "CATALOG", "description": "", "reports": 4, "last_report_at": "2026-10-15T10:00:00Z", "last_verdict": "fail",
     "services": [{"id": "s1", "title": "S1", "reports": 4, "last_report_at": None, "own_sections": ["queries"]}],
     "overrides": [
         {"section": "llm", "status": "inherited"},

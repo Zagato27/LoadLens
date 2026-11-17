@@ -147,7 +147,7 @@ def client(monkeypatch):
     monkeypatch.setattr(
         dashboard,
         "publish_report",
-        lambda **kwargs: {"page_id": "42", "page_url": "https://confluence.example.ru/pages/viewpage.action?pageId=42", "title": "LoadLens: test-run"},
+        lambda **kwargs: {"page_id": "42", "page_url": "https://confluence.example.com/pages/viewpage.action?pageId=42", "title": "LoadLens: test-run"},
     )
     monkeypatch.setattr(threading, "Thread", lambda target, daemon=True: _sync_thread(target=target))
 
@@ -374,7 +374,7 @@ def test_env_llm_keys_never_go_to_an_address_typed_into_the_form(client, monkeyp
     monkeypatch.setattr(providers.requests, "post", lambda url, **kwargs: sent.append((url, kwargs["headers"]["Authorization"])) or FakeResponse())
     monkeypatch.setenv("OPENAI_API_KEY", "ENV-SECRET")
     llm = copy.deepcopy(core.CONFIG.get("llm") or {})
-    llm["openai"] = {**(llm.get("openai") or {}), "api_base_url": "https://llm.corp/v1", "api_key": "", "model": "m"}
+    llm["openai"] = {**(llm.get("openai") or {}), "api_base_url": "https://llm.example/v1", "api_key": "", "model": "m"}
     monkeypatch.setitem(core.CONFIG, "llm", llm)
 
     moved = {**llm, "provider": "openai", "openai": {**llm["openai"], "api_base_url": "https://attacker.example/v1"}}
@@ -383,7 +383,7 @@ def test_env_llm_keys_never_go_to_an_address_typed_into_the_form(client, monkeyp
 
     same = {**llm, "provider": "openai"}
     assert client.post("/config/test_connection", json={"section": "llm", "data": same}).status_code == 200
-    assert sent[-1][0].startswith("https://llm.corp") and "ENV-SECRET" in sent[-1][1]
+    assert sent[-1][0].startswith("https://llm.example") and "ENV-SECRET" in sent[-1][1]
 
 
 def test_catalog_save_rejects_source_still_in_use(client):
@@ -519,11 +519,11 @@ def test_masked_secret_is_bound_to_its_destination():
     from loadlens_app.config_secrets import MASK, SecretDestinationChangedError, mask_secrets, restore_secrets
 
     stored = {
-        "api_base_url": "https://llm.corp/v1", "api_key": "k-1", "credentials": "c-1",
-        "proxies": {"https": "http://proxy-user:proxy-pw@proxy.corp:3128", "http": ""},
+        "api_base_url": "https://llm.example/v1", "api_key": "k-1", "credentials": "c-1",
+        "proxies": {"https": "http://proxy-user:proxy-pw@proxy.example:3128", "http": ""},
     }
     masked = mask_secrets(stored)
-    assert masked["credentials"] == MASK and masked["proxies"]["https"] == "http://proxy-user:***@proxy.corp:3128"
+    assert masked["credentials"] == MASK and masked["proxies"]["https"] == "http://proxy-user:***@proxy.example:3128"
     assert restore_secrets(masked, stored) == stored
     for change in ({"api_base_url": "https://attacker.example/v1"}, {"proxies": {"https": "http://attacker:1"}}, {"verify": False}):
         with pytest.raises(SecretDestinationChangedError):
@@ -542,11 +542,11 @@ def test_audit_targets_keep_hosts_only():
     from loadlens_app.blueprints.config_api import _addresses
 
     payload = {
-        "base_url": "https://user:pw@wiki.corp:8443/confluence", "password": "x",
-        "proxies": {"https": "http://u:p@proxy.corp:3128", "http": ""},
-        "storage": {"host": "db.corp", "port": 5432, "password": "y"},
+        "base_url": "https://user:pw@wiki.example:8443/confluence", "password": "x",
+        "proxies": {"https": "http://u:p@proxy.example:3128", "http": ""},
+        "storage": {"host": "db.example", "port": 5432, "password": "y"},
     }
-    assert _addresses(payload) == ["db.corp:5432", "proxy.corp:3128", "wiki.corp:8443"]
+    assert _addresses(payload) == ["db.example:5432", "proxy.example:3128", "wiki.example:8443"]
 
 
 def test_mask_and_restore_secrets():
@@ -679,14 +679,14 @@ def test_report_address_uses_run_id(client, monkeypatch):
 
     def lookup(run_id="", run_name="", service=""):
         if run_id == "abc123":
-            return {"run_id": "abc123", "run_name": "ODP", "service": "НСИ"}
-        if run_name == "ODP":
-            return {"run_id": "abc123", "run_name": run_name, "service": service or "НСИ"}
+            return {"run_id": "abc123", "run_name": "demo-run", "service": "Каталог"}
+        if run_name == "demo-run":
+            return {"run_id": "abc123", "run_name": run_name, "service": service or "Каталог"}
         return None
 
     monkeypatch.setattr(dashboard, "_lookup_report_ref", lookup)
 
-    legacy = client.get("/reports/НСИ/ODP")
+    legacy = client.get("/reports/Каталог/demo-run")
     assert legacy.status_code == 302
     assert legacy.headers["Location"].endswith("/reports/abc123")
 
@@ -695,7 +695,7 @@ def test_report_address_uses_run_id(client, monkeypatch):
 
     ref = client.get("/report_ref/abc123")
     assert ref.status_code == 200
-    assert ref.get_json() == {"run_id": "abc123", "run_name": "ODP", "service": "НСИ"}
+    assert ref.get_json() == {"run_id": "abc123", "run_name": "demo-run", "service": "Каталог"}
     assert client.get("/report_ref/missing").status_code == 404
 
 
@@ -703,11 +703,11 @@ def test_report_pages_never_write_on_get(client, monkeypatch):
     from loadlens_app.blueprints import dashboard
 
     # A run saved before ids existed: found by name, no id yet.
-    conn = RecordingConnection(fetchone_results=[None, None, ("", "ODP", "НСИ")])
+    conn = RecordingConnection(fetchone_results=[None, None, ("", "demo-run", "Каталог")])
     monkeypatch.setattr(dashboard, "_ts_conn", lambda: conn)
-    ref = client.get("/report_ref/ODP")
+    ref = client.get("/report_ref/demo-run")
     assert ref.status_code == 200
-    assert ref.get_json() == {"run_id": "", "run_name": "ODP", "service": "НСИ"}
+    assert ref.get_json() == {"run_id": "", "run_name": "demo-run", "service": "Каталог"}
 
     conn_runs = RecordingConnection(fetchone_results=[(1,)], fetchall_results=[[
         ("old-run", None, None, "svc", "Успешно", None, None, None, "", "", "", None, 1),
@@ -723,12 +723,12 @@ def test_legacy_report_address_opens_by_name_until_the_migration_runs(client, mo
     from loadlens_app.blueprints import dashboard
 
     def lookup(run_id="", run_name="", service=""):
-        return {"run_id": "", "run_name": "ODP", "service": "НСИ"} if run_name == "ODP" else None
+        return {"run_id": "", "run_name": "demo-run", "service": "Каталог"} if run_name == "demo-run" else None
 
     monkeypatch.setattr(dashboard, "_lookup_report_ref", lookup)
-    legacy = client.get("/reports/НСИ/ODP")
-    assert legacy.status_code == 302 and legacy.headers["Location"].endswith("/reports/ODP")
-    assert client.get("/reports/ODP").status_code == 200
+    legacy = client.get("/reports/Каталог/demo-run")
+    assert legacy.status_code == 302 and legacy.headers["Location"].endswith("/reports/demo-run")
+    assert client.get("/reports/demo-run").status_code == 200
 
 
 def test_runs_paging_is_bounded_and_search_is_literal(client, monkeypatch):
@@ -902,8 +902,9 @@ def test_rename_run_data_updates_tables(monkeypatch):
     result = core._rename_run_data("old-run", "new-run")
     assert result["run_name"] == "new-run"
     assert store["names"] == {"new-run"}
-    # metrics, llm_reports, engineer_reports, confluence_publications, llm_feedback, report_verdicts and run_index.
-    assert store["updates"] == [("old-run", "new-run")] * 7
+    # metrics, llm_reports, engineer_reports, confluence_publications, llm_feedback, report_verdicts, release_marks and
+    # run_index, then run_a and run_b of compare_explanations and compare_publications.
+    assert store["updates"] == [("old-run", "new-run")] * 12
 
 
 def test_rename_run_data_conflict(monkeypatch):
@@ -1361,11 +1362,14 @@ def test_compare_summary_aggregate_whitelist(client, monkeypatch):
 
     conn = RecordingConnection(fetchall_results=[[("LT: RPS", 300.0, 270.0)]])
     monkeypatch.setattr(compare, "_ts_conn", lambda: conn)
+    monkeypatch.setattr(compare, "query_roles", lambda area, service=None: {})
     resp = client.get("/compare_summary", query_string={"run_a": "a", "run_b": "b", "domain": "lt_framework", "agg": "max"})
     assert resp.status_code == 200
     row = resp.get_json()[0]
     assert row["agg"] == "max" and row["value_a"] == 300.0 and row["value_b"] == 270.0
-    assert row["trend_pct"] == pytest.approx(-10.0)
+    # The change is A (the assessed run) relative to the baseline B; RPS is better higher.
+    assert row["trend_pct"] == pytest.approx(11.1111, rel=1e-4)
+    assert row["direction"] == "higher"
     assert "MAX(value)" in conn.log[0][0]
 
     resp = client.get("/compare_summary", query_string={"run_a": "a", "run_b": "b", "domain": "lt_framework", "agg": "median"})
@@ -2011,32 +2015,32 @@ def test_confluence_export_drops_unsafe_links_and_ignores_the_requested_source_u
 
     published = {}
     monkeypatch.setattr(dashboard, "publish_report", lambda **kwargs: published.update(kwargs) or {"page_id": "1", "page_url": "u"})
-    monkeypatch.setitem(core.CONFIG["confluence"], "app_url", "https://loadlens.corp/")
+    monkeypatch.setitem(core.CONFIG["confluence"], "app_url", "https://loadlens.example/")
     resp = client.post("/publish_confluence", json={"run_name": "test-run", "source_url": "https://phishing.example/login"})
     assert resp.status_code == 200
-    assert published["source_url"] == "https://loadlens.corp/reports/test-run"
+    assert published["source_url"] == "https://loadlens.example/reports/test-run"
 
 
 def test_worker_tasks_take_credentials_from_config_and_refuse_foreign_hosts(monkeypatch, tmp_path):
     import update_page
     from data_collectors import temp_files
 
-    settings = {"grafana_base_url": "http://grafana.corp:3000", "grafana_login": "g", "grafana_pass": "p",
-                "url_basic": "https://wiki.corp", "user": "u", "password": "w", "loki_url": "http://loki.corp"}
+    settings = {"grafana_base_url": "http://grafana.example:3000", "grafana_login": "g", "grafana_pass": "p",
+                "url_basic": "https://wiki.example", "user": "u", "password": "w", "loki_url": "http://loki.example"}
     monkeypatch.setattr(update_page, "_legacy_settings", lambda: settings)
     downloads = []
     monkeypatch.setattr(update_page, "_download_img_with_retry", lambda url, name, user, pw: downloads.append((url, user, pw)) or True)
-    assert update_page.download_grafana_image_task("http://grafana.corp.evil.example/render/x", "f") is False
+    assert update_page.download_grafana_image_task("http://grafana.example.evil.example/render/x", "f") is False
     assert downloads == []
-    assert update_page.download_grafana_image_task("http://grafana.corp:3000/render/d-solo/x?a=1", "f") is True
-    assert downloads == [("http://grafana.corp:3000/render/d-solo/x?a=1", "g", "p")]
+    assert update_page.download_grafana_image_task("http://grafana.example:3000/render/d-solo/x?a=1", "f") is True
+    assert downloads == [("http://grafana.example:3000/render/d-solo/x?a=1", "g", "p")]
 
     monkeypatch.setattr(temp_files, "TEMP_DIR", tmp_path)
     uploads = []
     monkeypatch.setattr(update_page, "_attach_with_retry", lambda func, url, auth, page, path: uploads.append((url, auth.username, path)) or True)
     assert update_page.upload_attachment_task("grafana", "42", str(tmp_path.parent / "settings.py")) is False
     assert update_page.upload_attachment_task("grafana", "42", temp_files.temp_file_path("chart", ".jpg")) is True
-    assert uploads and uploads[0][:2] == ("https://wiki.corp", "u")
+    assert uploads and uploads[0][:2] == ("https://wiki.example", "u")
 
 
 def _write_project_runtime(per_area: dict, metrics: dict | None = None) -> None:

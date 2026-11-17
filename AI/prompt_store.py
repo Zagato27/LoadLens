@@ -45,7 +45,7 @@ DOMAIN_PROMPT_FILES: Dict[str, str] = {
     "judge": "judge_prompt.txt",
     "critic": "critic_prompt.txt",
 }
-TEST_PROFILES = ("step", "soak", "spike", "stress", "none")
+TEST_PROFILES = ("step", "soak", "spike", "stress", "scenario", "none")
 
 # SHA-256 of the comparable text (``_comparable``) of earlier defaults, ru and en. The settings page may store the
 # default text it showed; such a copy of an earlier default is no override either, so the run reads the current
@@ -68,9 +68,15 @@ PREVIOUS_DEFAULTS: Dict[str, frozenset] = {
         "e85cb53061fc81f36276759976cd4e1bf5c9b38263c4b83e70ee24c522670b42",
         "9c881c17e91b99ecddd1e56be552a4bfe19707ff60d60ac6d7de5982ec5d1878",
     }),
+    # 2026-11: the resources prompt compared per_step.max with the threshold and set no verdict rule.
     "hard_resources_prompt.txt": frozenset({
+        # Previous ru/en defaults before the English prose punctuation correction.
+        "0ebbb67dd3e2164d65e66ae380ab1b01df0342bb1fae64e1700d81646e8727c0",
+        "2803426ad9c923c77c124d7a8f9dd3516543056170db416efe31afabb040d735",
         "46cf968cf59c18124fef3a376df47e140be39e53246bed8e948eeee71060b34f",
         "94b47b573ccdf7fc87fdbbc3d93682e195c25933b66971d4ddf08e756246917a",
+        "623a633881ccc89fcf31157fde12a815e29a39863cd54fd311ce2bcef34b32f7",
+        "abb36deac04045b33eb6fbe8713d3be27d5a75a11e069e9297a2111708b45d2c",
     }),
     "lt_framework_prompt.txt": frozenset({
         "109027fe86caa81e45042be0dfadb986e63bd488b2b9ea27b08aa012fcc0a5cc",
@@ -79,6 +85,11 @@ PREVIOUS_DEFAULTS: Dict[str, frozenset] = {
     "lt_generators_prompt.txt": frozenset({
         "de2b4d8aaf1a2f37db3a275e7169a8513e9e0edeb8ee4aa0a5903baab9a59a55",
         "baa5c5253cd98d4954f7cf8a94b7fc1a92fde19b3ea7826e0145e23affad4f2b",
+    }),
+    # 2026-11: the logs prompt named OpenSearch only; Loki packs carry sampled error types.
+    "application_logs_prompt.txt": frozenset({
+        "4ba23901ec0305f42768f94e33b56f7a169a0311da8fb5559a65aba409a18139",
+        "fdbf5d17ab9e7fb83e9aca1d14e2de4b41327ee7bd9196f13ca53b7d05ddb899",
     }),
 }
 

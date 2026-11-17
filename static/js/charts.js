@@ -1294,6 +1294,7 @@
   //   target: {y, value, text, x, anchor}|null, grid: [{y, value, text}], ticks: [{x, t, text, anchor}],
   //   sla: {index, rps, start, end, startText, endText}|null, highlight: {index, x, w, y, path}|null, aria}.
   const PROFILE_CHAR_W = 6.7; // JetBrains Mono 11px advance, for fitting labels
+  const SAME_BAND_MS = 60000; // a marker band within a minute of the SLA zone at both ends is that zone
   const PROFILE_TONES = ['accent', 'ok', 'warn', 'fail', 'muted'];
   function profileMs(value) {
     if (typeof value === 'number') return Number.isFinite(value) ? value : null;
@@ -1340,6 +1341,13 @@
     return { index: step.index, x: step.x, w: step.w, y: step.y, path: `M${step.x} ${step.y}H${round1(step.x + step.w)}` };
   }
   function textWidth(text) { return String(text || '').length * PROFILE_CHAR_W; }
+  // The text cut to `room` pixels with an ellipsis; '' when fewer than three characters would be left.
+  function fitProfileText(text, room) {
+    const value = String(text || '');
+    if (textWidth(value) <= room) return value;
+    const chars = Math.floor(room / PROFILE_CHAR_W) - 1;
+    return chars >= 3 ? value.slice(0, chars).trimEnd() + '…' : '';
+  }
   charts.stepProfileModel = function stepProfileModel(opts) {
     const o = opts || {};
     const rawSteps = (Array.isArray(o.steps) ? o.steps : []).filter((s) => s && typeof s === 'object');
@@ -1442,12 +1450,26 @@
         };
       }
     }
+    const slaBand = bands.find((b) => b.role === 'sla') || null;
     markers.forEach((m) => {
       if (m.kind !== 'band' || m.role === 'sla') return;
       const a = profileMs(m.t);
       const b = profileMs(m.to);
       if (a === null || b === null || !(b > a)) return;
+      // A band over the SLA zone (the worst phase of a scenario) names that zone instead of drawing a second one.
+      if (slaBand && sla && Math.abs(Math.max(a, x0) - sla.start) < SAME_BAND_MS && Math.abs(Math.min(b, x1) - sla.end) < SAME_BAND_MS) {
+        if (!compact && m.label) slaBand.label = String(m.label);
+        return;
+      }
       addBand([a, b], String(m.label || ''), profileTone(m.tone, 'muted'), String(m.role || ''));
+    });
+    // Band labels share one row under the axis: each one ends before the next starts (cut with an ellipsis, or
+    // dropped when not even a few letters fit).
+    bands.slice().sort((p, q) => p.labelX - q.labelX).forEach((band, position, sorted) => {
+      if (!band.label) return;
+      const next = sorted.slice(position + 1).find((other) => other.label);
+      const room = Math.min(next ? next.labelX - 8 : width, width) - band.labelX;
+      band.label = fitProfileText(band.label, room);
     });
 
     // Event lines with their labels in rows, so neighbours do not overlap.

@@ -23,7 +23,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tests.test_smoke_api import RecordingConnection  # noqa: E402,F401  (initialises the app before update_page)
-from tests.test_test_types import END_TS, P95_LABEL, PIPELINE_CASES, RPS_LABEL, START_TS, _pipeline_frames, _stress_steps  # noqa: E402
+from tests.test_test_types import END_TS, P95_LABEL, PIPELINE_CASES, RPS_LABEL, START_TS, _pipeline_frames, _stress_steps, pipeline_queries  # noqa: E402
 from tests.test_perf_reports_sql import SaveConnection, SqlStub  # noqa: E402
 from tests.js_harness import run_js  # noqa: E402
 from AI import db_store  # noqa: E402
@@ -52,7 +52,7 @@ def _cfg(kind):
         "default_params": {"step": "1m", "resample_interval": "1T"},
         "data_sources": {"prom": {"title": "Prometheus", "type": "prometheus", "prometheus": {"url": "http://prometheus:9090"}}},
         "domain_sources": {"default": {"source": "prom"}, "lt_framework": {"source": "prom"}},
-        "queries": {"lt_framework": {"promql_queries": ["a", "b"], "label_keys_list": [[], []], "labels": [RPS_LABEL, P95_LABEL]}},
+        "queries": {"lt_framework": pipeline_queries(kind)},
         "sla": {"max_performance_query": RPS_LABEL, "p95_query": P95_LABEL, **sla},
     }
 
@@ -66,6 +66,7 @@ def _run(monkeypatch, kind, *, use_llm, save_to_db=True):
     monkeypatch.setattr(pipeline_module, "save_domain_labeled", lambda **kwargs: None)
     monkeypatch.setattr(pipeline_module, "save_llm_results", lambda results, run_meta, storage_cfg: saved.append(copy.deepcopy(results)))
     monkeypatch.setattr(pipeline_module, "_load_baseline_context", lambda *args: {"available": False, "reason": "test"})
+    monkeypatch.setattr(pipeline_module, "_load_phase_reference", lambda *args: None)
 
     def fake_llm(user_prompt, data_context, k, return_scores, domain_key):
         if not use_llm:
@@ -234,7 +235,7 @@ def test_confluence_page_of_a_report_without_the_model():
 
 
 def test_confluence_page_without_the_model_shows_a_manual_verdict_and_the_report_language():
-    manual = {"verdict": "pass", "author": "p.ivanov", "changed_at": "2026-10-17T13:00:00+00:00", "reason": "retest ok"}
+    manual = {"verdict": "pass", "author": "engineer1", "changed_at": "2026-10-17T13:00:00+00:00", "reason": "retest ok"}
     body = _page([_final_row(manual_verdict=manual)])
     assert "Изменён вручную" in body and "retest ok" in body and "Автоматический вердикт" in body
     body = _page([_final_row("en")])

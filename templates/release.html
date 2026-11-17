@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% set active_nav = 'releases' %}
+{% set i18n_ns = ['charts', 'releases'] %}
+{% block title %}{{ t('releases.page.title', name=release_name) }}{% endblock %}
+{% block container_class %}releases-page release-page{% endblock %}
+{% block head %}
+<script defer src="{{ url_for('static', filename='vendor/chart.umd.js') }}"></script>
+{% endblock %}
+{% block content %}
+  <nav class="breadcrumbs" aria-label="{{ t('releases.page.breadcrumbs') }}">
+    <a href="/releases">{{ t('releases.list.title') }}</a><span class="sep" aria-hidden="true">/</span><span class="current">{{ release_name }}</span>
+  </nav>
+  <div class="page-header">
+    <div class="page-heading">
+      <h2 id="releaseTitle">{{ t('releases.page.heading', name=release_name) }}</h2>
+      <p class="page-subtitle release-head-meta"><span id="releaseStatus" class="pill na"></span> <span id="releaseMeta" class="dim"></span></p>
+    </div>
+    <div class="page-actions">
+      <a id="jiraIssues" class="btn btn-sm" target="_blank" rel="noopener noreferrer" hidden>{{ t('releases.page.jira_issues') }}</a>
+      <a id="jiraTicket" class="btn btn-sm" target="_blank" rel="noopener noreferrer" hidden></a>
+      <button type="button" class="btn btn-sm" id="releaseEdit" data-min-role="engineer">{{ t('releases.page.edit') }}</button>
+    </div>
+  </div>
+  <p id="releaseNote" class="release-note" hidden></p>
+  <div class="release-publish">
+    <button type="button" class="btn btn-sm" id="releaseConfluence" data-min-role="engineer">{{ t('releases.confluence.add') }}</button>
+    <a id="releaseConfluenceLink" class="link" target="_blank" rel="noopener noreferrer" hidden>{{ t('releases.confluence.open') }}</a>
+    <span id="releaseConfluenceStatus" class="dim" aria-live="polite"></span>
+  </div>
+  <div id="releaseProblem" class="report-note" hidden></div>
+
+  <div class="table-wrap">
+    <table class="data-table release-table" id="releaseTable">
+      <thead>
+        <tr>
+          <th>{{ t('releases.table.col_service') }}</th>
+          <th>{{ t('releases.table.col_type') }}</th>
+          <th>{{ t('releases.table.col_run') }}</th>
+          <th>{{ t('releases.table.col_verdict') }}</th>
+          <th class="num">{{ t('releases.table.col_p95') }}</th>
+          <th class="num">{{ t('releases.table.col_errors') }}</th>
+          <th class="num">{{ t('releases.table.col_capacity') }}</th>
+          <th>{{ t('releases.table.col_previous') }}</th>
+          <th><span class="visually-hidden">{{ t('releases.table.col_actions') }}</span></th>
+        </tr>
+      </thead>
+      <tbody id="releaseRows"></tbody>
+    </table>
+  </div>
+  <p class="dim release-deltas-note">{{ t('releases.table.deltas_note') }}</p>
+
+  <section class="release-untested" id="untestedSection" hidden>
+    <div class="section-head"><h3>{{ t('releases.untested.title') }}</h3><span class="dim">{{ t('releases.untested.subtitle') }}</span></div>
+    <ul class="release-untested-list" id="untested"></ul>
+  </section>
+
+  <section class="release-trend" id="trendSection" hidden>
+    <div class="section-head">
+      <h3>{{ t('releases.trend.title') }}</h3>
+      <div class="release-trend-pick">
+        <label><span class="dim">{{ t('releases.trend.service') }}</span> <select id="trendService"></select></label>
+        <label><span class="dim">{{ t('releases.trend.type') }}</span> <select id="trendType"></select></label>
+      </div>
+    </div>
+    <p class="dim release-trend-note">{{ t('releases.trend.note') }}</p>
+    <div id="trendCharts" class="release-trend-charts"></div>
+  </section>
+{% endblock %}
+{% block scripts %}
+<script defer src="{{ url_for('static', filename='js/charts.js') }}"></script>
+<script defer src="{{ url_for('static', filename='js/releases.js') }}"></script>
+{% endblock %}

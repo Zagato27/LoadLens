@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from AI.prompt_store import load_prompt, resolve_lang, text
+from AI.regression import thresholds_enabled, thresholds_from_sla
 from AI.test_profile import TEST_TYPE_ALIASES, is_capacity_like, normalize_test_type, profile_for
 
 # SLA fields shown in the guidance, in this order; labels and units are ``guidance.sla_field.<key>`` /
@@ -28,7 +29,7 @@ SLA_QUERY_KEYS: Dict[str, str] = {
     "max_memory_pct": "memory_query",
 }
 PEAK_DOMAINS = frozenset({"lt_framework"})
-TEST_TYPE_PROFILES = ("step", "soak", "spike", "stress")
+TEST_TYPE_PROFILES = ("step", "soak", "spike", "stress", "scenario")
 
 
 def test_type_overlay(test_type: Optional[str], lang: Optional[str] = None) -> str:
@@ -89,6 +90,9 @@ def sla_guidance_lines(
     if not lines:
         return []
     lines.append(text("guidance.sla_scope", code))
+    if any(_cfg_number(sla_cfg.get(key)) is not None for key in ("max_cpu_pct", "max_memory_pct")):
+        # Every mode treats them so (AI/sla_evaluator.py); models compared single-minute maxima with them and failed runs.
+        lines.append(text("guidance.secondary_thresholds", code))
     if not is_capacity_like(mode):
         lines.extend(_non_capacity_target_lines(sla_cfg, domain, mode, code))
     elif domain is None or domain in PEAK_DOMAINS:
@@ -104,12 +108,15 @@ def sla_guidance_lines(
         lines.append(text("guidance.domain_sla_step", code))
     if is_capacity_like(mode) and _cfg_number(sla_cfg.get("target_rps")) is not None:
         lines.append(text("guidance.target_step", code))
+    if mode != "phases" and thresholds_enabled(thresholds_from_sla(sla_cfg)):
+        # Regression against the baseline run is deterministic (AI/regression.py); scenarios are not compared.
+        lines.append(text("guidance.sla_regression", code))
     lines.append(text("guidance.only_source", code))
     return lines
 
 
 def _non_capacity_target_lines(sla_cfg: Dict[str, Any], domain: Optional[str], mode: str, lang: str) -> List[str]:
-    """How target_rps and the SLA window are checked for soak and spike tests."""
+    """How target_rps and the SLA window are checked for soak, spike and scenario tests."""
     peak_domain = domain is None or domain in PEAK_DOMAINS
     if mode == "stability":
         if peak_domain:
@@ -121,6 +128,10 @@ def _non_capacity_target_lines(sla_cfg: Dict[str, Any], domain: Optional[str], m
         if peak_domain:
             return [text("guidance.spike_target", lang), text("guidance.spike_thresholds", lang)]
         return [text("guidance.spike_domain", lang)]
+    if mode == "phases":
+        if peak_domain:
+            return [text("guidance.phases_target", lang), text("guidance.phases_reference", lang)]
+        return [text("guidance.phases_domain", lang)]
     return []
 
 

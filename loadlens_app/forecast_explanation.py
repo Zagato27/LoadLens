@@ -227,7 +227,8 @@ def _facts(forecast: ForecastReport, lang: str = "ru") -> dict[str, Any]:
     }
 
 
-def _compact_system(snapshot: dict[str, Any]) -> dict[str, Any]:
+def compact_system(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Components, dependencies, stores and known constraints of the system context, shortened for a prompt."""
     architecture = snapshot.get("architecture") if isinstance(snapshot.get("architecture"), dict) else {}
     operations = snapshot.get("operational_context") if isinstance(snapshot.get("operational_context"), dict) else {}
     compact = {
@@ -243,7 +244,11 @@ def _compact_system(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in compact.items() if value}
 
 
-def _llm_choice() -> tuple[Optional[LlmChoice], str]:
+# The old private names stay for callers and tests.
+_compact_system = compact_system
+
+
+def llm_choice() -> tuple[Optional[LlmChoice], str]:
     """The provider the report pipeline calls (global ``llm`` settings), or the reason it is missing."""
     llm = CONFIG.get("llm") if isinstance(CONFIG.get("llm"), dict) else {}
     provider = str(llm.get("provider") or "").strip().lower()
@@ -251,6 +256,9 @@ def _llm_choice() -> tuple[Optional[LlmChoice], str]:
     if not provider or not isinstance(settings, dict):
         return None, t("capacity.explain.no_llm")
     return LlmChoice(provider=provider, settings=settings), ""
+
+
+_llm_choice = llm_choice
 
 
 def _storage_names() -> tuple[str, str, str]:
@@ -400,4 +408,12 @@ def generate_explanation(run_id: str, budget_owner: Optional[str] = None) -> Exp
         return _cached_view("ready", context, stored)
 
 
-__all__ = ["ExplanationError", "ExplanationView", "explanation_view", "generate_explanation"]
+__all__ = [
+    "ExplanationError",
+    "ExplanationView",
+    "LlmChoice",
+    "compact_system",
+    "explanation_view",
+    "generate_explanation",
+    "llm_choice",
+]

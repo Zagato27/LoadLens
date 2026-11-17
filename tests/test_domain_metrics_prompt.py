@@ -247,8 +247,9 @@ def test_copies_of_earlier_defaults_are_no_override():
         # The settings page may have stored the default it showed, with the line endings of a browser.
         assert effective_override(old.replace("\n", "\r\n"), "database") is None
         assert effective_override(old + "\nOwn rule.", "database") is not None
-    assert set(PREVIOUS_DEFAULTS) == {f"{domain}_prompt.txt" for domain in LISTED_DOMAINS}
-    assert all(len(hashes) == 2 for hashes in PREVIOUS_DEFAULTS.values())
+    # application_logs: the 2026-11 Loki change (tests/test_loki_logs.py checks its old copies).
+    assert set(PREVIOUS_DEFAULTS) == {f"{domain}_prompt.txt" for domain in LISTED_DOMAINS} | {"application_logs_prompt.txt"}
+    assert all(len(hashes) >= 2 and len(hashes) % 2 == 0 for hashes in PREVIOUS_DEFAULTS.values())
 
 
 # ---- descriptions in the settings: schema, saving, the role list ---------------------------------------------

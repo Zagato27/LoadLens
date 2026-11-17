@@ -199,8 +199,10 @@ def _band(start: Any, end: Any, label: str, tone: str, role: str) -> Optional[Di
 
 
 def marker_mode(parsed: Mapping[str, Any], window: Mapping[str, Any]) -> str:
-    """``spike``, ``hold`` (soak) or ``step`` (capacity and stress)."""
+    """``phase`` (scenario), ``spike``, ``hold`` (soak) or ``step`` (capacity and stress)."""
     kind = _text(window.get("kind")).lower()
+    if isinstance(parsed.get("scenario"), Mapping) or kind == "phase":
+        return "phase"
     if isinstance(parsed.get("spike_analysis"), Mapping) or kind == "spike":
         return "spike"
     profile = _as_dict(parsed.get("test_profile"))
@@ -376,6 +378,21 @@ def _spike_markers(parsed: Mapping[str, Any], window: Mapping[str, Any]) -> List
     return out
 
 
+def _phase_markers(parsed: Mapping[str, Any], window: Mapping[str, Any], steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The phase the SLA verdict points at (its worst failed check) as a band, the phase boundaries as ticks."""
+    out: List[Dict[str, Any]] = []
+    if _text(window.get("kind")).lower() == "phase":
+        band = _band(*_window_range(window), t("report.marker.worst_phase", label=_text(window.get("title"))), "warn", "phase")
+        if band:
+            out.append(band)
+    phases = [item for item in _as_dict(parsed.get("scenario")).get("phases") or [] if isinstance(item, Mapping)]
+    for item in (phases or steps)[1:]:
+        start_ms = moment_ms(item.get("start_iso"))
+        if start_ms is not None:
+            out.append(_marker("tick", start_ms, None, "", "muted", "phase"))
+    return out
+
+
 def markers_for(final_row: Mapping[str, Any], step_table: Optional[Mapping[str, Any]] = None) -> List[Dict[str, Any]]:
     """Markers drawn on every chart of the report.
 
@@ -384,13 +401,16 @@ def markers_for(final_row: Mapping[str, Any], step_table: Optional[Mapping[str, 
     is another step), step boundaries as ticks, the start of the step after the ceiling when it broke
     the thresholds («деградация HH:MM») and the RPS drop (stress ``rps_drop_iso`` or the first ``after_drop``
     step, «падение RPS HH:MM»).
-    Soak: the hold window. Spike: every spike window. ``step_table`` is the resolved load-step
-    table (``resolve_load_step_table``); without it the table saved with the row is used.
+    Soak: the hold window. Spike: every spike window. Scenario: the phase the verdict points at and the phase
+    boundaries. ``step_table`` is the resolved load-step table (``resolve_load_step_table``); without it the table
+    saved with the row is used.
     """
     row = final_row if isinstance(final_row, Mapping) else {}
     parsed = _as_dict(row.get("parsed"))
     window = sla_window(row)
     mode = marker_mode(parsed, window)
+    if mode == "phase":
+        return _phase_markers(parsed, window, _steps_of(_table_of(row, step_table)))
     if mode == "spike":
         return _spike_markers(parsed, window)
     if mode == "hold":

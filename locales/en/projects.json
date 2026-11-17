@@ -23,7 +23,7 @@
   "projects.form.description": "Description",
   "projects.form.edit_title": "Project “{title}”",
   "projects.form.id": "ID",
-  "projects.form.id_placeholder": "no spaces, e.g. NSI",
+  "projects.form.id_placeholder": "no spaces, e.g. demo",
   "projects.form.id_value": "ID: {id}",
   "projects.form.no_copy": "Do not copy",
   "projects.form.title": "Display name",

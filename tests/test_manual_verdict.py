@@ -176,16 +176,16 @@ def test_set_change_and_reset_keep_the_history():
     assert state == {"run_name": "nightly-7", "run_id": "rid-7", "automatic": "fail", "verdict": "fail", "manual": None, "history": []}
 
     # A legacy label is accepted on input; all three columns store codes.
-    state = db_store.save_manual_verdict(db, "public", "llm_reports", "nightly-7", "Успешно", "  сбой генератора  ", "ivanov")
+    state = db_store.save_manual_verdict(db, "public", "llm_reports", "nightly-7", "Успешно", "  сбой генератора  ", "engineer1")
     assert state["verdict"] == "pass" and state["automatic"] == "fail"
     assert state["manual"] == {"verdict": "pass", "previous_verdict": "fail", "auto_verdict": "fail",
-                               "reason": "сбой генератора", "author": "ivanov", "changed_at": T0.isoformat()}
+                               "reason": "сбой генератора", "author": "engineer1", "changed_at": T0.isoformat()}
     assert (db.changes[0]["verdict"], db.changes[0]["previous_verdict"], db.changes[0]["auto_verdict"]) == ("pass", "fail", "fail")
 
-    state = db_store.save_manual_verdict(db, "public", "llm_reports", "nightly-7", "risk", "уточнили", "petrov")
+    state = db_store.save_manual_verdict(db, "public", "llm_reports", "nightly-7", "risk", "уточнили", "engineer2")
     assert state["verdict"] == "risk" and state["manual"]["previous_verdict"] == "pass"
 
-    state = db_store.save_manual_verdict(db, "public", "llm_reports", "nightly-7", None, "", "ivanov")
+    state = db_store.save_manual_verdict(db, "public", "llm_reports", "nightly-7", None, "", "engineer1")
     assert state["verdict"] == "fail" and state["manual"] is None
     assert [(h["verdict"], h["previous_verdict"]) for h in state["history"]] == [
         (None, "risk"), ("risk", "pass"), ("pass", "fail"),
@@ -197,9 +197,9 @@ def test_history_rows_saved_with_labels_are_read_as_codes():
     db = VerdictDb(auto="Провал")
     db.changes = [
         {"run_name": "nightly-7", "run_id": "rid-7", "verdict": "Есть риски", "previous_verdict": "Провал",
-         "auto_verdict": "Провал", "reason": "старая запись", "author": "ivanov", "created_at": T0},
+         "auto_verdict": "Провал", "reason": "старая запись", "author": "engineer1", "created_at": T0},
         {"run_name": "nightly-7", "run_id": "rid-7", "verdict": None, "previous_verdict": "Успешно",
-         "auto_verdict": "", "reason": "", "author": "petrov", "created_at": T0 - timedelta(days=1)},
+         "auto_verdict": "", "reason": "", "author": "engineer2", "created_at": T0 - timedelta(days=1)},
     ]
     state = db_store.load_verdict_state(db, "public", "llm_reports", "nightly-7")
     assert state["verdict"] == "risk" and state["manual"]["verdict"] == "risk"
@@ -209,7 +209,7 @@ def test_history_rows_saved_with_labels_are_read_as_codes():
     # The same verdict given as a code or a label changes nothing.
     for same in ("risk", "Есть риски", " есть  РИСКИ "):
         with pytest.raises(ValueError):
-            db_store.save_manual_verdict(db, "public", "llm_reports", "nightly-7", same, "x", "ivanov")
+            db_store.save_manual_verdict(db, "public", "llm_reports", "nightly-7", same, "x", "engineer1")
 
 
 @pytest.mark.parametrize(
@@ -227,7 +227,7 @@ def test_history_rows_saved_with_labels_are_read_as_codes():
 def test_changes_that_change_nothing_or_lack_a_reason_are_refused(verdict, reason, error):
     db = VerdictDb(auto="Провал")
     with pytest.raises(error):
-        db_store.save_manual_verdict(db, "public", "llm_reports", "nightly-7", verdict, reason, "ivanov")
+        db_store.save_manual_verdict(db, "public", "llm_reports", "nightly-7", verdict, reason, "engineer1")
     assert db.changes == []
 
 
@@ -235,7 +235,7 @@ def test_a_run_without_a_final_report_has_no_verdict_to_change():
     db = VerdictDb(auto=None)
     assert db_store.load_verdict_state(db, "public", "llm_reports", "nightly-7") is None
     with pytest.raises(LookupError):
-        db_store.save_manual_verdict(db, "public", "llm_reports", "nightly-7", "Успешно", "x", "ivanov")
+        db_store.save_manual_verdict(db, "public", "llm_reports", "nightly-7", "Успешно", "x", "engineer1")
 
 
 def test_without_the_table_the_state_has_no_history(monkeypatch):
@@ -332,11 +332,11 @@ def test_confluence_page_names_who_changed_the_verdict_and_why():
 
     row = {"domain": "final", "verdict": "Провал", "llm_verdict": "Провал", "sla_verdict": "Провал",
            "parsed": {"verdict": "Провал", "verdict_rationale": "p95 выше порога"},
-           "manual_verdict": {"verdict": "Есть риски", "reason": "известная деградация стенда", "author": "ivanov",
+           "manual_verdict": {"verdict": "Есть риски", "reason": "известная деградация стенда", "author": "engineer1",
                               "changed_at": "2026-10-17T12:00:00+00:00"}}
     body = confluence_export.render_llm_domain_body(row)
     assert "<th>Вердикт</th><td>Есть риски</td>" in body
-    assert "<th>Изменён вручную</th><td>ivanov, 2026-10-17 12:00 UTC. Причина: известная деградация стенда</td>" in body
+    assert "<th>Изменён вручную</th><td>engineer1, 2026-10-17 12:00 UTC. Причина: известная деградация стенда</td>" in body
     assert "<th>Автоматический вердикт</th><td>Провал</td>" in body
     plain = confluence_export.render_llm_domain_body({**row, "manual_verdict": None})
     assert "<th>Вердикт</th><td>Провал</td>" in plain and "Вердикт LLM" not in plain  # the same verdict twice says nothing
@@ -417,7 +417,7 @@ def test_report_rows_carry_the_manual_verdict(api, monkeypatch):
     client, db, _ = api
     from loadlens_app.blueprints import dashboard
 
-    db_store.save_manual_verdict(db, "public", "llm_reports", "nightly-7", "Есть риски", "деградация стенда", "ivanov")
+    db_store.save_manual_verdict(db, "public", "llm_reports", "nightly-7", "Есть риски", "деградация стенда", "engineer1")
     rows = [("nightly-7", "demo", 1, 2, "final", "Провал", "{}", {"verdict": "Провал"}, None, "Провал", {}, None, T0, "step"),
             ("nightly-7", "demo", 1, 2, "jvm", "Провал", "{}", {"verdict": "Провал"}, None, None, {}, None, T0, "step")]
     conn = Scripted(many=[rows])
@@ -427,7 +427,7 @@ def test_report_rows_carry_the_manual_verdict(api, monkeypatch):
     final = next(item for item in data if item["domain"] == "final")
     assert final["verdict"] == "risk" and final["auto_verdict"] == "fail"
     assert final["llm_verdict"] == "fail" and final["sla_verdict"] == "fail" and final["parsed"]["verdict"] == "fail"
-    assert final["manual_verdict"]["reason"] == "деградация стенда" and final["manual_verdict"]["author"] == "ivanov"
+    assert final["manual_verdict"]["reason"] == "деградация стенда" and final["manual_verdict"]["author"] == "engineer1"
     assert final["manual_verdict"]["verdict"] == "risk"
     jvm = next(item for item in data if item["domain"] == "jvm")
     assert jvm["verdict"] == "fail" and jvm["sla_verdict"] is None and "manual_verdict" not in jvm
@@ -437,9 +437,9 @@ def test_runs_items_and_dashboard_rows_carry_the_manual_verdict():
     from loadlens_app.blueprints import dashboard
 
     row = ("nightly-7", T0, T0, "demo", "Есть риски", "Провал", "Провал", T0, "step", "rid", "", 120, 1,
-           "Есть риски", "деградация стенда", "ivanov", T0)
+           "Есть риски", "деградация стенда", "engineer1", T0)
     item = dashboard._runs_item(row)
     assert item["verdict"] == "risk" and item["sla_verdict"] == "fail" and item["llm_verdict"] == "fail"
-    assert item["manual_verdict"] == {"verdict": "risk", "reason": "деградация стенда", "author": "ivanov", "changed_at": T0.isoformat()}
+    assert item["manual_verdict"] == {"verdict": "risk", "reason": "деградация стенда", "author": "engineer1", "changed_at": T0.isoformat()}
     assert dashboard._runs_item(row[:13])["manual_verdict"] is None  # an automatic verdict
     assert dashboard._manual_verdict_view([None, None, None, None]) is None

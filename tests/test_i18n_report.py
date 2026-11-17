@@ -110,7 +110,7 @@ def stress_row(lang):
         parsed["report_language"] = "en"
     return {
         "domain": "final", "service": "checkout", "test_type": "stress", "verdict": "risk", "start_ms": 1792059960000, "end_ms": 1792063560000,
-        "manual_verdict": {"verdict": "pass", "reason": "generator fault", "author": "ivanov", "changed_at": "2026-10-17T12:00:00+00:00"},
+        "manual_verdict": {"verdict": "pass", "reason": "generator fault", "author": "engineer1", "changed_at": "2026-10-17T12:00:00+00:00"},
         "auto_verdict": "risk",
         "scores": {"run_usage": {"calls": 9, "prompt_tokens": 15300, "completion_tokens": 2100},
                    "judge": {"overall": 0.9, "factual": 0.8, "completeness": 0.7, "specificity": 0.6,
@@ -338,7 +338,7 @@ def test_js_builders_speak_english():
     assert out["holdNote"].startswith("SLA checked on the hold window 17:26–18:16, mean RPS 120. Target RPS 200 — passed")
     assert out["spikeNote"].startswith("SLA checked in the spike windows: the worst spike for each threshold.")
     assert "query “Latency”, maximum across the query series." in plain(out["steps"])
-    assert out["verdicts"][:3] == ["Changed manually: ivanov, 2026-10-17 12:00. Automatic: Risks found.",
+    assert out["verdicts"][:3] == ["Changed manually: engineer1, 2026-10-17 12:00. Automatic: Risks found.",
                                    "Set by the SLA criteria. AI assessment: Passed.", "Set by the SLA criteria."]
     assert out["problems"] == ["Choose a new verdict", "Give a reason: it is shown in the report, the archive and Confluence",
                                "The reason must be at most 3 characters"]

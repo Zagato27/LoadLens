@@ -1,7 +1,7 @@
 # LoadLens documentation
 
-User documentation is in English. The design notes of finished and planned work are in Russian and stay in this
-directory as they were written; they are listed at the end of this page.
+User documentation is in English. Maintainer design notes are kept separately in the local, unpublished
+`plans/` directory.
 
 ## User documentation
 
@@ -13,6 +13,7 @@ directory as they were written; they are listed at the end of this page.
 | [ai-analysis.md](ai-analysis.md) | The analysis pipeline: context packs, candidates, judge, verification of numbers, verdict codes, test types, prompts and languages, system context, providers |
 | [running-load-tests.md](running-load-tests.md) | The "Run a test" page: SSH, Docker, Kubernetes, GitLab CI, Jenkins and manual generators, tool templates, live metrics, run tags, security |
 | [api.md](api.md) | The REST API: tokens, roles, every endpoint by area, `/about` and `/healthz` |
+| [upgrading-to-2.md](upgrading-to-2.md) | Migration from 1.0: comparison API changes, automatic step detection, baselines and storage |
 | [deployment.md](deployment.md) | Docker Compose in production: environment file, database and roles, Redis and the Celery worker, health checks, migrations, secrets, updates, external database |
 | [development.md](development.md) | Tests, the UI sandbox, localization rules and the Cyrillic ratchet, prompts, query packs, SPDX headers, CHANGELOG and releases, CI |
 | [query-packs.en.md](query-packs.en.md) | Generated reference of every query pack: variables, queries, roles, units (regenerate with `python -m AI.query_packs docs --lang en docs/query-packs.en.md`; the Russian twin is [query-packs.md](query-packs.md)) |

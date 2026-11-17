@@ -17,11 +17,13 @@ from .load_tests import load_tests_bp
 from .projects import projects_bp
 from .query_packs import query_packs_bp
 from .recovery import recovery_bp
+from .release_pages import release_pages_bp
+from .releases import releases_bp
 from .settings import settings_bp
 
 BLUEPRINTS = (
     dashboard_bp, compare_bp, settings_bp, config_bp, projects_bp, forecast_bp, appearance_bp, query_packs_bp,
-    recovery_bp, load_tests_bp, about_bp,
+    recovery_bp, load_tests_bp, about_bp, release_pages_bp, releases_bp,
 )
 
 

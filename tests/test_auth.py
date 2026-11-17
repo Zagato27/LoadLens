@@ -289,12 +289,12 @@ def test_throttle_refuses_attempts_even_with_the_right_password():
     service, _, clock = make_service(login_max_attempts=2, login_window_seconds=60)
     add_user(service, "alice", Role.VIEWER)
     for _ in range(2):
-        assert service.login("alice", "wrong-password-1", ip="1.1.1.1").status is LoginStatus.INVALID
-    blocked = service.login("alice", PASSWORD, ip="1.1.1.1")
+        assert service.login("alice", "wrong-password-1", ip="192.0.2.1").status is LoginStatus.INVALID
+    blocked = service.login("alice", PASSWORD, ip="192.0.2.1")
     assert blocked.status is LoginStatus.THROTTLED and blocked.retry_after > 0
-    assert service.login("alice", PASSWORD, ip="2.2.2.2").status is LoginStatus.OK  # another address is unaffected
+    assert service.login("alice", PASSWORD, ip="192.0.2.2").status is LoginStatus.OK  # another address is unaffected
     clock.advance(seconds=61)
-    assert service.login("alice", PASSWORD, ip="1.1.1.1").status is LoginStatus.OK
+    assert service.login("alice", PASSWORD, ip="192.0.2.1").status is LoginStatus.OK
 
 
 def test_session_user_checks_epoch_and_activity_and_caches_briefly():
@@ -652,10 +652,10 @@ def test_config_changes_record_target_hosts_in_the_audit_log(repo, logged_in, mo
 
     monkeypatch.setitem(core.CONFIG, "confluence", copy.deepcopy(core.CONFIG.get("confluence") or {}))
     admin = logged_in("admin")
-    body = {"section": "confluence", "data": {"base_url": "https://user:SECRET-PW@wiki.corp:8443/x", "password": "SECRET-NEW"}}
+    body = {"section": "confluence", "data": {"base_url": "https://user:SECRET-PW@wiki.example:8443/x", "password": "SECRET-NEW"}}
     assert admin.post("/config", json=body).status_code == 200
     event = next(e for e in repo.list_audit() if e.action == "config.update")
-    assert event.details["targets"] == ["wiki.corp:8443"]
+    assert event.details["targets"] == ["wiki.example:8443"]
     assert "SECRET" not in json.dumps(event.details)
 
 
@@ -856,7 +856,7 @@ def test_pages_and_navigation_follow_the_role(logged_in):
         return set(re.findall(r'<a class="nav-btn[^"]*" href="([^"]+)"', html)), html
 
     viewer_links, html = nav_links(logged_in("viewer"))
-    assert viewer_links == {"/", "/reports", "/compare", "/forecasting"}
+    assert viewer_links == {"/", "/reports", "/releases", "/compare", "/forecasting"}
     # Running load tests (dashboard block, tile, menu badge) are for engineers and admins.
     assert 'id="navLaunchBadge"' not in html and 'id="activeTile"' not in html and "dash-tiles-5" not in html
     assert logged_in("viewer").get("/load_tests/active").status_code == 403
@@ -867,7 +867,7 @@ def test_pages_and_navigation_follow_the_role(logged_in):
 
     engineer = logged_in("engineer")
     links, html = nav_links(engineer)
-    assert links == {"/", "/new", "/launch", "/reports", "/compare", "/forecasting"}
+    assert links == {"/", "/new", "/launch", "/reports", "/releases", "/compare", "/forecasting"}
     assert 'id="navLaunchBadge"' in html and 'id="activeTile"' in html and "dash-tiles dash-tiles-5" in html
     assert engineer.get("/new").status_code == 200 and engineer.get("/settings").status_code == 403
 

@@ -18,6 +18,7 @@
 
   <div class="tabs archive-tabs" role="tablist" aria-label="{{ t('archive.tabs_label') }}">
     <button type="button" class="tab active" role="tab" id="tabReports" data-tab="reports" aria-controls="reportsPanel" aria-selected="true">{{ t('archive.tab.reports') }}</button>
+    <button type="button" class="tab" role="tab" id="tabReleases" data-tab="releases" aria-controls="reportsPanel" aria-selected="false" tabindex="-1">{{ t('archive.tab.releases') }}</button>
     <button type="button" class="tab" role="tab" id="tabRuns" data-tab="runs" aria-controls="runsPanel" aria-selected="false" tabindex="-1">{{ t('archive.tab.runs') }}</button>
   </div>
 
@@ -40,6 +41,9 @@
     </label>
     <label class="inp archive-filter"><span class="archive-filter-key">{{ t('archive.filter.test_type_key') }}</span>
       <select id="testTypeFilter"><option value="">{{ t('archive.filter.all') }}</option></select>
+    </label>
+    <label class="inp archive-filter" id="releaseFilterBox" hidden><span class="archive-filter-key">{{ t('archive.filter.release_key') }}</span>
+      <select id="releaseFilter"><option value="">{{ t('archive.filter.all_releases') }}</option></select>
     </label>
     <span class="archive-counter" id="archiveCounter" aria-live="polite"></span>
   </form>

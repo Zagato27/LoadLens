@@ -41,9 +41,10 @@ ROUNDING_SLACK_MIN_VALUE = 10.0
 VERIFIED_SHARE = 0.6
 
 # Step / interval / finding identifiers are references, not measurements.
-# Step labels by test type and language: ступень/интервал/фон/всплеск (ru), step/interval/background/spike (en).
+# Step labels by test type and language: ступень/интервал/фон/всплеск/фаза/пауза (ru),
+# step/interval/background/spike/phase/pause (en).
 _STEP_REFERENCE_RE = re.compile(
-    r"(ступен[иьяе]|интервал[аеы]?|шаг[аеи]?|фон[аеу]?|всплеск[аеу]?|step|interval|background|spike)\s*№?\s*\d+",
+    r"(ступен[иьяе]|интервал[аеы]?|шаг[аеи]?|фон[аеу]?|всплеск[аеу]?|фаз[аеуы]|пауз[аеуы]|step|interval|background|spike|phase|pause)\s*№?\s*\d+",
     re.IGNORECASE,
 )
 _FINDING_ID_RE = re.compile(r"\bf\d+\b", re.IGNORECASE)

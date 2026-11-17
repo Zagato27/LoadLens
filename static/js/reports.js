@@ -754,6 +754,152 @@
     });
   }
 
+  // ---- release marks (AI/release_marks.py) -------------------------------------------------------------------
+  // «Релиз 25.11 · принятый прогон · эталон сервиса» under the verdict word, with «Релиз…» and «Сделать эталоном» /
+  // «Снять эталон» for engineers. The marks come from GET /runs/<run>/release after the hero is drawn; until then
+  // (and for a run nobody marked, as seen by a viewer) the line is empty.
+  function releaseLineHtml(mark) {
+    const m = isPlainObject(mark) ? mark : null;
+    if (!m) return '<div class="hero-sub rep-release" data-release-line hidden></div>';
+    const parts = [];
+    const release = safeStr(m.release);
+    if (release) {
+      parts.push(`<span class="rep-release-name">${escapeHtml(LL.t('report.release.line_release', { release: release }))}</span>`);
+      if (m.accepted) parts.push(escapeHtml(LL.t(m.accepted_manual ? 'report.release.accepted_manual' : 'report.release.accepted')));
+    }
+    if (m.baseline) parts.push(escapeHtml(LL.t('report.release.baseline')));
+    const who = [safeStr(m.author), m.updated_at ? LL.formatDateTime(m.updated_at) : ''].filter(Boolean).join(', ');
+    const title = parts.length && who ? ` title="${escapeHtml(LL.t('report.release.changed_by', { who: who }))}"` : '';
+    const actions = [
+      `<button type="button" class="btn btn-sm btn-ghost" data-release-action="edit">${escapeHtml(LL.t('report.release.edit'))}</button>`,
+      `<button type="button" class="btn btn-sm btn-ghost" data-release-action="${m.baseline ? 'unpin' : 'pin'}">${escapeHtml(LL.t(m.baseline ? 'report.release.unpin' : 'report.release.pin'))}</button>`
+    ].join('');
+    // Nothing to show to a viewer: the whole line is for engineers then.
+    const role = parts.length ? '' : ' data-min-role="engineer"';
+    return `<div class="hero-sub rep-release" data-release-line${role}${title}>${parts.join(META_SEP)}`
+      + `<span class="rep-release-actions" data-min-role="engineer">${actions}</span></div>`;
+  }
+  // Body of the «Релиз…» dialog from GET /runs/<run>/release.
+  function releaseDialogHtml(state) {
+    const s = isPlainObject(state) ? state : {};
+    const names = Array.isArray(s.releases) ? s.releases : [];
+    const nameMax = Number(s.name_max) || 80;
+    const noteMax = Number(s.note_max) || 1000;
+    const now = s.release
+      ? LL.t(s.accepted ? 'report.release.now_accepted' : 'report.release.now_marked', { release: safeStr(s.release) })
+      : LL.t('report.release.now_none');
+    return [
+      '<div class="release-mark-dialog">',
+      `<p class="muted">${escapeHtml(now)}</p>`,
+      `<label class="release-mark-field"><span>${escapeHtml(LL.t('report.release.name_label'))}</span>`,
+      `<input type="text" name="releaseName" maxlength="${nameMax}" list="reportReleaseNames" autocomplete="off" value="${escapeHtml(safeStr(s.release))}" placeholder="${escapeHtml(LL.t('report.release.name_placeholder'))}"></label>`,
+      `<datalist id="reportReleaseNames">${names.map((name) => `<option value="${escapeHtml(name)}"></option>`).join('')}</datalist>`,
+      `<label class="release-mark-field"><span>${escapeHtml(LL.t('report.release.note_label'))}</span>`,
+      `<textarea name="releaseNote" rows="2" maxlength="${noteMax}">${escapeHtml(safeStr(s.note))}</textarea></label>`,
+      `<label class="checkbox-line"><input type="checkbox" name="releaseAccepted"${s.accepted_manual ? ' checked' : ''}> <span>${escapeHtml(LL.t('report.release.accept_label'))}</span></label>`,
+      `<p class="dim release-mark-hint">${escapeHtml(LL.t('report.release.accept_hint'))}</p>`,
+      '<div class="dialog-error" data-release-error role="alert"></div>',
+      '</div>'
+    ].join('');
+  }
+  async function releaseRequest(method, what, body) {
+    const url = `/runs/${encodeURIComponent(getRunFromPath())}/${what}`;
+    const init = method === 'GET' ? {} : { method: method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) };
+    const resp = await fetch(url, init);
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    return data;
+  }
+  function applyReleaseMark(mark) {
+    reportState.mark = isPlainObject(mark) ? mark : null;
+    const hero = document.getElementById('reportHero');
+    const line = hero && hero.querySelector('[data-release-line]');
+    if (!line) return;
+    const holder = document.createElement('div');
+    holder.innerHTML = releaseLineHtml(reportState.mark);
+    const next = holder.firstElementChild;
+    line.replaceWith(next);
+    bindReleaseActions(next);
+  }
+  async function loadReleaseMark() {
+    if (!getRunFromPath()) return;
+    try {
+      applyReleaseMark(await releaseRequest('GET', 'release'));
+    } catch (e) {
+      // No final report or no database: the report shows no release line.
+    }
+  }
+  async function openReleaseDialog() {
+    let state;
+    try {
+      state = await releaseRequest('GET', 'release');
+    } catch (e) {
+      LL.ui.toast(LL.t('report.release.failed', { error: e.message }), { tone: 'error' });
+      return;
+    }
+    let busy = false;
+    const save = async (close, body, remove) => {
+      if (busy) return;
+      const error = body.querySelector('[data-release-error]');
+      const name = String(body.querySelector('input[name="releaseName"]').value || '').trim();
+      const note = String(body.querySelector('textarea[name="releaseNote"]').value || '').trim();
+      const accepted = body.querySelector('input[name="releaseAccepted"]').checked;
+      if (!remove) {
+        const problem = !name ? LL.t('report.release.name_required')
+          : (name.length > 80 ? LL.t('report.release.name_too_long', { max: 80 }) : '');
+        error.textContent = problem;
+        if (problem) return;
+      }
+      busy = true;
+      try {
+        const payload = { release: name, note: note, accepted: accepted };
+        const next = remove ? await releaseRequest('DELETE', 'release') : await releaseRequest('PUT', 'release', payload);
+        close(next);
+        applyReleaseMark(next);
+        const done = remove ? LL.t('report.release.removed')
+          : LL.t(next.accepted ? 'report.release.saved_accepted' : 'report.release.saved', { release: safeStr(next.release) });
+        LL.ui.toast(done, { tone: 'ok' });
+      } catch (e) {
+        error.textContent = e.message;
+      } finally {
+        busy = false;
+      }
+    };
+    const actions = [{ label: LL.t('common.action.cancel') }];
+    if (state.release) actions.push({ label: LL.t('report.release.remove'), danger: true, onClick: (close, body) => save(close, body, true) });
+    actions.push({ label: LL.t('common.action.save'), primary: true, onClick: (close, body) => save(close, body, false) });
+    await LL.ui.dialog({
+      title: LL.t('report.release.dialog_title'),
+      bodyHtml: releaseDialogHtml(state),
+      onOpen: (body) => {
+        const error = body.querySelector('[data-release-error]');
+        body.addEventListener('input', () => { error.textContent = ''; });
+        const input = body.querySelector('input[name="releaseName"]');
+        if (input) { input.focus(); input.select(); }
+      },
+      actions: actions
+    });
+  }
+  async function toggleBaseline(pin) {
+    try {
+      const next = await releaseRequest(pin ? 'PUT' : 'DELETE', 'baseline', {});
+      applyReleaseMark(next);
+      LL.ui.toast(LL.t(pin ? 'report.release.pinned' : 'report.release.unpinned'), { tone: 'ok' });
+    } catch (e) {
+      LL.ui.toast(LL.t('report.release.failed', { error: e.message }), { tone: 'error' });
+    }
+  }
+  function bindReleaseActions(root) {
+    if (!root) return;
+    root.querySelectorAll('[data-release-action]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const action = btn.dataset.releaseAction;
+        if (action === 'edit') openReleaseDialog();
+        else toggleBaseline(action === 'pin');
+      });
+    });
+  }
+
   function renderListCell(items, emptyText, formatter) {
     const values = (Array.isArray(items) ? items : [])
       .map((item) => {
@@ -1094,6 +1240,7 @@
   // Test-type section of the final report; mirrors AI/report_sections.py.
   function reportMode(report) {
     const r = report || {};
+    if (r.scenario && typeof r.scenario === 'object') return 'phases';
     if (r.spike_analysis && typeof r.spike_analysis === 'object') return 'spike';
     if (r.saturation && typeof r.saturation === 'object') return 'stress';
     if (r.stability_under_load && typeof r.stability_under_load === 'object') return 'stability';
@@ -1108,7 +1255,7 @@
     const explicit = safeStr(profile.normalized_test_type).toLowerCase();
     if (explicit) return explicit;
     const mode = reportMode(report);
-    const byMode = { stability: 'soak', spike: 'spike', stress: 'stress' }[mode];
+    const byMode = { stability: 'soak', spike: 'spike', stress: 'stress', phases: 'scenario' }[mode];
     if (byMode) return byMode;
     const raw = safeStr(fallback || profile.test_type).toLowerCase();
     return LL.TEST_TYPE_LABELS && LL.TEST_TYPE_LABELS[raw] ? raw : 'step';
@@ -1121,7 +1268,7 @@
     if (value === null || value === undefined || value === '' || !Number.isFinite(n)) return '';
     return (n > 0 ? '+' : '') + formatNumber(n) + unit;
   }
-  const TEST_TYPES = ['step', 'soak', 'spike', 'stress'];
+  const TEST_TYPES = ['step', 'soak', 'spike', 'stress', 'scenario'];
   const METRIC_KINDS = ['rps', 'p95', 'error_rate', 'cpu', 'memory'];
   const RESOURCE_KINDS = ['cpu', 'memory'];
   // Name of a metric kind (trends, limiting resource) in the UI language; '' for an unknown kind.
@@ -1262,9 +1409,73 @@
     if (saturationNote) rows.push({ label: LL.t('report.section.note'), value: saturationNote });
     return rows;
   }
+  // Comparison of the phase durations with the previous scenario run (AI/report_sections._duration_text).
+  function durationChangeText(reference) {
+    const worst = isPlainObject(reference.worst_duration) ? reference.worst_duration : null;
+    if (!worst) return LL.t('report.section.duration_same');
+    return LL.t('report.section.duration_worst', {
+      label: safeStr(worst.label || worst.title), reference: formatNumber(worst.reference_min),
+      current: formatNumber(worst.current_min), change: signed(worst.change_pct, '') || '0'
+    });
+  }
+  // Why a scenario has no phases (AI/phases.py reasons); literal keys (tests/test_i18n.py).
+  const PHASE_REASON_KEYS = {
+    no_group_query: 'report.section.phases_reason_no_group_query',
+    no_data: 'report.section.phases_reason_no_data',
+    one_group: 'report.section.phases_reason_one_group'
+  };
+  function phaseReasonText(reason) {
+    return LL.t(PHASE_REASON_KEYS[safeStr(reason)] || PHASE_REASON_KEYS.no_data);
+  }
+  function phaseLabels(items) {
+    return (Array.isArray(items) ? items : []).filter(isPlainObject).map((item) => safeStr(item.label || item.title)).filter(Boolean).join(', ');
+  }
+  // Scenario: the phases found, the worst one, the previous scenario run and one row per phase (AI/report_sections.scenario_rows).
+  function scenarioRows(report) {
+    const sc = report.scenario || {};
+    const profile = report.test_profile || {};
+    const rows = [
+      { label: LL.t('report.section.test_type'), value: safeStr(storedTypeLabel(profile) || profile.test_type) || 'scenario' },
+      { label: LL.t('report.section.focus'), value: storedText('typeFocus', safeStr(profile.normalized_test_type).toLowerCase()) || safeStr(sc.focus) || '—' }
+    ];
+    rows.push({
+      label: LL.t('report.section.phases'),
+      value: sc.detected
+        ? LL.t('report.section.phases_found', { count: formatNumber(sc.phase_count), key: safeStr(sc.label_key), level: formatNumber(sc.level) })
+        : phaseReasonText(sc.reason)
+    });
+    rows.push({ label: LL.t('report.section.mean_rps'), value: finiteOrNull(sc.rps_mean) !== null ? formatNumber(sc.rps_mean) + ' RPS' : '—' });
+    const worst = isPlainObject(sc.worst_phase) ? sc.worst_phase : null;
+    rows.push({ label: LL.t('report.section.worst_phase'), value: worst ? `${safeStr(worst.label)} · ${hhmm(worst.start_iso)}–${hhmm(worst.end_iso)}` : LL.t('report.section.worst_phase_none') });
+    const reference = isPlainObject(sc.reference) ? sc.reference : {};
+    if (reference.available) {
+      rows.push({ label: LL.t('report.section.reference_run'), value: safeStr(reference.run_name) || '—' });
+      rows.push({ label: LL.t('report.section.missing_phases'), value: phaseLabels(reference.missing) || LL.t('report.section.missing_none') });
+      rows.push({ label: LL.t('report.section.duration_change'), value: durationChangeText(reference) });
+    } else {
+      rows.push({ label: LL.t('report.section.reference_run'), value: LL.t('report.section.reference_none') });
+    }
+    (Array.isArray(sc.phases) ? sc.phases : []).filter(isPlainObject).forEach((phase) => {
+      rows.push({
+        label: safeStr(phase.label) || '—',
+        value: LL.t('report.section.phase_value', {
+          span: `${hhmm(phase.start_iso)}–${hhmm(phase.end_iso)}`, minutes: formatNumber(phase.duration_min),
+          rps: formatNumber(phase.rps_mean), verdict: phaseVerdictText(phase)
+        })
+      });
+    });
+    return rows;
+  }
+  // Verdict of a phase row: none for a pause, «без оценки» for a phase left out of the SLA (AI/report_sections).
+  function phaseVerdictText(phase) {
+    if (phase.idle) return '—';
+    if (phase.excluded === true) return LL.t('report.section.phase_excluded');
+    return phase.verdict ? LL.verdictLabel(phase.verdict) : '—';
+  }
   function testTypeSection(report) {
     const r = report || {};
     const mode = reportMode(r);
+    if (mode === 'phases') return { title: LL.t('report.section.title_scenario'), rows: scenarioRows(r) };
     if (mode === 'stability') return { title: LL.t('report.section.title_stability'), rows: stabilityRows(r) };
     if (mode === 'spike') return { title: LL.t('report.section.title_spike'), rows: spikeRows(r) };
     if (mode === 'stress' && r.saturation && typeof r.saturation === 'object') return { title: LL.t('report.section.title_saturation'), rows: saturationRows(r) };
@@ -1559,7 +1770,18 @@
     ].join('');
   }
 
-  const SLA_CHECK_NAMES = ['target_rps', 'target_margin', 'error_rate', 'p95_latency', 'p99_latency', 'cpu_usage', 'memory_usage', 'recovery'];
+  // The names of AI/sla_evaluator.SLA_CHECK_NAMES (tests/test_regression_ui.py keeps the two lists equal).
+  const SLA_CHECK_NAMES = ['target_rps', 'target_margin', 'error_rate', 'p95_latency', 'p99_latency', 'cpu_usage', 'memory_usage', 'recovery', 'phase_completeness', 'phase_duration', 'regression_latency', 'regression_errors', 'regression_capacity'];
+  // Regression against the baseline run (AI/regression.py): the actual value is the worsening (positive is worse),
+  // in % of the baseline or in percentage points (check.unit).
+  function isRegressionCheck(check) {
+    return !!check && (safeStr(check.category) === 'regression' || safeStr(check.name).startsWith('regression_'));
+  }
+  // Unit after the threshold and the delta of a regression check: « %» or « п.п.».
+  function regressionUnit(check) {
+    const unit = safeStr(check && check.unit) || (safeStr(check && check.name) === 'regression_errors' ? 'pp' : 'pct');
+    return unit === 'pp' ? ' ' + LL.t('report.sla.unit_pp') : ' %';
+  }
   // Checks whose threshold is a floor (more is better): the target RPS and the margin over it.
   const FLOOR_CHECKS = ['target_rps', 'target_margin'];
   function isFloorCheck(name) {
@@ -1580,8 +1802,10 @@
   // longer bar is better; for the other checks a bar past the mark is a breach.
   const SLA_BAR_SPAN = 1.5;
   function slaBarModel(check) {
-    const actual = finiteOrNull(check && check.actual);
+    let actual = finiteOrNull(check && check.actual);
     const threshold = finiteOrNull(check && check.threshold);
+    // A regression check below zero is an improvement over the baseline: an empty bar.
+    if (actual !== null && actual < 0 && isRegressionCheck(check)) actual = 0;
     if (actual === null || threshold === null || threshold <= 0 || actual < 0) return null;
     const ratio = Math.min(actual / threshold, SLA_BAR_SPAN);
     const passed = check.passed;
@@ -1618,6 +1842,7 @@
     const window = markerSlaWindow(finalRow);
     const mode = markerMode(parsed, window);
     if (mode === 'spike') return LL.t('report.sla.scope_spike');
+    if (mode === 'phase') return safeStr(window.title) ? LL.t('report.sla.scope_phases_worst', { label: safeStr(window.title) }) : LL.t('report.sla.scope_phases');
     const table = embeddedLoadStepTable(finalRow);
     const steps = table ? table.steps.filter(isPlainObject) : [];
     const offset = reportOffsetHours(steps);
@@ -1665,20 +1890,28 @@
       const termKey = name === 'target_rps' ? 'target_rps' : (name === 'error_rate' ? 'error_rate' : (name.startsWith('p95') ? 'p95' : ''));
       const label = termKey ? LL.ui.term(termKey, plainLabel) : escapeHtml(plainLabel);
       const passed = check ? check.passed : null;
-      const statusClass = passed === true ? 'ok' : (passed === false ? 'fail' : 'na');
-      const statusMark = passed === true ? '✓' : (passed === false ? '✗' : '—');
-      const statusTitle = passed === true ? LL.t('report.sla.status_ok') : (passed === false ? LL.t('report.sla.status_fail') : LL.t('report.sla.status_na'));
+      // A phase broke the threshold for less than sla.phase_breach_minutes: a risk, not a failure.
+      const brief = passed === false && isPlainObject(check) && check.brief === true;
+      const statusClass = brief ? 'risk' : (passed === true ? 'ok' : (passed === false ? 'fail' : 'na'));
+      const statusMark = brief ? '!' : (passed === true ? '✓' : (passed === false ? '✗' : '—'));
+      let statusTitle = passed === true ? LL.t('report.sla.status_ok') : (passed === false ? LL.t('report.sla.status_fail') : LL.t('report.sla.status_na'));
+      if (brief) statusTitle = LL.t('report.sla.status_brief');
       // The stored message (report language) stays as the tooltip when the query names the source.
       const note = safeStr(check && check.message);
-      const where = isPlainObject(check) ? slaSourceText(check, window, source) : '';
-      const sub = where || note;
+      // A regression check names the baseline run in its message: the message is the sub-line.
+      const regression = isRegressionCheck(check);
+      const where = isPlainObject(check) && !regression ? slaSourceText(check, window, source) : '';
+      const briefNote = brief ? LL.t('report.sla.brief_note', { minutes: formatNumber(check.breach_min) }) : '';
+      const sub = [where || note, where ? briefNote : ''].filter(Boolean).join(' · ');
       const threshold = formatNumber(check && check.threshold);
+      const unit = regression ? regressionUnit(check) : '';
+      const actual = formatNumber(check && check.actual);
       return [
-        `<tr class="is-${statusClass}">`,
+        `<tr class="is-${statusClass}${regression ? ' is-regression' : ''}">`,
         `<td class="g"><span class="rep-glyph ${statusClass}" role="img" title="${escapeHtml(statusTitle)}" aria-label="${escapeHtml(statusTitle)}">${statusMark}</span></td>`,
         `<td class="name"${where && note ? ` title="${escapeHtml(note)}"` : ''}>${label}${sub ? `<span class="sub m">${escapeHtml(sub)}</span>` : ''}</td>`,
-        `<td class="n th">${escapeHtml(threshold === '—' ? threshold : `${thresholdSign(name)} ${threshold}`)}</td>`,
-        `<td class="n act">${escapeHtml(formatNumber(check && check.actual))}</td>`,
+        `<td class="n th">${escapeHtml(threshold === '—' ? threshold : `${thresholdSign(name)} ${threshold}${unit}`)}</td>`,
+        `<td class="n act">${escapeHtml(actual === '—' ? actual : actual + unit)}</td>`,
         `<td class="n bar">${slaBarHtml(check)}</td>`,
         '</tr>'
       ].join('');
@@ -1934,6 +2167,20 @@
       const head = LL.t('report.steps.sla_spike');
       return { steps: steps, slaNote: checks.length ? head + '. ' + slaChecksText(checks) + '.' : head + '.' };
     }
+    if (kind === 'phase' || steps.some((step) => step.phase === true)) {
+      // A scenario: every phase was checked; the worst one (the SLA window, when a check failed) is marked.
+      const moment = kind === 'phase' ? momentMs(window.start || window.start_iso) : null;
+      steps.forEach((step) => { step.selected = false; });
+      // Phases touch: the window starts where the previous phase ends, so the phase that starts there wins.
+      const startsAt = (step) => {
+        const range = stepRangeMs(step);
+        return range[0] !== null && range[1] !== null && range[0] <= moment && moment < range[1];
+      };
+      const covered = moment != null ? steps.find(startsAt) || steps.find((step) => stepCovers(step, moment)) || null : null;
+      if (covered) covered.selected = true;
+      const head = covered ? LL.t('report.steps.sla_phase_worst', { label: safeStr(covered.label) }) : LL.t('report.steps.sla_phases');
+      return { steps: steps, slaNote: checks.length ? head + '. ' + slaChecksText(checks) + '.' : head + '.' };
+    }
     const target = markerTargetWindow(finalRow);
     const hasTarget = Object.keys(target).length > 0;
     if (!steps.some((step) => step.selected)) {
@@ -1985,6 +2232,7 @@
   // Tag of the step the SLA verdict was decided on: "target" / "margin" on a step test with a target step, else
   // "SLA"; the ceiling of such a run (another step) is tagged "max".
   function stepTagHtml(step) {
+    if (step.selected && step.phase === true) return `<span class="rep-step-tag">${escapeHtml(LL.t('report.steps.tag_worst_phase'))}</span>`;
     if (step.selected) {
       let text = 'SLA';
       if (step.sla_role === 'margin') text = LL.t('report.steps.tag_margin');
@@ -1998,13 +2246,20 @@
     const classes = ['rep-step'];
     if (step.selected) classes.push('is-sla');
     else if (step.ceiling) classes.push('is-ceiling');
-    if (step.after_drop === true) classes.push('is-bad');
+    if (step.after_drop === true || step.phase_verdict === 'fail') classes.push('is-bad');
+    else if (step.phase_verdict === 'risk') classes.push('is-risk');
     else if (step.stable === false) classes.push('is-unstable');
+    if (step.idle === true) classes.push('is-idle');
+    if (step.excluded === true) classes.push('is-excluded');
     const rps = formatNumber(step.rps);
     const rpsText = rps === '—' ? '' : `${rps} RPS`;
     const head = step.after_drop === true
       ? [LL.t('report.steps.flag_after_drop'), rpsText].filter(Boolean).join(' · ')
       : [safeStr(step.index), rpsText].filter(Boolean).join(' · ');
+    // A phase cell is as wide as its share of the run (it sits under its phase); a narrow one keeps the number.
+    const headHtml = step.phase === true && safeStr(step.index) && rpsText
+      ? `${escapeHtml(safeStr(step.index))}<span class="rep-step-rps"> · ${escapeHtml(rpsText)}</span>`
+      : escapeHtml(head || '—');
     const p95 = finiteOrNull(step.latency_p95);
     const sub = [stepInterval(step), p95 === null ? '' : LL.t('report.steps.cell_p95', { value: formatNumber(p95) })].filter(Boolean).join(' · ');
     let flag = '';
@@ -2017,9 +2272,14 @@
     const start = utcMoment(step.start_iso);
     const end = utcMoment(step.end_iso);
     const minutes = start !== null && end !== null && end > start ? Math.round((end - start) / 6000) / 10 : 1;
+    // A phase is named after its request group; the full name is the tooltip of the cell.
+    const name = step.phase === true ? safeStr(step.label) : '';
+    const title = name && step.excluded === true ? `${name} · ${LL.t('report.section.phase_excluded')}` : name;
+    const titleAttr = title ? ` title="${escapeHtml(title)}"` : '';
     return [
-      `<div class="${classes.join(' ')}" role="listitem"${rangeAttrs}${indexAttr} style="flex-grow:${minutes}">`,
-      `<b>${escapeHtml(head || '—')}${stepTagHtml(step)}</b>`,
+      `<div class="${classes.join(' ')}" role="listitem"${rangeAttrs}${indexAttr}${titleAttr} style="flex-grow:${minutes}">`,
+      `<b>${headHtml}${stepTagHtml(step)}</b>`,
+      name ? `<span class="rep-step-name">${escapeHtml(name)}</span>` : '',
       `<span class="rep-step-sub">${escapeHtml(sub)}</span>`,
       flag ? `<span class="rep-step-flag">${escapeHtml(flag)}</span>` : '',
       '</div>'
@@ -2034,8 +2294,9 @@
     else if (safeStr(table.latency_query)) sourceBits.push(LL.t('report.steps.source_max'));
     const note = sourceBits.length ? LL.t('report.steps.note_source', { source: sourceBits.join(', ') }) : LL.t('report.steps.note');
     const detection = stepDetectionText(table);
+    const phases = table.steps.some((step) => step.phase === true);
     return [
-      `<div class="rep-steprow" role="list" aria-label="${escapeHtml(LL.t('report.steps.title'))}">${cells}</div>`,
+      `<div class="rep-steprow${phases ? ' is-phases' : ''}" role="list" aria-label="${escapeHtml(LL.t(phases ? 'report.steps.title_phases' : 'report.steps.title'))}">${cells}</div>`,
       `<p class="rep-step-note">${escapeHtml(detection ? `${note} ${detection}` : note)}</p>`
     ].join('');
   }
@@ -2044,6 +2305,14 @@
   function stepDetectionText(table) {
     const detection = table && isPlainObject(table.detection) ? table.detection : null;
     if (!detection) return '';
+    if (detection.phases === true) {
+      // How the phases of a scenario were found (AI/phases.py), or why there are none.
+      if (safeStr(detection.reason)) return LL.t('report.steps.phases_none', { reason: phaseReasonText(detection.reason) });
+      return LL.t('report.steps.phases_auto', {
+        source: safeStr(detection.source_label), key: safeStr(detection.label_key),
+        level: formatNumber(detection.level), minutes: formatNumber(detection.min_phase_min)
+      });
+    }
     const seconds = Number(detection.sample_sec);
     const cadence = Number.isFinite(seconds) && seconds >= 60
       ? LL.t('report.steps.cadence_min', { n: LL.fmt.number(seconds / 60, { maximumFractionDigits: 1 }) })
@@ -2183,6 +2452,7 @@
   }
   function markerMode(parsed, window) {
     const kind = safeStr(window.kind).toLowerCase();
+    if (isPlainObject(parsed.scenario) || kind === 'phase') return 'phase';
     if (isPlainObject(parsed.spike_analysis) || kind === 'spike') return 'spike';
     const profile = isPlainObject(parsed.test_profile) ? parsed.test_profile : {};
     if (isPlainObject(parsed.stability_under_load) || kind === 'hold' || ['stability', 'soak'].indexOf(safeStr(profile.mode).toLowerCase()) >= 0) return 'hold';
@@ -2302,12 +2572,28 @@
     }
     return out;
   }
+  // The phase the SLA verdict points at as a band, the phase boundaries as ticks (AI/report_markers._phase_markers).
+  function phaseMarkers(parsed, window, steps) {
+    const out = [];
+    if (safeStr(window.kind).toLowerCase() === 'phase') {
+      const band = bandItem(window.start || window.start_iso, window.end || window.end_iso, LL.t('report.marker.worst_phase', { label: safeStr(window.title) }), 'warn', 'phase');
+      if (band) out.push(band);
+    }
+    const scenario = isPlainObject(parsed.scenario) ? parsed.scenario : {};
+    const phases = (Array.isArray(scenario.phases) ? scenario.phases : []).filter(isPlainObject);
+    (phases.length ? phases : steps).slice(1).forEach((item) => {
+      const t = utcMoment(item.start_iso);
+      if (t !== null) out.push(markerItem('tick', t, null, '', 'muted', 'phase'));
+    });
+    return out;
+  }
   // reportMarkers(finalRow, table): markers drawn on every chart (see AI/report_markers.markers_for).
   function reportMarkers(finalRow, table) {
     if (!finalRow) return [];
     const parsed = parseJsonish(finalRow.parsed) || {};
     const window = markerSlaWindow(finalRow);
     const mode = markerMode(parsed, window);
+    if (mode === 'phase') return phaseMarkers(parsed, window, (markerTable(finalRow, table).steps || []).filter(isPlainObject));
     if (mode === 'spike') return spikeMarkers(parsed, window);
     if (mode === 'hold') return holdMarkers(parsed, window);
     const steps = (markerTable(finalRow, table).steps || []).filter(isPlainObject);
@@ -2507,6 +2793,15 @@
   // Hero meta entries of the test type that are not KPI tiles (heroKpis shows the numbers).
   function heroTypeEntries(parsed, peak) {
     const mode = reportMode(parsed);
+    if (mode === 'phases') {
+      const reference = isPlainObject((parsed.scenario || {}).reference) ? parsed.scenario.reference : {};
+      if (!reference.available) return [{ label: LL.t('report.section.reference_run'), value: LL.t('report.section.reference_none') }];
+      return [
+        { label: LL.t('report.section.reference_run'), value: safeStr(reference.run_name) || '—' },
+        { label: LL.t('report.section.missing_phases'), value: phaseLabels(reference.missing) || LL.t('report.section.missing_none') },
+        { label: LL.t('report.section.duration_change'), value: durationChangeText(reference) }
+      ];
+    }
     if (mode === 'stability') {
       const st = parsed.stability_under_load || {};
       const hold = (st.hold && typeof st.hold === 'object') ? st.hold : {};
@@ -2584,6 +2879,21 @@
     const notConfirmed = !!target && target.passed === false && finiteOrNull(target.actual) === null;
     const targetWords = [LL.t('report.kpi.goal_reached'), notConfirmed ? LL.t('report.kpi.goal_not_confirmed') : LL.t('report.kpi.goal_missed')];
     const targetNote = kpiThresholdNote(target, targetBound, targetWords);
+    if (mode === 'phases') {
+      const sc = parsed.scenario || {};
+      const reference = isPlainObject(sc.reference) ? sc.reference : {};
+      const worst = isPlainObject(sc.worst_phase) ? sc.worst_phase : null;
+      const completeness = byName('phase_completeness');
+      const phasesNote = reference.available
+        ? LL.t('report.kpi.phases_reference', { count: formatNumber(reference.phase_count), missing: formatNumber((reference.missing || []).length) })
+        : LL.t('report.kpi.phases_no_reference');
+      return [
+        tile('phases', LL.t('report.kpi.phases'), 'phase', sc.phase_count, ' ' + LL.t('report.kpi.phases_unit'), phasesNote, kpiTone(completeness && completeness.passed)),
+        textTile('worst_phase', LL.t('report.kpi.worst_phase'), '', worst ? safeStr(worst.label) : LL.t('report.kpi.worst_phase_none'),
+          worst ? `${hhmm(worst.start_iso)}–${hhmm(worst.end_iso)}` : '', worst ? (worst.verdict === 'fail' ? 'fail' : '') : 'ok'),
+        latencyTile || errorTile
+      ].filter(Boolean);
+    }
     if (mode === 'spike') {
       const sa = parsed.spike_analysis || {};
       const spikes = Array.isArray(sa.spikes) ? sa.spikes : [];
@@ -2688,7 +2998,12 @@
     error_rate: 'report.summary.name.error_rate',
     cpu_usage: 'report.summary.name.cpu_usage',
     memory_usage: 'report.summary.name.memory_usage',
-    recovery: 'report.summary.name.recovery'
+    recovery: 'report.summary.name.recovery',
+    phase_completeness: 'report.summary.name.phase_completeness',
+    phase_duration: 'report.summary.name.phase_duration',
+    regression_latency: 'report.summary.name.regression_latency',
+    regression_errors: 'report.summary.name.regression_errors',
+    regression_capacity: 'report.summary.name.regression_capacity'
   };
   function summaryName(name) {
     const key = SUMMARY_NAMES[safeStr(name)];
@@ -2700,7 +3015,9 @@
     if (key === 'target_rps' || key === 'target_margin') return ' RPS';
     if (key === 'p95_latency' || key === 'p99_latency') return ' ' + LL.t('report.unit.ms');
     if (key === 'recovery') return ' ' + LL.t('report.unit.min');
-    if (key === 'error_rate' || key === 'cpu_usage' || key === 'memory_usage') return ' %';
+    if (key === 'error_rate' || key === 'cpu_usage' || key === 'memory_usage' || key === 'phase_duration') return ' %';
+    if (key === 'regression_latency' || key === 'regression_capacity') return ' %';
+    if (key === 'regression_errors') return ' ' + LL.t('report.sla.unit_pp');
     return '';
   }
   function summaryFigure(value, name) {
@@ -2746,7 +3063,9 @@
         const params = { name: summaryName(name), actual: summaryFigure(check.actual, name), threshold: summaryFigure(check.threshold, name) };
         let key = 'report.summary.breach_one';
         if (name === 'recovery') key = 'report.summary.breach_recovery';
+        else if (name === 'phase_completeness') key = 'report.summary.breach_phases_missing';
         else if (name === 'target_margin') key = 'report.summary.breach_margin';
+        else if (isRegressionCheck(check)) key = 'report.summary.breach_regression';
         breach = html(key, params);
       }
     } else if (failed.length > 1) {
@@ -2832,6 +3151,62 @@
   // Markup of the report head of the final row: the meta line, then the verdict block — a rule in the verdict
   // color, the verdict word, the manual tag and reason, one sentence on why, the figures; the SLA criteria with the
   // verdict line on the right. renderHero puts it on the page.
+  // ---- baseline of the regression check --------------------------------------------------------------------
+  // «База: <run> · релиз 25.10 · эталон · Сравнить» under the verdict summary, from sla_details.regression
+  // (AI/regression.py): the run the report was compared with when it was built, how it was chosen and a link to the
+  // comparison; without a comparison the reason. '' when the report has no regression thresholds (or predates them).
+  // Keys are literal (tests/test_i18n.py checks every one exists).
+  const BASELINE_MODE_KEYS = {
+    pinned: 'report.baseline.mode.pinned',
+    previous_release: 'report.baseline.mode.previous_release',
+    previous_success: 'report.baseline.mode.previous_success',
+    previous: 'report.baseline.mode.previous'
+  };
+  const BASELINE_REASON_KEYS = {
+    no_checks: 'report.baseline.reason.no_checks',
+    mode_unsupported: 'report.baseline.reason.mode_unsupported',
+    no_baseline: 'report.baseline.reason.no_baseline',
+    no_baseline_sla: 'report.baseline.reason.no_baseline_sla',
+    other_service: 'report.baseline.reason.other_service',
+    other_type: 'report.baseline.reason.other_type',
+    no_level: 'report.baseline.reason.no_level',
+    level_mismatch: 'report.baseline.reason.level_mismatch',
+    no_step_at_level: 'report.baseline.reason.no_step_at_level',
+    no_value: 'report.baseline.reason.no_value',
+    zero_baseline: 'report.baseline.reason.zero_baseline',
+    no_ceiling: 'report.baseline.reason.no_ceiling',
+    not_compared: 'report.baseline.reason.not_compared'
+  };
+  function baselineReasonText(code) {
+    return LL.t(BASELINE_REASON_KEYS[safeStr(code)] || BASELINE_REASON_KEYS.no_value);
+  }
+  function baselineLineHtml(finalRow) {
+    if (!finalRow) return '';
+    const sla = parseJsonish(finalRow.sla_details) || {};
+    const regression = isPlainObject(sla.regression) ? sla.regression : null;
+    const reason = regression ? safeStr(regression.reason) : '';
+    if (!regression || reason === 'disabled') return '';
+    const run = safeStr(regression.baseline_run_name);
+    const parts = [];
+    if (run) {
+      const href = LL.reportUrl({ run_id: safeStr(regression.baseline_run_id), run_name: run });
+      parts.push(`<a href="${escapeHtml(href)}" data-baseline-run>${escapeHtml(run)}</a>`);
+      const release = safeStr(regression.baseline_release);
+      if (release) parts.push(escapeHtml(LL.t('report.baseline.release', { release: release })));
+      const modeKey = BASELINE_MODE_KEYS[safeStr(regression.mode)];
+      if (modeKey) parts.push(escapeHtml(LL.t(modeKey)));
+      if (reason) parts.push(escapeHtml(LL.t('report.baseline.not_compared', { reason: baselineReasonText(reason) })));
+      const current = safeStr(finalRow.run_name) || getRunFromPath();
+      if (current) {
+        const compare = `/compare?run_a=${encodeURIComponent(current)}&run_b=${encodeURIComponent(run)}`;
+        parts.push(`<a href="${escapeHtml(compare)}" data-baseline-compare title="${escapeHtml(LL.t('report.baseline.compare_title'))}">${escapeHtml(LL.t('report.baseline.compare'))}</a>`);
+      }
+    } else {
+      parts.push(escapeHtml(LL.t('report.baseline.none', { reason: baselineReasonText(reason || 'no_baseline') })));
+    }
+    const state = regression.available ? 'compared' : 'none';
+    return `<div class="hero-sub rep-baseline" data-baseline="${state}"><span class="rep-baseline-k">${escapeHtml(LL.t('report.baseline.title'))}</span> ${parts.join(META_SEP)}</div>`;
+  }
   function heroHtml(finalRow, allRows) {
     if (!finalRow) return `<div class="rep-empty hero-empty">${escapeHtml(LL.t('report.hero.no_final'))}</div>`;
     const parsed = parseJsonish(finalRow.parsed) || {};
@@ -2860,7 +3235,9 @@
       manual ? `<span class="verdict-manual-tag">${escapeHtml(LL.t('report.verdict.manual_tag'))}</span>` : '',
       isDeterministicFinal(finalRow) ? `<span class="verdict-manual-tag">${escapeHtml(LL.t('report.hero.no_ai_tag'))}</span>` : '',
       '</div>',
+      releaseLineHtml(reportState.mark),
       summary ? `<p class="rep-verdict-why">${summary}</p>` : '',
+      baselineLineHtml(finalRow),
       `<div class="hero-sub rep-verdict-source">${escapeHtml(verdictSourceText(finalRow))}</div>`,
       manual && safeStr(manual.reason) ? `<div class="hero-sub hero-manual-reason">${escapeHtml(LL.t('report.verdict.reason_line', { reason: safeStr(manual.reason) }))}</div>` : '',
       unverified,
@@ -2888,6 +3265,7 @@
     if (!finalRow) return;
     bindFeedbackVotes(hero);
     bindVerdictActions(hero);
+    bindReleaseActions(hero.querySelector('[data-release-line]'));
   }
 
   async function reportsLoadLlm() {
@@ -2937,6 +3315,7 @@
     reportState.finalRow = finalRow;
     reportState.rows = arr;
     renderHero(finalRow, arr);
+    if (finalRow) loadReleaseMark();
     // Charts read the markers and thresholds, so the step table is resolved (and «Ход теста» drawn) before them.
     await renderLoadSteps(finalRow);
     reportState.finalRow = finalRow;
@@ -3442,6 +3821,12 @@
     chosenSlaStep: chosenSlaStep,
     markerMode: markerMode,
     slaBarModel: slaBarModel,
+    SLA_CHECK_NAMES: SLA_CHECK_NAMES,
+    slaCheckLabel: slaCheckLabel,
+    checkUnit: checkUnit,
+    baselineLineHtml: baselineLineHtml,
+    releaseLineHtml: releaseLineHtml,
+    releaseDialogHtml: releaseDialogHtml,
     heroKpis: heroKpis,
     heroTypeEntries: heroTypeEntries,
     testTypeSection: testTypeSection,

@@ -24,10 +24,11 @@
 ## Why LoadLens
 
 - **The whole test window from your own metrics.** LoadLens reads Prometheus, VictoriaMetrics or InfluxDB (directly or through Grafana), stores the series of every run in TimescaleDB and builds the report from the test's own data: load tool, JVM, databases, Kafka, services, nodes, load generators, application logs.
-- **Deterministic steps and SLA verdicts.** A step detector finds the plateaus, the stable maximum and the moment the load drops; the SLA check (target RPS, error ratio and p95/p99 on the last step where they hold, CPU and memory on the first step at the target) gives `pass`, `risk`, `fail` or `no_data` with the threshold, the fact and the status of every criterion; steps above the target are headroom, so going further never worsens the verdict. No model is involved in the verdict.
-- **AI analysis per domain, every number checked.** Each domain gets its own analysis; several candidates are scored by a judge, and every number in the findings is verified against the collected data before the report says it. Step, soak, spike and stress tests each get their own analysis.
-- **Compare runs and forecast capacity.** Two runs side by side with an automatically chosen baseline, and a Universal Scalability Law forecast: the limit, the safe maximum and the number of pods for a target load.
-- **Launch tests and publish.** Start k6, JMeter, Locust or Gatling on SSH, Docker, Kubernetes, GitLab CI or Jenkins generators with live RPS, errors and p95, then publish the report and the forecast to Confluence.
+- **Deterministic steps and SLA verdicts.** A step detector finds the plateaus, the stable maximum and the moment the load drops; the SLA check (target RPS, error ratio and p95/p99 on the last step where they hold, CPU and memory on the first step at the target) gives `pass`, `risk`, `fail` or `no_data` with the threshold, the fact and the status of every criterion; steps above the target are headroom, so going further never worsens the verdict. Optional regression checks compare p95, errors and the load reached with the baseline run at a comparable load and turn the verdict into `risk` or `fail` over their thresholds. No model is involved in the verdict.
+- **AI analysis per domain, every number checked.** Each domain gets its own analysis; several candidates are scored by a judge, and every number in the findings is verified against the collected data before the report says it. Step, soak, spike, stress and scenario tests each get their own analysis; a scenario run (one pass of a business process) is split into phases by the request groups of the script and compared with the previous run phase by phase.
+- **Compare runs and forecast capacity.** Two runs side by side with an automatically chosen baseline, a rule-based better/worse outcome and an AI explanation of the difference, and a Universal Scalability Law forecast: the limit, the safe maximum and the number of pods for a target load.
+- **Releases at a glance.** The page of a release shows every service and test type with its accepted run, verdict and the change of p95, errors and the load reached against the previous release, the services not tested yet and a trend by release; it links the Jira issues of the release and is published to Confluence as one page. Runs get their release mark from the archive, the report page or the launch form, and a run can be pinned as the baseline of its service: the analysis and the comparison take it first, then the accepted run of the previous release.
+- **Launch tests and publish.** Start k6, JMeter, Locust or Gatling on SSH, Docker, Kubernetes, GitLab CI or Jenkins generators with live RPS, errors and p95, then publish the report, the forecast, the comparison and the release to Confluence.
 
 ## Quick start
 
@@ -55,6 +56,8 @@ cd docker && docker compose up -d --build           # app, TimescaleDB, Redis, C
 
 Open http://localhost:5000, sign in with the administrator from `docker/.env` and run the wizard at `/settings?wizard=1`: storage, data sources, domain bindings, query packs for your stack, LLM and SLA, each connection checked before you save. Tagged releases publish the image `ghcr.io/<owner>/loadlens:<tag>` (and `:latest`) for linux/amd64 and linux/arm64; [docs/deployment.md](docs/deployment.md#https-with-caddy) puts it behind HTTPS with Caddy. Details: [docs/getting-started.md](docs/getting-started.md), [docs/deployment.md](docs/deployment.md).
 
+Upgrading from 1.0? Read the [2.0 upgrade guide](docs/upgrading-to-2.md) for API and configuration changes.
+
 ## What it works with
 
 | | |
@@ -64,8 +67,8 @@ Open http://localhost:5000, sign in with the administrator from `docker/.env` an
 | Query packs | 43 packs with checked queries and SLA references: node_exporter, windows_exporter, kube-state-metrics, JVM (Micrometer, JMX exporter, OpenTelemetry), Go, Python (FastAPI, Flask, Django), HTTP (Micrometer, Go, OpenTelemetry, NGINX ingress, Istio), Kafka (kafka_exporter, broker JMX, client Micrometer), PostgreSQL, PgBouncer, MySQL, MongoDB, Redis, ArangoDB, HikariCP, load generators |
 | Launching tests | SSH (pinned host key), Docker Engine API, Kubernetes Jobs, GitLab CI and Jenkins pipelines with their parameters, or a manual mode that only marks the window |
 | LLM providers | Perplexity, OpenAI-compatible APIs, Anthropic, GigaChat (mTLS) |
-| Outputs | Web reports (print to PDF), Confluence pages for the report and the forecast, REST API with tokens for CI |
-| Logs | OpenSearch: aggregated ERROR logs of the test window as an optional domain |
+| Outputs | Web reports (print to PDF), Confluence pages for the report, the forecast, the comparison and the release, links to the Jira issues of a release, REST API with tokens for CI |
+| Logs | OpenSearch or Grafana Loki (directly or through Grafana): aggregated ERROR logs of the test window as an optional domain |
 | Storage | TimescaleDB (PostgreSQL 14+ with the extension); Redis and a Celery worker are optional, reports run in a thread otherwise |
 | Sign-in | Local users with roles (viewer, engineer, administrator), API tokens, audit log, LDAP or OIDC through the `AuthProvider` interface, a recovery mode while the database is down |
 | UI languages | English and Russian; the language of reports and prompts is a setting of the installation |
@@ -94,7 +97,9 @@ one, the theme follows the system.
 
 ![Report summary: the verdict in plain words, figures against thresholds, SLA criteria and the test timeline](docs/screenshots/report-summary-en.png)
 
-More screenshots (AI analysis, charts, archive, comparison, forecast, settings; Russian UI) are in [README.ru.md](README.ru.md).
+![Release page: the accepted run of every service with the change against the previous release, the services not tested and the trend by release](docs/screenshots/release-en.png)
+
+More screenshots (AI analysis, charts, archive, comparison, forecast, release page, settings; Russian UI) are in [README.ru.md](README.ru.md).
 
 ## Configuration
 
@@ -127,7 +132,7 @@ Contributions are accepted under the [Developer Certificate of Origin](https://d
 
 ## Security
 
-Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md). Never commit `settings.py`, the runtime JSON files or `docker/.env`. LoadLens does not phone home: it talks only to the systems you configure (metric stores, Confluence, OpenSearch, the LLM provider), and the LLM provider is the only one that receives test data for analysis.
+Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md). Never commit `settings.py`, the runtime JSON files or `docker/.env`. LoadLens does not phone home: it talks only to the systems you configure (metric stores, Confluence, OpenSearch or Loki, the LLM provider), and the LLM provider is the only one that receives test data for analysis.
 
 ## License
 

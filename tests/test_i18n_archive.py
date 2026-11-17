@@ -189,8 +189,8 @@ def test_archive_builders_in_russian_are_unchanged():
         "Показано 21–40 из 57", "Показано 41–57 из 57", "Ничего не найдено",
     ]
     assert archive("A.verdictTitle({ sla_verdict: 'risk', llm_verdict: 'pass' })") == "По SLA: Есть риски; оценка ИИ: Успешно"
-    manual = {"manual_verdict": {"verdict": "pass", "author": "ivanov", "reason": "ok"}, "sla_verdict": "fail", "llm_verdict": "pass"}
-    assert archive(f"A.verdictTitle({_js(manual)})") == "Изменён вручную: ivanov. Причина: ok"
+    manual = {"manual_verdict": {"verdict": "pass", "author": "engineer1", "reason": "ok"}, "sla_verdict": "fail", "llm_verdict": "pass"}
+    assert archive(f"A.verdictTitle({_js(manual)})") == "Изменён вручную: engineer1. Причина: ok"
     jobs = [
         {"kind": "confluence", "status": "error", "message": "нет доступа"},
         {"kind": "report", "service": "svc", "status": "running", "progress": "x", "message": ""},
@@ -235,7 +235,7 @@ def test_compare_builders_in_english():
     assert "250 (saturation point)" in grid and "80 (held)" in grid
     assert '<span class="trend better" title="An increase counts as an improvement">↑ 12.3 % · better</span>' == out[2]
     assert out[6] == '<span class="trend neutral">no change</span>'
-    assert out[8] == '<thead><tr><th>Metric</th><th class="num">A (average)</th><th class="num">B (average)</th><th>Change of B vs A</th></tr></thead>'
+    assert out[8] == '<thead><tr><th>Metric</th><th class="num">A (average)</th><th class="num">B (average)</th><th>Change of A vs B</th></tr></thead>'
     assert 'aria-label="Chart: RPS, runs A and B"' in out[11]
     assert out[-5:-2] == ["Pick both runs.", "The same run is picked twice.", "Press “Compare”."]
     assert out[-2] == "900 (spike)"
@@ -255,7 +255,7 @@ def test_compare_builders_in_russian_are_unchanged():
     assert out[4] == '<span class="trend worse" title="Рост считается ухудшением">↑ 5.0 % · хуже</span>'
     assert out[5] == '<span class="trend neutral" title="Направление не определено по названию метрики">↑ 7.0 %</span>'
     assert out[6] == '<span class="trend neutral">без изменений</span>'
-    assert out[7] == '<thead><tr><th>Метрика</th><th class="num">A (p95)</th><th class="num">B (p95)</th><th>Изменение B к A</th></tr></thead>'
+    assert out[7] == '<thead><tr><th>Метрика</th><th class="num">A (p95)</th><th class="num">B (p95)</th><th>Изменение A к B</th></tr></thead>'
     assert 'A (максимум)' in out[9] and "<th>Серия</th>" in out[12] and 'B (максимум)' in out[12]
     assert '<div class="dim">нажмите, чтобы открыть график</div>' in out[10]
     assert '<span class="dim">A — сплошная, B — пунктир; время от старта прогона. Выделите участок мышью, чтобы приблизить</span>' in out[11]
@@ -271,3 +271,68 @@ def test_compare_builders_escape_server_text():
     html = compare("C.chartRowHtml('CPU \"busy\" <%>') + C.findingsHtml({ parsed: { findings: [{ summary: '<b>x</b>' }] } }, 'A · <run>')", locale="en")
     assert "<b>" not in html and "<run>" not in html
     assert "CPU &quot;busy&quot; &lt;%&gt;" in html and "A · &lt;run&gt;" in html
+
+
+def test_the_direction_from_the_server_wins_over_the_label_words():
+    out = compare("[C.trendHtml(12, 'Hits', 'higher'), C.trendHtml(12, 'RPS', 'neutral'), C.trendHtml(12, 'RPS', undefined), "
+                  "C.metricRowHtml({ query_label: 'Lag', value_a: 2, value_b: 1, trend_pct: 100, direction: 'lower' })]")
+    assert out[0] == '<span class="trend better" title="Рост считается улучшением">↑ 12.0 % · лучше</span>'
+    assert out[1] == '<span class="trend neutral" title="Направление не определено по названию метрики">↑ 12.0 %</span>'
+    assert out[2].startswith('<span class="trend better"')
+    assert '<span class="trend worse" title="Рост считается ухудшением">↑ 100.0 % · хуже</span>' in out[3]
+
+
+EXPLAIN_VIEW = {
+    "status": "ready", "message": "", "model": "test-model", "generated_at": "2026-11-10T09:00:00+00:00", "llm_problem": "",
+    "outcome": {"code": "better", "title": "A is better than B", "reasons": ["Maximum RPS: A 1200, B 1000 (+20.0 %)"]},
+    "flags": [{"code": "window", "text": "Windows of different length: 60 and 120 min"}],
+    "metrics": {"threshold_pct": 10, "counts": {"better": 2, "worse": 1, "same": 3, "unknown": 0}, "top_changes": [
+        {"domain": "lt_framework", "domain_title": "Load tool", "metric": "p95", "value_a": 300, "value_b": 400,
+         "change_pct": -25, "direction": "lower", "assessment": "better"},
+    ]},
+    "findings": [{"side": "B", "id": "B:database:f1", "domain": "database", "component": "postgres", "summary": "Pool exhausted"}],
+    "explanation": {
+        "headline": "A holds more RPS", "summary": "1200 vs 1000 RPS.",
+        "key_changes": [{"label": "Max RPS", "value_a": "1200", "value_b": "1000", "assessment": "better"}],
+        "causes": ["c1", "c2", "c3", "c4"], "caveats": [], "next_checks": ["Repeat"],
+        "evidence": [{"finding_id": "B:database:f1", "role": "pool"}, {"finding_id": "C:x:f9", "role": "extra"}],
+        "confidence": "medium",
+    },
+    "check": {"status": "verified", "claims_total": 4, "claims_matched": 4, "unmatched": [], "unknown_findings": ["C:x:f9"]},
+}
+
+
+def test_explanation_block_in_english():
+    html = compare(f"C.explanationHtml({_js(EXPLAIN_VIEW)})", locale="en")
+    assert not CYRILLIC.search(html), html
+    assert '<div class="compare-outcome is-ok"><p class="compare-outcome-title">A is better than B</p>' in html
+    assert "Comparison caveats" in html and "Windows of different length: 60 and 120 min" in html
+    assert "p95 metrics, change of 10 % or more: 2 better, 1 worse, 3 unchanged, 0 with an unknown direction" in html
+    assert "Largest metric changes (1)" in html and '<span class="trend better" title="An increase counts as a regression">↓ 25.0 % · better</span>' in html
+    assert '<span class="pill warn">Model confidence: medium</span>' in html
+    assert '<button type="button" class="btn btn-sm" id="compareExplainRun" data-min-role="engineer">Refresh analysis</button>' in html
+    assert '<p class="compare-explain-headline">A holds more RPS</p>' in html
+    assert '<span class="compare-change-values"><span>A 1200</span><span>B 1000</span></span><span class="trend better">better</span>' in html
+    assert "1 more" in html and "Likely causes" in html and "Caveats" in html and "<p class=\"dim\">None.</p>" in html
+    assert "Based on (2)" in html and "C:x:f9: not in the reports" in html and "B · database · postgres" in html
+    assert "numbers checked against the data: 4 of 4; links to unknown findings: C:x:f9" in html
+    assert "Report findings given to the model (1)" in html
+
+
+def test_explanation_block_before_the_analysis_and_without_an_llm_in_russian():
+    missing = {**EXPLAIN_VIEW, "status": "missing", "explanation": None, "check": None, "findings": [], "flags": []}
+    html = compare(f"C.explanationHtml({_js(missing)})")
+    assert "ИИ объяснит, чем A отличается от B" in html and ">Разобрать с ИИ</button>" in html
+    assert "Проверенных находок в отчётах нет" in html and "compare-flags" not in html
+    no_llm = compare(f"C.explanationHtml({_js({**missing, 'llm_problem': 'Не настроен провайдер LLM'})})")
+    assert "compareExplainRun" not in no_llm and '<span class="dim">Не настроен провайдер LLM</span>' in no_llm
+    stale = compare(f"C.explanationHtml({_js({**EXPLAIN_VIEW, 'status': 'stale', 'message': 'устарел'})})")
+    assert '<p class="dim">устарел</p>' in stale and "Обновить разбор" in stale
+
+
+def test_explanation_block_escapes_server_text():
+    view = {**EXPLAIN_VIEW, "outcome": {"code": "worse", "title": "<b>t</b>", "reasons": ["<i>r</i>"]},
+            "explanation": {**EXPLAIN_VIEW["explanation"], "headline": "<script>x</script>"}}
+    html = compare(f"C.explanationHtml({_js(view)})", locale="en")
+    assert "<script>" not in html and "<b>t</b>" not in html and "<i>r</i>" not in html
+    assert "&lt;script&gt;x&lt;/script&gt;" in html and 'class="compare-outcome is-fail"' in html

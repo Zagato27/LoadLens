@@ -38,6 +38,7 @@
   "common.role.admin": "Администратор",
   "common.role.engineer": "Инженер",
   "common.role.viewer": "Наблюдатель",
+  "common.test_type.scenario": "Сценарий",
   "common.test_type.soak": "Долговременный (soak)",
   "common.test_type.spike": "Всплески (spike)",
   "common.test_type.step": "Ступенчатый (max perf)",

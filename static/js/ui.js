@@ -622,8 +622,9 @@
   const GLOSSARY_TERMS = [
     'stable_max', 'peak_max', 'verdict_success', 'verdict_risk', 'verdict_fail', 'verdict_na', 'sla_first',
     'confidence', 'judge', 'p95', 'step_profile', 'resample', 'target_rps', 'error_rate', 'trend_better',
-    'unverified', 'test_type_step', 'test_type_soak', 'test_type_spike', 'test_type_stress', 'hold_window',
-    'trend_drift', 'spike_window', 'overshoot', 'recovery_time', 'saturation_point', 'limiting_resource'
+    'unverified', 'test_type_step', 'test_type_soak', 'test_type_spike', 'test_type_stress', 'test_type_scenario',
+    'hold_window', 'trend_drift', 'spike_window', 'overshoot', 'recovery_time', 'saturation_point', 'limiting_resource',
+    'phase'
   ];
   LL.GLOSSARY = LL.GLOSSARY || (function glossaryTable() {
     const out = {};
@@ -699,6 +700,22 @@
       actionHtml ? `<div class="empty-state-action">${actionHtml}</div>` : '',
       '</div>'
     ].join('');
+  };
+
+  // ---- background jobs ---------------------------------------------------
+  // Polls /job_status/<id> until the job ends: {status: 'done'|'error', job} or {status: 'timeout', job: null}
+  // after `polls` attempts. onProgress(job) runs between the polls while the job is still running.
+  ui.pollJob = async function pollJob(jobId, options) {
+    const opts = Object.assign({ polls: 180, intervalMs: 1500, onProgress: null }, options || {});
+    for (let attempt = 0; attempt < opts.polls; attempt += 1) {
+      const resp = await fetch('/job_status/' + encodeURIComponent(jobId));
+      const job = await resp.json().catch(() => ({}));
+      if (job.status === 'done') return { status: 'done', job };
+      if (!resp.ok || job.status === 'error' || job.status === 'not_found') return { status: 'error', job };
+      if (opts.onProgress) opts.onProgress(job);
+      await new Promise((resolve) => setTimeout(resolve, opts.intervalMs));
+    }
+    return { status: 'timeout', job: null };
   };
 
   // ---- responsive tables -------------------------------------------------

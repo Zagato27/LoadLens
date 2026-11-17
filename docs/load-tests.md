@@ -59,7 +59,7 @@
 ```python
 "gen-1": {
     "title": "Генератор 1", "type": "ssh",
-    "ssh": {"host": "10.0.0.5", "port": 22, "username": "loadlens",
+    "ssh": {"host": "192.0.2.5", "port": 22, "username": "loadlens",
             "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\n...",  # или "password"
             "passphrase": "", "host_key": "ssh-ed25519 AAAA..."},       # ключ хоста закрепляет «Проверить»
     "work_dir": "/opt/loadlens/runs",      # каталоги инстансов
@@ -78,7 +78,7 @@
 ```python
 "docker-1": {
     "title": "Docker на gen2", "type": "docker",
-    "docker": {"url": "https://gen2.example.ru:2376", "ca_cert": "-----BEGIN CERTIFICATE-----...",
+    "docker": {"url": "https://gen2.example.com:2376", "ca_cert": "-----BEGIN CERTIFICATE-----...",
                "client_cert": "-----BEGIN CERTIFICATE-----...", "client_key": "-----BEGIN PRIVATE KEY-----...", "verify": True},
     "network": "loadtest",                                    # сеть контейнеров
     "mounts": [{"source": "loadlens-scripts", "target": "/scripts", "read_only": True}],  # том или путь на хосте
@@ -96,7 +96,7 @@ LoadLens работает с Docker Engine API по HTTPS с клиентски�
 ```python
 "k8s-perf": {
     "title": "Кластер нагрузки", "type": "kubernetes",
-    "kubernetes": {"api_url": "https://k8s.example.ru:6443", "token": "eyJ...", "ca_cert": "-----BEGIN CERTIFICATE-----..."},
+    "kubernetes": {"api_url": "https://k8s.example.com:6443", "token": "eyJ...", "ca_cert": "-----BEGIN CERTIFICATE-----..."},
     # или "kubernetes": {"in_cluster": True} — LoadLens работает в этом кластере под своим сервисным аккаунтом
     "namespace": "loadtest",
     "scripts": {"config_map": "loadtest-scripts"},            # или {"pvc": "scripts"}; без них — скрипты в образе
@@ -115,14 +115,14 @@ LoadLens работает с Docker Engine API по HTTPS с клиентски�
 ```python
 "gitlab": {
     "title": "GitLab", "type": "gitlab",
-    "gitlab": {"url": "https://gitlab.example.ru", "project": "perf/load-tests", "ref": "",  # "" — ветка проекта по умолчанию
+    "gitlab": {"url": "https://gitlab.example.com", "project": "perf/load-tests", "ref": "",  # "" — ветка проекта по умолчанию
                "api_token": "glpat-...", "inputs": "auto"},      # scope api: параметры, запуск, статус, отмена
-    "loadlens_url": "https://loadlens.example.ru",                  # необязательно: события пайплайна
+    "loadlens_url": "https://loadlens.example.com",                  # необязательно: события пайплайна
     "tags_metrics": True,                                          # пайплайн передаёт LOADLENS_RUN_TAG инструменту
 },
 "jenkins": {
     "title": "Jenkins", "type": "jenkins",
-    "jenkins": {"url": "https://jenkins.example.ru", "job": "perf/load-test", "ref": "",  # ветка multibranch-задачи
+    "jenkins": {"url": "https://jenkins.example.com", "job": "perf/load-test", "ref": "",  # ветка multibranch-задачи
                 "username": "loadlens", "api_token": "11ab..."},
     "param_options": {"STAND": ["stage", "preprod"]},              # варианты, которые Jenkins не отдаёт
 }
@@ -293,7 +293,7 @@ Maven:   {exe} gatling:test -Dgatling.simulationClass={script} {params}
 
 Отчёт запускается после паузы на доставку метрик: два шага выборки `default_params.step`, но не меньше 30 секунд и не больше 5 минут. Если все слоты фоновых задач заняты, отчёт ждёт свободного. Если дневной лимит анализа ИИ исчерпан, отчёт строится без анализа.
 
-**Подсказка окна для отчёта вручную.** Если тест запускали не из LoadLens, форма «Новый отчёт» после выбора сервиса ищет его окно сама: читает запрос с ролью `lt.rps_total` домена «Нагрузка» за последние 6 часов и показывает до трёх последних отрезков с ненулевым RPS. Пауза дольше трёх шагов выборки разрывает отрезок, одиночные точки отбрасываются. К отрезкам добавляются завершённые прогоны сервиса из LoadLens; прогон, который пересекается с отрезком, даёт ему имя и точное время. Клик по подсказке подставляет начало и конец. Если источник не отвечает, форма пишет об этом строкой под полями и работает как раньше. Ответ кешируется на 60 секунд в каждом процессе.
+**Подсказка окна для отчёта вручную.** Если тест запускали не из LoadLens, форма «Новый отчёт» после выбора сервиса ищет его окно сама: читает запрос с ролью `lt.rps_total` домена «Нагрузка» за последние 6 часов и показывает до трёх последних отрезков с ненулевым RPS. Если за эти часы отрезков меньше трёх, форма ищет более старые за последние 30 дней шагом 5 минут и уточняет границы каждого найденного отрезка отдельным запросом за его интервал, так что тест недельной давности тоже попадает в подсказку с точным временем. Пауза дольше трёх шагов выборки разрывает отрезок, одиночные точки отбрасываются; при поиске за 30 дней одиночную точку проверяет уточняющий запрос. Тест короче 5 минут старше 6 часов может не попасть в подсказку: на шаге 5 минут у него может не оказаться ни одной точки. К отрезкам добавляются завершённые прогоны сервиса из LoadLens за те же 30 дней; прогон, который пересекается с отрезком, даёт ему имя и точное время. Клик по подсказке подставляет начало и конец. Если источник не отвечает, форма пишет об этом строкой под полями и работает как раньше; если не удался только поиск за 30 дней, подсказка показывает отрезки последних часов и строку об этом. Ответ кешируется на 60 секунд в каждом процессе.
 
 ## Ресурсы генераторов в отчёте
 
@@ -326,7 +326,7 @@ Maven:   {exe} gatling:test -Dgatling.simulationClass={script} {params}
 - `GET /load_tests/active?limit=5&live=1` — идущие прогоны активной области для дэшборда: `total` и до `limit` (0–20) последних прогонов со статусом, прогрессом инстансов, `can_stop` и, при `live=1`, RPS и долей ошибок за 15 минут (`live.rps`, `live.errors`, `live.points`). `limit=0` — только число.
 - `POST /load_tests/runs/<run_id>/stop` — остановка прогона или инстанса (`{"index": N}`).
 - `GET /load_tests/runs/<run_id>/logs?index=&bytes=` — хвост журнала инстанса; `GET /load_tests/runs/<run_id>/live?window=&since=&mode=` — живые метрики: `window` — последние 15, 30 или 60 минут (0 — весь прогон), `since` — только точки с этого момента (мс), `mode` — `filtered` или `plain` из первого ответа. Ответ: `series` по ролям, `instances` (RPS инстансов), `events`, `sla`, `fresh_at`, `step_sec`.
-- `GET /lt_windows?service=&hours=6` — найденные окна теста сервиса для формы «Новый отчёт» (`hours` от 0,25 до 24). Ответ: `ok`, `windows: [{start, end, duration_sec, rps_peak, ongoing}]`, `runs` — завершённые прогоны LoadLens в том же интервале; при ошибке источника `ok: false` и `message`, HTTP-статус остаётся 200.
+- `GET /lt_windows?service=&hours=6` — найденные окна теста сервиса для формы «Новый отчёт»: `hours` (от 0,25 до 24) — глубина точного прохода, более старые окна ищутся за 30 дней. Ответ: `ok`, `windows: [{start, end, duration_sec, rps_peak, ongoing}]`, `runs` — завершённые прогоны LoadLens за те же 30 дней, `days` и `since` — глубина и начало поиска; при ошибке источника `ok: false` и `message`, HTTP-статус остаётся 200; если не удался только поиск за 30 дней, `ok` остаётся `true`, а `message` объясняет.
 - `GET /load_tests/presets?service=`, `POST /load_tests/presets` (`name`, `service`, `spec` — форма запуска), `DELETE /load_tests/presets/<id>`.
 - `GET /load_tests/ci_params?generator=&ref=` — параметры пайплайна CI-генератора (`params`, `ref`, `source`, `notes`, `auto`); `GET /load_tests/ci_refs?generator=&search=` — ветки проекта GitLab или multibranch-задачи Jenkins.
 
@@ -342,7 +342,7 @@ curl -s -H "Authorization: Bearer $LOADLENS_TOKEN" -H "Content-Type: application
        "instances":[{"name":"rest","generator":"gen-1","tool":"k6","script":"checkout.js",
                      "params":"--out experimental-prometheus-rw",
                      "env":"K6_PROMETHEUS_RW_SERVER_URL=http://prometheus:9090/api/v1/write"}]}' \
-  https://loadlens.example.ru/load_tests
+  https://loadlens.example.com/load_tests
 ```
 
 CI-инстанс в той же форме: `{"name": "pipeline", "generator": "gitlab", "ci_ref": "main", "ci_params": {"PROFILE": "load", "users": 50}, "ci_extra": "BASE_URL=https://stage.example"}` — без `tool`, `script`, `params` и `env`.

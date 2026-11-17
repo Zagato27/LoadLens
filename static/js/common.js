@@ -188,7 +188,7 @@ window.LoadLens.jobDismissButton = function jobDismissButton(job, onDone) {
   });
 })();
 
-// «Changed manually: ivanov, 2026-10-17 15:20. Reason: …» for a manual verdict ({verdict, reason, author,
+// «Changed manually: engineer1, 2026-10-17 15:20. Reason: …» for a manual verdict ({verdict, reason, author,
 // changed_at}); '' without one.
 window.LoadLens.manualVerdictTitle = function manualVerdictTitle(manual) {
   if (!manual || !manual.verdict) return '';
@@ -309,7 +309,7 @@ window.LoadLens.reportDomainTitles = function reportDomainTitles(rows) {
 };
 
 window.LoadLens.TEST_TYPE_LABELS = window.LoadLens.messageTable(
-  ['step', 'soak', 'spike', 'stress'],
+  ['step', 'soak', 'spike', 'stress', 'scenario'],
   (key) => window.LoadLens.t(`common.test_type.${key}`),
 );
 window.LoadLens.testTypeLabel = function testTypeLabel(key) {

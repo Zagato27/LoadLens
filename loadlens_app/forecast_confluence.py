@@ -7,7 +7,6 @@ reports saved before the field), like the report page; the job's progress messag
 
 from __future__ import annotations
 
-import io
 import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -24,11 +23,13 @@ from loadlens_app.confluence_export import (
     ProgressCallback,
     attachment_image,
     confluence_config,
+    figure as _figure,
     h2,
     h3,
     kv_table,
     li_list,
     p,
+    png as _png,
     upsert_page,
     validate_confluence_config,
     wrap_expand,
@@ -430,25 +431,6 @@ def forecast_page_body(
         wrap_expand(t("confluence.forecast.section_method"), li_list(_method_items(report))),
     ])
     return "".join(parts)
-
-
-def _figure(width: float, height: float) -> tuple[Any, Any, Any]:
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots(figsize=(width, height), dpi=110)
-    fig.patch.set_facecolor("#ffffff")
-    return plt, fig, ax
-
-
-def _png(plt: Any, fig: Any) -> bytes:
-    fig.tight_layout()
-    buffer = io.BytesIO()
-    fig.savefig(buffer, format="png")
-    plt.close(fig)
-    return buffer.getvalue()
 
 
 def _zone_text(report: ForecastReport, zone: ScaleZone) -> str:

@@ -100,6 +100,16 @@ def _manual_verdicts_table_known(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _release_marks_table_known(monkeypatch):
+    """Same for release_marks (AI/release_marks.py): readers join it without a probe; tests/test_release_marks*.py
+    clear the set to check the probe and the lazy creation."""
+    from AI import db_store, release_marks
+
+    monkeypatch.setattr(release_marks, "_READY", {"public"})
+    monkeypatch.setattr(db_store, "_ENSURED_TABLES", {key for key in db_store._ENSURED_TABLES if key[1] != release_marks.RELEASE_MARKS_TABLE})
+
+
+@pytest.fixture(autouse=True)
 def _storage_breaker_closed():
     """The storage breaker is process state: every test starts and ends with it closed."""
     from AI import storage_state

@@ -9,6 +9,8 @@ HOW TO READ THE CONTEXT (JSON, passed together with this task):
   ramp-down): it is not a level the system sustained. dip=true — a short dip: RPS fell and returned to its previous
   level; it is neither a separate load step nor the system limit. The flags are present only on such steps.
   In a spike test the steps alternate background and spikes ("background 1 · ≈100 RPS", "spike 1 · ≈480 RPS").
+  In a scenario test the steps are the phases of the scenario ("phase 3 · Checkout · Pay") and pauses ("pause 1"):
+  rps_level is the mean RPS the script applied in the phase, not a level the system sustained.
   Refer to steps by label (for example "step 3 · ≈150 RPS" or "interval 2 · 10:20–10:30").
 - sections[]: metric groups of the domain (label — the query name; in domain tasks the meaning and units of the
   queries are listed in the "DOMAIN METRICS" block). Each section has:
@@ -22,6 +24,7 @@ HOW TO READ THE CONTEXT (JSON, passed together with this task):
     elasticity — the metric grew noticeably faster than the load between steps (load_change_pct — load growth);
     drift — the metric changed on the plateau of one step while the load stayed the same;
     shift — the interval differs noticeably from the first one (for tests without steps).
+    A scenario test has drift only: its phases load different parts of the system and must not be compared.
     The value/reference/change_pct and explanation fields already contain a ready-made wording.
 - step_table[]: for each section — series ranked by the size of the change between steps
   (change_vs_first_pct), and per_step[] = {step, mean, p95, max, samples} for every step. The values are computed on
@@ -32,6 +35,8 @@ HOW TO READ THE CONTEXT (JSON, passed together with this task):
 - baseline: the previous run of the same service (run_name, verdict) and its statistics for the same series:
   baseline_mean/baseline_p95/baseline_max and delta_mean_pct/delta_max_pct — the change of the current run relative
   to it in %. If available=false, the cause is given in reason — comparison with the previous run is unavailable; do not invent it.
+  basis (when present) names the baseline: the pinned baseline of the service or the accepted run of an earlier release
+  (release) — refer to it that way in the findings.
 - timeline (final task only): a "metric × step" matrix across all domains (mean_per_step — means over the step
   plateau) — use it to link events of different components at the same step.
 - deterministic_sla (final task): the result of the programmatic SLA check — verdict, checks[] with actual/threshold
@@ -51,7 +56,7 @@ HOW TO READ THE CONTEXT (JSON, passed together with this task):
   step, margin — the margin step over the target), it is the step the verdict is decided on, and ceiling_step_label /
   ceiling_rps is the ceiling: growth of CPU, memory and latency between them is headroom used up, not a reason for "risk"
   or "fail".
-- test_profile: the test type (normalized_test_type: step | soak | spike | stress) and the analysis mode (mode).
+- test_profile: the test type (normalized_test_type: step | soak | spike | stress | scenario) and the analysis mode (mode).
 - hold_window (soak): the load hold window without the ramp-up — start_iso/end_iso, actual_rps_mean (mean RPS),
   min_bucket_rps/min_bucket_label (the weakest interval), drop_pct, early_drop_iso (RPS fell long before the end).
   The SLA of a soak test is checked on this window.
@@ -62,7 +67,16 @@ HOW TO READ THE CONTEXT (JSON, passed together with this task):
   spikes — level, duration, pre/during p95 and error rate, overshoot_p95_pct, recovered and recovery_time_sec.
 - saturation (final task, stress): the saturation point (saturation_rps, step), the first degraded step,
   failure_mode and limiting_resource.
+- phase_profile (lt_framework) / phases (domains) / scenario (final task, scenario): the phases of the scenario —
+  key (the path of the request group of the script; phases of two runs are matched by it), label, start_iso/end_iso,
+  duration_min, rps_mean, groups[] (shares of the request groups in the phase), verdict and failed (the SLA of the
+  phase). scenario.worst_phase is the phase the SLA points at; scenario.reference is the previous scenario run:
+  missing (its phases this run lacks), extra, durations[] (change of the phase durations, significant=false — within
+  the data step) and worst_duration. In a scenario test sla_step is the worst phase. excluded=true — the phase is
+  left out of the SLA by the settings (preparing or cleaning up test data): it has no verdict, its errors and
+  latency are no SLA breach. A deterministic_sla check with brief=true broke its threshold for less than the set
+  duration (breach_min minutes, a short excursion): a risk, not a failure.
 - system_context: a reference description of the system; use it as context, not as facts about the metrics.
 All numbers in the answer come only from this context: if a value is not in top_series / step_table / anomalies /
 baseline / timeline / deterministic_sla / sla_step / hold_window / stability_under_load / spike_analysis /
-saturation — it must not be stated.
+saturation / phases / scenario — it must not be stated.

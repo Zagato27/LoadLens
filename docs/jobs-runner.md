@@ -20,8 +20,10 @@
 | Отчёт | «Новый отчёт» (`POST /create_report`), наблюдатель прогонов страницы «Запуск теста» | `loadlens.report` | `report` |
 | Публикация отчёта в Confluence | кнопка на странице отчёта (`POST /publish_confluence`) | `loadlens.publish_confluence` | `confluence` |
 | Публикация прогноза в Confluence | страница прогноза (`POST /forecast/<run_id>/confluence`) | `loadlens.publish_forecast` | `forecast_confluence` |
+| Публикация сравнения в Confluence | страница сравнения (`POST /compare_confluence`) | `loadlens.publish_compare` | `compare_confluence` |
+| Публикация релиза в Confluence | страница релиза (`POST /releases/<name>/confluence`) | `loadlens.publish_release` | `release_confluence` |
 
-Объяснение прогноза моделью и разбор документа для контекста системы выполняются прямо в запросе, как раньше. Графики Grafana, логи Loki и вложения Confluence отчёт скачивает и загружает сам, своим пулом потоков (до 3 попыток с паузой 2 с, на элемент не больше `CELERY_TASK_TIMEOUT`, 600 с), отдельных задач Celery для них больше нет.
+Объяснение прогноза моделью, ИИ-разбор сравнения и разбор документа для контекста системы выполняются прямо в запросе, как раньше. Графики Grafana, логи Loki и вложения Confluence отчёт скачивает и загружает сам, своим пулом потоков (до 3 попыток с паузой 2 с, на элемент не больше `CELERY_TASK_TIMEOUT`, 600 с), отдельных задач Celery для них больше нет.
 
 ## Режимы
 
@@ -33,7 +35,7 @@
 | `thread` | Всегда в потоке веб-процесса, как до появления воркера |
 | `celery` | Всегда в воркере. С `CELERY_TASK_ALWAYS_EAGER=1` задача выполняется прямо внутри запроса (режим отладки Celery), в журнале предупреждение |
 
-Без установленного пакета `celery` задачи всегда идут потоком. Режим определяется для каждой новой задачи по переменным окружения веб-процесса; чтобы сменить его, перезапустите приложение. Форма ответов `/create_report`, `/publish_confluence`, `/forecast/<run_id>/confluence`, `/jobs` и `/job_status` от режима не зависит.
+Без установленного пакета `celery` задачи всегда идут потоком. Режим определяется для каждой новой задачи по переменным окружения веб-процесса; чтобы сменить его, перезапустите приложение. Форма ответов `/create_report`, `/publish_confluence`, `/forecast/<run_id>/confluence`, `/compare_confluence`, `/releases/<name>/confluence`, `/jobs` и `/job_status` от режима не зависит.
 
 ## Переменные окружения
 

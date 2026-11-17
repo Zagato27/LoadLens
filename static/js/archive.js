@@ -7,10 +7,14 @@
   // The search applies by itself this long after the last keystroke (Enter applies at once).
   const SEARCH_DEBOUNCE_MS = 350;
   const COLUMNS = 11;
-  const SORT_KEYS = ['run_name', 'service', 'test_type', 'end_time', 'report_created_at', 'verdict', 'max_rps'];
-  // Dates and load levels read best newest/largest first; text columns alphabetically.
-  const DESC_FIRST = new Set(['end_time', 'report_created_at', 'max_rps']);
+  const SORT_KEYS = ['run_name', 'service', 'test_type', 'end_time', 'report_created_at', 'verdict', 'max_rps', 'release'];
+  // Dates, load levels and releases (by their newest report) read best newest/largest first; text columns alphabetically.
+  const DESC_FIRST = new Set(['end_time', 'report_created_at', 'max_rps', 'release']);
   const DEFAULT_SORT = 'end_time';
+  // The Releases tab is the reports panel filtered by release marks (/runs?release=*), newer releases first.
+  const RELEASES_SORT = 'release';
+  const RELEASE_NAME_MAX = 80;
+  const RELEASE_NOTE_MAX = 1000;
   const MAX_PAGE = 50000; // the server caps offset at 1 000 000
   const FILTER_MAX_LENGTH = 200;
 
@@ -20,15 +24,25 @@
     return DESC_FIRST.has(sort) ? 'desc' : 'asc';
   }
 
-  function defaultState() {
-    return { page: 1, sort: DEFAULT_SORT, dir: defaultDir(DEFAULT_SORT), q: '', service: '', verdict: '', testType: '' };
+  function defaultSort(tab) {
+    return tab === 'releases' ? RELEASES_SORT : DEFAULT_SORT;
   }
 
-  // Archive state from a query string (?q=&service=&verdict=&test_type=&sort=&dir=&page=); bad values fall back to defaults.
+  // `tab` is 'reports' or 'releases' (the same panel); `release` is the release filter of the Releases tab
+  // ('' = every marked run).
+  function defaultState(tab) {
+    const panel = tab === 'releases' ? 'releases' : 'reports';
+    const sort = defaultSort(panel);
+    return { tab: panel, page: 1, sort, dir: defaultDir(sort), q: '', service: '', verdict: '', testType: '', release: '' };
+  }
+
+  // Archive state from a query string (?tab=releases&release=&q=&service=&verdict=&test_type=&sort=&dir=&page=);
+  // bad values fall back to defaults.
   function parseQuery(search) {
     const params = new URLSearchParams(search || '');
     const text = (name) => String(params.get(name) || '').trim().slice(0, FILTER_MAX_LENGTH);
-    const state = defaultState();
+    const state = defaultState(tabFromQuery(search));
+    if (state.tab === 'releases') state.release = text('release').slice(0, RELEASE_NAME_MAX);
     state.q = text('q');
     state.service = text('service');
     // A verdict code; a shared link with an old label (?verdict=Провал) selects its code.
@@ -47,11 +61,14 @@
   // Query string for the address bar: only values that differ from the defaults, '' when none do.
   function buildQuery(state) {
     const params = new URLSearchParams();
+    const releases = state.tab === 'releases';
+    if (releases) params.set('tab', 'releases');
+    if (releases && state.release) params.set('release', state.release);
     if (state.q) params.set('q', state.q);
     if (state.service) params.set('service', state.service);
     if (state.verdict) params.set('verdict', state.verdict);
     if (state.testType) params.set('test_type', state.testType);
-    if (state.sort !== DEFAULT_SORT) params.set('sort', state.sort);
+    if (state.sort !== defaultSort(state.tab)) params.set('sort', state.sort);
     if (state.dir !== defaultDir(state.sort)) params.set('dir', state.dir);
     if (state.page > 1) params.set('page', String(state.page));
     const text = params.toString();
@@ -65,6 +82,8 @@
     if (state.service) params.set('service', state.service);
     if (state.verdict) params.set('verdict', state.verdict);
     if (state.testType) params.set('test_type', state.testType);
+    // The Releases tab: '*' keeps every run with a release mark, a name the runs of that release.
+    if (state.tab === 'releases') params.set('release', state.release || '*');
     params.set('offset', String((Math.max(1, state.page) - 1) * pageSize));
     params.set('limit', String(pageSize));
     params.set('sort', state.sort);
@@ -75,7 +94,7 @@
   }
 
   function hasFilters(state) {
-    return !!(state.q || state.service || state.verdict || state.testType);
+    return !!(state.q || state.service || state.verdict || state.testType || (state.tab === 'releases' && state.release));
   }
 
   // Chips above the table, one per active filter. `labels.service(id)` and `labels.testType(key)` give display names.
@@ -86,6 +105,7 @@
     if (state.service) chips.push({ key: 'service', label: LL.t('archive.filter.service'), value: names.service ? names.service(state.service) : state.service });
     if (state.verdict) chips.push({ key: 'verdict', label: LL.t('archive.filter.verdict'), value: LL.verdictLabel(state.verdict) });
     if (state.testType) chips.push({ key: 'testType', label: LL.t('archive.filter.test_type'), value: names.testType ? names.testType(state.testType) : state.testType });
+    if (state.tab === 'releases' && state.release) chips.push({ key: 'release', label: LL.t('archive.filter.release'), value: state.release });
     return chips;
   }
 
@@ -231,15 +251,74 @@
     const bits = [];
     if (job.kind === 'confluence') bits.push(LL.t('archive.jobs.kind_confluence'));
     if (job.kind === 'forecast_confluence') bits.push(LL.t('archive.jobs.kind_forecast_confluence'));
+    if (job.kind === 'compare_confluence') bits.push(LL.t('archive.jobs.kind_compare_confluence'));
+    if (job.kind === 'release_confluence') bits.push(LL.t('archive.jobs.kind_release_confluence'));
     if (job.service) bits.push(job.service);
     bits.push(job.status === 'running' ? `${Number(job.progress) || 0}% — ${job.message || ''}` : (job.message || ''));
     if (job.updated_at) bits.push(LL.formatDateTime(job.updated_at));
     return bits.filter(Boolean).join(' · ');
   }
 
-  // The tab of the page from its address: '?tab=runs' opens the load test runs, anything else the reports.
+  // The tab of the page from its address: '?tab=runs' opens the load test runs, '?tab=releases' the reports with a
+  // release mark, anything else the reports.
   function tabFromQuery(search) {
-    return new URLSearchParams(search || '').get('tab') === 'runs' ? 'runs' : 'reports';
+    const tab = new URLSearchParams(search || '').get('tab');
+    return tab === 'runs' || tab === 'releases' ? tab : 'reports';
+  }
+
+  // Marks of a run in the name cell (/runs: release, release_accepted, baseline): [{kind, text, title}].
+  function releasePills(run) {
+    const r = run || {};
+    const release = String(r.release || '');
+    const pills = [];
+    if (release) {
+      pills.push({
+        kind: r.release_accepted ? 'accepted' : 'release',
+        text: release,
+        title: LL.t(r.release_accepted ? 'archive.release.pill_accepted_title' : 'archive.release.pill_title', { release }),
+      });
+    }
+    if (r.baseline) pills.push({ kind: 'baseline', text: LL.t('archive.release.pill_baseline'), title: LL.t('archive.release.pill_baseline_title') });
+    return pills;
+  }
+
+  // «Сравнить с прошлым релизом»: the compare page picks B by itself (the accepted run of an earlier release, else the
+  // previous successful run).
+  function compareWithPreviousRelease(run) {
+    return `/compare?run_a=${encodeURIComponent((run && run.run_name) || '')}&baseline=previous_release`;
+  }
+
+  // Body of the «Отметить релиз…» dialog from GET /runs/<run>/release.
+  function releaseDialogHtml(state) {
+    const s = state || {};
+    const esc = (value) => LL.ui.escapeHtml(value);
+    const names = Array.isArray(s.releases) ? s.releases : [];
+    const nameMax = Number(s.name_max) || RELEASE_NAME_MAX;
+    const noteMax = Number(s.note_max) || RELEASE_NOTE_MAX;
+    const now = s.release
+      ? LL.t(s.accepted ? 'archive.release.now_accepted' : 'archive.release.now_marked', { release: s.release })
+      : LL.t('archive.release.now_none');
+    return [
+      '<div class="release-mark-dialog">',
+      `<p class="muted">${esc(now)}</p>`,
+      `<label class="release-mark-field"><span>${esc(LL.t('archive.release.name_label'))}</span>`,
+      `<input type="text" name="releaseName" maxlength="${nameMax}" list="releaseMarkNames" autocomplete="off" value="${esc(s.release || '')}" placeholder="${esc(LL.t('archive.release.name_placeholder'))}"></label>`,
+      `<datalist id="releaseMarkNames">${names.map((name) => `<option value="${esc(name)}"></option>`).join('')}</datalist>`,
+      `<label class="release-mark-field"><span>${esc(LL.t('archive.release.note_label'))}</span>`,
+      `<textarea name="releaseNote" rows="2" maxlength="${noteMax}">${esc(s.note || '')}</textarea></label>`,
+      `<label class="checkbox-line"><input type="checkbox" name="releaseAccepted"${s.accepted_manual ? ' checked' : ''}> <span>${esc(LL.t('archive.release.accept_label'))}</span></label>`,
+      `<p class="dim release-mark-hint">${esc(LL.t('archive.release.accept_hint'))}</p>`,
+      '<div class="dialog-error" data-release-error role="alert"></div>',
+      '</div>',
+    ].join('');
+  }
+
+  // Why the dialog cannot be saved; '' when it can (the server checks the rest).
+  function releaseFormProblem(name) {
+    const value = String(name || '').trim();
+    if (!value) return LL.t('archive.release.name_required');
+    if (value.length > RELEASE_NAME_MAX) return LL.t('archive.release.name_too_long', { max: RELEASE_NAME_MAX });
+    return '';
   }
 
   // Id of the report a load test run produced, from its address /reports/<id>; '' without one.
@@ -273,7 +352,8 @@
     PAGE_SIZE, SORT_KEYS, defaultState, defaultDir, parseQuery, buildQuery, buildRunsUrl, hasFilters, activeChips,
     withoutFilter, nextSort, compareTargets, compareUrl, selectionLabel, selectionHint, formatRps, timeCell, durationText,
     shortTypeLabel, verdictTitle, pagerText, jobMeta, shortDateTime, slaText, p95Text, pageCount, pageText,
-    tabFromQuery, reportIdFromUrl, launchedIndex, launchedFor,
+    tabFromQuery, reportIdFromUrl, launchedIndex, launchedFor, defaultSort, releasePills, compareWithPreviousRelease,
+    releaseDialogHtml, releaseFormProblem,
   };
 
   // ---- page --------------------------------------------------------------------------------
@@ -289,9 +369,11 @@
   let columnLabels = [];
   // Runs started from the Run test page (launchedIndex), engineers only.
   let launchedRuns = null;
-  // 'reports' or 'runs'; only the active tab writes the address and refreshes in the background.
+  // 'reports', 'releases' or 'runs'; only the active tab writes the address and refreshes in the background.
+  // Reports and Releases share the reports panel (state.tab tells them apart).
   let activeTab = 'reports';
   let reportsStarted = false;
+  let releaseNamesLoaded = false;
 
   // ---- filters ----
 
@@ -333,11 +415,29 @@
     }
   }
 
+  // Release names of the area for the filter of the Releases tab (GET /releases_data), once per page.
+  async function loadReleaseOptions() {
+    if (releaseNamesLoaded) return;
+    releaseNamesLoaded = true;
+    try {
+      const resp = await fetch('/releases_data');
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const items = await resp.json();
+      (Array.isArray(items) ? items : []).forEach((item) => ensureOption($('releaseFilter'), String((item && item.release) || ''), String((item && item.release) || '')));
+      $('releaseFilter').value = state.release;
+    } catch (e) {
+      releaseNamesLoaded = false; // the filter keeps the value from the link
+    }
+  }
+
   function applyStateToControls() {
     $('searchInput').value = state.q;
     $('serviceFilter').value = state.service;
     $('verdictFilter').value = state.verdict;
     $('testTypeFilter').value = state.testType;
+    ensureOption($('releaseFilter'), state.release, state.release);
+    $('releaseFilter').value = state.release;
+    $('releaseFilterBox').hidden = state.tab !== 'releases';
   }
 
   function readFilters() {
@@ -345,11 +445,12 @@
     state.service = $('serviceFilter').value;
     state.verdict = $('verdictFilter').value;
     state.testType = $('testTypeFilter').value;
+    state.release = state.tab === 'releases' ? $('releaseFilter').value : '';
     state.page = 1;
   }
 
   function resetFilters() {
-    Object.assign(state, { q: '', service: '', verdict: '', testType: '', page: 1 });
+    Object.assign(state, { q: '', service: '', verdict: '', testType: '', release: '', page: 1 });
     applyStateToControls();
   }
 
@@ -395,7 +496,7 @@
   }
 
   function syncUrl() {
-    if (activeTab !== 'reports') return;
+    if (activeTab === 'runs') return;
     try {
       history.replaceState(history.state, '', `${location.pathname}${buildQuery(state)}${location.hash}`);
     } catch (e) { /* the address bar stays as it was */ }
@@ -519,6 +620,32 @@
     items.appendChild(menuButton(LL.t('archive.row.compare_with'), () => {
       location.href = '/compare?run_a=' + encodeURIComponent(run.run_name);
     }));
+    items.appendChild(menuButton(LL.t('archive.release.compare_previous'), () => {
+      location.href = compareWithPreviousRelease(run);
+    }));
+    if (LL.can('engineer')) {
+      items.appendChild(menuButton(LL.t('archive.release.mark'), async () => {
+        menu.removeAttribute('open');
+        await openReleaseDialog(run);
+      }));
+      if (run.release && !run.release_accepted) {
+        items.appendChild(menuButton(LL.t('archive.release.accept'), async () => {
+          menu.removeAttribute('open');
+          await changeMark(run, 'PUT', 'release', { release: run.release, accepted: true }, LL.t('archive.release.accepted_done', { name: run.run_name, release: run.release }));
+        }));
+      }
+      if (run.release) {
+        items.appendChild(menuButton(LL.t('archive.release.unmark'), async () => {
+          menu.removeAttribute('open');
+          await changeMark(run, 'DELETE', 'release', null, LL.t('archive.release.unmarked_done', { name: run.run_name }));
+        }));
+      }
+      items.appendChild(menuButton(LL.t(run.baseline ? 'archive.release.unpin' : 'archive.release.pin'), async () => {
+        menu.removeAttribute('open');
+        await changeMark(run, run.baseline ? 'DELETE' : 'PUT', 'baseline', run.baseline ? null : {},
+          LL.t(run.baseline ? 'archive.release.unpinned_done' : 'archive.release.pinned_done', { name: run.run_name }));
+      }));
+    }
     const launched = launchedRun(run);
     if (launched && LL.can('engineer')) {
       items.appendChild(menuButton(LL.t('archive.row.relaunch'), () => {
@@ -583,6 +710,82 @@
     }
   }
 
+  // PUT/DELETE /runs/<run>/release|baseline; the state of the run's marks, or an Error with the server message.
+  async function markRequest(run, method, what, body) {
+    const init = { method };
+    if (body) { init.headers = { 'Content-Type': 'application/json' }; init.body = JSON.stringify(body); }
+    const resp = await fetch(`/runs/${encodeURIComponent(run.run_name)}/${what}`, init);
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    return data;
+  }
+
+  async function changeMark(run, method, what, body, doneText) {
+    try {
+      await markRequest(run, method, what, body);
+      LL.ui.toast(doneText, { tone: 'ok' });
+      releaseNamesLoaded = false;
+      if (state.tab === 'releases') loadReleaseOptions();
+      await loadPage({ quiet: true });
+    } catch (err) {
+      LL.ui.toast(LL.t('archive.release.failed', { error: err.message }), { tone: 'error' });
+    }
+  }
+
+  async function openReleaseDialog(run) {
+    let current;
+    try {
+      const resp = await fetch(`/runs/${encodeURIComponent(run.run_name)}/release`);
+      current = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(current.error || `HTTP ${resp.status}`);
+    } catch (err) {
+      LL.ui.toast(LL.t('archive.release.failed', { error: err.message }), { tone: 'error' });
+      return;
+    }
+    let busy = false;
+    await LL.ui.dialog({
+      title: LL.t('archive.release.dialog_title', { name: run.run_name }),
+      bodyHtml: releaseDialogHtml(current),
+      onOpen: (body) => {
+        const error = body.querySelector('[data-release-error]');
+        body.addEventListener('input', () => { error.textContent = ''; });
+        const input = body.querySelector('input[name="releaseName"]');
+        if (input) { input.focus(); input.select(); }
+      },
+      actions: [
+        { label: LL.t('common.action.cancel') },
+        {
+          label: LL.t('common.action.save'),
+          primary: true,
+          onClick: async (close, body) => {
+            if (busy) return;
+            const name = String(body.querySelector('input[name="releaseName"]').value || '').trim();
+            const note = String(body.querySelector('textarea[name="releaseNote"]').value || '').trim();
+            const accepted = body.querySelector('input[name="releaseAccepted"]').checked;
+            const error = body.querySelector('[data-release-error]');
+            const problem = releaseFormProblem(name);
+            error.textContent = problem;
+            if (problem) return;
+            busy = true;
+            try {
+              const payload = { release: name, note, accepted };
+              const next = await markRequest(run, 'PUT', 'release', payload);
+              close(next);
+              LL.ui.toast(LL.t(next.accepted ? 'archive.release.marked_accepted' : 'archive.release.marked', { name: run.run_name, release: next.release }), { tone: 'ok' });
+              releaseNamesLoaded = false;
+              if (state.tab === 'releases') loadReleaseOptions();
+              await loadPage({ quiet: true });
+            } catch (err) {
+              error.textContent = err.message;
+            } finally {
+              busy = false;
+            }
+          }
+        }
+      ]
+    });
+  }
+
   async function deleteRun(run) {
     const ok = await LL.ui.confirm({
       title: LL.t('archive.delete.title'),
@@ -592,8 +795,20 @@
     });
     if (!ok) return;
     try {
-      const resp = await fetch('/runs/' + encodeURIComponent(run.run_name), { method: 'DELETE' });
-      const j = await resp.json();
+      let resp = await fetch('/runs/' + encodeURIComponent(run.run_name), { method: 'DELETE' });
+      let j = await resp.json();
+      // The accepted run of a release or a baseline: a second confirmation, then the deletion is forced.
+      if (resp.status === 409 && j && j.code === 'release_protected') {
+        const sure = await LL.ui.confirm({
+          title: LL.t('archive.delete.protected_title'),
+          message: LL.t('archive.delete.protected_message', { name: run.run_name }),
+          confirmText: LL.t('archive.delete.protected_confirm'),
+          danger: true
+        });
+        if (!sure) return;
+        resp = await fetch('/runs/' + encodeURIComponent(run.run_name) + '?force=1', { method: 'DELETE' });
+        j = await resp.json();
+      }
       if (resp.ok) {
         selected.delete(run.run_name);
         LL.ui.toast(LL.t('archive.delete.done'), { tone: 'ok' });
@@ -634,6 +849,8 @@
         renderEmpty(LL.t('archive.empty.filtered'), `<button type="button" class="btn btn-sm" id="emptyReset">${LL.tHtml('archive.empty.reset_filters')}</button>`);
         const reset = $('emptyReset');
         if (reset) reset.addEventListener('click', () => { resetFilters(); loadPage(); });
+      } else if (state.tab === 'releases') {
+        renderEmpty(LL.t('archive.releases.empty'));
       } else {
         renderEmpty(LL.t('archive.empty.none'), LL.can('engineer') ? `<a class="btn btn-sm" href="/new">${LL.tHtml('archive.empty.create')}</a>` : '');
       }
@@ -661,6 +878,13 @@
         badge.textContent = LL.t('archive.row.launched');
         nameCell.appendChild(badge);
       }
+      releasePills(r).forEach((mark) => {
+        const pill = document.createElement('span');
+        pill.className = `release-pill ${mark.kind}`;
+        pill.textContent = mark.text;
+        pill.title = mark.title;
+        nameCell.appendChild(pill);
+      });
       tr.appendChild(nameCell);
       const serviceTd = cell(r.service || '—', 'nowrap service-cell');
       serviceTd.title = r.service || '';
@@ -823,6 +1047,12 @@
     } else if (job.kind === 'forecast_confluence' && job.report_url) {
       link.href = job.report_url;
       link.textContent = LL.t('archive.jobs.open_forecast');
+    } else if (job.kind === 'compare_confluence' && job.report_url) {
+      link.href = job.report_url;
+      link.textContent = LL.t('archive.jobs.open_compare');
+    } else if (job.kind === 'release_confluence' && job.report_url) {
+      link.href = job.report_url;
+      link.textContent = LL.t('archive.jobs.open_release');
     } else if (job.page_url && String(job.page_url).startsWith('/reports/')) {
       link.href = job.page_url;
       link.textContent = LL.t('archive.jobs.open_report');
@@ -875,7 +1105,7 @@
       strip.style.display = '';
       if (running && !jobsTimer) {
         jobsTimer = setInterval(async () => {
-          if (activeTab !== 'reports') return;
+          if (activeTab === 'runs') return;
           await loadJobsStrip();
           await loadPage({ quiet: true });
         }, JOBS_REFRESH_MS);
@@ -908,7 +1138,7 @@
       window.clearTimeout(searchTimer);
       searchTimer = window.setTimeout(applySearch, SEARCH_DEBOUNCE_MS);
     });
-    ['serviceFilter', 'verdictFilter', 'testTypeFilter'].forEach((id) => {
+    ['serviceFilter', 'verdictFilter', 'testTypeFilter', 'releaseFilter'].forEach((id) => {
       $(id).addEventListener('change', () => { readFilters(); loadPage(); });
     });
     $('prevBtn').addEventListener('click', () => { if (state.page > 1) { state.page -= 1; loadPage(); } });
@@ -938,10 +1168,10 @@
 
   // The reports tab starts on its first showing; later showings refresh it quietly (runs may have taken
   // their reports with them) and put its filters back into the address.
-  async function showReports() {
+  async function showReports(modeChanged) {
     if (reportsStarted) {
       syncUrl();
-      await loadPage({ quiet: true });
+      await loadPage(modeChanged ? undefined : { quiet: true });
       loadJobsStrip();
       return;
     }
@@ -953,30 +1183,46 @@
     loadJobsStrip();
   }
 
+  const TAB_IDS = { reports: 'tabReports', releases: 'tabReleases', runs: 'tabRuns' };
+  const TAB_SUBTITLES = { reports: 'archive.subtitle', releases: 'archive.releases.subtitle', runs: 'archive.runs.subtitle' };
+
+  // Reports and Releases are one panel: switching between them keeps the filters and takes the default sort of the tab.
+  function switchReportsMode(tab) {
+    if (state.tab === tab) return false;
+    const sort = defaultSort(tab);
+    Object.assign(state, { tab, page: 1, sort, dir: defaultDir(sort), release: tab === 'releases' ? state.release : '' });
+    applyStateToControls();
+    return true;
+  }
+
   function selectTab(tab, options) {
-    const next = tab === 'runs' && LL.archiveRuns ? 'runs' : 'reports';
+    const next = tab === 'runs' && LL.archiveRuns ? 'runs' : (tab === 'releases' ? 'releases' : 'reports');
     activeTab = next;
-    [['reports', 'tabReports', 'reportsPanel'], ['runs', 'tabRuns', 'runsPanel']].forEach(([name, tabId, panelId]) => {
+    Object.entries(TAB_IDS).forEach(([name, tabId]) => {
       const on = name === next;
       const btn = $(tabId);
+      if (!btn) return;
       btn.classList.toggle('active', on);
       btn.setAttribute('aria-selected', on ? 'true' : 'false');
       btn.tabIndex = on ? 0 : -1;
-      $(panelId).hidden = !on;
     });
+    $('reportsPanel').hidden = next === 'runs';
+    $('runsPanel').hidden = next !== 'runs';
     const subtitle = document.querySelector('.page-header .page-subtitle');
-    if (subtitle) subtitle.textContent = LL.t(next === 'runs' ? 'archive.runs.subtitle' : 'archive.subtitle');
+    if (subtitle) subtitle.textContent = LL.t(TAB_SUBTITLES[next]);
     if (next === 'runs') {
       $('archiveBreadcrumbs').hidden = true;
       LL.archiveRuns.show();
     } else {
-      showReports();
+      const changed = switchReportsMode(next);
+      if (next === 'releases') loadReleaseOptions();
+      showReports(changed);
     }
-    if (options && options.focus) $(next === 'runs' ? 'tabRuns' : 'tabReports').focus();
+    if (options && options.focus) $(TAB_IDS[next]).focus();
   }
 
   function wireTabs() {
-    const tabs = [$('tabReports'), $('tabRuns')];
+    const tabs = [$('tabReports'), $('tabReleases'), $('tabRuns')].filter(Boolean);
     tabs.forEach((btn) => btn.addEventListener('click', () => {
       if (btn.dataset.tab !== activeTab) selectTab(btn.dataset.tab);
     }));
@@ -984,7 +1230,7 @@
     tabs.forEach((btn, i) => btn.addEventListener('keydown', (e) => {
       if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
       e.preventDefault();
-      const other = tabs[(i + 1) % tabs.length];
+      const other = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
       selectTab(other.dataset.tab, { focus: true });
     }));
   }
@@ -997,7 +1243,7 @@
     columnLabels = Array.from(document.querySelectorAll('#runsTable thead th')).map((th) => th.textContent.trim());
     // Filters, sort and page come from the address (?service= also arrives from report breadcrumbs).
     const tab = tabFromQuery(location.search);
-    if (tab === 'reports') Object.assign(state, parseQuery(location.search));
+    if (tab !== 'runs') Object.assign(state, parseQuery(location.search));
     fillStaticOptions();
     applyStateToControls();
     wireControls();

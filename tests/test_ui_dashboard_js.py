@@ -283,7 +283,7 @@ def test_menu_badge_counts_running_tests():
 
 
 def test_manual_verdict_pill_is_marked():
-    manual = {"verdict": "risk", "reason": "деградация <стенда>", "author": "ivanov", "changed_at": "2026-10-17T12:00:00Z"}
+    manual = {"verdict": "risk", "reason": "деградация <стенда>", "author": "engineer1", "changed_at": "2026-10-17T12:00:00Z"}
     html = call(f"LL.dashboard._internals.verdictPill('risk', '', {js(manual)})")
     assert 'class="pill warn"' in html and ">Есть риски</span>" in html and "verdict-manual-mark" in html and "&lt;стенда&gt;" in html
     assert "verdict-manual-mark" not in call("LL.dashboard._internals.verdictPill('fail')")

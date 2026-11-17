@@ -94,6 +94,7 @@
             <option value="soak">{{ t('common.test_type.soak') }}</option>
             <option value="spike">{{ t('common.test_type.spike') }}</option>
             <option value="stress">{{ t('common.test_type.stress') }}</option>
+            <option value="scenario">{{ t('common.test_type.scenario') }}</option>
           </select>
           <div class="field-hint">{{ t('launch.form.test_type_hint') }}</div>
         </div>
@@ -101,6 +102,11 @@
           <label for="runName">{{ t('launch.form.run_name') }} <span class="optional">{{ t('launch.form.optional') }}</span></label>
           <input type="text" id="runName" maxlength="180" placeholder="{{ t('launch.form.run_name_placeholder') }}" />
           <div class="field-hint">{{ t('launch.form.run_name_hint') }}</div>
+        </div>
+        <div>
+          <label for="release">{{ t('launch.form.release') }} <span class="optional">{{ t('launch.form.optional') }}</span></label>
+          <input type="text" id="release" maxlength="80" autocomplete="off" placeholder="{{ t('launch.form.release_placeholder') }}" />
+          <div class="field-hint">{{ t('launch.form.release_hint') }}</div>
         </div>
         <div>
           <label for="maxDuration">{{ t('launch.form.max_duration') }}</label>

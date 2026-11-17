@@ -335,7 +335,8 @@ def test_find_previous_run_and_metric_stats_with_scripted_connection():
         conn, "public", "llm_reports", exclude_run_name="nightly-2", service="demo",
         before=datetime(2024, 11, 1, tzinfo=timezone.utc),
     )
-    assert previous == BaselineRun(run_name="release-2.4", service="demo", verdict="pass", created_at=created)
+    assert previous == BaselineRun(run_name="release-2.4", service="demo", verdict="pass", created_at=created,
+                                   mode="previous_success")
     sql_text, params = conn.log[0]
     # previous_success compares the code; the CASE maps rows saved with «Успешно» to it.
     assert "r.service = %s" in sql_text and "= 'pass'" in sql_text and "WHEN 'Успешно' THEN 'pass'" in sql_text
@@ -1004,7 +1005,7 @@ def test_sla_window_falls_back_to_last_stable_step_where_latency_holds():
     # is already a latency collapse: timeouts keep RPS flat, so RPS alone marks it stable.
     index = pd.date_range(datetime.fromtimestamp(START_TS, tz=timezone.utc), periods=12, freq="1min")
     latency = pd.DataFrame(
-        {"group=::ADDRESSById": [60.0, 61.0, 61.0, 57.0, 66.0, 65.0, 461.0, 60001.0, 32731.0, 60003.0, 60001.0, 60001.0]},
+        {"group=::GetProduct": [60.0, 61.0, 61.0, 57.0, 66.0, 65.0, 461.0, 60001.0, 32731.0, 60003.0, 60001.0, 60001.0]},
         index=index,
     )
     segments = [
@@ -1063,14 +1064,14 @@ def _run_steps(values, index):
 
 
 def test_plateau_after_rps_drop_is_not_stable_max():
-    # Per-minute RPS of ODP-87633: steps up to ≈1597, then RPS falls to a flat ≈1400 (timeouts).
+    # Anonymized per-minute RPS: steps up to ≈1597, then RPS falls to a flat ≈1400 (timeouts).
     rps = [
         22, 118, 235, 367, 500, 634, 721, 744, 744, 744, 744, 746, 792, 817, 817, 817, 817, 819, 871, 898,
         898, 898, 898, 900, 958, 989, 988, 988, 988, 990, 1055, 1088, 1088, 1088, 1088, 1089, 1162, 1198, 1199, 1198,
         1198, 1200, 1279, 1319, 1319, 1319, 1320, 1322, 1408, 1450, 1451, 1452, 1452, 1454, 1548, 1596, 1597, 1597, 1595, 1599,
         1673, 1450, 1400, 1431, 1398, 1384, 1384, 1751,
     ]
-    index = pd.date_range("2026-09-22T15:37:00Z", periods=len(rps), freq="1min")
+    index = pd.date_range("2024-01-01T10:00:00Z", periods=len(rps), freq="1min")
     profile = step_detector.find_step_profile(pd.Series([float(v) for v in rps], index=index), min_stable_minutes=5.0)
     segments = profile["step_segments"]
     assert segments[-1]["stable"] is True and segments[-1]["after_drop"] is True
@@ -1084,7 +1085,7 @@ def test_plateau_after_rps_drop_is_not_stable_max():
     assert profile["stable_max"] == pytest.approx(1597.0)
     assert profile["stable_max"] > segments[-1]["level"]
 
-    healthy_latency = pd.DataFrame({"group=::ADDRESSById": [60.0] * len(rps)}, index=index)
+    healthy_latency = pd.DataFrame({"group=::GetProduct": [60.0] * len(rps)}, index=index)
     domain_data = {
         "lt_framework": {
             "pack": {"sections": [{"label": "LT RPS", "top_series": [{"series": "all=", "stable_max": profile["stable_max"], "step_segments": segments}]}]},
