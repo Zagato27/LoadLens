@@ -39,7 +39,7 @@ from loadlens_app.config_schema import (
     validate_sla,
     warnings_for,
 )
-from AI.providers import without_env_keys
+from AI.providers import llm_scope, structured_output_enabled, without_env_keys
 from AI.query_packs import prune_queries
 from AI.step_detector import without_retired_sla_keys
 from loadlens_app.config_secrets import SecretPlaceholderError, destination_changed, mask_secrets, restore_secrets
@@ -49,6 +49,7 @@ from loadlens_app.connection_checks import (
     check_data_source,
     check_resolved_source,
     list_grafana_datasources,
+    list_llm_models,
     run_check,
 )
 from loadlens_app.load_tests.executors import check_generator
@@ -65,6 +66,7 @@ from loadlens_app.core import (
     AREA_OVERRIDABLE_SECTIONS,
     CONFLUENCE_TEMPLATE_KEYS,
     METRICS_RUNTIME_PATH,
+    _RUNTIME_FILES_LOCK,
     _active_metrics_config,
     _active_project_area,
     _available_domain_keys,
@@ -76,10 +78,12 @@ from loadlens_app.core import (
     _metrics_runtime_view,
     _normalize_system_context,
     _per_area_config,
+    _runtime_settings_write,
     _save_metrics_runtime_data,
     _save_settings_runtime_data,
     _services_map_for_area,
 )
+from loadlens_app.llm_profiles import Connections, ProfileError, SECTION as LLM_PROFILES, connections, effective_llm
 
 config_bp = Blueprint("config_api", __name__)
 
@@ -124,7 +128,7 @@ def _set_nested(target: dict, parts: list[str], value: dict) -> None:
 
 
 # Fields whose values name the host a section talks to. Only host and port reach the audit log.
-_ADDRESS_KEYS = ("url", "base_url", "api_base_url", "url_basic", "grafana_base_url", "loki_url")
+_ADDRESS_KEYS = ("url", "base_url", "api_base_url", "url_basic", "grafana_base_url", "loki_url", "proxy_url")
 _AUDIT_TARGETS_LIMIT = 10
 
 
@@ -241,6 +245,7 @@ def get_config():
             "areas_meta": areas_meta,
             "active_area": active_area,
             "llm": _area_section(area, "llm"),
+            "llm_profiles": connections().view(active_area),
             "data_sources": copy.deepcopy(CONFIG.get("data_sources") or {}),
             "domain_sources": _area_section(area, "domain_sources"),
             "logs_source": _area_section(area, "logs_source"),
@@ -309,6 +314,7 @@ def get_config():
         return internal_error(e)
 
 
+@_runtime_settings_write
 def _update_area_service_section(area: str, service: str, section: str, payload: dict) -> None:
     runtime = _load_settings_runtime_data()
     if "per_area" not in runtime or not isinstance(runtime.get("per_area"), dict):
@@ -324,6 +330,7 @@ def _update_area_service_section(area: str, service: str, section: str, payload:
     _save_settings_runtime_data(runtime)
 
 
+@_runtime_settings_write
 def _remove_area_service_section(area: str, service: str, section: str) -> bool:
     """Drops a service override so the area value applies again; returns whether it existed."""
     runtime = _load_settings_runtime_data()
@@ -380,6 +387,7 @@ def _update_metrics_config(area: str, service: str, payload: dict) -> tuple[dict
 
 
 @config_bp.route("/config", methods=["POST"])
+@_runtime_settings_write
 def update_config():
     """Применяет изменения конфигурации (глобально, по области или по сервису).
 
@@ -396,6 +404,8 @@ def update_config():
     if section.split(".")[0] == "auth":
         # Authentication settings (and the session key) must not be writable from the browser.
         return jsonify({"error": translate("api.config.auth_readonly")}), 403
+    if section.split(".")[0] == LLM_PROFILES:
+        return jsonify({"error": translate("server.llm_profiles.invalid_action")}), 400
     if section != "metrics_config":
         try:
             payload = restore_secrets(payload, _current_scope_value(section, area, service))
@@ -502,6 +512,7 @@ def update_config():
         return internal_error(e)
 
 
+@_runtime_settings_write
 def store_section(section: str, payload: dict, area: str, service: str) -> dict:
     """Writes a section at its scope: service (queries, sla), area override, or global.
 
@@ -754,7 +765,61 @@ def llm_models():
     except SecretPlaceholderError as e:
         return jsonify({"error": str(e)}), 400
     _audit_addresses(payload)
-    return jsonify(list_llm_models(payload).to_dict()), 200
+    with without_env_keys():
+        return jsonify(list_llm_models(payload).to_dict()), 200
+
+
+@config_bp.route("/config/llm_profiles", methods=["POST"])
+def llm_profiles():
+    """Mutates a saved connection or checks a draft at the supplied scope."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": translate("server.llm_profiles.invalid_action")}), 400
+    area, profile_id, action = (body.get(key, "") for key in ("area", "id", "action"))
+    data = body.get("data", {})
+    if not all(isinstance(value, str) for value in (area, profile_id, action)) or not isinstance(data, dict):
+        return jsonify({"error": translate("server.llm_profiles.invalid_action")}), 400
+    try:
+        with _RUNTIME_FILES_LOCK:
+            if area and area not in {entry["id"] for entry in _list_project_areas()}:
+                raise ProfileError(translate("server.llm_profiles.invalid_area"), 404)
+            if action in ("test", "models"):
+                profile = connections().prepare(area, profile_id, data)
+            else:
+                runtime = _load_settings_runtime_data()
+                catalog = Connections(runtime)
+                if action == "save":
+                    profile_id = catalog.save(area, profile_id, data)
+                elif action == "activate":
+                    catalog.activate(area, profile_id)
+                elif action == "delete":
+                    catalog.delete(area, profile_id)
+                elif action == "analysis":
+                    current = catalog.analysis_settings(area)
+                    catalog.save_analysis(area, restore_secrets(data, current))
+                else:
+                    raise ProfileError(translate("server.llm_profiles.invalid_action"))
+                if area and not set(catalog.areas).difference({area}):
+                    # Adding the first runtime project entry must keep the other metrics-only projects visible.
+                    per_area = runtime.setdefault("per_area", {})
+                    for entry in _list_project_areas():
+                        per_area.setdefault(entry["id"], {})
+                _save_settings_runtime_data(runtime)
+                g.audit_extra = {"operation": action, "area": area, "profile_id": profile_id}
+                return jsonify({"id": profile_id, **Connections(runtime).view(area)})
+
+        provider = profile["provider"]
+        llm = {"provider": provider, provider: profile["settings"], "_use_env_keys": profile["use_env"]}
+        _audit_addresses(llm)
+        with llm_scope(llm):
+            result = run_check("llm", llm) if action == "test" else list_llm_models(llm)
+        return jsonify(result.to_dict())
+    except ProfileError as exc:
+        return jsonify({"error": str(exc)}), exc.status
+    except SecretPlaceholderError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return internal_error(exc)
 
 
 @config_bp.route("/config/query_preview", methods=["POST"])
@@ -833,15 +898,6 @@ def _form_context(value: object) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
-def _structured_for_scope(area: str) -> bool:
-    """GigaChat function calling reads the global settings, so it is used only when the area keeps them."""
-    from AI.providers import structured_output_enabled
-
-    if not structured_output_enabled():
-        return False
-    return not area or _area_section(area, "llm") == (CONFIG.get("llm") or {})
-
-
 @config_bp.route("/config/system_context/import", methods=["POST"])
 def import_system_context():
     """Fills the system context from a document or pasted text with one model call.
@@ -891,7 +947,7 @@ def import_system_context():
         if service and service not in _services_map_for_area(area):
             raise ContextImportError(translate("api.scope.service_not_in_area", service=service, area=area), 404, "not_found")
         # The model is checked first: without it there is no point in reading a page or a file.
-        llm_section = _area_section(area, "llm") if area else _config_node("llm")
+        llm_section = effective_llm(area)
         provider, _settings = llm_for_scope(llm_section)
         page = None
         confluence_url = str(body.get("confluence_url") or "").strip()
@@ -914,7 +970,8 @@ def import_system_context():
         owner = _import_owner()
         consume_llm(owner, "context_import")
         try:
-            draft = ask_model(extracted.text, llm_section, use_structured=_structured_for_scope(area))
+            with llm_scope(llm_section):
+                draft = ask_model(extracted.text, llm_section, use_structured=structured_output_enabled())
         except ContextImportError:
             refund_llm(owner, "context_import")
             raise

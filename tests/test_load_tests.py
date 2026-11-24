@@ -653,6 +653,19 @@ def test_quick_failure_is_not_part_of_the_report_window(world):
     assert world.store.get(run_id).instances[0].message.startswith("Команда инструмента не найдена")
 
 
+def test_watcher_cancels_a_manual_run_stopped_before_its_first_tick(world):
+    run_id = _run(world, [_inst(0, generator="manual", tool="")])
+    requested = service.request_stop(run_id)
+    assert requested.status == store.RUN_STARTING and requested.stop_requested(0)
+
+    world.watcher.tick()
+
+    run = world.store.get(run_id)
+    assert run.status == store.RUN_CANCELLED
+    assert run.instances[0].status == store.INST_CANCELLED
+    assert not world.started
+
+
 def test_manual_generator_marks_the_window_only(world):
     run_id = _run(world, [_inst(0, generator="manual", tool="")], use_llm=False)
     world.watcher.tick()

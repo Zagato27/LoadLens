@@ -27,7 +27,7 @@ MENTION_WEIGHT = 4
 STARTS_INSIDE_WEIGHT = 2
 OVERLAP_WEIGHT = 1
 SEVERITY_WEIGHT = {"critical": 2, "high": 1}
-DIGIT_GROUP_RE = re.compile(r"(?<=\d)[ \u00a0\u202f](?=\d{3}(?!\d))")
+DIGIT_GROUP_RE = re.compile(r"(?<!\w)\d{1,3}(?:[ \u00a0\u202f]\d{3})+(?!\d)")
 RAW_EXCERPT_CHARS = 200
 
 
@@ -159,7 +159,7 @@ def parse_explanation(raw: str) -> LimitExplanation:
 
 
 def _grouped(text: str) -> str:
-    return DIGIT_GROUP_RE.sub("", text)
+    return DIGIT_GROUP_RE.sub(lambda match: "".join(match.group().split()), text)
 
 
 def _numbers(value: Any) -> list[float]:

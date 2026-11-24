@@ -2441,7 +2441,9 @@ def test_forecast_explanation_is_generated_checked_and_cached(client, monkeypatc
         explain, "save_forecast_explanation",
         lambda conn, schema, table, run_id, digest, payload: stored.update({run_id: StoredExplanation(run_id, digest, payload, None)}),
     )
-    monkeypatch.setitem(explain.CONFIG, "llm", {"provider": "openai", "openai": {"model": "test-model"}})
+    from settings import CONFIG
+
+    monkeypatch.setitem(CONFIG, "llm", {"provider": "openai", "openai": {"model": "test-model"}})
     monkeypatch.setattr(explain, "ask_llm_with_text_data", lambda *args, **kwargs: json_module.dumps(answer, ensure_ascii=False))
 
     first = client.get("/forecast/abc/explanation").get_json()

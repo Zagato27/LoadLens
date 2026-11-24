@@ -34,12 +34,20 @@ from AI.step_detector import MAX_CV as STEP_MAX_CV, detect_steps, find_step_prof
 from AI.i18n import t
 from AI.i18n import LocalizedError, Msg, msg, plural
 from AI.report_texts import LocaleTable
-from AI.prompt_assembly import assemble_prompt, build_analysis_guidance
+from AI.prompt_assembly import (
+    SLA_FIELDS, SLA_QUERY_KEYS, assemble_prompt, build_analysis_guidance, no_sla_guidance,
+    sla_guidance_lines, system_context_rules,
+)
 from AI.prompt_store import effective_override, load_prompt, resolve_lang, texts_in_all_languages
 from AI.prompt_store import text as prompt_text
-from AI.providers import attach_usage_to_scores, reset_usage, usage_domain
+from AI.context_budget import text_size
+from AI.providers import (
+    LLMRateLimitError, attach_usage_to_scores, current_llm_config, llm_scope,
+    provider_concurrency, report_prompt_budget, reset_usage, usage_domain,
+)
 from AI.scoring import LLMAnalysis, VerificationSummary, fill_missing_verdict_rationale, llm_two_pass_self_consistency, make_failed_llm_analysis, parse_llm_analysis_strict
 from AI.verification import unverified_findings, verify_analysis
+from AI.observed_steps import observed_load_steps, validate_observed_steps
 from AI.db_store import (
     BASELINE_MODE_PINNED,
     BASELINE_MODE_PREVIOUS,
@@ -76,6 +84,7 @@ from AI.sla_evaluator import (
     apply_regression,
     evaluate_sla,
     extract_target_rps_from_pack,
+    format_sla_rationale,
     format_sla_summary,
     summary_parts_from_checks,
 )
@@ -157,7 +166,7 @@ def _time_shift_hours() -> int:
         CONFIG["llm"]["time_shift_hours"] = 0  # либо другое целое число
     """
     try:
-        llm_cfg = CONFIG.get("llm") or {}
+        llm_cfg = current_llm_config()
         val = llm_cfg.get("time_shift_hours", 3)
         return int(val)
     except Exception:
@@ -597,12 +606,15 @@ def _designated_window_ctx(window: Optional[Dict[str, Any]], shift_hours: int) -
     """Stable step behind the designated peak, in report time, with the step above it that broke SLA."""
     if not window:
         return None
-    return {
+    context = {
         "start_iso": format_iso(pd.Timestamp(window["start"]), shift_hours),
         "end_iso": format_iso(pd.Timestamp(window["end"]), shift_hours),
         "degraded_level": window.get("degraded_level"),
         "degraded_checks": window.get("degraded_checks") or [],
     }
+    if window.get("degraded_start"):
+        context["degraded_start_iso"] = format_iso(pd.Timestamp(window["degraded_start"]), shift_hours)
+    return context
 
 
 def _peak_step_start(steps: Sequence[LoadStep], level: Any, shift_hours: int) -> Optional[str]:
@@ -1780,7 +1792,7 @@ def _domain_worker_count(llm_cfg: Dict[str, Any]) -> int:
     provider_cfg = (llm_cfg or {}).get(provider) if provider else None
     if not isinstance(provider_cfg, dict):
         provider_cfg = (llm_cfg or {}).get("gigachat") if isinstance((llm_cfg or {}).get("gigachat"), dict) else {}
-    concurrent = _cfg_int((provider_cfg or {}).get("max_concurrent"), 4)
+    concurrent = provider_concurrency(provider, provider_cfg)
     return max(1, min(requested, concurrent))
 
 
@@ -2114,11 +2126,16 @@ def _derive_steps_for_run(
     start_ts: float,
     end_ts: float,
     shift_hours: int,
+    observed_steps: Optional[List[dict]] = None,
+    run_tag: Optional[str] = None,
 ) -> RunSteps:
-    """Load steps of the run: step detector on the designated RPS series, else equal time buckets."""
+    """Prefer generator intervals, then the RPS detector, then equal time buckets."""
     segments = None
     detection: Optional[Dict[str, Any]] = None
     rps_series = _designated_rps_series(lt_labeled, perf_label)
+    if observed_steps is not None:
+        steps = observed_load_steps(observed_steps, rps_series, start_ts, shift_hours, min_stable_minutes)
+        return RunSteps(steps, None, {"method": "generator", "run_tag": run_tag, "min_step_minutes": min_stable_minutes})
     if rps_series is not None and isinstance(stable_cfg, dict) and _cfg_bool(stable_cfg.get("use_step_profile"), default=False):
         found = detect_steps(rps_series, min_stable_minutes=min_stable_minutes)
         segments = (found.profile or {}).get("step_segments")
@@ -2738,7 +2755,8 @@ def uploadFromLLM(
     locale; the other parameters are those of :func:`_upload_from_llm`.
     """
     lang = report_language_of(report_language, run_meta)
-    with with_locale(lang):
+    llm = ef_config.get("llm") if isinstance(ef_config, dict) else None
+    with with_locale(lang), llm_scope(llm if isinstance(llm, dict) else current_llm_config()):
         return _upload_from_llm(
             start_ts,
             end_ts,
@@ -2815,6 +2833,11 @@ def _upload_from_llm(
         min_stable_min = 5.0
     run_test_type = str((run_meta or {}).get("test_type") or "").strip().lower()
     profile = profile_for(run_test_type)
+    observed_steps = (run_meta or {}).get("observed_steps")
+    if observed_steps is not None:
+        if not (run_meta or {}).get("run_tag"):
+            raise LocalizedError("api.dashboard.observed_steps.tag")
+        observed_steps = validate_observed_steps(observed_steps, round(start_ts * 1000), round(end_ts * 1000), run_test_type)
     test_profile = profile.to_dict(lang)
     peak_performance_applicable = profile.peak_performance_applicable
     use_step_profile = resolve_step_detection(profile, sla_early)
@@ -2909,6 +2932,8 @@ def _upload_from_llm(
         start_ts=start_ts,
         end_ts=end_ts,
         shift_hours=shift_hours,
+        observed_steps=observed_steps,
+        run_tag=(run_meta or {}).get("run_tag"),
     )
     lt_mode_entries: Dict[str, Any] = {}
     if profile.mode == "spike":
@@ -2962,7 +2987,7 @@ def _upload_from_llm(
             min_stable_minutes=min_stable_min,
             stable_detection_cfg=lt_stable_cfg if key == "lt_framework" else None,
             step_detection=run_steps.detection if key == "lt_framework" else None,
-            include_stable_max=(key == "lt_framework" and peak_performance_applicable),
+            include_stable_max=(key == "lt_framework" and peak_performance_applicable and observed_steps is None),
             steps=load_steps,
             start_ts=start_ts,
             anomaly_cfg=anomaly_cfg,
@@ -2984,12 +3009,19 @@ def _upload_from_llm(
         domain_data[key] = payload
 
     lt_pack = domain_data.get("lt_framework", {}).get("pack", {})
+    if observed_steps is not None:
+        # Even an unavailable load source must retain the supplied windows for the other SLA domains.
+        lt_pack["load_steps"] = [step.to_dict() for step in load_steps]
+        domain_data.setdefault("lt_framework", {})["pack"] = lt_pack
     perf_query_label = str(sla_early.get("max_performance_query") or "").strip()
     designated_peak: Optional[float] = None
     designated_series: Optional[str] = None
     designated_source_label: Optional[str] = None
     designated_method: Optional[str] = None
-    if peak_performance_applicable and perf_query_label and "lt_framework" in domain_keys:
+    if observed_steps is not None:
+        designated_source_label = perf_query_label
+        designated_method = "observed_steps"
+    elif peak_performance_applicable and perf_query_label and "lt_framework" in domain_keys:
         rps_pick = extract_target_rps_from_pack(
             lt_pack,
             perf_query_label,
@@ -3039,7 +3071,7 @@ def _upload_from_llm(
         designated_peak = float(sla_window["level"])
         designated_series = str(sla_window.get("series") or "") or designated_series
         designated_source_label = str(sla_window.get("label") or "") or designated_source_label
-        designated_method = f"stable_max (query: {designated_source_label})"
+        designated_method = "observed_steps" if observed_steps is not None else f"stable_max (query: {designated_source_label})"
         _pin_series_to_sla_window(lt_pack, sla_window)
     logger.info(
         "SLA pipeline result: verdict=%s, mode=%s, failed=%s",
@@ -3210,7 +3242,7 @@ def _upload_from_llm(
             }
         elif designated_peak is not None:
             peak_obj = final_payload.get("peak_performance")
-            if not isinstance(peak_obj, dict):
+            if observed_steps is not None or not isinstance(peak_obj, dict):
                 peak_obj = {}
             try:
                 peak_obj["max_rps"] = round(float(designated_peak), 2)
@@ -3223,25 +3255,22 @@ def _upload_from_llm(
             if designated_source_label:
                 peak_obj["source_label"] = str(designated_source_label)
             final_payload["peak_performance"] = peak_obj
+        elif observed_steps is not None:
+            final_payload["peak_performance"] = {"max_rps": None, "method": "observed_steps"}
         if isinstance(sla_result, dict) and sla_result.get("verdict"):
-            # The final verdict is the SLA one (a code); the model's verdict stays only in the rationale.
             sla_verdict = to_code(sla_result["verdict"])
             original_verdict = to_code(final_payload.get("verdict"))
             final_payload["verdict"] = sla_verdict
+            checks = deterministic_sla["checks"]
+            adjustments = (sla_result.get("summary_parts") or {}).get("adjustments")
+            final_payload["verdict_rationale"] = format_sla_rationale(
+                sla_verdict, checks, lang, summary=sla_result.get("summary") if adjustments or not checks else None,
+            )
+            final_payload["verdict_rationale_source"] = "sla_checks"
             if sla_verdict == RISK and original_verdict == FAIL:
-                rationale = str(final_payload.get("verdict_rationale") or "").strip()
-                correction = prompt_text("verdict.final_adjusted", lang, test=profile.label(lang), label=verdict_label(FAIL, lang))
-                final_payload["verdict_rationale"] = f"{correction}\n\n{rationale}" if rationale else correction
                 final_payload["verdict_adjusted_from"] = FAIL
 
-    def _deterministic_results() -> Dict[str, Any]:
-        """Results of a report built without the model: the final payload, its context and the SLA data.
-
-        The payload is marked ``analysis: deterministic`` and has no domain analyses; ``save_llm_results``
-        writes the final row alone.
-        """
-        payload: Dict[str, Any] = {"analysis": DETERMINISTIC}
-        _decorate_final_payload(payload)
+    def _fill_peak_times(payload: Dict[str, Any]) -> None:
         peak = payload.get("peak_performance")
         if isinstance(peak, dict) and not peak.get("not_applicable"):
             # The model reads these times off the context; here they come from the SLA step (without SLA, the
@@ -3253,7 +3282,13 @@ def _upload_from_llm(
             if run_steps.rps_drop is not None:
                 peak["drop_time"] = format_iso(run_steps.rps_drop, shift_hours)[11:16]
             elif window.get("end_iso") and window.get("degraded_level") is not None:
-                peak["drop_time"] = str(window["end_iso"])[11:16]
+                peak["drop_time"] = str(window.get("degraded_start_iso") or window["end_iso"])[11:16]
+
+    def _deterministic_results() -> Dict[str, Any]:
+        """Build the final row with the calculated test figures, context and SLA data."""
+        payload: Dict[str, Any] = {"analysis": DETERMINISTIC}
+        _decorate_final_payload(payload)
+        _fill_peak_times(payload)
         return {
             "report_language": lang,
             "final_parsed": payload,
@@ -3271,11 +3306,12 @@ def _upload_from_llm(
 
     if only_collect:
         # Without the model the report still gets its final row: SLA verdict, steps and test figures.
+        results = _deterministic_results() if save_to_db or observed_steps is not None else {}
         if save_to_db:
             _progress(msg("job.progress.save_results"), PROGRESS_SAVE_RESULTS)
             try:
                 save_llm_results(
-                    results=_deterministic_results(),
+                    results=results,
                     run_meta={
                         **(run_meta or {}),
                         "start_ms": int((run_meta or {}).get("start_ms") or int(start_ts * 1000)),
@@ -3285,7 +3321,7 @@ def _upload_from_llm(
                 )
             except Exception as e:
                 logger.error("Failed to save the report built without the model: %s", e)
-        return {}
+        return results if observed_steps is not None else {}
 
     # Default prompts in the report language; an override is used only when it is not empty and not a copy
     # of a default of any language (the settings UI may store the default text it showed).
@@ -3307,11 +3343,12 @@ def _upload_from_llm(
     context_guide = load_prompt("_context_guide.txt", lang)
     response_format = load_prompt("_response_format.txt", lang)
     analysis_guidance = build_analysis_guidance(sla_early, active_system_context, profile.test_type or run_test_type, lang=lang)
+    input_budget = report_prompt_budget()
 
     def _domain_prompt(base_text: str, domain: str) -> str:
         # Application logs have no query block: their prompt describes the shape of the log context.
         block = queries.get(domain) if domain != APPLICATION_LOGS_DOMAIN else None
-        return assemble_prompt(
+        prompt = assemble_prompt(
             _augment_prompt_with_system_context(base_text, system_context_brief, lang),
             context_guide,
             build_analysis_guidance(
@@ -3322,6 +3359,25 @@ def _upload_from_llm(
             ),
             response_format,
         )
+        if input_budget is not None and text_size(prompt) > input_budget // 2:
+            # A domain can have no stable SLA window. Its configured criteria still apply to their own queries.
+            lines = sla_guidance_lines(sla_early, domain, profile.mode, lang) or [no_sla_guidance(lang)]
+            guidance = "\n".join([profile.focus(lang), *lines])
+            if text_size(guidance) > input_budget // 2:
+                criteria = {
+                    field: {"threshold": sla_early[field], "query": sla_early.get(SLA_QUERY_KEYS[field])}
+                    for field in SLA_FIELDS if sla_early.get(field) not in (None, "")
+                }
+                criteria_json = json.dumps({"sla": criteria}, ensure_ascii=False, separators=(",", ":"))
+                guidance = profile.focus(lang) + "\n" + criteria_json
+            task = base_text
+            if not effective_override(overrides.get(domain), domain) and text_size(task + guidance) > input_budget // 2:
+                task = t("llm.prompt.compact_domain", domain=domain)
+            prompt = task + "\n" + guidance
+            for rule in system_context_rules(active_system_context, lang):
+                if text_size(prompt + "\n" + rule) <= input_budget * 3 // 4:
+                    prompt += "\n" + rule
+        return prompt
 
     prompt_jvm = _domain_prompt(prompt_jvm, "jvm")
     prompt_database = _domain_prompt(prompt_database, "database")
@@ -3332,7 +3388,7 @@ def _upload_from_llm(
     prompt_application_logs = _domain_prompt(prompt_application_logs, APPLICATION_LOGS_DOMAIN)
     prompt_generators = _domain_prompt(prompt_generators, GENERATORS_DOMAIN)
 
-    include_tables = bool(((CONFIG.get("llm", {}) or {}).get("include_markdown_tables_in_context", False)))
+    include_tables = bool(current_llm_config().get("include_markdown_tables_in_context", False))
     jvm_full_data = domain_data["jvm"]["markdown"]; jvm_pack = domain_data["jvm"]["pack"]; jvm_ctx = domain_data["jvm"]["ctx"]
     database_full_data = domain_data["database"]["markdown"]; database_ctx = domain_data["database"]["ctx"]
     kafka_full_data = domain_data["kafka"]["markdown"]; kafka_ctx = domain_data["kafka"]["ctx"]
@@ -3407,7 +3463,8 @@ def _upload_from_llm(
                     )
                 except Exception as e:
                     logger.error(f"LLM {key} analysis failed: {e}")
-                    results_map[key] = ("{}", None, {})
+                    failure = make_failed_llm_analysis(e) if isinstance(e, LLMRateLimitError) else None
+                    results_map[key] = ("{}", failure, {})
                 llm_done += 1
                 _progress(
                     msg("job.progress.llm_done", done=llm_done, total=len(domains_jobs), domain=stage_domain(key)),
@@ -3527,6 +3584,22 @@ def _upload_from_llm(
     merged_prompt_overall = assemble_prompt(merged_prompt_overall, context_guide, analysis_guidance, response_format)
 
     base_ctx = _overall_context()
+    domain_summaries = None
+    if input_budget is not None and text_size(merged_prompt_overall) > input_budget // 2:
+        # Keep domain findings as JSON evidence so they can be sampled with the metrics.
+        # A custom prompt retains its instructions and references the corresponding JSON keys.
+        summary_key = "domain_analyses"
+        domain_summaries = {
+            key: _parsed_to_dict(parsed) for key, (_, parsed, _) in results_map.items() if parsed
+        }
+        custom = effective_override(overrides.get("overall"), "overall")
+        if custom:
+            for key in ("jvm", "database", "kafka", "microservices", "hard_resources", "lt_framework",
+                        GENERATORS_DOMAIN, APPLICATION_LOGS_DOMAIN):
+                custom = custom.replace("{answer_" + key + "}", f"{summary_key}.{key}")
+            merged_prompt_overall = custom.replace("{system_context_brief}", system_context_brief)
+        else:
+            merged_prompt_overall = t("llm.prompt.compact_final")
     if include_tables:
         base_ctx["domains_tables_markdown"] = {
             "jvm": jvm_full_data,
@@ -3541,14 +3614,19 @@ def _upload_from_llm(
             base_ctx["domains_tables_markdown"][GENERATORS_DOMAIN] = generators_full_data
         if APPLICATION_LOGS_DOMAIN in domain_keys:
             base_ctx["domains_tables_markdown"][APPLICATION_LOGS_DOMAIN] = application_logs_full_data
-    overall_ctx = json.dumps(_compact_overall_context(base_ctx), ensure_ascii=False)
+    overall_pack = _compact_overall_context(base_ctx)
+    overall_ctx = json.dumps(overall_pack, ensure_ascii=False)
+    model_overall_ctx = (
+        json.dumps({**overall_pack, "domain_analyses": domain_summaries}, ensure_ascii=False)
+        if domain_summaries is not None else overall_ctx
+    )
     logger.info("Final LLM context size: %d chars", len(overall_ctx))
     _progress(msg("job.progress.final_llm"), PROGRESS_FINAL_LLM)
     try:
         with usage_domain("final"):
             final_answer, final_parsed, final_score = llm_two_pass_self_consistency(
                 user_prompt=merged_prompt_overall,
-                data_context=overall_ctx,
+                data_context=model_overall_ctx,
                 k=self_consistency_k,
                 return_scores=True,
                 domain_key="final",
@@ -3598,14 +3676,10 @@ def _upload_from_llm(
     final_payload = _to_dict_maybe(final_parsed) or _extract_json_obj(final_answer)
     if isinstance(final_payload, dict):
         _decorate_final_payload(final_payload)
+        if final_payload.get("analysis_error") or observed_steps is not None:
+            _fill_peak_times(final_payload)
         final_parsed = final_payload
-        try:
-            trimmed = (final_answer or "").strip()
-            if trimmed.startswith("{") and trimmed.endswith("}"):
-                json.loads(trimmed)
-                final_answer = json.dumps(final_payload, ensure_ascii=False)
-        except Exception:
-            pass
+        final_answer = json.dumps(final_payload, ensure_ascii=False)
 
     def _compose_text(full_md: str, header: str, analysis: str) -> str:
         if include_tables:
@@ -3666,6 +3740,18 @@ def _upload_from_llm(
         "load_step_table": load_step_table,
         "system_context": active_system_context,
     }
+
+    final_error = final_payload.get("analysis_error") if isinstance(final_payload, dict) else None
+    domain_analyses = {key: _to_dict_maybe(parsed) for key, (_, parsed, _) in results_map.items()}
+    if final_error and not any(parsed and not parsed.get("analysis_error") for parsed in domain_analyses.values()):
+        results = _deterministic_results()
+        failures = []
+        for key, parsed in domain_analyses.items():
+            error = (parsed or {}).get("analysis_error")
+            if isinstance(error, dict):
+                failures.append({"domain": key, "stage": error.get("stage") or "candidate",
+                                 "reason": error.get("reason"), "message": error.get("message")})
+        results["final_parsed"]["analysis_error"] = {**final_error, "domain_failures": failures} if failures else final_error
 
     # Сохранение LLM результатов в отдельную таблицу (если включено)
     if save_to_db:

@@ -190,6 +190,8 @@ LoadLens собирает метрики теста из Prometheus и InfluxDB 
 
 ## Быстрый старт
 
+Для знакомства с LoadLens можно поднять демо на машине с одним vCPU. Лимит CPU приложения задаёт `DEMO_APP_CPUS` в `docker/demo.env`. [Инструкция по запуску демо](docs/getting-started.md#try-the-demo-first).
+
 При обновлении с 1.0 прочитайте [руководство перехода на 2.0](docs/upgrading-to-2.md): изменились API сравнения и настройки детектора ступеней.
 
 ### Вариант A: Docker Compose

@@ -126,6 +126,32 @@ def test_field_schemas_and_tables_are_english_in_en():
     assert "Хранилище (TimescaleDB)" in ru and "OpenAI-совместимый API" in ru and "Подставляется вместо {exe}; генератор может задать свой путь." in ru
 
 
+def test_llm_sharing_scope_and_form_payload():
+    result = run_js(SETTINGS, f"""
+      const {{ llmProfileScope, llmDraftData }} = {INTERNALS};
+      const areas = [{{id: 'shop', title: 'Storefront'}}];
+      const model = {{name: 'Review', provider: 'openai', shared: true}};
+      const settings = JSON.stringify({{model: 'review', api_key: '***'}});
+      ({{
+        labels: [
+          llmProfileScope({{area: 'shop', shared: true}}, areas),
+          llmProfileScope({{area: 'other', shared: true}}, areas),
+          llmProfileScope({{area: 'shop'}}, areas),
+          llmProfileScope({{area: ''}}, areas),
+        ],
+        published: llmDraftData(model, settings, 'shop'),
+        unpublished: llmDraftData({{...model, shared: false}}, settings, 'shop').shared,
+        global: llmDraftData(model, settings, ''),
+      }})
+    """, locale="en")
+    assert result["labels"] == ['Shared from project “Storefront”', 'Shared from project “other”', 'Project', 'Shared']
+    assert result["published"] == {
+        "name": "Review", "provider": "openai", "shared": True, "settings": {"model": "review", "api_key": "***"}
+    }
+    assert result["unpublished"] is False
+    assert result["global"] == {key: value for key, value in result["published"].items() if key != "shared"}
+
+
 SUMMARIES = f"""
 const I = {INTERNALS};
 const badge = (info, type) => {{ const el = I.toolBadge(info, 'k6', type); return el ? el.textContent : null; }};

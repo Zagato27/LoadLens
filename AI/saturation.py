@@ -171,7 +171,7 @@ def build_saturation(
         saturation_window = (start, end)
         saturation_step = _step_at(steps, start)
         if degraded_checks:
-            degraded_step = _next_step(steps, saturation_step)
+            degraded_step = _step_at(steps, to_utc(window["degraded_start"])) if window.get("degraded_start") else _next_step(steps, saturation_step)
     saturation_rps = float(window["level"]) if window is not None and window.get("level") is not None else designated_peak
     mode = failure_mode(degraded_checks or failed_now, rps_drop)
     limit_reached = bool(degraded_checks or failed_now or rps_drop is not None)

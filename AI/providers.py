@@ -2,18 +2,23 @@
 import contextvars
 import os
 import json
+import math
 import random
 import time
 import threading
 import logging
+from collections import Counter, deque
 from contextlib import contextmanager
-from typing import Any, Dict, Iterator, Optional, Type, TypeVar
+from email.utils import parsedate_to_datetime
+from typing import Any, Callable, Dict, Iterator, Optional, Type, TypeVar
 import requests
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
+from weakref import WeakValueDictionary
 
 StructuredT = TypeVar("StructuredT")
 
 from settings import CONFIG
+from AI.context_budget import compact_json, text_size
 from AI.prompt_store import load_prompt, normalize_lang, resolve_lang
 from AI.prompt_store import text as prompt_text
 from AI.i18n import t
@@ -24,6 +29,32 @@ logger = logging.getLogger(__name__)
 # Provider keys from the server environment (OPENAI_API_KEY ...) belong to the saved provider address.
 # A connection check of an unsaved form that points elsewhere runs without them, see without_env_keys().
 _ENV_KEYS_ALLOWED: contextvars.ContextVar[bool] = contextvars.ContextVar("llm_env_keys_allowed", default=True)
+_LLM_SCOPE: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar("llm_scope", default=None)
+_LLM_USAGE: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar("llm_usage", default=None)
+_LLM_RATE_FAILURES: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar("llm_rate_failures", default=None)
+
+
+def current_llm_config() -> dict:
+    scoped = _LLM_SCOPE.get()
+    return scoped if scoped is not None else (CONFIG.get("llm") or {})
+
+
+@contextmanager
+def llm_scope(config: Optional[dict]) -> Iterator[None]:
+    if not isinstance(config, dict):
+        yield
+        return
+    token = _LLM_SCOPE.set(config)
+    usage_token = _LLM_USAGE.set({})
+    rate_token = _LLM_RATE_FAILURES.set({})
+    env_token = _ENV_KEYS_ALLOWED.set(_ENV_KEYS_ALLOWED.get() and config.get("_use_env_keys", True))
+    try:
+        yield
+    finally:
+        _ENV_KEYS_ALLOWED.reset(env_token)
+        _LLM_RATE_FAILURES.reset(rate_token)
+        _LLM_USAGE.reset(usage_token)
+        _LLM_SCOPE.reset(token)
 
 
 @contextmanager
@@ -43,12 +74,19 @@ def _env_key(*names: str) -> str:
         if value:
             return value
     return ""
-_llm_provider_name = (CONFIG.get("llm", {}) or {}).get("provider", "perplexity").lower()
-_llm_provider_cfg = (CONFIG.get("llm", {}) or {}).get(_llm_provider_name, {})
-_llm_semaphore = threading.Semaphore(int((_llm_provider_cfg or {}).get("max_concurrent") or 4))
+
+
+def provider_api_key(provider: str, settings: dict) -> str:
+    names = {
+        "openai": ("OPENAI_API_KEY",),
+        "anthropic": ("ANTHROPIC_API_KEY",),
+        "perplexity": ("PPLX_API_KEY", "PERPLEXITY_API_KEY"),
+    }
+    return _env_key(*names.get(provider, ())) or str(settings.get("api_key") or "")
+_connection_slots = WeakValueDictionary()
+_connection_slots_lock = threading.Lock()
 _llm_rate_lock = threading.Lock()
-_llm_last_request_ts = 0.0
-_llm_next_allowed_ts = 0.0
+_llm_rate_state: dict[tuple, tuple[float, float]] = {}
 _gigachat_lock = threading.Lock()
 _gigachat_clients: dict[str, object] = {}
 _usage_lock = threading.Lock()
@@ -58,6 +96,8 @@ _usage_tls = threading.local()
 _language_warnings: set[tuple[str, str]] = set()
 SUPPORTED_PROVIDERS = ("perplexity", "openai", "anthropic", "gigachat")
 DEFAULT_MAX_ATTEMPTS = 3
+DEFAULT_RATE_LIMIT_COOLDOWN_SEC = 20.0
+MAX_RATE_LIMIT_WAIT_SEC = 60.0
 CONTEXT_MARGIN_TOKENS = 4_000
 MIN_INPUT_TOKENS = 1_000
 _TRUNCATED_FINISH_REASONS = frozenset({"length", "max_tokens"})
@@ -88,8 +128,28 @@ class LLMEmptyAnswer(RuntimeError):
         super().__init__(t("llm.error.empty_answer", provider=provider))
 
 
+class LLMRateLimitError(RuntimeError):
+    """HTTP 429 for which this analysis has no further attempts."""
+
+    def __init__(self, provider: str, message_key: str):
+        self.provider = provider
+        super().__init__(t(message_key))
+
+
 class LLMBudgetError(RuntimeError):
     """The requested output budget leaves no room for the prompt inside the context window."""
+
+
+class LLMContextOverflow(LLMBudgetError):
+    """The local budget or the endpoint's own tokenizer rejected a request."""
+
+    def __init__(self, window: int, output: int, remote: bool = False):
+        self.provider = "openai"
+        self.max_tokens = output
+        key = "llm.error.context_provider" if remote else "llm.error.context_budget"
+        super().__init__(t(key, window=window, output=output))
+
+
 _PERPLEXITY_SONAR_MODELS = {
     "sonar",
     "sonar-pro",
@@ -144,7 +204,7 @@ def _extract_token_counts(response: Any) -> tuple[Optional[int], Optional[int]]:
 
 
 def _usage_cost(prompt_tokens: Optional[int], completion_tokens: Optional[int]) -> Optional[float]:
-    pricing = ((CONFIG.get("llm") or {}).get("gigachat") or {}).get("pricing") or {}
+    pricing = (current_llm_config().get("gigachat") or {}).get("pricing") or {}
     prompt_rate = float(pricing["prompt_per_1k"]) if pricing.get("prompt_per_1k") is not None else None
     completion_rate = float(pricing["completion_per_1k"]) if pricing.get("completion_per_1k") is not None else None
     if prompt_rate is None and completion_rate is None:
@@ -163,10 +223,15 @@ def _empty_usage_bucket() -> Dict[str, Any]:
     return {"calls": 0, "prompt_tokens": None, "completion_tokens": None, "elapsed_ms": 0, "cost": None}
 
 
+def _usage_buckets():
+    scoped = _LLM_USAGE.get()
+    return scoped if scoped is not None else _usage_by_domain
+
+
 def reset_usage() -> None:
     """Clears accumulated token usage and the per-run warnings (call at the start of a report run)."""
     with _usage_lock:
-        _usage_by_domain.clear()
+        _usage_buckets().clear()
         _language_warnings.clear()
 
 
@@ -194,7 +259,7 @@ def record_llm_usage(
 ) -> None:
     domain = str(domain_key or current_usage_domain())
     with _usage_lock:
-        bucket = _usage_by_domain.setdefault(domain, _empty_usage_bucket())
+        bucket = _usage_buckets().setdefault(domain, _empty_usage_bucket())
         bucket["calls"] = int(bucket.get("calls") or 0) + 1
         bucket["elapsed_ms"] = int(bucket.get("elapsed_ms") or 0) + max(0, int(elapsed_ms or 0))
         if prompt_tokens is not None:
@@ -207,7 +272,7 @@ def record_llm_usage(
 def snapshot_usage() -> Dict[str, Dict[str, Any]]:
     """Copy of per-domain usage plus a ``run_total`` roll-up."""
     with _usage_lock:
-        by_domain = {key: dict(value) for key, value in _usage_by_domain.items()}
+        by_domain = {key: dict(value) for key, value in _usage_buckets().items()}
     total = _empty_usage_bucket()
     known_prompt = False
     known_completion = False
@@ -328,8 +393,31 @@ def _tls_verify(pcfg: dict) -> bool | str:
     return str(pcfg.get("ca_bundle") or "").strip() or True
 
 
+def llm_proxy_url(value: object) -> str:
+    """Validate the optional HTTP proxy URL without including its credentials in errors."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        url = value.strip()
+        if not url:
+            return ""
+        try:
+            parts = urlsplit(url)
+            if (parts.scheme in ("http", "https") and parts.hostname and parts.port != 0
+                    and parts.path in ("", "/") and not parts.query and not parts.fragment
+                    and parts.netloc.count("@") <= 1 and not any(ch.isspace() or ord(ch) < 32 for ch in url)
+                    and (parts.username is None or (parts.username and parts.password is not None))):
+                return url
+        except ValueError:
+            pass
+    raise ValueError(t("llm.error.invalid_proxy_url"))
+
+
 def _request_proxies(pcfg: dict) -> dict | None:
     """Proxies of this provider for one request; ``None`` when none are set."""
+    url = llm_proxy_url((pcfg or {}).get("proxy_url"))
+    if url:
+        return {"http": url, "https": url}
     raw = (pcfg or {}).get("proxies") or {}
     proxies = {str(k).lower(): str(v).strip() for k, v in raw.items() if isinstance(v, str) and v.strip()} if isinstance(raw, dict) else {}
     return proxies or None
@@ -375,31 +463,153 @@ def _effective_max_tokens(provider_cfg: dict, default: int, default_cap: int) ->
     return requested
 
 
-def _wait_llm_slot(pcfg: dict) -> None:
-    """Глобальный pacing между LLM-вызовами для снижения burst-нагрузки."""
-    global _llm_last_request_ts
-    min_interval = max(0.0, _safe_float((pcfg or {}).get("request_min_interval_sec", 0.0), 0.0))
-    if min_interval <= 0:
+def _connection_key(provider: str, pcfg: dict) -> tuple:
+    """Models and named profiles using the same connection share the rate limit."""
+    if provider == "perplexity":
+        address = _perplexity_url(pcfg)
+    elif provider == "gigachat":
+        address = _normalize_gigachat_base_url(pcfg.get("base_url") or pcfg.get("api_base_url"))
+    elif provider == "anthropic":
+        address = pcfg.get("api_base_url") or pcfg.get("base_url") or "https://api.anthropic.com"
+    else:
+        address = _normalize_llm_base_url(pcfg.get("api_base_url") or pcfg.get("base_url"))
+    parts = urlsplit(address)
+    credential = provider_api_key(provider, pcfg) or str(pcfg.get("credentials") or pcfg.get("cert_file") or "")
+    return (provider, parts.scheme, parts.hostname, parts.port or (443 if parts.scheme == "https" else 80), hash(credential))
+
+
+def provider_concurrency(provider: str, pcfg: dict) -> int:
+    url = str(pcfg.get("api_base_url") or pcfg.get("base_url") or "")
+    custom_openai = provider == "openai" and urlsplit(url).hostname != "api.openai.com"
+    return max(1, _safe_int(pcfg.get("max_concurrent"), 1 if custom_openai else 4))
+
+
+class _ConnectionSlots:
+    """Admit requests in arrival order under the lowest active or waiting profile limit."""
+
+    def __init__(self):
+        self.changed = threading.Condition()
+        self.limits = Counter()
+        self.waiting = deque()
+        self.active = 0
+
+    @contextmanager
+    def acquire(self, limit: int) -> Iterator[None]:
+        ticket = object()
+        acquired = False
+        with self.changed:
+            self.waiting.append(ticket)
+            self.limits[limit] += 1
+        try:
+            with self.changed:
+                self.changed.wait_for(lambda: self.waiting[0] is ticket and self.active < min(self.limits))
+                self.waiting.popleft()
+                self.active += 1
+                acquired = True
+                self.changed.notify_all()
+            yield
+        finally:
+            with self.changed:
+                if acquired:
+                    self.active -= 1
+                else:
+                    self.waiting.remove(ticket)
+                self.limits[limit] -= 1
+                if not self.limits[limit]:
+                    del self.limits[limit]
+                self.changed.notify_all()
+
+
+def _request_slot(key: tuple, pcfg: dict):
+    with _connection_slots_lock:
+        slots = _connection_slots.get(key)
+        if slots is None:
+            slots = _ConnectionSlots()
+            _connection_slots[key] = slots
+    return slots.acquire(provider_concurrency(key[0], pcfg))
+
+
+def _wait_llm_slot(pcfg: dict, key: tuple) -> None:
+    """Wait for this connection's pacing and cooldown before sending a request."""
+    if pcfg.get("_connection_check"):
         return
+    failures = _LLM_RATE_FAILURES.get()
+    min_interval = _safe_float(pcfg.get("request_min_interval_sec"), 0.0)
+    if not math.isfinite(min_interval) or min_interval < 0:
+        min_interval = 0.0
     while True:
         with _llm_rate_lock:
+            if failures is not None and key in failures:
+                raise LLMRateLimitError(key[0], failures[key])
             now = time.monotonic()
-            target = max(_llm_next_allowed_ts, _llm_last_request_ts + min_interval)
+            last, cooldown = _llm_rate_state.get(key, (0.0, 0.0))
+            # Space out queued requests for a minute after a 429 even without configured pacing.
+            interval = max(1.0, min_interval) if cooldown and now < cooldown + MAX_RATE_LIMIT_WAIT_SEC else min_interval
+            target = max(cooldown, last + interval)
             wait_sec = target - now
+            if cooldown - now > MAX_RATE_LIMIT_WAIT_SEC:
+                raise LLMRateLimitError(key[0], "llm.error.rate_limited")
             if wait_sec <= 0:
-                _llm_last_request_ts = now
+                if interval:
+                    _llm_rate_state[key] = (now, cooldown)
+                else:
+                    _llm_rate_state.pop(key, None)
                 return
         time.sleep(min(wait_sec, 1.0))
 
 
-def _apply_llm_cooldown(seconds: float) -> None:
-    """Сдвигает общий cooldown для всех потоков после 429/перегруза."""
-    global _llm_next_allowed_ts
-    sec = max(0.0, float(seconds or 0.0))
-    if sec <= 0:
-        return
+def _retry_after_seconds(response) -> float | None:
+    raw = (getattr(response, "headers", None) or {}).get("Retry-After")
+    if not raw:
+        return None
+    try:
+        delay = float(raw)
+    except (TypeError, ValueError):
+        try:
+            delay = parsedate_to_datetime(raw).timestamp() - time.time()
+        except (ValueError, TypeError, OverflowError, OSError):
+            return None
+    return max(0.0, delay) if math.isfinite(delay) else None
+
+
+def _rate_limit_message(response) -> str:
+    """Recognize provider error codes without exposing the response body."""
+    try:
+        payload = response.json() if response is not None else {}
+    except ValueError:
+        payload = {}
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(error, dict):
+        for code in (error.get("type"), error.get("code")):
+            if code in ("exceeded_current_quota_error", "insufficient_quota", "billing_hard_limit_reached"):
+                return "llm.error.quota_exhausted"
+            if code == "engine_overloaded_error":
+                return "llm.error.overloaded"
+    return "llm.error.rate_limited"
+
+
+def _handle_rate_limit(exc: Exception, pcfg: dict, key: tuple, attempt: int, max_attempts: int) -> None:
+    response = getattr(exc, "response", None)
+    message_key = _rate_limit_message(response)
+    if pcfg.get("_connection_check"):
+        raise LLMRateLimitError(key[0], message_key) from None
+    quota_exhausted = message_key == "llm.error.quota_exhausted"
+    delay = _retry_after_seconds(response)
+    if delay is None:
+        base = _safe_float(pcfg.get("rate_limit_cooldown_sec"), DEFAULT_RATE_LIMIT_COOLDOWN_SEC)
+        base = min(MAX_RATE_LIMIT_WAIT_SEC, base) if math.isfinite(base) and base > 0 else DEFAULT_RATE_LIMIT_COOLDOWN_SEC
+        delay = min(MAX_RATE_LIMIT_WAIT_SEC, base * 2 ** min(attempt - 1, 6) + random.uniform(0, base / 4))
+    stop = quota_exhausted or attempt >= max_attempts or delay > MAX_RATE_LIMIT_WAIT_SEC
     with _llm_rate_lock:
-        _llm_next_allowed_ts = max(_llm_next_allowed_ts, time.monotonic() + sec)
+        if not quota_exhausted:
+            last, cooldown = _llm_rate_state.get(key, (0.0, 0.0))
+            _llm_rate_state[key] = (last, max(cooldown, time.monotonic() + delay))
+        failures = _LLM_RATE_FAILURES.get()
+        if stop and failures is not None:
+            failures.setdefault(key, message_key)
+    if stop:
+        raise LLMRateLimitError(key[0], message_key) from None
+    logger.warning("LLM attempt %d/%d got HTTP 429 (provider=%s); retry in %.1fs or later", attempt, max_attempts, key[0], delay)
 
 
 def _messages_to_agent_input(messages: list[dict]) -> str:
@@ -457,7 +667,7 @@ def _perplexity_call(messages: list[dict], pcfg: dict) -> str:
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "Authorization": f"Bearer {_env_key('PPLX_API_KEY', 'PERPLEXITY_API_KEY') or pcfg.get('api_key', '')}",
+        "Authorization": f"Bearer {provider_api_key('perplexity', pcfg)}",
     }
 
     proxies = _request_proxies(pcfg)
@@ -522,19 +732,54 @@ def _openai_call(messages: list[dict], pcfg: dict) -> str:
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "Authorization": f"Bearer {_env_key('OPENAI_API_KEY') or pcfg.get('api_key', '')}",
+        "Authorization": f"Bearer {provider_api_key('openai', pcfg)}",
     }
     proxies = _request_proxies(pcfg)
     verify = _tls_verify(pcfg)
+    model = pcfg.get("model", "gpt-4o-mini")
+    moonshot = urlsplit(base_url).hostname in ("api.moonshot.ai", "api.moonshot.cn")
+    model_id = str(model).lower() if moonshot else ""
+    kimi_k3 = model_id.startswith("kimi-k3")
+    kimi_instant = model_id in ("kimi-k2.5", "kimi-k2.6")
+    kimi_fixed_sampling = kimi_k3 or kimi_instant or model_id.startswith("kimi-k2.7-code")
+    probe = pcfg.get("_connection_check") and kimi_fixed_sampling
+    if probe and not kimi_instant:
+        pcfg = {**pcfg, "generation": {**gen, "max_tokens": 512}}
     req_max_tokens = _effective_max_tokens(pcfg, default=1200, default_cap=32768)
+    budget_field = "max_completion_tokens" if kimi_fixed_sampling and model_id != "kimi-k2.5" else "max_tokens"
+    used = sum(text_size(message["content"]) for message in messages)
+    if used + req_max_tokens + OPENAI_CHAT_OVERHEAD > _openai_window(pcfg):
+        raise LLMContextOverflow(_openai_window(pcfg), req_max_tokens)
     payload = {
-        "model": pcfg.get("model", "gpt-4o-mini"),
+        "model": model,
         "messages": messages,
-        "temperature": _safe_float(gen.get("temperature"), 0.2),
-        "top_p": _safe_float(gen.get("top_p"), 0.9),
-        "max_tokens": req_max_tokens,
+        budget_field: req_max_tokens,
     }
+    # The first-party Kimi API fixes sampling parameters per model and thinking mode.
+    if not kimi_fixed_sampling:
+        payload["temperature"] = _safe_float(gen.get("temperature"), 0.2)
+        payload["top_p"] = _safe_float(gen.get("top_p"), 0.9)
+    if probe and kimi_instant:
+        payload["thinking"] = {"type": "disabled"}
+    if probe and kimi_k3:
+        payload["reasoning_effort"] = "low"
     resp = requests.post(url, headers=headers, json=payload, timeout=_safe_int(pcfg.get("request_timeout_sec"), 120), verify=verify, proxies=proxies)
+    if getattr(resp, "status_code", None) in (400, 413, 422):
+        try:
+            error = resp.json().get("error")
+        except (AttributeError, ValueError):
+            error = None
+        if isinstance(error, dict):
+            detail = " ".join(str(error.get(k) or "") for k in ("type", "code", "message")).lower()
+        else:
+            detail = str(error or getattr(resp, "text", "") or "").lower()
+        if any(marker in detail for marker in (
+            "context_length_exceeded", "context_window_exceeded", "exceed_context_size",
+            "maximum context length", "exceeds the context", "exceeds context",
+            "context window is too small", "context size has been exceeded",
+            "exceeds the available context", "exceeds the model's context", "prompt is too long", "input is too long",
+        )):
+            raise LLMContextOverflow(_openai_window(pcfg), req_max_tokens, remote=True)
     resp.raise_for_status()
     data = resp.json()
     choice = (data.get("choices") or [{}])[0] if isinstance(data, dict) else {}
@@ -548,6 +793,32 @@ def _openai_call(messages: list[dict], pcfg: dict) -> str:
 def _estimate_tokens(text: str) -> int:
     """Upper bound on tokens. Cyrillic JSON is close to one token per character."""
     return max(1, len(text or ""))
+
+
+OPENAI_CHAT_OVERHEAD = 128
+
+
+def _openai_window(pcfg: dict) -> int:
+    # Custom gateways can serve any model; their actual window is a profile setting.
+    return max(1, _safe_int(pcfg.get("context_window_tokens"), 128_000))
+
+
+def _openai_input_budget(pcfg: dict, system: str) -> tuple[int, int]:
+    window = _openai_window(pcfg)
+    output = _effective_max_tokens(pcfg, default=1200, default_cap=32768)
+    # Chat templates add role markers and the generation prefix on the server.
+    return window - output - text_size(system) - OPENAI_CHAT_OVERHEAD, output
+
+
+def report_prompt_budget() -> Optional[int]:
+    """Return the OpenAI-compatible user-message budget for report prompt assembly."""
+    root = current_llm_config()
+    if root.get("provider") != "openai":
+        return None
+    pcfg = root.get("openai") or {}
+    force_json = bool((pcfg.get("generation") or {}).get("force_json_in_prompt", True))
+    budget, _ = _openai_input_budget(pcfg, default_system_prompt(force_json=force_json))
+    return max(0, budget)
 
 
 def _context_window_tokens(pcfg: dict) -> int:
@@ -724,6 +995,8 @@ def _raise_for_llm_status(resp: requests.Response) -> None:
     """Raises HTTPError whose message includes the provider body (MiniMax hides the reason in it)."""
     if resp.ok:
         return
+    if resp.status_code == 407:
+        raise requests.exceptions.ProxyError()
     detail = (resp.text or "").strip().replace("\n", " ")
     if len(detail) > 800:
         detail = detail[:800] + "…"
@@ -740,7 +1013,7 @@ def _anthropic_call(messages: list[dict], pcfg: dict, system_text: str) -> str:
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "x-api-key": _env_key('ANTHROPIC_API_KEY') or pcfg.get('api_key', ''),
+        "x-api-key": provider_api_key("anthropic", pcfg),
         "anthropic-version": "2023-06-01",
     }
     proxies = _request_proxies(pcfg)
@@ -798,7 +1071,9 @@ def _normalize_gigachat_base_url(raw_url: str | None) -> str:
 def _get_gigachat_client(pcfg: dict | None = None):
     """Lazily creates a GigaChat client (langchain_gigachat) with mTLS; cached per config."""
     if not isinstance(pcfg, dict):
-        pcfg = ((CONFIG.get("llm") or {}).get("gigachat") or {})
+        pcfg = current_llm_config().get("gigachat") or {}
+    if llm_proxy_url(pcfg.get("proxy_url")):
+        raise ValueError(t("llm.error.gigachat_proxy_url"))
     from langchain_gigachat.chat_models import GigaChat as LC_GigaChat
 
     base_url = _normalize_gigachat_base_url(pcfg.get("base_url") or pcfg.get("api_base_url"))
@@ -931,6 +1206,7 @@ def ask_llm_with_text_data(
     base_url: str = None,
     system_prompt: Optional[str] = None,
     lang: Optional[str] = None,
+    fit_user: Optional[Callable[[int], str]] = None,
 ) -> str:
     """Единая точка вызова LLM (Perplexity/OpenAI/Anthropic/GigaChat) с текстовым контекстом.
 
@@ -958,7 +1234,7 @@ def ask_llm_with_text_data(
         Пробрасывает ошибки HTTP и таймауты после `max_attempts` попыток
         (по умолчанию три; настраивается в конфиге провайдера).
     """
-    llm_root = CONFIG.get("llm", {}) or {}
+    llm_root = current_llm_config()
     provider = (llm_config or {}).get("provider") if isinstance(llm_config, dict) else None
     provider = (provider or llm_root.get("provider") or "perplexity").lower()
     pcfg = llm_root.get(provider, {})
@@ -989,51 +1265,82 @@ def ask_llm_with_text_data(
     if provider == "perplexity":
         _check_language_preference(pcfg, lang)
 
-    max_attempts = _max_attempts(pcfg, llm_config)
-    attempts = 0
-    last_err = None
-    while attempts < max_attempts:
+    key = _connection_key(provider, pcfg)
+
+    elapsed = 0.0
+
+    def invoke(cfg: dict) -> str:
+        nonlocal elapsed
+        request_messages = messages
+        if provider == "openai":
+            budget, output = _openai_input_budget(cfg, system_text)
+            if text_size(user_content) > budget:
+                if fit_user is not None and budget > 0:
+                    reduced = fit_user(budget)
+                elif data_context and budget > text_size(user_prompt) + 2:
+                    context = compact_json(data_context, budget - text_size(user_prompt) - 2)
+                    reduced = f"{user_prompt}\n\n{context}" if context else ""
+                else:
+                    reduced = ""
+                if not reduced or text_size(reduced) > budget:
+                    raise LLMContextOverflow(_openai_window(cfg), output)
+                request_messages = [messages[0], {"role": "user", "content": reduced}]
+        _wait_llm_slot(cfg, key)
+        started = time.perf_counter()
         try:
-            _wait_llm_slot(pcfg)
-            started = time.perf_counter()
-            with _llm_semaphore:
-                text = _call_with_output_retry(
-                    pcfg, lambda cfg: _call_provider(provider, messages, cfg, system_text),
-                )
+            return _call_provider(provider, request_messages, cfg, system_text)
+        finally:
+            elapsed += time.perf_counter() - started
+
+    max_attempts = _max_attempts(pcfg, llm_config)
+    last_err = None
+    for attempt in range(1, max_attempts + 1):
+        elapsed = 0.0
+        try:
+            with _request_slot(key, pcfg):
+                try:
+                    text = _call_with_output_retry(pcfg, invoke)
+                except requests.HTTPError as exc:
+                    if getattr(exc.response, "status_code", None) != 429:
+                        raise
+                    _handle_rate_limit(exc, pcfg, key, attempt, max_attempts)
+                    continue
             if provider != "gigachat":
-                record_llm_usage(elapsed_ms=int((time.perf_counter() - started) * 1000))
+                record_llm_usage(elapsed_ms=int(elapsed * 1000))
             return text
-        except (LLMOutputTruncated, LLMEmptyAnswer, LLMBudgetError):
+        except (LLMOutputTruncated, LLMEmptyAnswer, LLMBudgetError, LLMRateLimitError):
             raise
+        except requests.exceptions.ProxyError:
+            raise RuntimeError(t("llm.error.proxy_failed")) from None
         except requests.HTTPError as e:
             status = getattr(getattr(e, "response", None), "status_code", 0) or 0
+            if status == 407:
+                raise RuntimeError(t("llm.error.proxy_failed")) from None
             # 400 from MiniMax is an invalid request (context window, bad params). Retrying it does not help.
-            if status and status != 429 and status < 500:
+            if status and status < 500:
                 raise
             last_err = e
-            attempts += 1
-            if attempts >= max_attempts:
+            if attempt >= max_attempts:
                 break
             logger.warning(
                 "LLM attempt %d/%d failed (provider=%s, status=%s): %s",
-                attempts, max_attempts, provider, status, e,
+                attempt, max_attempts, provider, status, e,
             )
-            time.sleep(min(2 ** attempts, 8))
+            time.sleep(min(2 ** attempt, 8))
         except Exception as e:
+            # The GigaChat SDK has its own exception type for HTTP failures.
+            if provider == "gigachat" and (getattr(e, "status_code", None) == 429 or "429" in str(e)):
+                _handle_rate_limit(e, pcfg, key, attempt, max_attempts)
+                continue
             last_err = e
-            attempts += 1
-            if attempts >= max_attempts:
+            if attempt >= max_attempts:
                 break
-            is_rate_limit = "429" in str(e)
-            base_delay = min(2 ** (attempts + 1), 60) if is_rate_limit else min(2 ** attempts, 8)
+            base_delay = min(2 ** attempt, 8)
             jitter = random.uniform(0, base_delay * 0.5)
             delay = base_delay + jitter
-            if is_rate_limit:
-                global_cooldown = max(delay, _safe_float(pcfg.get("rate_limit_cooldown_sec", 15), 15))
-                _apply_llm_cooldown(global_cooldown)
             logger.warning(
-                "LLM attempt %d/%d failed (provider=%s, rate_limit=%s, retry in %.1fs): %s",
-                attempts, max_attempts, provider, is_rate_limit, delay, e,
+                "LLM attempt %d/%d failed (provider=%s, retry in %.1fs): %s",
+                attempt, max_attempts, provider, delay, e,
             )
             time.sleep(delay)
     raise last_err
@@ -1041,8 +1348,9 @@ def ask_llm_with_text_data(
 
 def structured_output_enabled() -> bool:
     """True when ``llm.gigachat.structured_output`` asks for GigaChat function-calling output."""
-    provider = str((CONFIG.get("llm") or {}).get("provider") or "").lower()
-    gcfg = (CONFIG.get("llm") or {}).get("gigachat") or {}
+    llm = current_llm_config()
+    provider = str(llm.get("provider") or "").lower()
+    gcfg = llm.get("gigachat") or {}
     return provider == "gigachat" and bool(gcfg.get("structured_output", False))
 
 
@@ -1058,13 +1366,14 @@ def ask_llm_structured(
     Uses ``with_structured_output`` of langchain-gigachat. Raises RuntimeError
     when the installed client has no such method — there is no silent fallback.
     """
-    gcfg = dict((CONFIG.get("llm") or {}).get("gigachat") or {})
+    gcfg = dict(current_llm_config().get("gigachat") or {})
     from langchain_core.messages import HumanMessage, SystemMessage
 
     system_text = (system_prompt or "").strip() or prompt_text("system.structured", lang)
     user_content = user_prompt if not data_context else f"{user_prompt}\n\n{data_context}"
 
     def _invoke(cfg: dict) -> StructuredT:
+        _wait_llm_slot(cfg, key)
         client = _get_gigachat_client(cfg)
         if not hasattr(client, "with_structured_output"):
             raise RuntimeError(t("llm.error.gigachat_no_structured_output"))
@@ -1102,13 +1411,13 @@ def ask_llm_structured(
             return schema(**parsed)
         raise TypeError(f"Structured output returned {type(result).__name__}, expected {schema.__name__}")
 
+    key = _connection_key("gigachat", gcfg)
     max_attempts = _max_attempts(gcfg, None)
     attempts = 0
     last_err: Optional[Exception] = None
     while attempts < max_attempts:
         try:
-            _wait_llm_slot(gcfg)
-            with _llm_semaphore:
+            with _request_slot(key, gcfg):
                 return _call_with_output_retry(gcfg, _invoke)
         except (LLMOutputTruncated, LLMEmptyAnswer, LLMBudgetError, RuntimeError):
             raise

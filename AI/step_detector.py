@@ -473,6 +473,17 @@ def _segment(seg: pd.Series, params: DetectorParams, min_stable_minutes: float, 
     }
 
 
+def observed_plateau_stable(samples: pd.Series, width: pd.Timedelta, min_minutes: float) -> bool:
+    """Apply the plateau criteria to measured, consecutive buckets within one supplied interval."""
+    if len(samples) < PLATEAU_MIN_SAMPLES or width <= pd.Timedelta(0):
+        return False
+    if not samples.index.to_series().diff().iloc[1:].eq(width).all():
+        return False
+    params = _floor_params(width.total_seconds(), min_minutes)
+    segment = _segment(samples, params, min_minutes, None)
+    return bool(segment and segment["stable"] and not segment["had_drop"])
+
+
 def _mergeable(a: Dict[str, object], b: Dict[str, object], params: DetectorParams) -> bool:
     """Neighbours at one level, or two unstable neighbours close to each other, with no drop between them.
 

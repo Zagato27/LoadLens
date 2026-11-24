@@ -171,11 +171,18 @@ def test_demo_compose_app_uses_the_demo_settings_and_the_thread_runner(compose):
     env = app["environment"]
     assert env["LOADLENS_DEMO_SEED"] == "1"
     assert env["LOADLENS_JOB_RUNNER"] == "thread" and env["CELERY_TASK_ALWAYS_EAGER"] == "1"
+    assert env["LOADLENS_LOAD_TEST_WATCHER"] == "1"
     assert env["LOADLENS_AUTH_ENABLED"] == "1"
     assert env["LOADLENS_ADMIN_USER"] == "${DEMO_ADMIN_USER:-admin}"
     assert env["DEMO_DB_HOST"] == "timescaledb" and env["DEMO_LLM_URL"] == "http://llm-stub:5090/v1"
     assert APP_ENV_VARS <= set(env)
     assert not (set(env) - APP_ENV_VARS - {name for name in env if name.startswith("DEMO_")})
+
+
+def test_demo_app_cpu_limit_defaults_to_one_and_can_be_overridden(compose, demo_env):
+    limit = compose["services"]["app"]["deploy"]["resources"]["limits"]["cpus"]
+    assert limit == "${DEMO_APP_CPUS:-1}"
+    assert demo_env["DEMO_APP_CPUS"] == "1"
 
 
 def test_demo_compose_env_names_match_what_the_application_reads(compose):

@@ -50,8 +50,8 @@ WINDOWS_KEEP = 3
 WINDOWS_RUNS_KEEP = 5
 # Older tests: when the fine pass over the last hours finds fewer than WINDOWS_KEEP stretches, one coarse query
 # looks this far back and a fine query per stretch it finds restores the exact bounds.
-WINDOWS_SEARCH_DAYS = 30
-WINDOWS_COARSE_STEP = 300  # seconds: 30 days are 8640 points, under the Prometheus limit of 11000 per series
+WINDOWS_SEARCH_DAYS = 7
+WINDOWS_COARSE_STEP = 300  # seconds
 WINDOWS_REFINE_MARGIN_STEPS = 2  # coarse steps added on each side of a stretch before its fine query
 WINDOWS_CACHE_SEC = 60.0
 WINDOWS_CACHE_MAX = 128
@@ -669,13 +669,13 @@ def finished_runs(service: str, start: float, end: float, keep: int = WINDOWS_RU
 
 
 def load_windows(area: str, service: str, hours: Any = WINDOWS_DEFAULT_HOURS, now: Optional[float] = None) -> dict[str, Any]:
-    """Load of a service over the last 30 days: stretches with RPS above zero and finished load test runs.
+    """Recent load of a service: stretches with RPS above zero and finished load test runs.
 
     The RPS comes from the ``lt.rps_total`` row of the service's ``lt_framework`` queries (the summed row
     of a complex run on PromQL). The fine pass reads the last ``hours`` with :func:`choose_step`; when it finds
     fewer than three stretches, a coarse pass reads the last ``WINDOWS_SEARCH_DAYS`` days with a five-minute
     step and a fine query per older stretch restores its exact bounds. The three latest stretches are returned
-    newest first as ``{start, end, duration_sec, rps_peak, ongoing}``; the runs are those of the same 30 days.
+    newest first as ``{start, end, duration_sec, rps_peak, ongoing}``, along with runs from the same period.
     Source errors do not fail the call: ``message`` says why in a few words and ``detail`` carries the error
     text; ``ok`` is false when the fine pass failed and stays true when only the coarse one did. The runs are
     listed either way.

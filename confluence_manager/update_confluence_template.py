@@ -24,6 +24,7 @@ from requests.auth import HTTPBasicAuth
 import re
 
 from AI.i18n import LocalizedError, get_locale, t, with_locale
+from AI.report_sections import rationale_title, verified_findings_text
 from AI.verdicts import label as verdict_label, tone as verdict_tone
 
 # Results of the placeholder updates (compared by callers instead of message texts).
@@ -386,7 +387,7 @@ def _render_key_value_table(title: str, rows: list[tuple[str, str]]) -> str:
     )
 
 
-def _render_rationale_box(report: dict) -> str:
+def _render_rationale_box(report: dict, domain: str | None = None) -> str:
     text = (
         (report or {}).get("verdict_rationale")
         or (report or {}).get("verdict_reason")
@@ -396,7 +397,7 @@ def _render_rationale_box(report: dict) -> str:
     return (
         "<div style=\"border:1px solid #b3d4ff;border-left:4px solid #2684ff;"
         "background:#f4f9ff;border-radius:8px;padding:10px 12px;margin:8px 0 14px 0;\">"
-        f"<p style=\"margin:0 0 6px 0;\"><strong>{_html(t('report.rationale.title'))}</strong></p>"
+        f"<p style=\"margin:0 0 6px 0;\"><strong>{_html(rationale_title(report, domain))}</strong></p>"
         f"{_render_rich_text(text)}"
         "</div>"
     )
@@ -641,6 +642,21 @@ def _md_table_head() -> str:
     return f"| {_md(t('confluence.template.col_param'))} | {_md(t('confluence.template.col_value'))} |"
 
 
+def _generator_step_table(report: dict) -> tuple[str, list[list[object]]]:
+    table = report.get("load_step_table") or {}
+    detection = table.get("detection") if isinstance(table, dict) else None
+    if not isinstance(detection, dict) or detection.get("method") != "generator":
+        return "", []
+    note = t("report.steps.generator", tag=detection["run_tag"], minutes=detection["min_step_minutes"])
+    rows = [[t("report.steps.col_step"), t("report.steps.col_interval"), "RPS", t("report.steps.col_latency")]]
+    for step in table["steps"]:
+        name = step["label"]
+        if step.get("planned_rps") is not None:
+            name += " · " + t("report.steps.planned_rps", rate=step["planned_rps"])
+        rows.append([name, f"{step['start_iso']} – {step['end_iso']}", step.get("rps"), step.get("latency_p95")])
+    return note, rows
+
+
 def render_llm_markdown(report: dict, domain: str | None = None, lang: str | None = None) -> str:
     """Возвращает Markdown для Confluence Markdown macro (тексты — на языке ``lang`` или текущей локали)."""
     with _in_locale(lang):
@@ -651,21 +667,42 @@ def _llm_markdown(report: dict, domain: str | None) -> str:
     report = report if isinstance(report, dict) else {}
     peak = report.get("peak_performance") or report.get("peak_perfomance") or {}
     peak = peak if isinstance(peak, dict) else {}
+    error = report.get("analysis_error")
 
     lines: list[str] = [
         _md_table_head(),
         "|---|---:|",
         f"| {_md_cell(t('report.hero.verdict_title'))} | **{_md_cell(verdict_label(report.get('verdict'), get_locale()))}** |",
         "",
-        f"#### {t('report.rationale.title')}",
-        _md_rich_text(
+    ]
+    if isinstance(error, dict) and error:
+        from AI.report_sections import analysis_failure_location, domain_failure_details
+
+        lines.extend([f"#### {t('report.analysis_error.title')}", _md(error.get("message") or t("report.analysis_error.default_message")), ""])
+        location = analysis_failure_location(error)
+        if location:
+            lines.extend([_md(location), ""])
+        for detail in domain_failure_details(error):
+            lines.extend([_md(detail), ""])
+    else:
+        rationale = (
             report.get("verdict_rationale")
             or report.get("verdict_reason")
             or report.get("rationale")
             or t("confluence.template.no_rationale")
-        ),
-        "",
-    ]
+        )
+        lines.extend([f"#### {rationale_title(report, domain)}", _md_rich_text(rationale), ""])
+    count_text = verified_findings_text(report)
+    if count_text:
+        lines.extend([_md(count_text), ""])
+    note, step_rows = _generator_step_table(report)
+    if step_rows:
+        lines.extend([_md(note), ""])
+        for index, row in enumerate(step_rows):
+            lines.append("| " + " | ".join(_md_cell(cell) for cell in row) + " |")
+            if index == 0:
+                lines.append("|" + "---|" * len(row))
+        lines.append("")
 
     section = _test_type_section(report) if _peak_section_applies(domain) else None
     if not _peak_section_applies(domain):
@@ -685,6 +722,9 @@ def _llm_markdown(report: dict, domain: str | None) -> str:
             f"| {_md_cell(t('report.section.drop_time'))} | {_md_cell(peak.get('drop_time') or '—')} |",
             "",
         ])
+
+    if isinstance(error, dict) and error:
+        return "\n".join(lines).strip()
 
     lines.append(f"#### {t('report.findings.title')}")
     rows = _pair_findings_with_actions(
@@ -754,8 +794,18 @@ def _llm_html(report: dict, domain: str | None) -> str:
             "",
             [(t("report.hero.verdict_title"), _verdict_pill(report.get("verdict")))],
         ),
-        _render_rationale_box(report),
+        _render_rationale_box(report, domain),
     ]
+    count_text = verified_findings_text(report)
+    if count_text:
+        parts.append(f"<p>{_html(count_text)}</p>")
+    note, step_rows = _generator_step_table(report)
+    if step_rows:
+        parts.append(f"<p>{_html(note)}</p><table><tbody>")
+        for index, row in enumerate(step_rows):
+            tag = "th" if index == 0 else "td"
+            parts.append("<tr>" + "".join(f"<{tag}>{_html(cell)}</{tag}>" for cell in row) + "</tr>")
+        parts.append("</tbody></table>")
 
     section = _test_type_section(report) if _peak_section_applies(domain) else None
     if not _peak_section_applies(domain):

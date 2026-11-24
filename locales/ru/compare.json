@@ -50,7 +50,7 @@
   "compare.explain.caveats": "Оговорки",
   "compare.explain.check_none": "чисел в ответе нет",
   "compare.explain.check_unknown": "ссылки на несуществующие находки: {findings}",
-  "compare.explain.check_unverified": "есть числа, которых нет в данных: {numbers}",
+  "compare.explain.check_unverified": "данные не подтверждают числовые утверждения: {numbers}",
   "compare.explain.check_verified": "числа сверены с данными: {matched} из {total}",
   "compare.explain.col_domain": "Домен",
   "compare.explain.confidence": "Уверенность модели: {level}",

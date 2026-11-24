@@ -12,7 +12,7 @@
   // Test window hint: the hours of the fine pass of /lt_windows (the server adds a coarse pass over the last
   // WINDOWS_DAYS days, the value of the answer wins) and how many chips are shown.
   const WINDOWS_HOURS = 6;
-  const WINDOWS_DAYS = 30;
+  const WINDOWS_DAYS = 7;
   const WINDOWS_MAX_CHIPS = 5;
   // Progress card: "usually about N min" is the median of this many latest finished report jobs.
   const TYPICAL_SAMPLE = 10;
@@ -361,6 +361,22 @@
     const button = $('createBtn');
     button.disabled = true;
     try {
+      const file = $('observedStepsFile').files[0];
+      if (file) {
+        let markers;
+        try {
+          markers = JSON.parse(await file.text());
+        } catch {
+          formError.textContent = LL.t('new.params.observed_invalid');
+          return;
+        }
+        if (!markers || !Array.isArray(markers.observed_steps)) {
+          formError.textContent = LL.t('new.params.observed_invalid');
+          return;
+        }
+        payload.observed_steps = markers.observed_steps;
+        payload.run_tag = markers.run_tag;
+      }
       const resp = await fetch('/create_report', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

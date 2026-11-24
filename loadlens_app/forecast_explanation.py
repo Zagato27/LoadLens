@@ -36,12 +36,12 @@ from AI.limit_explanation import (
 )
 from AI.prompt_store import load_prompt
 from AI.prompt_store import text as prompt_text
-from AI.providers import ask_llm_with_text_data, usage_domain
-from loadlens_app.core import _ts_conn
+from AI.providers import ask_llm_with_text_data, llm_scope, usage_domain
+from loadlens_app.core import _find_area_for_service, _ts_conn
+from loadlens_app.llm_profiles import effective_llm
 from loadlens_app.forecast import ForecastReport, _storage, build_forecast
 from loadlens_app.i18n import stored_report_language
 from loadlens_app.limits import consume_llm
-from settings import CONFIG
 
 # AI/prompts/<lang>/forecast_limit_prompt.txt; the system prompt is ``forecast.system`` of _strings.json.
 PROMPT_FILE = "forecast_limit_prompt.txt"
@@ -74,6 +74,12 @@ class ExplanationError(Exception):
 class LlmChoice:
     provider: str
     settings: dict[str, Any]
+    use_env: bool = True
+    profile_id: str = ""
+
+    def config(self) -> dict:
+        return {"provider": self.provider, self.provider: self.settings,
+                "_use_env_keys": self.use_env, "_profile_id": self.profile_id}
 
     @property
     def model(self) -> str:
@@ -248,17 +254,14 @@ def compact_system(snapshot: dict[str, Any]) -> dict[str, Any]:
 _compact_system = compact_system
 
 
-def llm_choice() -> tuple[Optional[LlmChoice], str]:
-    """The provider the report pipeline calls (global ``llm`` settings), or the reason it is missing."""
-    llm = CONFIG.get("llm") if isinstance(CONFIG.get("llm"), dict) else {}
+def llm_choice(area: str | None = None) -> tuple[Optional[LlmChoice], str]:
+    """The connection selected for the report's project, or the reason it is missing."""
+    llm = effective_llm(area)
     provider = str(llm.get("provider") or "").strip().lower()
     settings = llm.get(provider) if provider else None
     if not provider or not isinstance(settings, dict):
         return None, t("capacity.explain.no_llm")
-    return LlmChoice(provider=provider, settings=settings), ""
-
-
-_llm_choice = llm_choice
+    return LlmChoice(provider, settings, llm.get("_use_env_keys", True), llm.get("_profile_id", "")), ""
 
 
 def _storage_names() -> tuple[str, str, str]:
@@ -275,8 +278,7 @@ def _analyses(run_id: str) -> RunAnalyses:
         conn.close()
 
 
-def _report_language(run_id: str) -> str:
-    """Language of the report of the run (``sla_details.report_language``); ``ru`` for older reports."""
+def _final_report(run_id: str):
     schema, llm_table, _ = _storage_names()
     try:
         conn = _ts_conn()
@@ -285,8 +287,8 @@ def _report_language(run_id: str) -> str:
         finally:
             conn.close()
     except Exception:
-        return "ru"
-    return stored_report_language(report) if report is not None else "ru"
+        return None
+    return report
 
 
 def _context(run_id: str) -> ExplanationContext:
@@ -295,7 +297,8 @@ def _context(run_id: str) -> ExplanationContext:
 
     The forecast is built in that language too: its texts (plan messages) go into the facts and the hash, so the
     locale of the person who opens the page does not change them."""
-    lang = _report_language(run_id)
+    report = _final_report(run_id)
+    lang = stored_report_language(report) if report is not None else "ru"
     with with_locale(lang):
         forecast = build_forecast(run_id, None, DEFAULT_HEADROOM_PCT)
     window = _limit_window(forecast)
@@ -305,7 +308,8 @@ def _context(run_id: str) -> ExplanationContext:
     findings = related_findings(analyses.findings, window, services) if window is not None else []
     payload = {"facts": _facts(forecast, lang), "findings": [finding_payload(item) for item in findings], "system": _compact_system(analyses.system_context)}
     digest = hashlib.sha256(json.dumps({"prompt": _prompt(lang), "payload": payload}, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
-    llm, llm_problem = _llm_choice()
+    area = (report.project_area if report is not None else "") or _find_area_for_service(forecast.service)
+    llm, llm_problem = llm_choice(area)
     return ExplanationContext(window, findings, payload, digest, llm, llm_problem, lang)
 
 
@@ -369,7 +373,7 @@ def _ask_model(context: ExplanationContext) -> str:
     if llm is None:
         raise ExplanationError(context.llm_problem, 422, "missing_llm")
     try:
-        with usage_domain("forecast"):
+        with llm_scope(llm.config()), usage_domain("forecast"):
             return ask_llm_with_text_data(
                 _prompt(context.lang),
                 json.dumps(context.payload, ensure_ascii=False),

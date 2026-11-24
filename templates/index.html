@@ -154,6 +154,12 @@
           <div class="field-hint">{{ t('new.params.llm_hint') }}</div>
         </div>
       </div>
+      <details>
+        <summary>{{ t('new.params.observed_steps') }}</summary>
+        <label for="observedStepsFile">{{ t('new.params.observed_file') }}</label>
+        <input type="file" id="observedStepsFile" accept=".json,application/json" aria-describedby="observedStepsHint" />
+        <div class="field-hint" id="observedStepsHint">{{ t('new.params.observed_hint') }}</div>
+      </details>
       {# The report is built in the installation's report language; said only when it differs from the interface. #}
       {% if report_language != locale %}
       {% set report_language_name = t('common.lang_name.en') if report_language == 'en' else t('common.lang_name.ru') %}

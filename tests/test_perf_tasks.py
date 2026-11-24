@@ -619,13 +619,23 @@ def test_confluence_publication_goes_to_the_worker_with_the_link_built_by_the_ro
     assert (status["status"], status["kind"], status["page_url"], status["page_id"]) == ("done", "confluence", "http://wiki/42", "42")
 
 
-def test_create_report_goes_to_the_worker(client, web, broker, celery_mode, monkeypatch):
+@pytest.mark.parametrize("with_markers", [False, True])
+def test_create_report_goes_to_the_worker(client, web, worker, broker, celery_mode, monkeypatch, refreshes, with_markers):
     monkeypatch.setattr(dashboard, "_find_area_for_service", lambda service: "demo")
     monkeypatch.setattr(dashboard, "_bootstrap_service_configs", lambda area, service: None)
     monkeypatch.setattr(dashboard, "_metrics_service_entry", lambda service: ("demo", {"metrics": []}))
     monkeypatch.setattr(dashboard, "_run_name_taken", lambda run_name, service: False)
 
-    response = client.post("/create_report", json={"start": "2024-11-01T10:00", "end": "2024-11-01T11:00", "service": "demo", "run_name": "nightly"})
+    request = {"start": "2024-11-01T10:00:00Z", "end": "2024-11-01T11:00:00Z", "service": "demo", "run_name": "nightly"}
+    if with_markers:
+        start = core.convert_to_timestamp(request["start"])
+        step = {"name": "one", "start_ms": start, "end_ms": start + 35_000}
+        request.update(run_tag="nightly-01", observed_steps=[step])
+        for invalid in ({"run_tag": ""}, {"run_tag": "another run"}, {"observed_steps": []},
+                        {"observed_steps": [step, step]}, {"test_type": "spike"}):
+            assert client.post("/create_report", json={**request, **invalid}).status_code == 400
+        assert not broker.sent
+    response = client.post("/create_report", json=request)
 
     assert response.status_code == 200
     body = response.get_json()
@@ -634,6 +644,11 @@ def test_create_report_goes_to_the_worker(client, web, broker, celery_mode, monk
     assert sent.name == "loadlens.report" and sent.kwargs["job_id"] == body["job_id"]
     assert sent.kwargs["end"] - sent.kwargs["start"] == 3_600_000
     assert (sent.kwargs["service"], sent.kwargs["project_area"], sent.kwargs["use_llm"]) == ("demo", "demo", True)
+    calls = []
+    monkeypatch.setattr(dashboard, "update_report", fake_update_report(calls))
+    deliver(monkeypatch, worker, sent.name, sent.kwargs)
+    assert calls[0][1].get("observed_steps") == request.get("observed_steps")
+    assert calls[0][1]["run_tag"] == request.get("run_tag")
 
 
 @pytest.fixture

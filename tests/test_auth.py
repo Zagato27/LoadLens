@@ -1085,6 +1085,7 @@ def test_an_admin_token_cannot_reach_settings_secrets_or_delete_data(app, logged
     api_client = Browser(app)
     refused = (
         ("GET", "/config"), ("POST", "/config"), ("POST", "/config/test_connection"), ("POST", "/config/llm_models"),
+        ("POST", "/config/llm_profiles"),
         ("POST", "/config/query_preview"), ("GET", "/config/grafana_datasources"),
         ("GET", "/prompts"), ("POST", "/prompts"), ("POST", "/projects"), ("DELETE", "/projects/demo"),
         ("DELETE", "/runs/old-run"), ("POST", "/demo/seed"), ("DELETE", "/service"),

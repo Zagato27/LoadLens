@@ -38,6 +38,10 @@
     promptDomain: 'overall',
     promptLoaded: '',
     checkOk: {},
+    llmDraft: null,
+    llmAnalysisDraft: undefined,
+    llmModels: [],
+    llmBusy: false,
     domainLang: {},
     domainLangPicker: {},
     // Language picked for an empty query row (its text decides once it has one), by domain:index.
@@ -175,15 +179,31 @@
   const LLM_PROVIDERS = [
     { v: 'perplexity', l: 'Perplexity' }, { v: 'openai', l: LL.t('settings.llm.provider_openai') }, { v: 'anthropic', l: 'Anthropic' }, { v: 'gigachat', l: 'GigaChat' }
   ];
+  const LLM_ANALYSIS_FIELDS = [
+    { key: 'max_domain_workers', label: LL.t('settings.field.llm.max_domain_workers.label'), hint: LL.t('settings.field.llm.max_domain_workers.hint') },
+    { key: 'self_consistency_k', label: LL.t('settings.field.llm.self_consistency_k.label'), hint: LL.t('settings.field.llm.self_consistency_k.hint') }
+  ];
+  function openaiConcurrencyDefault(settings = {}) {
+    try {
+      return new URL(settings.api_base_url || settings.base_url).hostname === 'api.openai.com' ? '4' : '1';
+    } catch {
+      return '1';
+    }
+  }
   const providerFields = (p, extra) => ([
     { path: `${p}.api_base_url`, label: 'API URL', type: 'text', showIf: (m) => m.provider === p },
     { path: `${p}.model`, label: LL.t('settings.field.llm.model.label'), type: 'combo', showIf: (m) => m.provider === p },
     ...(extra || []),
+    ...(p === 'gigachat' ? [] : [{
+      path: `${p}.proxy_url`, label: LL.t('settings.field.llm.proxy_url.label'), type: 'password',
+      placeholder: 'http://user:password@proxy.example:8080', hint: LL.t('settings.field.llm.proxy_url.hint'),
+      showIf: (m) => m.provider === p
+    }]),
     { path: `${p}.max_concurrent`, label: LL.t('settings.field.llm.max_concurrent.label'), type: 'number', showIf: (m) => m.provider === p },
     { path: `${p}.request_timeout_sec`, label: LL.t('settings.field.llm.request_timeout_sec.label'), type: 'number', showIf: (m) => m.provider === p },
     { path: `${p}.generation.temperature`, label: 'Temperature', type: 'number', step: '0.05', showIf: (m) => m.provider === p },
     { path: `${p}.generation.max_tokens`, label: LL.t('settings.field.llm.max_tokens.label'), type: 'number', hint: LL.t('settings.field.llm.max_tokens.hint'), showIf: (m) => m.provider === p },
-    { path: `${p}.context_window_tokens`, label: LL.t('settings.field.llm.context_window_tokens.label'), type: 'number', hint: LL.t('settings.field.llm.context_window_tokens.hint'), showIf: (m) => m.provider === p && (p === 'anthropic' || p === 'gigachat') }
+    { path: `${p}.context_window_tokens`, label: LL.t('settings.field.llm.context_window_tokens.label'), type: 'number', hint: LL.t('settings.field.llm.context_window_tokens.hint'), showIf: (m) => m.provider === p && ['openai', 'anthropic', 'gigachat'].includes(p) }
   ]);
   const apiKeyField = (p) => ({ path: `${p}.api_key`, label: LL.t('settings.field.llm.api_key.label'), type: 'password', showIf: (m) => m.provider === p });
   // Application logs: OpenSearch (no "type" in configs written before Loki) or Loki via Grafana or directly.
@@ -300,16 +320,20 @@
       id: 'llm', section: 'llm', title: LL.t('settings.card.llm.title'), scope: 'area',
       desc: LL.t('settings.card.llm.desc'),
       fields: [
+        { path: 'name', label: LL.t('settings.llm.profiles.name'), type: 'text' },
         { path: 'provider', label: LL.t('settings.field.llm.provider.label'), type: 'select', options: LLM_PROVIDERS },
-        { path: 'max_domain_workers', label: LL.t('settings.field.llm.max_domain_workers.label'), type: 'number', hint: LL.t('settings.field.llm.max_domain_workers.hint') },
-        { path: 'self_consistency_k', label: LL.t('settings.field.llm.self_consistency_k.label'), type: 'number', hint: LL.t('settings.field.llm.self_consistency_k.hint') },
+        {
+          path: 'shared', type: 'checkbox', label: LL.t('settings.llm.profiles.share'),
+          hint: LL.t('settings.llm.profiles.share_hint'), showIf: () => !!state.area
+        },
         ...providerFields('perplexity', [apiKeyField('perplexity')]),
         ...providerFields('openai', [apiKeyField('openai')]),
         ...providerFields('anthropic', [apiKeyField('anthropic')]),
         ...providerFields('gigachat', [
-          { path: 'gigachat.cert_file', label: LL.t('settings.field.llm.gigachat_cert_file.label'), type: 'text', hint: LL.t('settings.field.llm.gigachat_cert_file.hint'), showIf: (m) => m.provider === 'gigachat' },
-          { path: 'gigachat.key_file', label: LL.t('settings.field.llm.gigachat_key_file.label'), type: 'text', showIf: (m) => m.provider === 'gigachat' },
-          { path: 'gigachat.verify', label: LL.t('settings.field.llm.gigachat_verify.label'), type: 'checkbox', showIf: (m) => m.provider === 'gigachat' }
+          apiKeyField('gigachat'),
+          { path: 'gigachat.cert_file', label: LL.t('settings.field.llm.gigachat_cert_file.label'), type: 'password', hint: LL.t('settings.field.llm.gigachat_cert_file.hint'), showIf: (m) => m.provider === 'gigachat' },
+          { path: 'gigachat.key_file', label: LL.t('settings.field.llm.gigachat_key_file.label'), type: 'password', showIf: (m) => m.provider === 'gigachat' },
+          { path: 'gigachat.verify', label: LL.t('settings.field.llm.gigachat_verify.label'), type: 'checkbox', defaultValue: true, showIf: (m) => m.provider === 'gigachat' }
         ])
       ]
     },
@@ -468,7 +492,7 @@
         wrap.appendChild(hint);
       }
     } else if (field.type === 'password') {
-      wrap.innerHTML = `<label for="${id}">${esc(field.label)}</label><div class="password-field"><input type="password" id="${id}" value="${esc(value === undefined || value === null ? '' : value)}" autocomplete="new-password" /><button type="button" class="btn btn-reveal" aria-label="${LL.tHtml('settings.field.reveal_aria')}">${LL.tHtml('settings.field.reveal')}</button></div>${field.hint ? `<div class="field-hint">${esc(field.hint)}</div>` : ''}`;
+      wrap.innerHTML = `<label for="${id}">${esc(field.label)}</label><div class="password-field"><input type="password" id="${id}" value="${esc(value ?? '')}" placeholder="${esc(field.placeholder || '')}" autocomplete="new-password" /><button type="button" class="btn btn-reveal" aria-label="${LL.tHtml('settings.field.reveal_aria')}">${LL.tHtml('settings.field.reveal')}</button></div>${field.hint ? `<div class="field-hint">${esc(field.hint)}</div>` : ''}`;
       const input = wrap.querySelector('input');
       wrap.querySelector('.btn-reveal').addEventListener('click', (e) => {
         const show = input.type === 'password';
@@ -482,8 +506,13 @@
       wrap.innerHTML = `<label for="${id}">${esc(field.label)}</label><input type="${field.type === 'number' ? 'number' : 'text'}" id="${id}" ${field.step ? `step="${field.step}"` : ''} value="${esc(fieldText(field, value))}" placeholder="${esc(field.placeholder || '')}" />${field.hint ? `<div class="field-hint">${esc(field.hint)}</div>` : ''}`;
     }
     const control = wrap.querySelector('input, select, textarea');
+    if (field.path === 'openai.max_concurrent') control.placeholder = openaiConcurrencyDefault(model.openai);
     control.addEventListener(field.type === 'checkbox' || field.type === 'select' ? 'change' : 'input', () => {
       setPath(state.models[card.id], field.path, coerce(field, control.value, control.checked));
+      if (card.id === 'llm') {
+        syncLlmFields(card, field.path);
+        return;
+      }
       setJson(state.editors[`ed_${card.id}`], state.models[card.id]);
       updateCardDirty(card);
       updateFieldVisibility(card);
@@ -525,6 +554,14 @@
     const host = $('connectionCards');
     host.innerHTML = '';
     CONNECTION_CARDS.forEach((card) => {
+      if (card.id === 'llm') {
+        const el = document.createElement('article');
+        el.className = 'conn-card';
+        el.id = 'card-llm';
+        host.appendChild(el);
+        renderLlmProfiles(card);
+        return;
+      }
       state.models[card.id] = clone(sectionData(card.section));
       state.saved[card.id] = stable(state.models[card.id]);
       const scopeNote = card.scope === 'area'
@@ -535,7 +572,7 @@
       el.id = `card-${card.id}`;
       const bodyClass = card.kind ? 'card-body' : 'form-grid three';
       el.innerHTML = `
-        <div class="conn-head"><h3>${esc(card.title)}</h3><span class="conn-actions">${card.id === 'llm' ? `<button type="button" class="btn card-models">${LL.tHtml('settings.llm.models_button')}</button>` : ''}${card.testable === false ? '' : `<button type="button" class="btn card-test">${LL.tHtml('settings.card.test_button')}</button>`}</span></div>
+        <div class="conn-head"><h3>${esc(card.title)}</h3><span class="conn-actions">${card.testable === false ? '' : `<button type="button" class="btn card-test">${LL.tHtml('settings.card.test_button')}</button>`}</span></div>
         <p class="help">${esc(card.desc)} <span class="dim">(${esc(scopeNote)})</span></p>
         <div class="${bodyClass}"></div>
         <div class="conn-result" role="status"></div>
@@ -571,33 +608,280 @@
       }
       const testBtn = el.querySelector('.card-test');
       if (testBtn) testBtn.addEventListener('click', () => testCard(card));
-      const modelsBtn = el.querySelector('.card-models');
-      if (modelsBtn) modelsBtn.addEventListener('click', () => loadModels(card));
       el.querySelector('.card-save').addEventListener('click', () => saveCard(card));
     });
   }
 
-  async function loadModels(card) {
-    const el = $(`card-${card.id}`);
-    const result = el.querySelector('.conn-result');
-    const btn = el.querySelector('.card-models');
-    result.className = 'conn-result pending';
-    result.textContent = LL.t('settings.llm.models_loading');
-    btn.disabled = true;
-    try {
-      const resp = await fetch('/config/llm_models', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(configBody('llm', state.models[card.id])) });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-      state.llmModels = Array.isArray(data.models) ? data.models : [];
+  function llmProfileScope(profile, areas) {
+    if (!profile.area) return LL.t('settings.llm.profiles.shared');
+    if (!profile.shared) return LL.t('settings.llm.profiles.project');
+    const project = areas.find((item) => item.id === profile.area);
+    return LL.t('settings.llm.profiles.shared_from', { project: project?.title || profile.area });
+  }
+
+  function renderLlmProfiles(card) {
+    const root = $('card-llm');
+    const catalog = state.config.llm_profiles;
+    const draft = state.llmDraft;
+    const rows = catalog.profiles.map((profile, index) => {
+      const active = profile.id === catalog.active_id;
+      const editable = profile.area === state.area;
+      const scope = llmProfileScope(profile, state.config.areas_meta || []);
+      const provider = LLM_PROVIDERS.find((item) => item.v === profile.provider)?.l || profile.provider;
+      return `<li class="llm-profile" data-index="${index}">
+        <div class="llm-profile-label"><strong>${esc(profile.name)}</strong>${active ? `<span class="status ok">${LL.tHtml('settings.llm.profiles.active')}</span>` : ''}
+          <small class="dim">${[scope, provider, profile.settings.model].filter(Boolean).map(esc).join(' · ')}</small></div>
+        <div class="conn-actions">
+          ${active && (!catalog.inherits || !state.area) ? '' : `<button type="button" class="btn" data-profile-action="activate">${LL.tHtml('settings.llm.profiles.use')}</button>`}
+          ${editable ? `<button type="button" class="btn" data-profile-action="edit">${LL.tHtml('settings.llm.profiles.edit')}</button>` : ''}
+          ${!editable || (active && state.wizard && !draft) ? `<button type="button" class="btn" data-profile-action="test">${LL.tHtml('settings.card.test_button')}</button>` : ''}
+          ${editable && !active ? `<button type="button" class="btn" data-profile-action="delete">${LL.tHtml('settings.action.delete')}</button>` : ''}
+        </div></li>`;
+    }).join('');
+    root.innerHTML = `
+      <fieldset class="llm-controls">
+        <div class="conn-head"><h3>${esc(card.title)}</h3><button type="button" class="btn btn-primary llm-add">${LL.tHtml('settings.llm.profiles.add')}</button></div>
+        <p class="help">${LL.tHtml('settings.llm.profiles.help')}</p>
+        ${rows ? `<ul class="llm-profiles">${rows}</ul>` : `<p class="dim">${LL.tHtml('settings.llm.profiles.empty')}</p>`}
+        ${state.area ? `<div class="card-actions"><button type="button" class="btn llm-inherit" ${catalog.inherits ? 'disabled' : ''}>${LL.tHtml('settings.llm.profiles.inherit')}</button></div>` : ''}
+        ${draft ? `<div class="llm-profile-editor">
+          <h4>${LL.tHtml(draft.id ? 'settings.llm.profiles.edit' : 'settings.llm.profiles.add')}</h4>
+          <div class="form-grid three"></div>
+          <details class="report-collapsible"><summary>${LL.tHtml('settings.json.advanced_params')}</summary>
+            <div class="report-collapsible-body"><textarea id="llmProfileJson" class="mono llm-json" rows="8" aria-label="${LL.tHtml('settings.json.advanced_params')}"></textarea></div>
+          </details>
+          <div class="card-actions">
+            <button type="button" class="btn card-models">${LL.tHtml('settings.llm.models_button')}</button>
+            <button type="button" class="btn card-test">${LL.tHtml('settings.card.test_button')}</button>
+            <button type="button" class="btn btn-primary card-save">${LL.tHtml('settings.action.save')}</button>
+            <button type="button" class="btn llm-cancel">${LL.tHtml('settings.llm.profiles.cancel')}</button>
+          </div></div>` : ''}
+        <div id="llmProfileResult" class="conn-result" role="status"></div>
+        <details class="report-collapsible" ${state.llmAnalysisDraft === undefined ? '' : 'open'}>
+          <summary>${LL.tHtml('settings.llm.profiles.analysis')}</summary>
+          <div class="report-collapsible-body">
+            <div class="form-grid two llm-analysis-fields">${LLM_ANALYSIS_FIELDS.map(({ key, label, hint }) => `<div>
+              <label for="llm-analysis-${key}">${esc(label)}</label>
+              <input type="number" id="llm-analysis-${key}" data-analysis-field="${key}" min="1">
+              <div class="field-hint">${esc(hint)}</div></div>`).join('')}
+            </div>
+            <textarea id="llmAnalysisJson" class="mono llm-json" rows="8" aria-label="${LL.tHtml('settings.llm.profiles.analysis')}"></textarea>
+            <div class="card-actions"><button type="button" class="btn llm-analysis-save">${LL.tHtml('settings.action.save')}</button></div>
+            <div id="llmAnalysisResult" class="conn-result" role="status"></div>
+          </div>
+        </details>
+      </fieldset>`;
+    root.querySelector('.llm-add').onclick = () => openLlmDraft(card);
+    const inherit = root.querySelector('.llm-inherit');
+    if (inherit) inherit.onclick = () => changeLlmProfile(card, 'activate', '');
+    root.querySelectorAll('[data-profile-action]').forEach((button) => {
+      const profile = catalog.profiles[Number(button.closest('[data-index]').dataset.index)];
+      button.onclick = async () => {
+        const action = button.dataset.profileAction;
+        if (action === 'edit') return openLlmDraft(card, profile);
+        if (action === 'test') return checkLlmProfile(card, action, profile);
+        if (action === 'delete' && !await ui.confirm({
+          title: LL.t('settings.action.delete'), message: LL.t('settings.llm.profiles.delete', { name: profile.name }), danger: true
+        })) return;
+        return changeLlmProfile(card, action, profile.id);
+      };
+    });
+    if (draft) {
       refreshCardFields(card);
-      result.className = `conn-result ${data.ok ? 'ok' : 'error'}`;
-      result.textContent = data.message || (data.ok ? LL.t('settings.llm.models_count', { n: state.llmModels.length }) : LL.t('settings.llm.models_unsupported'));
+      const provider = $('f-llm-provider');
+      provider.disabled = !!draft.id;
+      $('f-llm-name').maxLength = 80;
+      const json = $('llmProfileJson');
+      json.value = draft.json;
+      json.oninput = () => {
+        draft.json = json.value;
+        markDirty('connections:llm', card.title, true);
+        resetLlmCheck();
+        try {
+          const model = state.models.llm;
+          model[model.provider] = llmJson(json.value);
+          json.setCustomValidity('');
+          refreshCardFields(card);
+          $('f-llm-provider').disabled = !!draft.id;
+        } catch (e) { json.setCustomValidity(e.message); }
+      };
+      root.querySelector('.card-save').onclick = () => saveLlmDraft(card);
+      root.querySelector('.card-test').onclick = () => checkLlmProfile(card, 'test');
+      root.querySelector('.card-models').onclick = () => checkLlmProfile(card, 'models');
+      root.querySelector('.llm-cancel').onclick = () => openLlmDraft(card, null);
+    }
+    const analysis = $('llmAnalysisJson');
+    analysis.value = state.llmAnalysisDraft ?? JSON.stringify(catalog.analysis, null, 2);
+    const analysisSave = root.querySelector('.llm-analysis-save');
+    const inputs = root.querySelectorAll('[data-analysis-field]');
+    analysisSave.disabled = state.llmAnalysisDraft === undefined;
+    function syncAnalysis() {
+      state.llmAnalysisDraft = analysis.value === JSON.stringify(catalog.analysis, null, 2) ? undefined : analysis.value;
+      analysisSave.disabled = state.llmAnalysisDraft === undefined;
+      markDirty('connections:llm-analysis', LL.t('settings.llm.profiles.analysis'), !analysisSave.disabled);
+      try {
+        const options = llmJson(analysis.value);
+        inputs.forEach((input) => { input.value = options[input.dataset.analysisField] ?? ''; input.disabled = false; });
+      } catch (e) {
+        inputs.forEach((input) => { input.disabled = true; });
+      }
+    }
+    analysis.oninput = syncAnalysis;
+    inputs.forEach((input) => input.oninput = () => {
+      const options = llmJson(analysis.value);
+      if (input.value) options[input.dataset.analysisField] = input.valueAsNumber;
+      else delete options[input.dataset.analysisField];
+      analysis.value = JSON.stringify(options, null, 2);
+      syncAnalysis();
+    });
+    syncAnalysis();
+    analysisSave.onclick = () => saveLlmAnalysis(card);
+  }
+
+  function llmJson(value) {
+    const parsed = JSON.parse(value);
+    if (!isPlainObject(parsed)) throw new Error(LL.t('settings.json.expected_object'));
+    return parsed;
+  }
+
+  function resetLlmCheck() {
+    state.checkOk.llm = false;
+    updateWizardNav();
+    if ($('llmProfileResult')) $('llmProfileResult').textContent = '';
+  }
+
+  async function openLlmDraft(card, profile) {
+    if (state.dirty.has('connections:llm') && !await ui.confirm({
+      title: LL.t('settings.prompts.discard_title'), message: LL.t('settings.prompts.discard_message'),
+      confirmText: LL.t('settings.prompts.discard_confirm'), danger: true
+    })) return;
+    state.llmModels = [];
+    state.llmDraft = null;
+    markDirty('connections:llm', card.title, false);
+    resetLlmCheck();
+    if (profile !== null) {
+      const provider = profile?.provider || 'openai';
+      const settings = clone(profile?.settings || {});
+      state.models.llm = { name: profile?.name || '', shared: !!profile?.shared, provider, [provider]: settings };
+      state.llmDraft = { id: profile?.id || '', json: JSON.stringify(settings, null, 2) };
+    }
+    renderLlmProfiles(card);
+    if (state.llmDraft) $('f-llm-name').focus();
+  }
+
+  function syncLlmFields(card, path) {
+    const model = state.models.llm;
+    const draft = state.llmDraft;
+    const connectionChanged = path !== 'name' && path !== 'shared';
+    if (path === 'openai.api_base_url') {
+      $('f-llm-openai-max_concurrent').placeholder = openaiConcurrencyDefault(model.openai);
+    }
+    if (connectionChanged) {
+      draft.json = JSON.stringify(model[model.provider] || {}, null, 2);
+      const json = $('llmProfileJson');
+      json.value = draft.json;
+      json.setCustomValidity('');
+    }
+    if (path === 'provider') {
+      state.llmModels = [];
+      refreshCardFields(card);
+      $('f-llm-provider').focus();
+    } else {
+      updateFieldVisibility(card);
+    }
+    markDirty('connections:llm', card.title, true);
+    if (connectionChanged) resetLlmCheck();
+  }
+
+  function llmDraftData(model = state.models.llm, json = state.llmDraft.json, area = state.area) {
+    const data = { name: model.name, provider: model.provider, settings: llmJson(json) };
+    if (area) data.shared = !!model.shared;
+    return data;
+  }
+
+  async function llmProfileRequest(action, id, data, area = state.area) {
+    const response = await fetch('/config/llm_profiles', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, area, id, data })
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    return result;
+  }
+
+  async function llmAction(action, resultId, callback) {
+    if (state.llmBusy) return null;
+    const controls = $('card-llm').querySelector('.llm-controls');
+    state.llmBusy = controls.disabled = true;
+    const result = $(resultId);
+    result.className = 'conn-result pending';
+    result.textContent = LL.t(action === 'models' ? 'settings.llm.models_loading' : action === 'test' ? 'settings.check.pending' : 'settings.status.saving');
+    try {
+      return await callback();
     } catch (e) {
       result.className = 'conn-result error';
-      result.textContent = LL.t('settings.llm.models_failed', { error: e.message });
+      result.textContent = e.message;
+      return null;
     } finally {
-      btn.disabled = false;
+      state.llmBusy = controls.disabled = false;
+      updateWizardNav();
     }
+  }
+
+  async function changeLlmProfile(card, action, id, data = {}) {
+    const resultId = action === 'analysis' ? 'llmAnalysisResult' : 'llmProfileResult';
+    return llmAction(action, resultId, async () => {
+      const result = await llmProfileRequest(action, id, data);
+      state.config.llm_profiles = result;
+      if (action === 'save' || (action === 'delete' && state.llmDraft?.id === id)) {
+        state.llmDraft = null;
+        markDirty('connections:llm', card.title, false);
+      }
+      if (action === 'analysis') {
+        state.llmAnalysisDraft = undefined;
+        markDirty('connections:llm-analysis', LL.t('settings.llm.profiles.analysis'), false);
+      }
+      if (action === 'activate' || action === 'save') resetLlmCheck();
+      renderLlmProfiles(card);
+      ui.toast(LL.t(action === 'activate' ? 'settings.llm.profiles.activated' : 'settings.status.saved'), { tone: 'ok' });
+      return result;
+    });
+  }
+
+  function saveLlmDraft(card) {
+    try {
+      return changeLlmProfile(card, 'save', state.llmDraft.id, llmDraftData());
+    } catch (e) {
+      setStatus('llmProfileResult', e.message, 'error');
+      return null;
+    }
+  }
+
+  function saveLlmAnalysis(card) {
+    try {
+      return changeLlmProfile(card, 'analysis', '', llmJson($('llmAnalysisJson').value));
+    } catch (e) {
+      setStatus('llmAnalysisResult', e.message, 'error');
+      return null;
+    }
+  }
+
+  function checkLlmProfile(card, action, savedProfile) {
+    return llmAction(action, 'llmProfileResult', async () => {
+      if (action === 'test') state.checkOk.llm = false;
+      const data = savedProfile || llmDraftData();
+      const id = savedProfile ? savedProfile.id : state.llmDraft.id;
+      const result = await llmProfileRequest(action, id, data, savedProfile ? savedProfile.area : state.area);
+      if (action === 'models') {
+        state.llmModels = Array.isArray(result.models) ? result.models : [];
+        refreshCardFields(card);
+        $('f-llm-provider').disabled = !!id;
+      } else {
+        state.checkOk.llm = result.ok && (!savedProfile || id === state.config.llm_profiles.active_id);
+      }
+      const status = $('llmProfileResult');
+      status.className = `conn-result ${result.ok ? 'ok' : 'error'}`;
+      status.textContent = result.message;
+    });
   }
 
   async function testCard(card, extra, resultEl) {
@@ -630,6 +914,7 @@
   }
 
   async function saveCard(card) {
+    if (card.id === 'llm') return saveLlmDraft(card);
     const el = $(`card-${card.id}`);
     const status = el.querySelector('.card-status');
     status.textContent = LL.t('settings.status.saving');
@@ -2624,10 +2909,12 @@
     return LL.t('settings.ctx.import.scope_service', { service: (svc && svc.title) || state.contextScope, area: areaTitle });
   }
   function contextLlmTitle() {
-    const llm = isPlainObject(state.config.llm) ? state.config.llm : {};
+    const catalog = state.config.llm_profiles;
+    const llm = catalog?.llm || state.config.llm || {};
     const provider = String(llm.provider || '');
     const model = provider && isPlainObject(llm[provider]) ? String(llm[provider].model || '') : '';
-    return provider ? (model ? `${provider} / ${model}` : provider) : '';
+    const active = catalog?.profiles.find((profile) => profile.id === catalog.active_id);
+    return [active?.name || provider, model].filter(Boolean).join(' / ');
   }
   function clearContextImport() {
     state.contextImport = null;
@@ -4787,7 +5074,7 @@
     if (!step || step.key === 'done') return;
     if (step.card) {
       const ok = !!state.checkOk[step.card];
-      next.disabled = !ok;
+      next.disabled = !ok || (step.card === 'llm' && state.llmBusy);
       hint.textContent = ok ? LL.t('settings.wizard.hint.checked') : LL.t('settings.wizard.hint.check_or_skip');
     } else if (step.key === 'queries') {
       const ltLabels = Array.isArray(queryBlock('lt_framework').labels) ? queryBlock('lt_framework').labels.filter(Boolean) : [];
@@ -4808,7 +5095,10 @@
     if (!skip) {
       if (step.card) {
         const card = CONNECTION_CARDS.find((c) => c.id === step.card);
-        if (state.dirty.has(`connections:${card.id}`) && !(await saveCard(card))) return;
+        if (card.id === 'llm' && state.llmDraft) {
+          const saved = await saveLlmDraft(card);
+          if (!saved || (saved.active_id !== saved.id && !await changeLlmProfile(card, 'activate', saved.id))) return;
+        } else if (state.dirty.has(`connections:${card.id}`) && !(await saveCard(card))) return;
       } else if (step.key === 'appearance' && (state.dirty.has('appearance:language') || state.dirty.has('appearance:accent'))) {
         if (!(await saveAppearanceNow())) return;
       } else if (step.key === 'sla' && state.dirty.has('sla:model') && !(await saveSla())) return;
@@ -4820,6 +5110,7 @@
   function initWizard() {
     state.wizard = new URLSearchParams(location.search).get('wizard') === '1';
     if (!state.wizard) return;
+    renderLlmProfiles(CONNECTION_CARDS.find((card) => card.id === 'llm'));
     document.body.classList.add('wizard');
     $('wizardNextBtn').addEventListener('click', () => wizardNext(false));
     $('wizardSkipBtn').addEventListener('click', () => wizardNext(true));
@@ -5085,7 +5376,7 @@
       schemaTexts, sourceSummary, generatorSummary, generatorStatus, toolSummary, toolBadge, hostKeyMessage,
       queryOptions, deadRefText, contextGroupSummary, slaUsageText, CONTEXT_GROUPS, promptLanguageNote, WIZARD_STEPS,
       aboutMarkdown, roleOptions, sharedRoleLabel, QUERY_NOTE_MAX, removeQueryRowsFromBlock,
-      offDomainsOf, servicesWithDomainOff, domainOffNote, domainRowCount
+      offDomainsOf, servicesWithDomainOff, domainOffNote, domainRowCount, llmDraftData, llmProfileScope, openaiConcurrencyDefault
     }
   };
 
@@ -5199,6 +5490,7 @@
     $('addServiceBtn').addEventListener('click', addService);
     $('dirtySaveAll').addEventListener('click', async () => {
       for (const card of CONNECTION_CARDS) if (state.dirty.has(`connections:${card.id}`)) await saveCard(card);
+      if (state.dirty.has('connections:llm-analysis')) await saveLlmAnalysis(CONNECTION_CARDS.find((card) => card.id === 'llm'));
       if (state.dirty.has('sla:model')) await saveSla();
       if (state.dirty.has('context:system_context')) $('contextSaveBtn').click();
       if (state.dirty.has('queries:queries')) $('queriesSaveBtn').click();

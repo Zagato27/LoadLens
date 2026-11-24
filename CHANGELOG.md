@@ -8,6 +8,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-24
+
+### Added
+
+- Step and stress reports accept named generator intervals with a run tag through the report form or API.
+  Charts, step statistics and SLA use the same boundaries. Reports show planned and measured throughput
+  separately and apply the configured minimum hold time to capacity checks ([#10](https://github.com/Zagato27/LoadLens/issues/10)).
+- Save and switch named LLM connections in **Settings → Connections**. Share a connection from its project
+  with **Available to all projects**. Each project can select it independently or follow the shared default.
+- Set an authenticated proxy URL for an OpenAI-compatible, Anthropic or Perplexity connection.
+
+### Changed
+
+- The New report form now searches the last seven days of metrics and finished runs when suggesting test
+  periods, down from 30 days. Users can still enter older report dates manually.
+
+### Fixed
+
+- The web report and Confluence explain the final verdict using the configured SLA checks and their units.
+  The verification count refers to AI findings. Older reports label their saved AI rationale as unchecked
+  ([#11](https://github.com/Zagato27/LoadLens/issues/11)).
+- The demo starts on single-vCPU hosts and processes manual run start and stop requests with the default
+  configuration ([#2](https://github.com/Zagato27/LoadLens/issues/2), [#5](https://github.com/Zagato27/LoadLens/issues/5)).
+- Comparison explanations check each value against the named run and metric. Numeric verification retains
+  percent units and checks measurements beyond the first twelve
+  ([#6](https://github.com/Zagato27/LoadLens/issues/6), [#7](https://github.com/Zagato27/LoadLens/issues/7), [#8](https://github.com/Zagato27/LoadLens/issues/8)).
+- OpenAI-compatible analysis and judge requests fit within the model's context window. Concurrent requests
+  respect the connection's slot limit. Failed calls identify the affected domain and stage
+  ([#3](https://github.com/Zagato27/LoadLens/issues/3), [#4](https://github.com/Zagato27/LoadLens/issues/4)).
+- Overlapping reports in the thread runner keep separate LLM usage and cost totals
+  ([#9](https://github.com/Zagato27/LoadLens/issues/9)).
+- Honor Moonshot's Kimi request parameters in connection checks and reports, and surface API validation errors in connection checks.
+- Back off and honor `Retry-After` when an LLM connection returns HTTP 429. Keep SLA results and test figures when model analysis fails.
+
 ## [2.0.0] - 2026-11-17
 
 ### Upgrade notes
@@ -317,6 +351,7 @@ verdict, an AI analysis that is checked against the data, and a Confluence page,
 - **API.** The same JSON API as the web UI with API tokens; `GET /runs?include=sla` adds the SLA result of every
   run, `GET /dashboard_data` returns the SLA checks and the load profile of the latest run.
 
-[Unreleased]: https://github.com/Zagato27/LoadLens/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/Zagato27/LoadLens/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/Zagato27/LoadLens/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/Zagato27/LoadLens/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/Zagato27/LoadLens/releases/tag/v1.0.0

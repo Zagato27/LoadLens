@@ -107,7 +107,7 @@ services:
       LOADLENS_JOB_RUNNER: thread
       CELERY_TASK_ALWAYS_EAGER: "1"
       LOADLENS_RUN_MIGRATIONS: "1"
-      LOADLENS_LOAD_TEST_WATCHER: "0"
+      LOADLENS_LOAD_TEST_WATCHER: "1"
       # Sign-in with the demo administrator (docker/demo.env).
       LOADLENS_AUTH_ENABLED: "1"
       LOADLENS_SECRET_KEY: ${DEMO_SECRET_KEY:-demo-only-secret-key-not-for-production}
@@ -135,7 +135,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2"
+          cpus: "${DEMO_APP_CPUS:-1}"
           memory: 2g
           pids: 512
     restart: unless-stopped

@@ -27,12 +27,13 @@ SECRET_KEYS = frozenset({
     "password", "token", "grafana_pass", "api_key", "password_env", "credentials",
     # Load generators: SSH key, Docker client key, CI trigger and API tokens.
     "private_key", "passphrase", "client_key", "trigger_token", "api_token",
+    "cert_file", "key_file",
 })
 
 # Fields that decide where the secrets on the same level, or nested below it, are sent.
 DESTINATION_KEYS = frozenset({
     "url", "base_url", "api_base_url", "api_url", "url_basic", "host", "port",
-    "proxies", "verify", "verify_ssl", "sslmode", "ca_bundle", "ca_cert", "in_cluster", "host_key",
+    "proxy_url", "proxies", "verify", "verify_ssl", "sslmode", "ca_bundle", "ca_cert", "in_cluster", "host_key",
 })
 # Destination fields where filling an empty value only makes the check stricter (pinning the SSH host key
 # found by the first check); changing or clearing a stored value still counts as a new destination.
@@ -75,7 +76,7 @@ def mask_secrets(tree: Any) -> Any:
     return tree
 
 
-def restore_secrets(incoming: Any, current: Any, _path: str = "", _moved: bool = False) -> Any:
+def restore_secrets(incoming: Any, current: Any, _path: str = "", _moved: bool = False, *, complete: bool = False) -> Any:
     """Replaces :data:`MASK` sentinels in ``incoming`` with values from ``current``.
 
     Raises:
@@ -86,7 +87,7 @@ def restore_secrets(incoming: Any, current: Any, _path: str = "", _moved: bool =
         return _restore_url_password(incoming, current, _path)
     if isinstance(incoming, dict):
         stored = current if isinstance(current, dict) else {}
-        moved = _moved or _destination_changed(incoming, stored, DESTINATION_KEYS)
+        moved = _moved or _destination_changed(incoming, stored, DESTINATION_KEYS, complete)
         restored: dict = {}
         for key, value in incoming.items():
             path = f"{_path}.{key}" if _path else str(key)
@@ -96,34 +97,34 @@ def restore_secrets(incoming: Any, current: Any, _path: str = "", _moved: bool =
                     raise SecretPlaceholderError(path)
                 specific = SPECIFIC_DESTINATIONS.get(key)
                 if specific:
-                    changed = _moved or _destination_changed(incoming, stored, specific)
+                    changed = _moved or _destination_changed(incoming, stored, specific, complete)
                 else:
                     changed = moved
                 if changed:
                     raise SecretDestinationChangedError(path)
                 restored[key] = stored_value
             else:
-                restored[key] = restore_secrets(value, stored.get(key), path, moved)
+                restored[key] = restore_secrets(value, stored.get(key), path, moved, complete=complete)
         return restored
     if isinstance(incoming, list):
         stored_list = current if isinstance(current, list) else []
         return [
-            restore_secrets(item, stored_list[idx] if idx < len(stored_list) else None, f"{_path}[{idx}]", _moved)
+            restore_secrets(item, stored_list[idx] if idx < len(stored_list) else None, f"{_path}[{idx}]", _moved, complete=complete)
             for idx, item in enumerate(incoming)
         ]
     return incoming
 
 
-def destination_changed(incoming: Any, stored: Any) -> bool:
+def destination_changed(incoming: Any, stored: Any, *, complete: bool = False) -> bool:
     """Whether an address, port, proxy or TLS field differs from the stored configuration at any depth."""
     if isinstance(incoming, dict):
         current = stored if isinstance(stored, dict) else {}
-        if _destination_changed(incoming, current, DESTINATION_KEYS):
+        if _destination_changed(incoming, current, DESTINATION_KEYS, complete):
             return True
-        return any(destination_changed(value, current.get(key)) for key, value in incoming.items() if isinstance(value, (dict, list)))
+        return any(destination_changed(value, current.get(key), complete=complete) for key, value in incoming.items() if isinstance(value, (dict, list)))
     if isinstance(incoming, list):
         current = stored if isinstance(stored, list) else []
-        return any(destination_changed(item, current[i] if i < len(current) else None) for i, item in enumerate(incoming))
+        return any(destination_changed(item, current[i] if i < len(current) else None, complete=complete) for i, item in enumerate(incoming))
     return False
 
 
@@ -159,19 +160,20 @@ def _restore_url_password(incoming: str, current: Any, path: str) -> str:
     return match.group("head") + stored_match.group("password") + match.group("tail")
 
 
-def _destination_changed(incoming: dict, stored: dict, keys: Optional[Iterable[str]]) -> bool:
+def _destination_changed(incoming: dict, stored: dict, keys: Optional[Iterable[str]], complete: bool = False) -> bool:
     """Whether any destination field present in ``incoming`` differs from the stored one."""
     for key in keys or ():
-        if key not in incoming:
+        if key not in incoming and not complete:
             continue
-        new, old = _normalized(incoming[key]), _normalized(stored.get(key))
+        new = _normalized(incoming.get(key), keep_case=complete)
+        old = _normalized(stored.get(key), keep_case=complete)
         if new == old or (key in PINNED_KEYS and old == ""):
             continue
         return True
     return False
 
 
-def _normalized(value: Any) -> Any:
+def _normalized(value: Any, *, keep_case: bool = False) -> Any:
     if value is None:
         return ""
     if isinstance(value, bool):
@@ -181,11 +183,11 @@ def _normalized(value: Any) -> Any:
     if isinstance(value, str):
         text = _mask_url_password(value.strip())
         lowered = text.lower()
-        return lowered if lowered in ("true", "false") else lowered.rstrip("/")
+        return lowered if lowered in ("true", "false") else (text if keep_case else lowered).rstrip("/")
     if isinstance(value, dict):
-        return tuple(sorted((str(k), _normalized(v)) for k, v in value.items()))
+        return tuple(sorted((str(k), _normalized(v, keep_case=keep_case)) for k, v in value.items()))
     if isinstance(value, list):
-        return tuple(_normalized(item) for item in value)
+        return tuple(_normalized(item, keep_case=keep_case) for item in value)
     return str(value)
 
 

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import Any, List, Mapping, Optional, Tuple
 
-from AI.i18n import get_locale, t
+from AI.i18n import get_locale, has_key, t
 from AI.saturation import failure_mode_title, saturation_note_text
 from AI.spike import spike_note_text
 from AI.stability import hold_note_text
@@ -31,9 +31,43 @@ from AI.verdicts import label as verdict_label
 
 Rows = List[Tuple[str, str]]
 
+
+def rationale_title(report: Mapping[str, Any], domain: str | None) -> str:
+    if domain == "final" and report.get("verdict_rationale_source") != "sla_checks":
+        return t("report.rationale.unchecked")
+    return t("report.rationale.title")
+
+
+def verified_findings_text(report: Mapping[str, Any]) -> str:
+    verification = report.get("verification_summary")
+    if not isinstance(verification, Mapping) or verification.get("verified") is None:
+        return ""
+    return t("report.findings.verified_count", count=verification["verified"])
+
+
 # Metric kinds with a name in the dictionary (report.metric.<kind>): trend rows and the limiting resource.
 METRIC_KINDS = ("rps", "p95", "error_rate", "cpu", "memory")
 RESOURCE_KINDS = ("cpu", "memory")
+
+
+def analysis_failure_location(error: Mapping[str, Any]) -> str:
+    domain = str(error.get("domain") or "")
+    stage = str(error.get("stage") or "")
+    domain_key = f"common.domain.{domain}"
+    stage_key = f"report.analysis_error.stage_{stage}"
+    domain_title = t(domain_key) if domain and has_key(domain_key) else domain
+    stage_title = t(stage_key) if stage and has_key(stage_key) else stage
+    return " · ".join(part for part in (domain_title, stage_title) if part)
+
+
+def domain_failure_details(error: Mapping[str, Any]) -> list[str]:
+    failures = error.get("domain_failures")
+    if not isinstance(failures, list):
+        return []
+    return [
+        " · ".join(filter(None, (analysis_failure_location(failure), str(failure["message"]))))
+        for failure in failures if isinstance(failure, dict) and failure.get("message")
+    ]
 
 
 def metric_title(kind: Any) -> str:
@@ -328,4 +362,5 @@ def test_type_section(report: Any) -> Optional[Tuple[str, Rows]]:
 # Imported into test modules under its own name; keep pytest from collecting it.
 test_type_section.__test__ = False  # type: ignore[attr-defined]
 
-__all__ = ["metric_title", "report_mode", "saturation_rows", "spike_rows", "stability_rows", "test_type_section"]
+__all__ = ["metric_title", "rationale_title", "report_mode", "saturation_rows", "spike_rows", "stability_rows",
+           "test_type_section", "verified_findings_text"]

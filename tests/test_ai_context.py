@@ -3,8 +3,13 @@
 
 import json
 import sys
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 from pathlib import Path
+from threading import Event
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -380,6 +385,37 @@ def test_domain_prompts_have_no_hardcoded_thresholds(name):
     assert "ступен" in text or "интервал" in text
 
 
+def test_compact_domain_prompt_keeps_service_thresholds_and_test_rules_without_an_sla_window(monkeypatch):
+    from tests.test_llm_context_window import profile, success
+    from tests.test_report_without_llm import END_TS, START_TS, _cfg, _pipeline_frames
+
+    cfg = _cfg("soak")
+    cfg["sla"].update(max_p95_ms=487, p95_query="gateway latency p95")
+    cfg["llm"] = {**profile(8192), "self_consistency_k": 1}
+    cfg["queries"]["jvm"] = {"promql_queries": ["heap"], "labels": ["Heap"], "label_keys_list": [[]]}
+    monkeypatch.setattr(pipeline_module, "fetch_and_aggregate_with_label_keys", lambda *a, **k: _pipeline_frames("soak")[:1])
+    monkeypatch.setattr(pipeline_module, "_load_baseline_context", lambda *args: {"available": False})
+    domain_requests = []
+
+    def post(_url, *, json, **kwargs):
+        if providers_module.current_usage_domain() == "jvm":
+            domain_requests.append(json["messages"][1]["content"])
+        return success('{"verdict":"pass","findings":[],"recommended_actions":[]}')
+
+    monkeypatch.setattr(providers_module.requests, "post", post)
+    pipeline_module.uploadFromLLM(
+        START_TS, END_TS, ef_config=cfg, active_domains=["jvm"], run_meta={"test_type": "soak", "service": "demo"},
+        system_context={"operational_context": {"analysis_focus": ["Checkout latency after warm-up"]}}, report_language="ru",
+    )
+
+    [sent] = domain_requests
+    instructions, evidence = sent.rsplit("\n\n", 1)
+    assert "487" in instructions and "gateway latency p95" in instructions
+    assert "hold_window" in instructions and "Checkout latency after warm-up" in instructions
+    context = json.loads(evidence)
+    assert "sla_step" not in context and "deterministic_sla" not in context
+
+
 def test_build_analysis_guidance_uses_service_sla_and_context_rules():
     sla = {"target_rps": 200, "max_p95_ms": 500, "max_performance_query": "LT RPS", "target_rps_allow_peak_fallback": False}
     context = {"operational_context": {"normal_degradation_rules": ["рост p95 до 10 % на пике"], "analysis_focus": ["checkout"], "known_risks": [], "known_constraints": []}}
@@ -574,11 +610,12 @@ def test_llm_network_settings_are_per_request_and_leave_the_environment_alone(mo
     monkeypatch.setattr(providers_module.requests, "post", fake_post)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     pcfg = {
-        "api_base_url": "https://llm.example/v1", "api_key": "k", "model": "m",
+        "api_base_url": "https://llm.example/v1", "api_key": "k", "model": "kimi-k2.6",
         "proxies": {"https": "http://proxy.example:3128", "http": ""}, "ca_bundle": "/etc/ca.pem",
     }
     providers_module._openai_call([{"role": "user", "content": "hi"}], pcfg)
     assert sent["proxies"] == {"https": "http://proxy.example:3128"} and sent["verify"] == "/etc/ca.pem"
+    assert sent["json"]["temperature"] == 0.2 and sent["json"]["top_p"] == 0.9
     assert not any(os.environ.get(name) for name in ("HTTPS_PROXY", "HTTP_PROXY", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"))
     assert providers_module._tls_verify({"verify": False, "ca_bundle": "/x"}) is False
     assert providers_module._tls_verify({"insecure_skip_verify": True}) is False
@@ -607,7 +644,7 @@ def test_ask_llm_structured_returns_schema_instance(monkeypatch):
             return FakeRunnable(schema)
 
     monkeypatch.setattr(providers_module, "_get_gigachat_client", lambda *_a, **_k: FakeClient())
-    monkeypatch.setattr(providers_module, "_wait_llm_slot", lambda gcfg: None)
+    monkeypatch.setattr(providers_module, "_wait_llm_slot", lambda cfg, key: None)
     result = providers_module.ask_llm_structured("prompt", "{}", LLMAnalysis)
     assert isinstance(result, LLMAnalysis) and result.verdict == "pass"
 
@@ -657,7 +694,7 @@ def test_self_consistency_skips_judge_for_one_candidate(monkeypatch):
 
 def test_self_consistency_calls_judge_for_two_candidates(monkeypatch):
     judge_calls = {"n": 0}
-    llm_cfg = scoring_module.CONFIG.setdefault("llm", {})
+    llm_cfg = providers_module.CONFIG.setdefault("llm", {})
     sc_cfg = llm_cfg.setdefault("self_consistency", {})
     monkeypatch.setitem(llm_cfg, "self_consistency_k", 2)
     monkeypatch.setitem(sc_cfg, "max_candidates", 2)
@@ -1353,6 +1390,104 @@ def test_second_truncation_is_not_retried_again(monkeypatch):
         ask_llm_with_text_data("prompt", "", system_prompt="ok")
 
 
+@pytest.fixture
+def llm_clock(monkeypatch):
+    clock = SimpleNamespace(now=100.0)
+    wall_time = datetime(2026, 11, 18, tzinfo=timezone.utc).timestamp()
+
+    def sleep(seconds):
+        clock.now += seconds
+
+    monkeypatch.setattr(providers_module, "time", SimpleNamespace(
+        monotonic=lambda: clock.now, perf_counter=lambda: clock.now,
+        time=lambda: wall_time + clock.now - 100, sleep=sleep,
+    ))
+    monkeypatch.setattr(providers_module, "_llm_rate_state", {})
+    monkeypatch.setattr(providers_module.random, "uniform", lambda *_args: 0)
+    return clock
+
+
+def _llm_response(status, url, payload, retry_after=None):
+    response = requests.Response()
+    response.status_code, response.url = status, url
+    response._content = json.dumps(payload).encode()
+    if retry_after is not None:
+        response.headers["Retry-After"] = retry_after
+    return response
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+@pytest.mark.parametrize("retry_after", ["6", "date", None])
+def test_llm_retries_http_429_after_provider_delay(monkeypatch, llm_clock, provider, retry_after):
+    calls = []
+    if retry_after == "date":
+        retry_after = format_datetime(datetime(2026, 11, 18, tzinfo=timezone.utc) + timedelta(seconds=6), usegmt=True)
+
+    def post(url, **_kwargs):
+        calls.append(llm_clock.now)
+        if len(calls) == 1:
+            return _llm_response(429, url, {"error": {"type": "rate_limit_error"}}, retry_after)
+        return _llm_response(200, url, {"content": [{"text": "OK"}], "choices": [{"message": {"content": "OK"}}]})
+
+    monkeypatch.setattr(requests, "post", post)
+    config = {"provider": provider, provider: {"api_base_url": "https://gateway.example", "max_attempts": 2}}
+    assert providers_module.ask_llm_with_text_data("prompt", "", llm_config=config, system_prompt="ok") == "OK"
+    assert calls == [100.0, 106.0 if retry_after else 120.0]
+
+
+def test_llm_queued_requests_share_the_cooldown(monkeypatch, llm_clock):
+    calls = []
+    first_started = Event()
+    second_queued = Event()
+
+    def post(url, **_kwargs):
+        calls.append(llm_clock.now)
+        if len(calls) == 1:
+            first_started.set()
+            assert second_queued.wait(5)
+            return _llm_response(429, url, {}, "6")
+        return _llm_response(200, url, {"choices": [{"message": {"content": "OK"}}]})
+
+    def ask(ready=None):
+        if ready:
+            ready.set()
+        return providers_module.ask_llm_with_text_data("prompt", "", system_prompt="ok")
+
+    monkeypatch.setattr(requests, "post", post)
+    config = {"provider": "openai", "openai": {"api_base_url": "https://gateway.example", "max_concurrent": 1}}
+    with providers_module.llm_scope(config), ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(copy_context().run, ask)
+        assert first_started.wait(5)
+        second = pool.submit(copy_context().run, ask, second_queued)
+        assert first.result() == second.result() == "OK"
+    assert calls == [100.0, 106.0, 107.0]
+
+
+@pytest.mark.parametrize("error_type, retry_after, attempts, message_key", [
+    ("exceeded_current_quota_error", None, [100.0], "llm.error.quota_exhausted"),
+    ("rate_limit_error", "3600", [100.0], "llm.error.rate_limited"),
+    ("engine_overloaded_error", None, [100.0, 120.0, 160.0], "llm.error.overloaded"),
+])
+def test_llm_stops_exhausted_requests_for_that_connection(monkeypatch, llm_clock, error_type, retry_after, attempts, message_key):
+    calls = []
+
+    def post(url, **kwargs):
+        if kwargs["headers"]["Authorization"] == "Bearer other-key":
+            return _llm_response(200, url, {"choices": [{"message": {"content": "OK"}}]})
+        calls.append(llm_clock.now)
+        return _llm_response(429, url, {"error": {"type": error_type, "message": "test secret"}}, retry_after)
+
+    monkeypatch.setattr(requests, "post", post)
+    config = {"_use_env_keys": False, "provider": "openai", "openai": {"api_base_url": "https://gateway.example/v1", "api_key": "key"}}
+    with providers_module.llm_scope(config):
+        for _ in range(2):
+            with pytest.raises(providers_module.LLMRateLimitError) as exc:
+                providers_module.ask_llm_with_text_data("prompt", "", system_prompt="ok")
+            assert str(exc.value) == providers_module.t(message_key)
+        assert providers_module.ask_llm_with_text_data("prompt", "", system_prompt="ok", api_key="other-key") == "OK"
+    assert calls == attempts
+
+
 def test_unusable_llm_answer_becomes_analysis_error(monkeypatch):
     from AI.providers import LLMOutputTruncated
 
@@ -1365,7 +1500,7 @@ def test_unusable_llm_answer_becomes_analysis_error(monkeypatch):
 
 
 def _two_candidates(monkeypatch, judge):
-    llm_cfg = scoring_module.CONFIG.setdefault("llm", {})
+    llm_cfg = providers_module.CONFIG.setdefault("llm", {})
     sc_cfg = llm_cfg.setdefault("self_consistency", {})
     monkeypatch.setitem(sc_cfg, "max_candidates", 2)
     monkeypatch.setitem(sc_cfg, "pause_sec_between_calls", 0)

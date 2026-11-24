@@ -62,6 +62,7 @@ CONFIG = {
         "openai": {
             "api_base_url": "https://api.openai.com/v1",
             "model": "gpt-4o-mini",
+            "context_window_tokens": 128000,
             "api_key": "",
             "max_concurrent": 2,
             "generation": {"temperature": 0.2, "top_p": 0.9, "max_tokens": 16000, "force_json_in_prompt": True},

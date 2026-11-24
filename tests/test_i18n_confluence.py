@@ -490,7 +490,9 @@ def _forecast_env(monkeypatch, lang: str | None):
     monkeypatch.setattr(explain, "load_final_report", lambda *args: report)
     monkeypatch.setattr(explain, "load_run_analyses", lambda *args: RunAnalyses(findings=[], system_context={}))
     monkeypatch.setattr(explain, "load_forecast_explanation", lambda *args: None)
-    monkeypatch.setitem(explain.CONFIG, "llm", {"provider": "openai", "openai": {"model": "test-model"}})
+    from settings import CONFIG
+
+    monkeypatch.setitem(CONFIG, "llm", {"provider": "openai", "openai": {"model": "test-model"}})
     monkeypatch.setattr(forecast_confluence, "confluence_config", lambda: dict(CONFLUENCE_CFG))
     monkeypatch.setattr(forecast_confluence, "load_forecast_publication", lambda run_id: None)
     monkeypatch.setattr(forecast_confluence, "save_forecast_publication", lambda *args: None)

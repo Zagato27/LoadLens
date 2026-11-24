@@ -48,6 +48,7 @@ from typing import Any, Dict, List, Mapping, Optional
 
 import pandas as pd
 
+from AI.context_pack import bucket_width, observed_bucket_slice
 from AI.i18n import get_locale, normalize_lang, t, with_locale
 from AI.regression import (
     CATEGORY_REGRESSION,
@@ -116,6 +117,8 @@ class StableWindow:
     role: str = ""
     margin_pct: Optional[float] = None
     after_drop: bool = False
+    degraded_start: Optional[str] = None
+    observed: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {
@@ -134,6 +137,8 @@ class StableWindow:
             out["role"] = self.role
         if self.margin_pct is not None:
             out["margin_pct"] = self.margin_pct
+        if self.degraded_start is not None:
+            out["degraded_start"] = self.degraded_start
         return out
 
 
@@ -144,6 +149,8 @@ def _unit_text(unit: str) -> str:
 def _scope_text(window: Optional[StableWindow]) -> str:
     if window is None:
         return t("sla.scope.whole")
+    if window.kind == "observed":
+        return t("sla.scope.observed", title=window.title)
     level = f"{window.level:.0f}"
     if window.kind == "hold":
         return t("sla.scope.hold", level=level)
@@ -215,7 +222,8 @@ def _lang_of(lang: Any) -> str:
     return text_lang(lang) if lang else get_locale()
 
 
-def format_sla_rationale(verdict: str, checks: List[Dict[str, Any]], lang: Optional[str] = None) -> str:
+def format_sla_rationale(verdict: str, checks: List[Dict[str, Any]], lang: Optional[str] = None,
+                         *, summary: Optional[str] = None) -> str:
     """Human-readable explanation of why the SLA verdict (a code or an old label) was chosen, in ``lang``
     (default: the current locale)."""
     lang = _lang_of(lang)
@@ -253,6 +261,8 @@ def format_sla_rationale(verdict: str, checks: List[Dict[str, Any]], lang: Optio
             text = head("fail")
     else:
         text = head("no_data")
+    if summary:
+        text = summary
     lines = [_format_check_line(item, lang) for item in checks]
     if not lines:
         return text
@@ -673,6 +683,8 @@ def _windows_from_load_steps(
         series = values
     windows: List[StableWindow] = []
     for step in raw:
+        if step.get("source") == "generator" and step.get("stable") is not True:
+            continue
         level = _safe_float(step.get("rps_level"))
         start = _as_utc(step.get("start_iso"))
         end = _as_utc(step.get("end_iso"))
@@ -687,17 +699,9 @@ def _windows_from_load_steps(
             series=column or str(step.get("series") or ""),
             label=label,
             after_drop=bool(step.get("after_drop")),
+            observed=step.get("source") == "generator",
         ))
     return sorted(windows, key=lambda item: _segment_end_sort_key(item.end), reverse=True)
-
-
-def _step_candidates(sla_config: Dict[str, Any], lt_pack: Dict[str, Any], lt_labeled: Any) -> List[StableWindow]:
-    """Load steps the SLA may be checked on, latest first: the report steps, else the detector segments."""
-    query = sla_config.get("max_performance_query")
-    candidates = _windows_from_load_steps(lt_pack, query, lt_labeled)
-    if not candidates:
-        candidates = _stable_windows_from_rps(lt_pack, query)
-    return candidates
 
 
 def _select_sla_window(
@@ -729,7 +733,8 @@ def _select_sla_window(
                 continue
             if degraded is None:
                 return window, checks
-            return replace(window, degraded_level=degraded.level, degraded_checks=degraded_names), checks
+            return replace(window, degraded_level=degraded.level, degraded_checks=degraded_names,
+                           degraded_start=degraded.start if degraded.observed else None), checks
         degraded, degraded_names = window, failed
     fallback = next(((window, checks) for window, checks in by_window if not window.after_drop), by_window[0])
     return fallback
@@ -779,19 +784,8 @@ def _as_utc(value: Any) -> Optional[pd.Timestamp]:
     return ts.tz_convert("UTC")
 
 
-def _bin_width(index: pd.DatetimeIndex) -> pd.Timedelta:
-    if len(index) < 2:
-        return pd.Timedelta(0)
-    deltas = pd.Series(index).diff().dropna()
-    if deltas.empty:
-        return pd.Timedelta(0)
-    width = deltas.median()
-    if pd.isna(width) or width <= pd.Timedelta(0):
-        return pd.Timedelta(0)
-    return width
-
-
-def _worst_series_p95(df: pd.DataFrame, start: Optional[pd.Timestamp] = None, end: Optional[pd.Timestamp] = None) -> tuple[Optional[float], Optional[str]]:
+def _worst_series_p95(df: pd.DataFrame, start: Optional[pd.Timestamp] = None, end: Optional[pd.Timestamp] = None,
+                      *, observed: bool = False) -> tuple[Optional[float], Optional[str]]:
     """Highest 95th percentile among series, optionally inside the stable window.
 
     A resampled point is stamped at the start of its bucket but already averages
@@ -804,9 +798,12 @@ def _worst_series_p95(df: pd.DataFrame, start: Optional[pd.Timestamp] = None, en
     idx = pd.DatetimeIndex(work.index)
     work.index = idx.tz_localize("UTC") if idx.tz is None else idx.tz_convert("UTC")
     if start is not None and end is not None:
-        width = _bin_width(work.index)
-        bin_end = work.index + width
-        work = work[(work.index >= start) & (bin_end <= end)]
+        if observed:
+            work = work.sort_index()
+            work = work.iloc[observed_bucket_slice(work.index, start, end, bucket_width(work.index))]
+        else:
+            bin_end = work.index + bucket_width(work.index)
+            work = work[(work.index >= start) & (bin_end <= end)]
     best: Optional[float] = None
     best_name: Optional[str] = None
     for col in work.columns:
@@ -829,7 +826,7 @@ def _breach_minutes(df: pd.DataFrame, series: Optional[str], start: pd.Timestamp
         return None
     idx = pd.DatetimeIndex(df.index)
     idx = idx.tz_localize("UTC") if idx.tz is None else idx.tz_convert("UTC")
-    width = _bin_width(idx)
+    width = bucket_width(idx)
     values = pd.Series(pd.to_numeric(df[column], errors="coerce").to_numpy(), index=idx)
     values = values[(values.index >= start) & (values.index + width <= end)].dropna()
     step = width.total_seconds() / 60.0 if width > pd.Timedelta(0) else 1.0
@@ -894,7 +891,7 @@ def _check_by_query_label(
     scope = _scope_text(window)
     actual, series = (None, None)
     if window is not None and start is not None and end is not None and end > start:
-        actual, series = _worst_series_p95(frame, start, end)
+        actual, series = _worst_series_p95(frame, start, end, observed=window.observed)
     elif window is None:
         actual, series = _worst_series_p95(frame)
     if actual is None:
@@ -1607,7 +1604,33 @@ def _capacity_checks(
     The latency and error checks come from the ceiling. CPU/memory are checked on the margin step, else the
     target step, else the ceiling (no target, or the target is not reached).
     """
-    candidates = _step_candidates(sla_config, lt_pack, lt_labeled)
+    candidates = _windows_from_load_steps(lt_pack, perf_query, lt_labeled)
+    observed = [s for s in lt_pack.get("load_steps") or [] if isinstance(s, dict) and s.get("source") == "generator"]
+    if observed:
+        # A generator can step down again. Capacity is the highest confirmed measured level.
+        complete = []
+        for candidate in candidates:
+            primary = _checks_for_window(sla_config, PRIMARY_SPECS, lt_labeled, candidate, "primary")
+            if all(check["passed"] is not None for check in primary):
+                complete.append(candidate)
+        candidates = sorted(complete, key=lambda w: w.level, reverse=True)
+    if observed and not candidates:
+        # Short or missing RPS series can still have latency and resource measurements inside the markers.
+        windows = [StableWindow(s["start_iso"], s["end_iso"], s.get("rps_level") or 0.0,
+                                "", perf_query or "", kind="observed", title=s["label"], observed=True) for s in observed]
+        checks = []
+        if target_rps is not None:
+            target = _make_check("target_rps", target_rps, None, None, severity="critical",
+                                 message=t("sla.target.no_stable_observed"), query_label=perf_query)
+            checks.append(target)
+            margin = _margin_pct(sla_config)
+            if margin is not None:
+                checks.append(_margin_check(target_rps, margin, None, None, target))
+        checks.extend(_checks_over_windows(sla_config, PRIMARY_SPECS, lt_labeled, windows, "primary"))
+        checks.extend(_checks_over_windows(sla_config, SECONDARY_SPECS, hr_labeled, windows, "secondary"))
+        return checks, None, None, None
+    if not candidates:
+        candidates = _stable_windows_from_rps(lt_pack, perf_query)
     window, primary_checks = _select_sla_window(sla_config, candidates, lt_labeled)
     margin_pct = _margin_pct(sla_config) if target_rps is not None else None
     target_window: Optional[StableWindow] = None

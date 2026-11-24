@@ -32,7 +32,8 @@ from AI.db_store import (
     save_manual_verdict,
     upsert_llm_feedback,
 )
-from AI.i18n import t as translate
+from AI.i18n import LocalizedError, t as translate
+from AI.observed_steps import validate_observed_steps
 from AI.release_marks import protected_runs, release_marks_cte, release_marks_ready
 from AI.scoring import parse_llm_analysis_strict
 from AI.verdicts import CODES as VERDICT_CODES, FAIL, RISK, code_sql, exact_code, normalize_report, optional_code, rank_sql, to_code
@@ -1524,6 +1525,18 @@ def create_report():
         }), 400
     if end <= start:
         return jsonify({"status": "error", "message": translate("api.dashboard.create.end_before_start")}), 400
+    run_tag = data.get("run_tag")
+    observed_steps = None
+    if run_tag is not None or "observed_steps" in data:
+        from loadlens_app.load_tests.tools import make_tag
+
+        if not isinstance(run_tag, str) or not run_tag or make_tag(run_tag, "") != run_tag:
+            return jsonify({"status": "error", "message": translate("api.dashboard.observed_steps.tag")}), 400
+    if "observed_steps" in data:
+        try:
+            observed_steps = validate_observed_steps(data["observed_steps"], start, end, test_type)
+        except LocalizedError as exc:
+            return jsonify({"status": "error", "message": str(exc)}), 400
     run_name_error = run_name_problem(run_name) if run_name else None
     if run_name_error:
         return jsonify({"status": "error", "message": run_name_error}), 400
@@ -1551,6 +1564,8 @@ def create_report():
             run_name=run_name,
             test_type=test_type,
             owner=_job_owner(),
+            run_tag=run_tag,
+            observed_steps=observed_steps,
         )
     except LimitError as exc:
         return _limit_error(exc)
@@ -1602,6 +1617,7 @@ def start_report_job(
     run_tag: str | None = None,
     run_filter_packs: list[str] | None = None,
     report_language: str | None = None,
+    observed_steps: list[dict] | None = None,
 ):
     """Checks the limits, creates a report job and starts it; raises :class:`LimitError`.
 
@@ -1641,6 +1657,7 @@ def start_report_job(
         run_tag=run_tag,
         run_filter_packs=list(run_filter_packs) if run_filter_packs is not None else None,
         report_language=report_lang,
+        **({"observed_steps": observed_steps} if observed_steps is not None else {}),
     )
     return job
 

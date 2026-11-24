@@ -26,6 +26,7 @@ from AI.query_packs import (
 )
 from AI.i18n import t as translate
 from loadlens_app.errors import log_failure, with_error_id
+from loadlens_app.llm_profiles import Connections, SECTION as LLM_PROFILES
 from loadlens_app.core import (
     _active_metrics_config,
     _deep_merge_dicts,
@@ -37,6 +38,7 @@ from loadlens_app.core import (
     _metrics_services_for_area,
     _normalize_system_context,
     _per_area_config,
+    _runtime_settings_write,
     _save_metrics_runtime_data,
     _save_settings_runtime_data,
     _ts_conn,
@@ -258,6 +260,12 @@ def _prompts_status(prompts: object) -> SectionOverride:
 
 def _section_status(area_entry: dict, section: str) -> SectionOverride:
     """inherited: no value in the project; same: a copy equal to the global value; own: differs."""
+    if section == "llm":
+        profiles = area_entry.get(LLM_PROFILES) or {}
+        if profiles.get("active") or "analysis" in profiles:
+            return SectionOverride(section, STATUS_OWN)
+        if not area_entry.get(section):
+            return SectionOverride(section, STATUS_INHERITED)
     if section not in area_entry:
         return SectionOverride(section, STATUS_INHERITED)
     value = area_entry.get(section)
@@ -339,6 +347,7 @@ def _clean_text_field(value: str, limit: int, label: str) -> str:
     return text
 
 
+@_runtime_settings_write
 def create_project(project_id: str, title: str, description: str, copy_from: str) -> str:
     """New project; with ``copy_from`` its settings are copied, services and reports are not."""
     new_id = _validate_project_id(project_id)
@@ -362,6 +371,7 @@ def create_project(project_id: str, title: str, description: str, copy_from: str
     return new_id
 
 
+@_runtime_settings_write
 def update_project(project_id: str, title: str, description: str) -> None:
     _require_project(project_id)
     clean_title = _clean_text_field(title, TITLE_MAX_LEN, translate("server.projects.field.title"))
@@ -385,6 +395,7 @@ def _set_reports_area(service_ids: list[str], project_id: Optional[str]) -> int:
         conn.close()
 
 
+@_runtime_settings_write
 def _move_service_settings(project_id: str, service_id: str, target_id: str) -> None:
     runtime = _load_settings_runtime_data()
     per_area = runtime.setdefault("per_area", {})
@@ -435,6 +446,7 @@ def _forget_in_memory(project_id: str, section: Optional[str]) -> None:
         entry.pop(section, None)
 
 
+@_runtime_settings_write
 def reset_area_section(project_id: str, section: str) -> bool:
     """Drops the project's own value of a section so the global one applies; returns whether it existed."""
     _require_project(project_id)
@@ -442,13 +454,17 @@ def reset_area_section(project_id: str, section: str) -> bool:
         raise ProjectError(translate("server.projects.section_not_resettable", section=section, allowed=", ".join(AREA_SECTIONS)))
     runtime = _load_settings_runtime_data()
     entry = (runtime.get("per_area") or {}).get(project_id)
-    changed = isinstance(entry, dict) and entry.pop(section, None) is not None
+    if section == "llm":
+        changed = Connections(runtime).reset_project(project_id)
+    else:
+        changed = isinstance(entry, dict) and entry.pop(section, None) is not None
     if changed:
         _save_settings_runtime_data(runtime)
     _forget_in_memory(project_id, section)
     return changed
 
 
+@_runtime_settings_write
 def reset_service_section(project_id: str, service_id: str, section: str) -> bool:
     """Drops a service override so the project value applies; returns whether it existed."""
     _require_project(project_id)
@@ -467,10 +483,12 @@ def reset_service_section(project_id: str, service_id: str, section: str) -> boo
     return changed
 
 
+@_runtime_settings_write
 def _drop_project_settings(project_id: str) -> None:
     runtime = _load_settings_runtime_data()
     per_area = runtime.get("per_area")
     if isinstance(per_area, dict) and per_area.pop(project_id, None) is not None:
+        Connections(runtime).release_project_profiles(project_id)
         _save_settings_runtime_data(runtime)
     metrics = _load_metrics_runtime_data()
     if metrics.pop(project_id, None) is not None:

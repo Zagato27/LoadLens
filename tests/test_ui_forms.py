@@ -139,19 +139,19 @@ def test_load_windows_clamps_hours_and_keeps_points_within_limits(source):
     assert call["start"] == pytest.approx(NOW - 24 * 3600)
     step = int(call["step"].rstrip("s"))
     assert (call["end"] - call["start"]) / step <= 600
-    coarse = source.calls[1]  # nothing in the last day: the 30-day pass follows
-    assert (coarse["start"], coarse["end"], coarse["step"]) == (NOW - 30 * DAY, NOW, "300s")
+    coarse = source.calls[1]  # nothing in the last day: the seven-day pass follows
+    assert (coarse["start"], coarse["end"], coarse["step"]) == (NOW - 7 * DAY, NOW, "300s")
     assert len(source.calls) == 2
 
 
 def test_load_windows_without_lt_queries_still_lists_runs(source, runs):
     source.cfg = {"queries": {}}
     _add_run(runs, "release-1", NOW - 3 * 3600, NOW - 2 * 3600)
-    _add_run(runs, "ten-days", NOW - 10 * DAY, NOW - 10 * DAY + 3600)
-    _add_run(runs, "forty-days", NOW - 40 * DAY, NOW - 40 * DAY + 3600)
+    _add_run(runs, "six-days", NOW - 6 * DAY, NOW - 6 * DAY + 3600)
+    _add_run(runs, "eight-days", NOW - 8 * DAY, NOW - 8 * DAY + 3600)
     data = live.load_windows("shop", "checkout", 6, now=NOW)
     assert not data["ok"] and "пакет запросов" in data["message"]
-    assert data["windows"] == [] and [r["run_name"] for r in data["runs"]] == ["release-1", "ten-days"]
+    assert data["windows"] == [] and [r["run_name"] for r in data["runs"]] == ["release-1", "six-days"]
     assert source.calls == []
 
 
@@ -171,7 +171,7 @@ def test_load_windows_survives_unreadable_settings(source, monkeypatch):
     assert not data["ok"] and data["message"] == "Настройки сервиса не читаются" and data["detail"] == "bad runtime file"
 
 
-# ---- the 30-day search ---------------------------------------------------------------------------------
+# ---- the seven-day search ------------------------------------------------------------------------------
 
 DAY = 86400
 
@@ -190,7 +190,7 @@ def _truth(*tests):
 
 
 def _kind(call):
-    if call["start"] == NOW - 30 * DAY:
+    if call["start"] == NOW - 7 * DAY:
         return "coarse"
     if call["start"] == NOW - 6 * 3600 and call["end"] == NOW:
         return "fine"
@@ -203,15 +203,15 @@ def _bounds(window):
 
 def test_a_quiet_day_finds_the_test_of_five_days_ago_with_exact_bounds(source):
     begin, finish = NOW - 5 * DAY + 40, NOW - 5 * DAY + 3590
-    source.respond = _truth((begin, finish, 250))
+    source.respond = _truth((begin, finish, 250), (NOW - 8 * DAY, NOW - 8 * DAY + 3600, 50))
     data = live.load_windows("shop", "checkout", 6, now=NOW)
-    assert data["ok"] and data["message"] == "" and data["days"] == 30
-    assert datetime.fromisoformat(data["since"]).timestamp() == NOW - 30 * DAY
+    assert data["ok"] and data["message"] == "" and data["days"] == 7
+    assert datetime.fromisoformat(data["since"]).timestamp() == NOW - 7 * DAY
     calls = [(c["start"], c["end"], c["step"]) for c in source.calls]
     # the coarse points of the test are NOW−5d+300 … NOW−5d+3300; its fine query adds two coarse steps each side
     lo, hi = NOW - 5 * DAY - 300, NOW - 5 * DAY + 3900
     fine_step = live.choose_step(lo, hi)
-    assert calls == [(NOW - 6 * 3600, NOW, "120s"), (NOW - 30 * DAY, NOW, "300s"), (lo, hi, f"{fine_step}s")]
+    assert calls == [(NOW - 6 * 3600, NOW, "120s"), (NOW - 7 * DAY, NOW, "300s"), (lo, hi, f"{fine_step}s")]
     assert len(data["windows"]) == 1
     window = data["windows"][0]
     start, end = _bounds(window)
@@ -232,7 +232,7 @@ def test_a_single_coarse_point_is_kept_only_when_its_fine_query_confirms_it(sour
     assert live.load_windows("shop", "checkout", 6, now=NOW)["windows"] == []
 
 
-def test_three_stretches_in_the_last_hours_need_no_30_day_search(source):
+def test_three_stretches_in_the_last_hours_need_no_coarse_search(source):
     source.respond = _truth(
         (NOW - 5 * 3600, NOW - 4.5 * 3600, 10), (NOW - 3 * 3600, NOW - 2.5 * 3600, 20),
         (NOW - 3600, NOW - 1800, 30), (NOW - 5 * DAY, NOW - 5 * DAY + 3600, 40),
@@ -242,7 +242,7 @@ def test_three_stretches_in_the_last_hours_need_no_30_day_search(source):
 
 
 def test_only_the_missing_stretches_are_read_again(source):
-    old = [(NOW - d * DAY, NOW - d * DAY + 1800, float(d)) for d in (10, 8, 6, 4)]
+    old = [(NOW - d * DAY, NOW - d * DAY + 1800, float(d)) for d in (7, 6, 4)]
     source.respond = _truth(*old, (NOW - 2 * 3600, NOW - 1.5 * 3600, 99))
     data = live.load_windows("shop", "checkout", 6, now=NOW)
     kinds = sorted(_kind(c) for c in source.calls)
@@ -260,12 +260,12 @@ def test_a_failed_fine_query_keeps_the_coarse_bounds_one_step_wider(source):
     assert _bounds(data["windows"][0]) == (NOW - 5 * DAY, NOW - 5 * DAY + 3600)
 
 
-def test_a_failed_30_day_search_keeps_the_last_hours(source):
+def test_a_failed_seven_day_search_keeps_the_last_hours(source):
     truth = _truth((NOW - 2 * 3600, NOW - 3600, 50))
     source.respond = lambda call: RuntimeError("timeout") if _kind(call) == "coarse" else truth(call)
     data = live.load_windows("shop", "checkout", 6, now=NOW)
     assert data["ok"] and len(data["windows"]) == 1
-    assert data["message"] == "Поиск за 30 дней не удался, показаны только последние часы" and data["detail"] == "timeout"
+    assert data["message"] == "Поиск за 7 дней не удался, показаны только последние часы" and data["detail"] == "timeout"
 
 
 def test_a_test_across_the_start_of_the_fine_pass_comes_whole(source):
@@ -276,13 +276,13 @@ def test_a_test_across_the_start_of_the_fine_pass_comes_whole(source):
 
 
 def test_a_long_old_test_keeps_its_coarse_bounds_without_a_fine_query(source):
-    source.respond = _truth((NOW - 10 * DAY, NOW - 7 * DAY, 15))  # three days: a fine query is no finer
+    source.respond = _truth((NOW - 6 * DAY, NOW - 3 * DAY, 15))  # three days: a fine query is no finer
     data = live.load_windows("shop", "checkout", 6, now=NOW)
     assert sorted(_kind(c) for c in source.calls) == ["coarse", "fine"]
-    assert _bounds(data["windows"][0]) == (NOW - 10 * DAY, NOW - 7 * DAY)
+    assert _bounds(data["windows"][0]) == (NOW - 6 * DAY, NOW - 3 * DAY)
 
 
-def test_the_30_day_search_stays_within_the_points_limit(source):
+def test_the_seven_day_search_stays_within_the_points_limit(source):
     source.cfg = {**_lt_config(), "limits": {"max_points_per_series": 2000}}
     live.load_windows("shop", "checkout", 6, now=NOW)
     coarse = next(c for c in source.calls if _kind(c) == "coarse")
@@ -359,7 +359,7 @@ def test_lt_windows_endpoint(client, source):
     assert data["ok"] and data["service"] == "checkout" and data["hours"] == 6
     assert len(data["windows"]) == 1 and data["windows"][0]["rps_peak"] == 80.0
     assert set(data["windows"][0]) == {"start", "end", "duration_sec", "rps_peak", "ongoing"}
-    assert data["runs"] == [] and data["days"] == 30 and data["since"]
+    assert data["runs"] == [] and data["days"] == 7 and data["since"]
 
 
 def test_lt_windows_endpoint_caches_for_a_minute(client, source, monkeypatch):

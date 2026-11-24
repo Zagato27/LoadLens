@@ -5,6 +5,16 @@
       "reason": "language name, always shown in its own language"
     }
   ],
+  "AI/compare_explanation.py": [
+    {
+      "literal": "пропускная способность",
+      "reason": "recognizes the Russian name for throughput in comparison explanations"
+    },
+    {
+      "literal": "мин",
+      "reason": "recognizes minutes in Russian-language model comparisons"
+    }
+  ],
   "AI/context_pack.py": [
     {
       "literal": "(?:запрос|query) «([^»]*)»",

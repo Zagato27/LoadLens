@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
 from typing import Dict
 
@@ -231,6 +232,17 @@ def _active_project_area() -> str | None:
 
 # Serialises reads and writes of the runtime JSON files within the process.
 _RUNTIME_FILES_LOCK = threading.RLock()
+
+
+def _runtime_settings_write(function):
+    """Keep a runtime read-modify-write together across settings requests."""
+    @wraps(function)
+    def locked(*args, **kwargs):
+        with _RUNTIME_FILES_LOCK:
+            return function(*args, **kwargs)
+
+    return locked
+
 
 # A file read less than this long after its mtime may change again within the same timestamp tick
 # and keep its size (coarse mtimes on FAT, network shares and some bind mounts, quick rewrites in
@@ -683,6 +695,7 @@ def _ensure_area_runtime(area_name: str):
     return runtime, runtime["per_area"][area_name]
 
 
+@_runtime_settings_write
 def _bootstrap_area_defaults(area_name: str | None) -> None:
     """Registers the area in runtime settings; sections it does not set inherit the global values."""
     if not area_name or isinstance(_per_area_config().get(area_name), dict):
@@ -691,6 +704,7 @@ def _bootstrap_area_defaults(area_name: str | None) -> None:
     _save_settings_runtime_data(runtime)
 
 
+@_runtime_settings_write
 def _bootstrap_service_configs(area_name: str | None, service_id: str | None) -> None:
     if not area_name or not service_id:
         return
@@ -1007,16 +1021,14 @@ def _rename_run_data(old_run_name: str, new_run_name: str) -> dict:
 
 
 def _delete_service_data(area_name: str, service_name: str) -> None:
-    runtime = _load_settings_runtime_data()
-    changed = False
-    if isinstance(runtime.get("per_area"), dict):
-        area_entry = runtime["per_area"].get(area_name)
-        if isinstance(area_entry, dict) and isinstance(area_entry.get("services"), dict):
-            if service_name in area_entry["services"]:
-                del area_entry["services"][service_name]
-                changed = True
-    if changed:
-        _save_settings_runtime_data(runtime)
+    with _RUNTIME_FILES_LOCK:
+        runtime = _load_settings_runtime_data()
+        areas = runtime.get("per_area")
+        area_entry = areas.get(area_name) if isinstance(areas, dict) else None
+        services = area_entry.get("services") if isinstance(area_entry, dict) else None
+        if isinstance(services, dict) and service_name in services:
+            del services[service_name]
+            _save_settings_runtime_data(runtime)
 
     metrics_rt = _load_metrics_runtime_data()
     if isinstance(metrics_rt.get(area_name), dict):

@@ -23,6 +23,7 @@ from loadlens_app.core import (
     _load_base_prompts,
     _load_metrics_runtime_data,
     _load_settings_runtime_data,
+    _runtime_settings_write,
     _save_metrics_runtime_data,
     _save_settings_runtime_data,
     _services_map_for_area,
@@ -137,6 +138,7 @@ def get_prompts():
 
 
 @settings_bp.route("/prompts", methods=["POST"])
+@_runtime_settings_write
 def post_prompts():
     """Сохраняет пользовательский промпт для области или сервиса."""
     try:
@@ -223,6 +225,7 @@ def get_prompt_history():
 
 
 @settings_bp.route("/service_meta", methods=["POST"])
+@_runtime_settings_write
 def update_service_meta():
     """Обновляет метаданные сервиса: заголовок и отключённые домены."""
     try:
@@ -258,6 +261,7 @@ def update_service_meta():
 
 
 @settings_bp.route("/service_meta", methods=["DELETE"])
+@_runtime_settings_write
 def delete_service_meta():
     """Удаляет runtime-метаданные и пользовательские оверрайды сервиса без очистки БД."""
     try:

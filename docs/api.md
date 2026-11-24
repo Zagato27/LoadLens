@@ -55,7 +55,7 @@ is one table in `loadlens_app/auth/policy.py`, and a test refuses a route withou
 
 | Endpoint | Body or parameters | Notes |
 |---|---|---|
-| `POST /create_report` | `start`, `end` (ISO 8601 with offset), `service`, `project_area?`, `test_type?` (`step`, `soak`, `spike`, `stress`, `scenario`), `use_llm?` (default true), `save_to_db?`, `web_only?`, `run_name?` | Returns `job_id` and the assigned `run_name`. Engineer |
+| `POST /create_report` | `start`, `end` (ISO 8601 with offset), `service`, `project_area?`, `test_type?` (`step`, `soak`, `spike`, `stress`, `scenario`), `use_llm?` (default true), `save_to_db?`, `web_only?`, `run_name?`, `run_tag?`, `observed_steps?` | Returns `job_id` and the assigned `run_name`. Engineer |
 | `GET /job_status/<job_id>` | | Phase, progress, message, error and the link to the result |
 | `GET /jobs` | `status=running,error`, `limit` | Recent jobs; cached 3 s |
 | `POST /jobs/dismiss` | `{"job_ids": [...]}` | Hides finished jobs from the list; running ones are returned in `skipped_running`. Engineer |
@@ -74,6 +74,31 @@ curl -s -X POST http://localhost:5000/create_report \
 # {"job_id": "...", "run_name": "checkout-2026-01-15-10-00"}
 curl -s -H "Authorization: Bearer ll_..." http://localhost:5000/job_status/<job_id>
 ```
+
+### Generator step boundaries
+
+For a step or stress test, attach a JSON file in **New report → Generator step boundaries** or include the
+same two fields in the report request. The following example covers 35 seconds starting at 10:00 UTC on
+15 January 2026.
+
+```json
+{
+  "run_tag": "checkout-01",
+  "observed_steps": [
+    {"name": "warm load", "start_ms": 1768471200000, "end_ms": 1768471235000, "planned_rps": 16}
+  ]
+}
+```
+
+Use the generator's actual run tag. Compatible query packs apply it to the load metrics. Custom queries
+must already select the intended run. Supply 1–512 intervals with printable names of up to 200 characters in chronological order, inside the
+requested report window. Times are Unix milliseconds. Intervals may touch or leave gaps. Invalid input
+returns HTTP 400 before the job is queued. Omit the list to use automatic detection.
+
+LoadLens measures throughput, latency and errors using complete metric buckets within each interval.
+The optional `planned_rps` describes the generator setting. Target and ceiling checks use measured RPS
+and require a stable interval meeting `sla.min_stable_minutes`. If none qualifies, the report still
+shows the step measurements and checks latency, error rate and resource thresholds within the marked intervals.
 
 ## Runs and verdicts
 
@@ -224,7 +249,7 @@ and `release.publish`.
 | `POST /load_tests/runs/<run_id>/stop` | `{"index": N}` to stop one instance, empty for the whole run |
 | `GET /load_tests/runs/<run_id>/logs?index=&bytes=` | Tail of the instance log |
 | `GET /load_tests/runs/<run_id>/live?window=&since=&mode=` | Live series by role, per-instance RPS, events, SLA lines, `fresh_at`, `step_sec` |
-| `GET /lt_windows?service=&hours=6` | Load windows of a service for the New report form: the last `hours` (0.25 to 24) with a fine step, then, when fewer than three windows are found, the last 30 days with a five-minute step and a fine query per older window. Finished LoadLens runs of the same 30 days in `runs`; `days` and `since` give the depth and the start of the search. A failed 30-day search keeps `ok: true` and sets `message` |
+| `GET /lt_windows?service=&hours=6` | Load windows of a service for the New report form: the last `hours` (0.25 to 24) with a fine step, then, when fewer than three windows are found, the last seven days with a five-minute step and a fine query per older window. Finished LoadLens runs of the same seven days in `runs`; `days` and `since` give the depth and the start of the search. A failed seven-day search keeps `ok: true` and sets `message` |
 | `GET /load_tests/presets?service=`, `POST /load_tests/presets`, `DELETE /load_tests/presets/<id>` | Presets of the run form (`name`, `service`, `spec`); variable values are not stored |
 | `GET /load_tests/ci_params?generator=&ref=`, `GET /load_tests/ci_refs?generator=&search=` | Pipeline parameters and branches of a CI generator |
 | `POST /load_tests/ci/<run_id>/<index>/events` | Without a login, with the instance secret in `X-LoadLens-Token`: `{"event": "started"}` or `{"event": "finished", "exit_code": N, "message": "..."}` |
@@ -248,12 +273,20 @@ Browser session only; a token with the administrator role is refused.
 | `POST /config/test_connection` | Tests a connection with the form values |
 | `GET /config/grafana_datasources?source=<id>` | Data sources of a Grafana connection |
 | `POST /config/llm_models` | Models of the provider |
+| `POST /config/llm_profiles` | Saves, activates, deletes, or tests a named LLM connection, lists its models, or saves scope-level analysis settings |
 | `POST /config/query_preview` | Runs one metric query: `domain`, `lang`, `query`, `label_keys`, `start?`, `end?`, `label?` (the row: its saved source applies), `binding?` (an unsaved source of the row; `null` for the domain binding) |
 | `POST /config/system_context/import` | Multipart `file`, `area?`, `service?`, `mode` (`fill`, `replace`), `current?`; or JSON with `text` or `confluence_url`. Returns `context`, `changes`, `source`, `warnings`, `provider`; nothing is saved |
 | `GET /config/query_packs?area=&service=` | The pack catalogue with compatibility and installed versions; a pack lists `domains`, `max_instances` and `targets` (compatibility and `instances` per domain; an installation carries its `binding` and `source`) |
 | `POST /config/query_packs/detect` | Metric names found at the sources and the share of needed metrics per pack and bundle; `sources` are the extra sources read (catalogue Prometheus sources, sources of rows), and a pack that fits one of them better has `alternative` with its `binding` |
 | `POST /config/query_packs/preview`, `.../check`, `.../apply` | Body: `pack_id`, `domain` (required for a pack whose domain is picked), `variables`, `include_indexes`, `binding` (the source of the pack rows; `null` for the domain binding, absent to keep the rows' sources), `mode` (`merge`, `replace`), `fill_sla`, `overwrite_sla`, `area?`, `service?`; `check` also takes `start` and `end`. `apply` returns `previous` for undo and `instance` of a multi-installation pack |
 | `POST /config/query_packs/summed_rps` | `area?`, `service?`, `use_for_sla?`: the row that sums the total RPS of several tools |
+
+For `POST /config/llm_profiles`, send `action: "save"`, the source project in `area`, the connection's `id`
+(omit for a new connection), and `data` with `name`, `provider`, and `settings`. Set `data.shared` to
+`true` to make the connection available to all projects, or `false` to make it local again. Omitting
+`shared` preserves the current visibility. Use the `id` from the save response for subsequent calls.
+To select a shared connection in another project, send `action: "activate"`, that project's `area` and the
+returned `id`. Making a connection local returns HTTP 409 while another project or the global default uses it.
 
 ## Projects, prompts and services
 

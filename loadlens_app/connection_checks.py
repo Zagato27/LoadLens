@@ -11,8 +11,10 @@ show them inline.
 from __future__ import annotations
 
 import time
+from base64 import b64encode
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict
+from urllib.parse import urlsplit
 
 import psycopg2
 import requests
@@ -22,7 +24,16 @@ from AI.i18n import t
 from AI.loki_client import loki_fetcher
 from AI.loki_logs import LOGS_TYPE_LOKI, count_query, logs_source_type, loki_settings, resolve_line_format, total_lines_query
 from AI.pipeline import _resolve_grafana_influx_ds_id, _resolve_grafana_prom_ds_id
-from AI.providers import SUPPORTED_PROVIDERS, _get_gigachat_client, _normalize_llm_base_url, ask_llm_with_text_data
+from AI.providers import (
+    LLMRateLimitError,
+    SUPPORTED_PROVIDERS,
+    _get_gigachat_client,
+    _normalize_llm_base_url,
+    _request_proxies,
+    _tls_verify,
+    ask_llm_with_text_data,
+    provider_api_key,
+)
 from loadlens_app.confluence_export import ConfluenceClient
 
 CHECK_TIMEOUT_SEC = 10
@@ -467,11 +478,17 @@ def _model_names(payload: Any) -> list[str]:
     return sorted({name for name in names if name})
 
 
-def _models_from_http(url: str, headers: dict, auth=None, verify: bool = True) -> ModelListResult:
+def _models_from_http(url: str, headers: dict, pcfg: dict) -> ModelListResult:
     try:
-        resp = requests.get(url, headers=headers, auth=auth, timeout=CHECK_TIMEOUT_SEC, verify=verify)
+        proxies = _request_proxies(pcfg)
+        options = {"proxies": proxies} if proxies else {}
+        resp = requests.get(url, headers=headers, timeout=CHECK_TIMEOUT_SEC, verify=_tls_verify(pcfg), **options)
+    except requests.exceptions.ProxyError:
+        return ModelListResult(ok=False, message=t("llm.error.proxy_failed"))
     except Exception as exc:
         return ModelListResult(ok=False, message=_explain(exc), models=[])
+    if resp.status_code == 407:
+        return ModelListResult(ok=False, message=t("llm.error.proxy_failed"))
     if resp.status_code in (404, 405, 501):
         return ModelListResult(ok=False, message=_unsupported_models())
     if resp.status_code in (401, 403):
@@ -496,19 +513,18 @@ def _anthropic_compatible_models(pcfg: dict) -> ModelListResult:
     catalog on the OpenAI-compatible ``/v1/models`` of the parent host.
     """
     base = str(pcfg.get("api_base_url") or pcfg.get("base_url") or "https://api.anthropic.com").rstrip("/")
-    verify = pcfg.get("verify", True) if isinstance(pcfg.get("verify"), bool) else True
-    key = str(pcfg.get("api_key") or "")
+    key = provider_api_key("anthropic", pcfg)
     primary = _models_from_http(
         f"{base}/v1/models",
         {"x-api-key": key, "anthropic-version": "2023-06-01", "Accept": "application/json"},
-        verify=verify,
+        pcfg,
     )
     if primary.ok or not base.endswith("/anthropic"):
         return primary
     catalog = _models_from_http(
         f"{base[: -len('/anthropic')]}/v1/models",
         {"Authorization": f"Bearer {key}", "Accept": "application/json"},
-        verify=verify,
+        pcfg,
     )
     if catalog.ok or primary.message == _unsupported_models():
         return catalog
@@ -544,10 +560,32 @@ def list_llm_models(llm_cfg: dict) -> ModelListResult:
                 base = _normalize_llm_base_url(raw_base) if provider == "openai" else raw_base.rstrip("/")
                 if base.endswith("/chat/completions"):
                     base = base[: -len("/chat/completions")]
-                token = str(pcfg.get("api_key") or "")
-                result = _models_from_http(f"{base}/models", {"Authorization": f"Bearer {token}", "Accept": "application/json"})
+                token = provider_api_key(provider, pcfg)
+                result = _models_from_http(f"{base}/models", {"Authorization": f"Bearer {token}", "Accept": "application/json"}, pcfg)
     result.elapsed_ms = int((time.perf_counter() - started) * 1000)
     return result
+
+
+def _llm_check_error(exc: requests.HTTPError, provider: str, pcfg: dict) -> str:
+    response = exc.response
+    if response is None or response.status_code not in (400, 404, 422):
+        return ""
+    try:
+        message = _cfg(_cfg(response.json()).get("error")).get("message")
+    except ValueError:
+        return ""
+    if not isinstance(message, str) or not message.strip():
+        return ""
+
+    secrets = {provider_api_key(provider, pcfg)}
+    for proxy in (_request_proxies(pcfg) or {}).values():
+        user, password = requests.utils.get_auth_from_url(proxy)
+        if password:
+            secrets.update((password, urlsplit(proxy).password or ""))
+            secrets.add(b64encode(f"{user}:{password}".encode("latin-1", errors="replace")).decode())
+    for secret in sorted(filter(None, secrets), key=len, reverse=True):
+        message = message.replace(secret, "***")
+    return t("server.connection.http_error", status=response.status_code, error=" ".join(message.split())[:500])
 
 
 def check_llm(llm_cfg: dict) -> CheckResult:
@@ -565,12 +603,21 @@ def check_llm(llm_cfg: dict) -> CheckResult:
         pcfg["connect_timeout_sec"] = min(int(pcfg.get("connect_timeout_sec") or CHECK_TIMEOUT_SEC), CHECK_TIMEOUT_SEC)
         pcfg["generation"] = {**_cfg(pcfg.get("generation")), "max_tokens": 16}
         pcfg["request_min_interval_sec"] = 0
-        text = ask_llm_with_text_data(
-            t("server.connection.llm_probe_prompt"),
-            "",
-            llm_config={"provider": provider, provider: pcfg, "force_json": False, "max_attempts": 1},
-            system_prompt=t("server.connection.llm_probe_system"),
-        )
+        pcfg["_connection_check"] = True
+        try:
+            text = ask_llm_with_text_data(
+                t("server.connection.llm_probe_prompt"),
+                "",
+                llm_config={"provider": provider, provider: pcfg, "force_json": False, "max_attempts": 1},
+                system_prompt=t("server.connection.llm_probe_system"),
+            )
+        except LLMRateLimitError as exc:
+            return CheckResult(ok=False, message=str(exc))
+        except requests.HTTPError as exc:
+            message = _llm_check_error(exc, provider, pcfg)
+            if message:
+                return CheckResult(ok=False, message=message)
+            raise
         reply = str(text or "").strip()
         return CheckResult(
             ok=True,

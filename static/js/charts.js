@@ -1363,6 +1363,7 @@
         end,
         plateauStart: profileMs(s.plateau_start_iso),
         plateauEnd: profileMs(s.plateau_end_iso),
+        observed: s.source === 'generator',
         rps,
         selected: s.selected === true,
         afterDrop: s.after_drop === true,
@@ -1386,15 +1387,16 @@
     const yOf = (v) => round1(bottom - (Math.max(0, v) / yMax) * (bottom - top));
     const inRange = (t) => t !== null && t >= x0 && t <= x1;
 
-    // Staircase: every step runs to the start of the next one (across a pause too) or, the last, to its end.
+    // Generator intervals have explicit ends and can leave gaps.
     let path = '';
     const outSteps = steps.map((s, i) => {
       const next = steps[i + 1];
-      const end = next ? next.start : s.end;
+      const end = next && !s.observed ? next.start : s.end;
       const x = xOf(s.start);
       const w = round1(xOf(end) - x);
       const y = yOf(s.rps);
-      path += i === 0 ? `M${x} ${y}H${round1(x + w)}` : `V${y}H${round1(x + w)}`;
+      const gap = s.observed && i > 0 && steps[i - 1].end < s.start;
+      path += i === 0 || gap ? `M${x} ${y}H${round1(x + w)}` : `V${y}H${round1(x + w)}`;
       const text = `${s.afterDrop || s.dip ? '~' : ''}${rpsText(s.rps)}`;
       let level = null;
       if (compact && w >= textWidth(text) + 8) {

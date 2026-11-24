@@ -104,6 +104,7 @@ def report_task(
     run_tag: Optional[str] = None,
     run_filter_packs: Optional[List[str]] = None,
     report_language: str = "ru",
+    observed_steps: Optional[List[dict]] = None,
 ) -> None:
     """Builds a report (``update_page.update_report``) for the job started by ``dashboard.start_report_job``.
 
@@ -125,6 +126,7 @@ def report_task(
             run_tag=run_tag,
             run_filter_packs=run_filter_packs,
             report_language=report_language,
+            **({"observed_steps": observed_steps} if observed_steps is not None else {}),
         )
         result = res if isinstance(res, dict) else {}
         run_id = str(result.get("run_id") or "")

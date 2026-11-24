@@ -30,7 +30,7 @@ from psycopg2 import sql
 from AI import report_markers
 from AI.i18n import SUPPORTED, LocalizedError, fmt_number, get_locale, msg, t, with_locale
 from AI.regression import REASONS as REGRESSION_REASONS, unit_text as regression_unit_text
-from AI.report_sections import test_type_section
+from AI.report_sections import analysis_failure_location, domain_failure_details, rationale_title, test_type_section, verified_findings_text
 from AI.sla_evaluator import SLA_CHECK_NAMES
 from AI.test_profile import normalize_test_type, test_type_label
 from AI.verdicts import NO_DATA, is_deterministic_report, normalize_report, optional_code, to_code
@@ -284,6 +284,8 @@ def _hhmm(value: object) -> str:
 
 
 def _step_interval(step: dict[str, Any]) -> str:
+    if step.get("source") == "generator":
+        return "–".join(str(step[key])[11:].split("+")[0].split("-")[0] for key in ("start_iso", "end_iso"))
     start = _hhmm(step.get("plateau_start_iso") or step.get("start_iso"))
     end = _hhmm(step.get("plateau_end_iso") or step.get("end_iso"))
     if start and end:
@@ -315,6 +317,10 @@ def _step_name(step: dict[str, Any]) -> str:
     flag = _step_flag(step)
     tag = _step_tag(step)
     name = str(step.get("index") or "") + (f" {tag}" if tag else "")
+    if step.get("source") == "generator":
+        name = f"{name} · {step['label']}"
+        if step.get("planned_rps") is not None:
+            name += " · " + t("report.steps.planned_rps", rate=step["planned_rps"])
     return f"{name}, {flag}" if flag else name
 
 
@@ -346,7 +352,10 @@ def load_step_expand(table: dict[str, Any] | None) -> str:
     ) if part]
     source = p(t("confluence.steps.source", source=", ".join(source_parts))) if source_parts else ""
     detector = step_detection_text(table)
-    note = p(f"{t('confluence.steps.note')} {detector}" if detector else t("confluence.steps.note"))
+    if _as_dict(table.get("detection")).get("method") == "generator":
+        note = p(detector)
+    else:
+        note = p(f"{t('confluence.steps.note')} {detector}" if detector else t("confluence.steps.note"))
     return wrap_expand(t("report.steps.title"), f"<table><thead>{head}</thead><tbody>{body}</tbody></table>{source}{note}")
 
 
@@ -368,6 +377,8 @@ def step_detection_text(table: dict[str, Any] | None) -> str:
     detection = table.get("detection") if isinstance(table, dict) else None
     if not isinstance(detection, dict):
         return ""
+    if detection.get("method") == "generator":
+        return t("report.steps.generator", tag=detection["run_tag"], minutes=detection["min_step_minutes"])
     try:
         seconds = float(detection.get("sample_sec"))
     except (TypeError, ValueError):
@@ -919,15 +930,16 @@ def _test_figures(row: dict[str, Any], parsed: dict[str, Any]) -> list[str]:
 def render_deterministic_summary(row: dict[str, Any]) -> str:
     """Final row of a report built without the model: the verdict, the test figures and a note on the analysis."""
     parsed = _as_dict(row.get("parsed"))
-    return "".join([kv_table(_verdict_rows(row, parsed)), *_test_figures(row, parsed), p(t("confluence.no_llm_analysis"))])
+    notice = _render_analysis_error(parsed) or p(t("confluence.no_llm_analysis"))
+    return "".join([kv_table(_verdict_rows(row, parsed)), *_test_figures(row, parsed), notice])
 
 
-def render_llm_domain_body(row: dict[str, Any]) -> str:
-    parsed = _as_dict(row.get("parsed"))
+def _render_analysis_error(parsed: dict[str, Any]) -> str:
     analysis_error = _as_dict(parsed.get("analysis_error"))
     if analysis_error:
         message = _cell_text(analysis_error.get("message"), t("report.analysis_error.default_message"))
         details = [
+            analysis_failure_location(analysis_error),
             _cell_text(analysis_error.get("provider"), ""),
             t("report.analysis_error.limit", value=analysis_error.get("max_tokens")) if analysis_error.get("max_tokens") else "",
             t("report.analysis_error.output", value=analysis_error.get("output_tokens")) if analysis_error.get("output_tokens") is not None else "",
@@ -936,10 +948,19 @@ def render_llm_domain_body(row: dict[str, Any]) -> str:
         body = h3(t("report.analysis_error.title")) + p(message)
         if details:
             body += p(" · ".join(details))
+        body += "".join(p(line) for line in domain_failure_details(analysis_error))
         excerpt = _require_str(analysis_error.get("excerpt"))
         if excerpt:
             body += f"<pre>{xml_text(excerpt[:2000])}</pre>"
         return body
+    return ""
+
+
+def render_llm_domain_body(row: dict[str, Any]) -> str:
+    parsed = _as_dict(row.get("parsed"))
+    error = _render_analysis_error(parsed)
+    if error:
+        return error + "".join(_test_figures(row, parsed))
     if not parsed and isinstance(row.get("text"), str) and "{" in row["text"]:
         raw = str(row["text"])
         start, end = raw.find("{"), raw.rfind("}")
@@ -956,12 +977,15 @@ def render_llm_domain_body(row: dict[str, Any]) -> str:
         "",
     )
     if rationale:
-        parts.append(h3(t("report.rationale.title")))
+        parts.append(h3(rationale_title(parsed, row.get("domain"))))
         parts.append(_html_paragraphs(rationale))
 
     parts.extend(_test_figures(row, parsed))
 
     parts.append(h3(t("report.findings.title")))
+    count_text = verified_findings_text(parsed)
+    if count_text:
+        parts.append(p(count_text))
     parts.append(two_col_table(
         t("report.findings.problems"),
         t("report.findings.recommendations"),

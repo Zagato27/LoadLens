@@ -1,6 +1,18 @@
 {
+  "llm.error.context_budget": "The request cannot fit the configured window of {window} tokens with {output} reserved for the reply. Reduce the output limit or required instructions, or set the model's actual window.",
+  "llm.error.context_provider": "The provider rejected the request because it exceeded the context window. Check the model's actual window. The profile specifies {window} tokens with {output} reserved for the reply.",
   "llm.error.empty_answer": "{provider}: the model returned empty text",
   "llm.error.gigachat_no_structured_output": "GigaChat client does not support with_structured_output: update langchain-gigachat or disable llm.gigachat.structured_output",
+  "llm.error.gigachat_proxy_url": "GigaChat reads its proxy from the server's HTTP_PROXY and HTTPS_PROXY settings.",
+  "llm.error.invalid_proxy_url": "Enter an HTTP or HTTPS proxy address such as http://user:password@proxy.example:8080.",
   "llm.error.output_truncated": "{provider}: the answer was cut off at {max_tokens} tokens",
-  "llm.error.output_truncated_with_count": "{provider}: the answer was cut off at {max_tokens} tokens, {output_tokens} produced"
+  "llm.error.output_truncated_with_count": "{provider}: the answer was cut off at {max_tokens} tokens, {output_tokens} produced",
+  "llm.error.overloaded": "The model provider reported overload (HTTP 429).",
+  "llm.error.proxy_failed": "The proxy connection failed. Check the proxy address and credentials.",
+  "llm.error.quota_exhausted": "The model provider reported insufficient quota or balance (HTTP 429). Check the API account limits and billing status.",
+  "llm.error.rate_limited": "The model provider returned HTTP 429. Check concurrency, request and token limits for the API account.",
+  "llm.error.request_timeout": "The model provider did not respond within the request timeout.",
+  "llm.prompt.compact_critic": "Repair DRAFT using the evidence in DATA_CONTEXT. Return only a report JSON object with verdict, verdict_rationale, findings and recommended_actions. Keep supported figures and their units.",
+  "llm.prompt.compact_domain": "Analyze metrics for the {domain} domain. Ground findings in the supplied JSON values and intervals. Respect deterministic_sla when present. Return the report object with verdict, verdict_rationale, findings and recommended_actions.",
+  "llm.prompt.compact_final": "Build the final report from deterministic_sla, metrics, load steps and domain_analyses. Preserve the SLA verdict and distinguish target load from capacity. Return JSON with verdict, verdict_rationale, findings and recommended_actions."
 }

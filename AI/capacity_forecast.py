@@ -18,9 +18,8 @@ from typing import Any, Literal, Optional, Sequence
 import numpy as np
 import pandas as pd
 
-from AI.context_pack import format_iso, to_utc
+from AI.context_pack import bucket_width, format_iso, to_utc
 from AI.i18n import t
-from AI.sla_evaluator import _bin_width
 
 LOAD_MODELS = ("open", "closed")
 LATENCY_UNIT_SECONDS = {"ms": 0.001, "s": 1.0}
@@ -293,7 +292,7 @@ def align_samples(
     frame = frame.dropna(subset=["x", "r_s"])
     frame = frame[(frame["x"] > 0) & (frame["r_s"] > 0) & (frame.index >= start)]
     frame = _require_closed_vus(frame) if load_model == "closed" else frame.assign(n=frame["x"] * frame["r_s"])
-    width = _bin_width(pd.DatetimeIndex(frame.index))
+    width = bucket_width(pd.DatetimeIndex(frame.index))
     frame = frame.assign(step=_step_positions(pd.DatetimeIndex(frame.index), steps))
     frame = frame.assign(role=_roles(frame, width, cutoff, ceiling_end))
     fit = frame.loc[frame["role"] == ROLE_FIT]

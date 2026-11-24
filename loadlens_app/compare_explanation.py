@@ -43,7 +43,7 @@ from AI.metric_direction import BETTER, SAME, UNKNOWN, WORSE, assess, change_pct
 from AI.phases import phase_pairs
 from AI.prompt_store import load_prompt
 from AI.prompt_store import text as prompt_text
-from AI.providers import ask_llm_with_text_data, usage_domain
+from AI.providers import ask_llm_with_text_data, llm_scope, usage_domain
 from AI.query_packs.blocks import block_roles
 from AI.scoring import VERIFICATION_UNVERIFIED
 from AI.test_profile import normalize_test_type, test_type_label
@@ -57,6 +57,7 @@ from settings import CONFIG
 
 # AI/prompts/<lang>/compare_prompt.txt; the system prompt is ``compare.system`` of _strings.json.
 PROMPT_FILE = "compare_prompt.txt"
+CHECK_VERSION = 2
 SIDES = ("A", "B")
 AGGREGATE = "p95"
 # The p95 aggregate of the compare blueprint (loadlens_app/blueprints/compare.py, AGGREGATES["p95"]).
@@ -666,7 +667,8 @@ def build_context(run_a: str, run_b: str) -> CompareContext:
     digest = hashlib.sha256(
         json.dumps({"prompt": _prompt(lang), "payload": payload}, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()
-    llm, llm_problem = llm_choice()
+    area_a, area_b = (side.project_area or _find_area_for_service(side.service) for side in sides.values())
+    llm, llm_problem = llm_choice(area_a if area_a == area_b else None)
     return CompareContext(
         run_a=run_a,
         run_b=run_b,
@@ -775,7 +777,12 @@ def _cached_view(status: ViewStatus, context: CompareContext, payload: Mapping[s
     generated_at = str(payload.get("generated_at") or "") or None
     try:
         explanation = CompareExplanation.model_validate(payload["explanation"])
-        check = ExplanationCheck(**payload["check"])
+        if payload.get("check_version") == CHECK_VERSION:
+            check = ExplanationCheck(**payload["check"])
+        elif status == "ready":
+            check = check_comparison(explanation, context.payload["facts"], context.findings, lang=context.lang)
+        else:
+            check = None  # The facts used for a legacy check have changed.
     except (KeyError, TypeError, ValidationError):
         return CompareView("stale", t("compare.explain.old_format"), context, model=model, generated_at=generated_at)
     message = t("compare.explain.stale") if status == "stale" else ""
@@ -826,7 +833,7 @@ def _ask_model(context: CompareContext) -> str:
     if llm is None:
         raise ExplanationError(context.llm_problem, 422, "missing_llm")
     try:
-        with usage_domain("compare"):
+        with llm_scope(llm.config()), usage_domain("compare"):
             return ask_llm_with_text_data(
                 _prompt(context.lang),
                 json.dumps(context.payload, ensure_ascii=False),
@@ -854,10 +861,11 @@ def generate_explanation(run_a: str, run_b: str, budget_owner: Optional[str] = N
         with with_locale(context.lang):
             raw = _ask_model(context)
             explanation = parse_comparison(raw)
-            check = check_comparison(explanation, context.payload["facts"], context.findings)
+            check = check_comparison(explanation, context.payload["facts"], context.findings, lang=context.lang)
         payload = {
             "explanation": explanation.model_dump(),
             "check": asdict(check),
+            "check_version": CHECK_VERSION,
             "model": context.llm.model if context.llm is not None else "",
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }

@@ -52,7 +52,7 @@ CONFIG["llm"]["openai"].update({
     "api_base_url": _LLM_STUB_URL,
     "model": "stub-model",
     "api_key": "demo-stub-key",
-    "max_concurrent": 4,
+    "max_concurrent": 1,
     "verify": False,
     "proxies": {"https": "", "http": ""},
     "connect_timeout_sec": 10,

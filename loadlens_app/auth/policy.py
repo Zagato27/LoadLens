@@ -172,6 +172,7 @@ POLICY: dict[str, Rule] = {
     "config_api.test_connection": _write(A, "config.test_connection", session_only=True),
     "config_api.grafana_datasources": _read(A, session_only=True),
     "config_api.llm_models": _write(A, "config.llm_models", session_only=True),
+    "config_api.llm_profiles": _write(A, "config.llm_profiles", session_only=True),
     "config_api.query_preview": _write(A, "config.query_preview", session_only=True),
     # Sends a document to the LLM provider and returns a draft; nothing is saved.
     "config_api.import_system_context": _write(A, "config.context_import", session_only=True),

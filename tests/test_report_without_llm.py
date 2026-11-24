@@ -11,12 +11,17 @@ import copy
 import json
 import re
 import sys
+from concurrent.futures import Future
+from contextvars import ContextVar
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Event
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
+import requests
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -28,10 +33,12 @@ from tests.test_perf_reports_sql import SaveConnection, SqlStub  # noqa: E402
 from tests.js_harness import run_js  # noqa: E402
 from AI import db_store  # noqa: E402
 from AI import pipeline as pipeline_module  # noqa: E402
+from AI import providers  # noqa: E402
 from AI.context_pack import format_iso  # noqa: E402
 from AI.i18n import t, with_locale  # noqa: E402
 from AI.verdicts import DETERMINISTIC, is_deterministic_report, to_code  # noqa: E402
-from loadlens_app import confluence_export  # noqa: E402
+from confluence_manager.update_confluence_template import render_llm_markdown  # noqa: E402
+from loadlens_app import confluence_export, job_runner  # noqa: E402
 
 REPORT_JS = ["static/js/common.js", "static/js/ui.js", "static/js/charts.js", "static/js/reports.js"]
 I = "LL.report._internals"  # noqa: E741
@@ -57,30 +64,135 @@ def _cfg(kind):
     }
 
 
-def _run(monkeypatch, kind, *, use_llm, save_to_db=True):
-    """Runs the pipeline on the frames of ``kind``; returns (result, saved results, contexts the model got)."""
-    saved: list = []
-    contexts: dict = {}
+def _stub_report_inputs(monkeypatch, kind):
     monkeypatch.setattr(pipeline_module, "load_prompt", lambda name, lang=None: "prompt")
     monkeypatch.setattr(pipeline_module, "fetch_and_aggregate_with_label_keys", lambda *a, **k: _pipeline_frames(kind))
     monkeypatch.setattr(pipeline_module, "save_domain_labeled", lambda **kwargs: None)
-    monkeypatch.setattr(pipeline_module, "save_llm_results", lambda results, run_meta, storage_cfg: saved.append(copy.deepcopy(results)))
     monkeypatch.setattr(pipeline_module, "_load_baseline_context", lambda *args: {"available": False, "reason": "test"})
     monkeypatch.setattr(pipeline_module, "_load_phase_reference", lambda *args: None)
+
+
+def _run(monkeypatch, kind, *, use_llm, save_to_db=True, rate_limited_domain=None):
+    """Runs the pipeline on the frames of ``kind``; returns (result, saved results, contexts the model got)."""
+    _stub_report_inputs(monkeypatch, kind)
+    saved: list = []
+    contexts: dict = {}
+    monkeypatch.setattr(pipeline_module, "save_llm_results", lambda results, run_meta, storage_cfg: saved.append(copy.deepcopy(results)))
+    real_llm = pipeline_module.llm_two_pass_self_consistency
 
     def fake_llm(user_prompt, data_context, k, return_scores, domain_key):
         if not use_llm:
             raise AssertionError("the model is called in a report without it")
-        payload = {"verdict": "pass", "verdict_rationale": "ok", "findings": [], "recommended_actions": []}
         contexts[domain_key] = json.loads(data_context)
+        if rate_limited_domain in ("all", domain_key):
+            return real_llm(user_prompt, data_context, k, return_scores, domain_key)
+        payload = {"verdict": "pass", "verdict_rationale": "ok", "findings": [], "recommended_actions": []}
         return json.dumps(payload), dict(payload), {}
 
     monkeypatch.setattr(pipeline_module, "llm_two_pass_self_consistency", fake_llm)
+    config = _cfg(kind)
+    if rate_limited_domain:
+        config["llm"].update(provider="openai", openai={"api_base_url": "https://llm.example/v1", "max_attempts": 1})
     result = pipeline_module.uploadFromLLM(
-        start_ts=START_TS, end_ts=END_TS, save_to_db=save_to_db, only_collect=not use_llm, ef_config=_cfg(kind),
+        start_ts=START_TS, end_ts=END_TS, save_to_db=save_to_db, only_collect=not use_llm, ef_config=config,
         run_meta={"test_type": kind, "run_name": f"run-{kind}", "service": "demo"}, active_domains=["lt_framework"],
     )
     return result, saved, contexts
+
+
+@pytest.mark.parametrize("target", [None, 1000])
+def test_final_rationale_only_uses_configured_sla(monkeypatch, target):
+    _stub_report_inputs(monkeypatch, "step")
+    cfg = _cfg("step")
+    cfg["sla"]["target_rps"] = target
+    invented = "Missed a target of 300 requests/s"
+
+    def answer(*args, **kwargs):
+        payload = {"verdict": "fail", "verdict_rationale": invented, "recommended_actions": [],
+                   "findings": [{"id": f"f{i}", "summary": "Latency limit 300 ms"} for i in range(1, 4)]}
+        raw = json.dumps(payload)
+        return raw, pipeline_module.parse_llm_analysis_strict(raw), {}
+
+    monkeypatch.setattr(pipeline_module, "llm_two_pass_self_consistency", answer)
+    result = pipeline_module.uploadFromLLM(
+        START_TS, END_TS, ef_config=cfg, run_meta={"test_type": "step"},
+        active_domains=["lt_framework"], report_language="en",
+    )
+    final = result["final_parsed"]
+    assert final["verification_summary"]["verified"] == 3
+    assert final["verdict_rationale_source"] == "sla_checks"
+    assert invented not in final["verdict_rationale"]
+    assert "300" in final["verdict_rationale"] and "ms" in final["verdict_rationale"]
+    assert json.loads(result["final"])["verdict_rationale"] == final["verdict_rationale"]
+    if target:
+        assert final["verdict"] == "fail" and "1000" in final["verdict_rationale"]
+    with with_locale("en"):
+        for html in (confluence_export.render_llm_domain_body({"parsed": final, "domain": "final"}),
+                     render_llm_markdown(final, domain="final"),
+                     run_js(REPORT_JS, f"{I}.renderStructuredReportHtml({js(final)}, '', 'final')", locale="en")):
+            assert invented not in html and "300" in html and "Verified findings: 3" in html
+        legacy = {"verdict": "fail", "verdict_rationale": invented}
+        assert "SLA claims unchecked" in confluence_export.render_llm_domain_body({"domain": "final", "parsed": legacy})
+
+
+def test_thread_reports_store_their_own_usage_for_the_same_domain_and_profile(monkeypatch):
+    _stub_report_inputs(monkeypatch, "step")
+    config = _cfg("step")
+    config["llm"].update(provider="gigachat", gigachat={
+        "structured_output": False, "max_concurrent": 2, "max_attempts": 1,
+        "pricing": {"prompt_per_1k": 2, "completion_per_1k": 4},
+    })
+    amounts = {"first": 10, "second": 20}
+    prompt_tokens = ContextVar("fake_provider_prompt_tokens")
+    first_reached_final, release_first = Event(), Event()
+    finished = {name: Future() for name in amounts}
+    saved = {}
+
+    def invoke(messages):
+        tokens = prompt_tokens.get()
+        if tokens == amounts["first"] and providers.current_usage_domain() == "final":
+            first_reached_final.set()
+            assert release_first.wait(15)
+        return SimpleNamespace(
+            content=json.dumps({"verdict": "pass", "verdict_rationale": "ok", "findings": [], "recommended_actions": []}),
+            usage_metadata={"input_tokens": tokens, "output_tokens": tokens // 2},
+        )
+
+    def save(results, run_meta, storage_cfg):
+        saved[run_meta["run_name"]] = copy.deepcopy(results["scores"])
+
+    def build_report(job_id):
+        prompt_tokens.set(amounts[job_id])
+        try:
+            pipeline_module.uploadFromLLM(
+                START_TS, END_TS, save_to_db=True, ef_config=config, active_domains=["lt_framework"],
+                run_meta={"run_name": job_id, "service": "demo", "test_type": "step"},
+            )
+        except Exception as exc:
+            finished[job_id].set_exception(exc)
+        else:
+            finished[job_id].set_result(None)
+
+    monkeypatch.setattr(providers, "_get_gigachat_client", lambda cfg: SimpleNamespace(invoke=invoke))
+    monkeypatch.setattr(pipeline_module, "save_llm_results", save)
+    task = SimpleNamespace(run=build_report)
+    assert job_runner.submit(task, "first") == "thread"
+    try:
+        assert first_reached_final.wait(15)
+        assert job_runner.submit(task, "second") == "thread"
+        finished["second"].result(timeout=15)
+    finally:
+        release_first.set()
+        finished["first"].result(timeout=15)
+
+    for name, tokens in amounts.items():
+        scores = saved[name]
+        for usage, calls in [(scores["lt_framework"]["usage"], 1), (scores["final"]["usage"], 1),
+                             (scores["final"]["run_usage"], 2)]:
+            assert usage["calls"] == calls
+            assert usage["prompt_tokens"] == calls * tokens
+            assert usage["completion_tokens"] == calls * tokens // 2
+            assert usage["cost"] == pytest.approx(calls * tokens * 0.004)
 
 
 @pytest.mark.parametrize("kind", list(PIPELINE_CASES))
@@ -123,6 +235,33 @@ def test_the_final_row_without_the_model_matches_the_report_with_it(monkeypatch)
         assert saved[0][key] == with_model[key], key
     # One builder: the stored context is the one the model reads.
     assert json.loads(saved[0]["contexts"]["final"]) == contexts["final"]
+
+
+@pytest.mark.parametrize("rate_limited_domain", ["all", "final"])
+def test_http_429_keeps_the_calculated_report(monkeypatch, rate_limited_domain):
+    calls = []
+
+    def post(url, **_kwargs):
+        calls.append(url)
+        response = requests.Response()
+        response.status_code, response.url = 429, url
+        response._content = b'{"error":{"type":"rate_limit_reached_error"}}'
+        return response
+
+    monkeypatch.setattr(requests, "post", post)
+    monkeypatch.setattr(providers, "_llm_rate_state", {})
+    result, saved, _ = _run(monkeypatch, "step", use_llm=True, rate_limited_domain=rate_limited_domain)
+    assert calls == ["https://llm.example/v1/chat/completions"]
+    assert saved == [result]
+    final = result["final_parsed"]
+    assert is_deterministic_report(final) == (rate_limited_domain == "all")
+    assert final["analysis_error"]["reason"] == "rate_limit"
+    assert final["verdict"] == final["deterministic_sla"]["verdict"] == to_code(result["sla_verdict"])
+    assert final["load_step_table"]["steps"] and result["sla_checks"]
+    assert final["peak_performance"]["max_rps"] == pytest.approx(300.0, abs=2.0)
+    assert CLOCK.fullmatch(final["peak_performance"]["max_time"])
+    if rate_limited_domain == "final":
+        assert result["lt_framework_parsed"]["verdict"] == "pass"
 
 
 def test_peak_time_without_an_sla_step_is_the_stable_step_at_the_peak():
@@ -363,3 +502,25 @@ def test_report_page_marks_a_report_without_the_model():
     assert "Отчёт построен без анализа ИИ" in out["summary"]
     assert "Пиковая производительность" in out["summary"] and "19:30" in out["summary"] and "19:45" in out["summary"]
     assert "ai-badge" not in out["summary"]
+
+
+@pytest.mark.parametrize("deterministic", [True, False])
+def test_web_and_confluence_show_calculated_figures_with_analysis_error(deterministic):
+    row = _final_row()
+    parsed = row["parsed"]
+    if not deterministic:
+        parsed.pop("analysis")
+    message = "Model provider: HTTP 429"
+    parsed["analysis_error"] = {
+        "reason": "rate_limit", "message": message, "stage": "candidate", "domain": "final",
+        "domain_failures": [{"stage": "critic", "domain": "database", "message": "Timeout in DB review"}],
+    }
+    rendered = run_js(REPORT_JS, f"""(() => {{
+      const row = {js(row)};
+      return {I}.isDeterministicFinal(row) ? {I}.deterministicSummaryHtml(row)
+        : {I}.renderStructuredReportHtml(row.parsed, '', 'final');
+    }})()""")
+    for body in (rendered, _page([row]), render_llm_markdown(parsed, domain="final")):
+        assert message in body and "Пиковая производительность" in body and "19:30" in body
+        assert "Итог · Генерация вариантов ответа" in body
+        assert "База данных · Проверка варианта критиком" in body and "Timeout in DB review" in body

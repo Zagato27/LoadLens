@@ -418,12 +418,12 @@ def live(run_id: str):
 
 @load_tests_bp.route("/lt_windows", methods=["GET"])
 def lt_windows():
-    """Load windows of a service over the last 30 days for the report form: stretches with RPS > 0 and finished runs.
+    """Load windows of a service over the last 7 days for the report form: stretches with RPS > 0 and finished runs.
 
     ``service`` is the service, ``hours`` the depth of the fine pass (6 by default, at most 24); when it finds
-    fewer than three stretches, older ones are searched over 30 days with a coarse step and then refined. Errors
+    fewer than three stretches, a coarse pass searches for older ones and then refines them. Errors
     of the metrics source do not fail the answer: ``ok`` is false (or ``message`` alone is set when only the
-    30-day search failed) and ``message`` says why.
+    coarse pass failed) and ``message`` says why.
     """
     service_id = request.args.get("service", "").strip()
     if not service_id:

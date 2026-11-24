@@ -33,6 +33,7 @@
 ## Quick start
 
 The demo needs Docker only: an LLM stub and a Prometheus stub run inside the stack, no API keys or external systems.
+The app container defaults to one vCPU. Adjust `DEMO_APP_CPUS` in `docker/demo.env` for a larger host.
 
 ```bash
 docker compose -f docker/docker-compose.demo.yml --env-file docker/demo.env --profile demo up --build

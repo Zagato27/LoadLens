@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
 import pandas as pd
@@ -50,10 +50,7 @@ def to_utc(value: Any) -> pd.Timestamp:
 
 def format_iso(value: Any, shift_hours: int) -> str:
     """ISO 8601 with the configured display offset, e.g. 2024-11-01T13:42:00+03:00."""
-    shifted = to_utc(value) + timedelta(hours=int(shift_hours))
-    sign = "+" if shift_hours >= 0 else "-"
-    hours = abs(int(shift_hours))
-    return f"{shifted.strftime('%Y-%m-%dT%H:%M:%S')}{sign}{hours:02d}:00"
+    return to_utc(value).tz_convert(timezone(timedelta(hours=int(shift_hours)))).isoformat()
 
 
 def minutes_from(value: Any, start_ts: float) -> float:
@@ -94,6 +91,7 @@ class LoadStep:
     # after_drop: the step follows an RPS fall that never recovered; dip: the step is a fall RPS recovered from.
     after_drop: bool = False
     dip: bool = False
+    planned_rps: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {
@@ -118,6 +116,10 @@ class LoadStep:
             out["after_drop"] = True
         if self.dip:
             out["dip"] = True
+        if self.source == "generator":
+            out["rps_level"] = self.rps_level
+            if self.planned_rps is not None:
+                out["planned_rps"] = self.planned_rps
         return out
 
 
@@ -274,7 +276,25 @@ def derive_load_steps(
     return steps if len(steps) >= MIN_STEPS_FROM_DETECTOR else equal_time_buckets(start_ts, end_ts, shift_hours)
 
 
+def bucket_width(index: pd.DatetimeIndex) -> pd.Timedelta:
+    if len(index) < 2:
+        return pd.Timedelta(0)
+    if index.freq is not None and isinstance(index.freq, pd.offsets.Tick):
+        return pd.Timedelta(index.freq)
+    deltas = index.to_series().diff().dropna()
+    return max(pd.Timedelta(0), deltas.median())
+
+
+def observed_bucket_slice(index: pd.DatetimeIndex, start: pd.Timestamp, end: pd.Timestamp, width: pd.Timedelta) -> slice:
+    """Complete buckets of a sorted time series in the generator's half-open interval."""
+    if width <= pd.Timedelta(0):
+        return slice(0, 0)
+    return slice(index.searchsorted(start), index.searchsorted(end - width, side="right"))
+
+
 def _slice_step(series: pd.Series, step: LoadStep, is_last: bool) -> pd.Series:
+    if step.source == "generator":
+        return series.iloc[observed_bucket_slice(series.index, step.start, step.end, bucket_width(series.index))].dropna()
     mask = (series.index >= step.start) & ((series.index <= step.end) if is_last else (series.index < step.end))
     return series[mask].dropna()
 
@@ -306,9 +326,13 @@ def _after_plateau_stats(series: pd.Series, step: LoadStep, is_last: bool) -> Op
 def _step_stats(series: pd.Series, steps: Sequence[LoadStep]) -> List[Optional[Dict[str, Any]]]:
     """Per-step statistics over the plateau, so a drop after it is not mixed into the step value."""
     stats: List[Optional[Dict[str, Any]]] = []
+    width = bucket_width(series.index) if steps and steps[0].source == "generator" else None
     for i, step in enumerate(steps):
         is_last = i == len(steps) - 1
-        chunk = _slice_plateau(series, step, is_last)
+        if width is None:
+            chunk = _slice_plateau(series, step, is_last)
+        else:
+            chunk = series.iloc[observed_bucket_slice(series.index, step.start, step.end, width)].dropna()
         if chunk.empty:
             stats.append(None)
             continue
@@ -701,6 +725,10 @@ def load_step_report_from_frames(
         })
         if errors is not None:
             rows[-1]["error_rate"] = errors[position]
+        if step.source == "generator":
+            rows[-1]["source"] = step.source
+            if step.planned_rps is not None:
+                rows[-1]["planned_rps"] = step.planned_rps
     _select_step(rows, selected_level, selected_start)
     if selected_role:
         for row in rows:
@@ -717,7 +745,8 @@ def load_step_report_from_frames(
         "latency_query": lat_label or None,
         "latency_series": lat_name or None,
         **({"error_query": error_label} if errors is not None else {}),
-        "note": _step_note(),
+        "note": t("report.steps.generator", tag=detection["run_tag"], minutes=detection["min_step_minutes"])
+        if detection and detection.get("method") == "generator" else _step_note(),
         "steps": rows,
         **({"detection": dict(detection)} if isinstance(detection, dict) else {}),
     }
@@ -876,10 +905,15 @@ def load_step_report_from_context(
             "latency_p95": latency_p95,
             "selected": False,
         })
+        if step.get("source") == "generator":
+            rows[-1]["source"] = "generator"
+            if "planned_rps" in step:
+                rows[-1]["planned_rps"] = step["planned_rps"]
     if not rows:
         return None
     level = selected_level if selected_level is not None else rps_hint.get("actual")
     _select_step(rows, level, selected_start)
+    detection = pack.get("step_detection") or pack.get("stable_detection")
     return {
         "rps_query": rps_label or None,
         "rps_series": str((rps_row or {}).get("series") or "") or None,
@@ -887,6 +921,7 @@ def load_step_report_from_context(
         "latency_series": named_series if named_row is not None else None,
         "note": _step_note(),
         "steps": rows,
+        **({"detection": detection} if isinstance(detection, dict) and detection.get("method") == "generator" else {}),
     }
 
 

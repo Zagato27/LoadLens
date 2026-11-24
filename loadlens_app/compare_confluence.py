@@ -233,7 +233,7 @@ def _check_text(view: CompareView) -> str:
     if check.status == "verified":
         return t("confluence.forecast.check_verified", matched=check.claims_matched, total=check.claims_total)
     if check.status == "unverified":
-        return t("confluence.forecast.check_unverified", numbers=", ".join(check.unmatched))
+        return t("compare.explain.check_unverified", numbers=", ".join(check.unmatched))
     return t("confluence.forecast.check_none")
 
 

@@ -52,7 +52,7 @@ def _report(name, scenario, verdict="risk"):
 def test_the_explanation_gets_the_phase_table_and_a_flag(monkeypatch):
     reports = {"A": _report("rel-121", SCENARIO_A), "B": _report("rel-120", SCENARIO_B)}
     monkeypatch.setattr(cx, "_load_reports", lambda run_a, run_b: (reports, []))
-    monkeypatch.setattr(cx, "llm_choice", lambda: (None, "no model"))
+    monkeypatch.setattr(cx, "llm_choice", lambda _area: (None, "no model"))
     context = cx.build_context("rel-121", "rel-120")
     facts = context.payload["facts"]
     assert context.sides["A"].key_rps == 38.0 and context.sides["A"].key_rps_kind == "phases"
@@ -129,7 +129,7 @@ def test_the_confluence_comparison_has_the_phase_table(monkeypatch):
 
     reports = {"A": _report("rel-121", SCENARIO_A), "B": _report("rel-120", SCENARIO_B)}
     monkeypatch.setattr(cx, "_load_reports", lambda run_a, run_b: (reports, []))
-    monkeypatch.setattr(cx, "llm_choice", lambda: (None, "no model"))
+    monkeypatch.setattr(cx, "llm_choice", lambda _area: (None, "no model"))
     monkeypatch.setattr(cx, "_load_cached", lambda run_a, run_b: None)
     body = cc.compare_page_body(cx.explanation_view("rel-121", "rel-120"), "", "2026-11-11 12:00")
     assert "<h3>Фазы сценария</h3>" in body and "фаза 2 · Cart" in body and "15,0 / 10,0 (+50,0 %)" in body

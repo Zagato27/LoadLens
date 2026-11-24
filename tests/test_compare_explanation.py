@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
 
 from tests.test_smoke_api import FakeConnection, RecordingConnection, client, patch_core  # noqa: F401
 from AI import db_store
+from AI.compare_explanation import CompareExplanation, check_comparison
 from AI.db_store import StoredPairExplanation, StoredRunReport, StoredRunRow
 from AI.i18n import with_locale
 from AI.metric_direction import (
@@ -263,6 +265,23 @@ def test_findings_given_to_the_model():
 # ---- context, cache, statuses ----------------------------------------------------------------------------------
 
 
+def test_project_routing_of_comparison_explanations(pair, monkeypatch):
+    from AI.providers import current_llm_config
+
+    def set_area(side, area):
+        report = pair["reports"][side]
+        report.rows["final"] = replace(report.rows["final"], project_area=area)
+
+    project_llm = {"provider": "openai", "openai": {"model": "project-model"}}
+    core.CONFIG_RUNTIME_PATH.write_text(json.dumps({"per_area": {"shop": {"llm": project_llm}, "other": {}}}), encoding="utf-8")
+    monkeypatch.setattr(cx, "ask_llm_with_text_data", lambda *args, **kwargs: current_llm_config()["openai"]["model"])
+    set_area("A", "shop")
+    set_area("B", "shop")
+    assert cx._ask_model(cx.build_context("night-2", "night-1")) == "project-model"
+    set_area("B", "other")
+    assert cx._ask_model(cx.build_context("night-2", "night-1")) == "test-model"
+
+
 def test_explanation_is_generated_checked_and_cached(pair):
     first = cx.explanation_view("night-2", "night-1").to_dict()
     assert (first["status"], first["model"], first["outcome"]["code"], first["language"]) == ("missing", "test-model", "better", "ru")
@@ -298,6 +317,87 @@ def test_the_explanation_goes_stale_when_the_facts_change(pair):
     pair["stored"][key] = StoredPairExplanation(*key, "x", {"explanation": {"headline": "старый формат"}, "check": {}}, None)
     old = cx.explanation_view(*key)
     assert old.status == "stale" and old.explanation is None and "прежнем формате" in old.message
+
+
+@pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.parametrize("swapped", [False, True])
+def test_throughput_is_checked_against_its_metric_and_run(structured, swapped):
+    # The other metric has the opposite pair, so even per-run pooling would accept the wrong numbers.
+    facts = {"runs": {"A": {"key_rps": 1200}, "B": {"key_rps": 1000}},
+             "metrics": {"top_changes": [{"metric": "Heap", "A": 1000, "B": 1200}]}}
+    a, b = (1000, 1200) if swapped else (1200, 1000)
+    explanation = CompareExplanation(
+        headline="Results", confidence="medium",
+        summary="Results" if structured else f"Throughput: A reached {a} RPS and B reached {b} RPS.",
+        key_changes=[{"label": "Throughput", "value_a": f"{a} RPS", "value_b": f"{b} RPS"}] if structured else [],
+    )
+    result = check_comparison(explanation, facts, [])
+    assert (result.status, result.claims_matched, result.claims_total) == (
+        ("unverified", 0, 2) if swapped else ("verified", 2, 2)
+    )
+    if swapped:
+        assert any("A" in item and "1000" in item for item in result.unmatched)
+        assert any("B" in item and "1200" in item for item in result.unmatched)
+
+
+def test_cached_legacy_checks_are_rechecked_without_a_model(pair):
+    pair["answer"] = {**ANSWER, "key_changes": [{"label": "RPS", "value_a": "1000 RPS", "value_b": "1200 RPS"}]}
+    generated = cx.generate_explanation("night-2", "night-1")
+    assert generated.check.status == "unverified"
+    stored = pair["stored"][("night-2", "night-1")].payload
+    stored.pop("check_version", None)
+    stored["check"].update(status="verified", unmatched=[])
+    assert cx.explanation_view("night-2", "night-1").check.status == "unverified"
+    assert len(pair["calls"]) == 1
+
+
+def test_nearby_run_values_cannot_be_swapped_within_the_rounding_tolerance():
+    answer = CompareExplanation(headline="Results", summary="101 RPS (A) and 100 RPS (B).", confidence="low")
+    facts = {"runs": {"A": {"key_rps": 100}, "B": {"key_rps": 101}}}
+    result = check_comparison(answer, facts, [])
+    assert (result.status, result.claims_matched, result.claims_total) == ("unverified", 0, 2)
+
+
+@pytest.mark.parametrize("facts", [
+    {"runs": {"A": {"key_rps": 1200}, "B": {"key_rps": 1000}}},
+    {"metrics": {"top_changes": [{"metric": "RPS", "A": 1200, "B": 1000}]}},
+])
+def test_russian_throughput_label_with_grouped_values(facts):
+    for a, b, expected in (("1 200 RPS", "1 000 RPS", 2), ("1 000 RPS", "1 200 RPS", 0)):
+        answer = CompareExplanation(headline="Results", summary="Results", confidence="low", key_changes=[
+            {"label": "Пропускная способность", "value_a": a, "value_b": b},
+        ])
+        result = check_comparison(answer, facts, [], lang="ru")
+        assert (result.claims_matched, result.claims_total) == (expected, 2)
+        assert result.status == ("verified" if expected else "unverified")
+
+
+@pytest.mark.parametrize(("lang", "summary"), [
+    ("en", "From 1,200 RPS in A to 1,000 RPS in B."),
+    ("ru", "В прогоне A 1200 RPS, в B 1000 RPS."),
+])
+def test_explicit_run_markers_in_both_report_languages(lang, summary):
+    answer = CompareExplanation(headline="Results", summary=summary, confidence="low")
+    facts = {"runs": {"A": {"key_rps": 1200}, "B": {"key_rps": 1000}}}
+    correct = check_comparison(answer, facts, [], lang=lang)
+    assert (correct.status, correct.claims_matched, correct.claims_total) == ("verified", 2, 2)
+    facts["runs"]["A"], facts["runs"]["B"] = facts["runs"]["B"], facts["runs"]["A"]
+    assert check_comparison(answer, facts, [], lang=lang).claims_matched == 0
+
+
+def test_percentile_identifiers_and_decimal_commas_in_numeric_changes():
+    answer = CompareExplanation(headline="Results", summary="Results", confidence="low", key_changes=[
+        {"label": "p95", "value_a": "p95 100,500 ms", "value_b": "p95 80 ms"},
+    ])
+    facts = {"metrics": {"top_changes": [{"metric": "p95", "A": 100.5, "B": 80}]}}
+    result = check_comparison(answer, facts, [], lang="ru")
+    assert (result.status, result.claims_matched, result.claims_total) == ("verified", 2, 2)
+
+
+def test_joint_run_label_does_not_assign_shared_prose_to_the_last_run():
+    answer = CompareExplanation(headline="Results", summary="A and B: 1000 RPS.", confidence="low")
+    facts = {"runs": {"A": {"key_rps": 1200}, "B": {"key_rps": 1000}}}
+    assert check_comparison(answer, facts, []).status == "unverified"
 
 
 def test_nothing_to_compare(pair):

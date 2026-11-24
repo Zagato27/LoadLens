@@ -34,8 +34,8 @@ are in [AI/README.md](../AI/README.md).
    the findings is checked against the collected data, and the best candidate is chosen: first the answer in the
    report language, then by score.
 6. **Overall conclusion.** The final prompt sees the domain verdicts, the SLA result and the previous run of the
-   service (`llm.baseline`), and returns the verdict rationale, findings and recommendations. Everything is saved to
-   `llm_reports` with the quality metrics (`scores`).
+   service (`llm.baseline`) and produces findings and recommendations. The pipeline generates the final
+   verdict rationale from the SLA checks and saves the report and quality metrics (`scores`) to `llm_reports`.
 
 Progress is reported per phase (collecting each domain, each model answer, the SLA check, the final analysis,
 saving); the job page shows it with the elapsed and the usual time. The entry point is
@@ -118,7 +118,15 @@ there are no such checks and the verdict is exactly the verdict of the mode.
   with a `reason` (`error`, `no_scores`, `partial_scores`).
 - **Verification of numbers.** Every number in the findings is looked up in the collected data; the "Answer
   confidence" block of the report lists which numbers were confirmed and how the answer was chosen. With
-  `llm.verification_pass` an extra call rebuilds the verdict from the confirmed findings only.
+  `llm.verification_pass` an extra call can revise an analysis that contains unverified findings.
+  The verification count refers to findings. LoadLens builds the final verdict explanation from the
+  deterministic SLA checks, including their configured thresholds, units and measured results. Older
+  reports identify their saved AI rationale as unchecked.
+- **Small context windows.** OpenAI-compatible requests reserve tokens for the reply and chat framing.
+  LoadLens estimates input size conservatively using UTF-8 byte length. It uses shorter report instructions
+  and reduces JSON evidence when necessary. The judge can use a shorter scoring form while keeping all
+  candidate indexes. An infeasible request or a context rejection from the server is recorded in the
+  report, and the deterministic SLA remains available.
 - **Language match.** The share of words in the expected script is the first key when candidates are compared, so
   a provider that answers in the wrong language loses to one that answers in the report language.
 - **Feedback.** Findings can be voted "Correct / Incorrect" on the report page (`llm_feedback`); the votes do not
@@ -134,7 +142,7 @@ overall block contain:
 
 | Field | Meaning |
 |---|---|
-| `verdict`, `verdict_rationale` | The code and a short explanation: a conclusion plus two to four key factors |
+| `verdict`, `verdict_rationale` | Verdict code and explanation. In the final report both come from the SLA evaluation. Domain analyses use the model's explanation. |
 | `confidence` | The model's confidence, 0..1 |
 | `findings` | Strings or objects `{summary, severity, component, evidence}`; `evidence_items[].threshold` is a number with a unit or `null` |
 | `recommended_actions`, `affected_components` | Concrete actions; an optional list of components |
@@ -233,7 +241,8 @@ context import, the document text are sent to the provider you configure; nothin
   (other service or test type, windows of different length, a baseline newer than A, a run without a report or
   without verified findings, other load) are listed beside it. "Analyse with AI" sends these facts and up to 8
   verified findings of each run to the model (`compare_prompt.txt`), which explains the differences without changing
-  the outcome; its numbers are checked against the facts. The explanation is in the language of the report of A and
+  the outcome. LoadLens checks each value attributed to A or B against that run's value for the named metric.
+  The comparison flags swapped values and identifies the affected run and metric. The explanation uses the language of report A and
   is cached per pair (`compare_explanations`); "Add comparison to Confluence" publishes the outcome, the verdicts, the
   largest changes and the cached explanation (or the findings of both runs) as its own page. Limit:
   `limits.llm_explanations_per_user_per_day`.
@@ -250,6 +259,9 @@ context import, the document text are sent to the provider you configure; nothin
   detector needs at least `sla.min_stable_minutes` of a plateau.
 - **Slow model answers.** Lower `generation.max_tokens` or the parallelism; for unstable providers use
   `request_min_interval_sec` and `rate_limit_cooldown_sec`.
+- **HTTP 429.** LoadLens pauses calls to the same API connection within the worker process and uses `Retry-After`
+  when the provider sends it. A wait longer than 60 seconds or a reported quota error ends model analysis for that
+  connection in the current report. The report keeps its SLA, figures, charts and any completed domain analyses.
 - **The judge did not run.** Expected with one candidate; otherwise look for `judge_meta.unavailable` and its reason
   in `GET /llm_reports`.
 - **Mixed languages in a report.** The report language is fixed when the job is queued; a prompt override in the

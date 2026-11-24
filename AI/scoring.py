@@ -5,20 +5,24 @@ import json
 import re
 import time
 import logging
+from requests.exceptions import Timeout
 from typing import List, Dict, Optional, Union, Tuple, Any
 from pydantic import BaseModel, Field, ValidationError, root_validator
 
 from AI.providers import (
     LLMBudgetError,
+    LLMContextOverflow,
     LLMEmptyAnswer,
     LLMOutputTruncated,
+    LLMRateLimitError,
     ask_llm_structured,
     ask_llm_with_text_data,
+    current_llm_config,
     structured_output_enabled,
     usage_domain,
 )
-from settings import CONFIG
-from AI.i18n import with_locale
+from AI.context_budget import compact_json, text_size
+from AI.i18n import t, with_locale
 from AI.prompt_store import PromptMissing, load_prompt, resolve_lang, script_share
 from AI.prompt_store import text as prompt_text
 from AI.verdicts import NO_DATA, PASS, label as verdict_label, to_code
@@ -563,6 +567,8 @@ class LLMAnalysisError(BaseModel):
 
     reason: str = Field(default="invalid_json")
     message: str = Field(default="")
+    stage: Optional[str] = Field(default=None)
+    domain: Optional[str] = Field(default=None)
     provider: Optional[str] = Field(default=None)
     max_tokens: Optional[int] = Field(default=None)
     output_tokens: Optional[int] = Field(default=None)
@@ -721,8 +727,14 @@ def _failure_payload(error: Any, raw_text: str) -> Dict[str, Any]:
         reason = "output_truncated"
     elif isinstance(error, LLMEmptyAnswer):
         reason = "empty_answer"
+    elif isinstance(error, LLMContextOverflow):
+        reason = "context_overflow"
     elif isinstance(error, LLMBudgetError):
         reason = "budget"
+    elif isinstance(error, Timeout):
+        reason = "timeout"
+    elif isinstance(error, LLMRateLimitError):
+        reason = "rate_limit"
     elif isinstance(error, BaseException):
         reason = "provider_error"
     elif isinstance(error, dict):
@@ -730,6 +742,8 @@ def _failure_payload(error: Any, raw_text: str) -> Dict[str, Any]:
             "reason": str(error.get("reason") or "invalid_json"),
             "message": str(error.get("message") or prompt_text("analysis_error.invalid_json")),
             "provider": error.get("provider"),
+            "stage": error.get("stage"),
+            "domain": error.get("domain"),
             "max_tokens": error.get("max_tokens"),
             "output_tokens": error.get("output_tokens"),
             "excerpt": error.get("excerpt") or excerpt,
@@ -737,6 +751,8 @@ def _failure_payload(error: Any, raw_text: str) -> Dict[str, Any]:
     else:
         reason = "invalid_json"
     message = str(error).strip() if error is not None else ""
+    if reason == "timeout":
+        message = t("llm.error.request_timeout")
     if not message:
         message = prompt_text("analysis_error.invalid_json")
     return {
@@ -749,9 +765,11 @@ def _failure_payload(error: Any, raw_text: str) -> Dict[str, Any]:
     }
 
 
-def make_failed_llm_analysis(error: Any, raw_text: str = "") -> LLMAnalysis:
+def make_failed_llm_analysis(error: Any, raw_text: str = "", *, stage=None, domain=None) -> LLMAnalysis:
     """Analysis placeholder that reports the failure instead of inventing findings."""
     payload = _failure_payload(error, raw_text)
+    if stage:
+        payload.update(stage=stage, domain=domain)
     return LLMAnalysis.parse_obj(
         {
             "verdict": NO_DATA,
@@ -1106,11 +1124,52 @@ def judge_candidates_with_llm(
             meta.get("prompt_chars"),
         )
     started_at = time.perf_counter()
+
+    def fit_judge(budget: int) -> str:
+        # Keep the domain rubric whenever it leaves room for evidence and all candidates.
+        template = load_prompt("judge_prompt.txt", lang).replace("{{DOMAIN_KEY}}", meta["domain_key"])
+        rubric = _load_judge_rubric(domain_key, lang)[0]
+        template = template.replace("{{JUDGE_RUBRIC}}", rubric or "")
+        slim_form = not rubric or text_size(template) > budget // 2
+        if slim_form:
+            template = load_prompt("judge_safe_prompt.txt", lang)
+        envelope = template.replace("{{DATA_CONTEXT}}", "").replace("{{CANDIDATES_JSON}}", "")
+        available = budget - text_size(envelope)
+        evidence = compact_json(data_context or "{}", available // 2)
+        if not evidence:
+            return ""
+        entries = []
+        identifiers = [{"index": i, "text": ""} for i in range(len(candidates_texts))]
+        container_cost = text_size(json.dumps(identifiers, separators=(",", ":")))
+        share = (available - text_size(evidence) - container_cost) // len(candidates_texts)
+        for idx, candidate in enumerate(candidates_texts):
+            # Embed JSON objects directly to avoid escaping (and double-counting) their content.
+            raw = _compact_jsonish_text(candidate)
+            try:
+                json.loads(raw)
+            except ValueError:
+                raw = json.dumps(raw, ensure_ascii=False)
+            data = compact_json(raw, share)
+            if not data:
+                return ""
+            try:
+                entries.append({"index": idx, "text": json.loads(data)})
+            except ValueError:
+                return ""
+        payload = json.dumps(entries, ensure_ascii=False, separators=(",", ":"))
+        fitted = template.replace("{{DATA_CONTEXT}}", evidence).replace("{{CANDIDATES_JSON}}", payload)
+        meta.update(context_chars=len(evidence), context_truncated=len(evidence) < len(data_context),
+                    prompt_chars=len(fitted))
+        if slim_form:
+            meta.update(used_safe_path=True, used_rubric=False, fallback_reason="context_window")
+        return fitted
+
     raw = ask_llm_with_text_data(
         user_prompt=judge_prompt,
         data_context="",
         llm_config={"force_json": True},
         system_prompt=judge_system_prompt(lang),
+        fit_user=fit_judge,
     )
     elapsed_ms = int((time.perf_counter() - started_at) * 1000)
     result = _parse_judge_scores(raw)
@@ -1540,7 +1599,7 @@ def _extract_numeric_claims(text: str) -> List[Dict[str, Any]]:
     claims: List[Dict[str, Any]] = []
     seen: set[Tuple[float, str]] = set()
     for match in re.finditer(
-        r"(?<![A-Za-zА-Яа-яЁё])(-?\d+(?:[.,]\d+)?)\s*(%|ms|sec|secs|seconds|s|rps|qps)?\b",
+        r"(?<!\w)(-?\d+(?:[.,]\d+)?)(?:\s*(%|(?:ms|seconds|secs?|s|rps|qps)\b)|\b)",
         blob,
         flags=re.IGNORECASE,
     ):
@@ -1554,8 +1613,6 @@ def _extract_numeric_claims(text: str) -> List[Dict[str, Any]]:
             continue
         seen.add(key)
         claims.append({"value": value, "unit": unit})
-        if len(claims) >= 12:
-            break
     return claims
 
 
@@ -1804,7 +1861,9 @@ def _select_best_candidate(
         )
     except Exception as exc:
         logger.warning("Judge failed for domain '%s': %s", domain_key, exc)
-        judge_scores, judge_meta = {}, {"domain_key": _normalize_judge_domain_key(domain_key) or None, "error": str(exc)}
+        failure = _failure_payload(exc, "")
+        judge_scores, judge_meta = {}, {"domain_key": _normalize_judge_domain_key(domain_key) or None,
+                                        "stage": "judge", "failure_reason": failure["reason"], "error": failure["message"]}
     judge_scores = _align_judge_indexes(judge_scores, len(candidates))
     judged = [idx for idx in range(len(candidates)) if idx in judge_scores]
     # A judge that failed or scored only some candidates must not count as zero for the rest:
@@ -1876,7 +1935,7 @@ def _self_consistency_runtime_cfg() -> Dict[str, Any]:
     bursts against rate-limited providers), ``candidate_workers``,
     ``critic_workers`` and ``pause_sec_between_calls`` for the sequential mode.
     """
-    sc_cfg = ((CONFIG.get("llm", {}) or {}).get("self_consistency", {}) or {})
+    sc_cfg = current_llm_config().get("self_consistency") or {}
 
     def _int(key: str, default: int) -> int:
         try:
@@ -1900,7 +1959,29 @@ def _self_consistency_runtime_cfg() -> Dict[str, Any]:
 
 def _ask_llm_for_usage(domain_key: str, user_prompt: str, data_context: str) -> str:
     with usage_domain(domain_key):
-        return ask_llm_with_text_data(user_prompt, data_context)
+        if domain_key != "critic":
+            return ask_llm_with_text_data(user_prompt, data_context)
+        draft = user_prompt
+
+        def fit_critic(budget: int) -> str:
+            instruction = t("llm.prompt.compact_critic")
+            available = budget - text_size(instruction) - len("\n\nDRAFT:\n\n\nDATA_CONTEXT:\n")
+            evidence = compact_json(data_context or "{}", available // 2)
+            if not evidence:
+                return ""
+            draft_bytes = draft.encode("utf-8")
+            room = available - text_size(evidence)
+            if room < min(64, len(draft_bytes)):
+                return ""
+            if len(draft_bytes) > room:
+                half = (room - 5) // 2
+                excerpt = draft_bytes[:half].decode("utf-8", errors="ignore") + "\n…\n"
+                excerpt += draft_bytes[-half:].decode("utf-8", errors="ignore")
+            else:
+                excerpt = draft
+            return f"{instruction}\n\nDRAFT:\n{excerpt}\n\nDATA_CONTEXT:\n{evidence}"
+
+        return ask_llm_with_text_data(_build_critic_prompt(draft), data_context, fit_user=fit_critic)
 
 
 def _run_one_llm_call(domain_key: str, prompt: str, data_context: str) -> object:
@@ -1964,7 +2045,7 @@ def _two_pass_self_consistency(
         tuple: `(best_text, best_parsed)` или `(best_text, best_parsed, scores)`.
     """
     candidates: list[tuple[str, Optional[LLMAnalysis]]] = []
-    call_errors: List[BaseException] = []
+    call_errors: list[tuple[str, BaseException]] = []
     runtime_cfg = _self_consistency_runtime_cfg()
     gen_count = min(max(1, int(k)), int(runtime_cfg["max_candidates"]))
     pause_sec = float(runtime_cfg["pause_sec_between_calls"])
@@ -1977,14 +2058,15 @@ def _two_pass_self_consistency(
                     structured = ask_llm_structured(user_prompt, data_context, LLMAnalysis)
             except Exception as exc:
                 logger.error("Structured LLM candidate failed for '%s': %s", usage_key, exc)
-                call_errors.append(exc)
+                call_errors.append(("candidate", exc))
             else:
                 if getattr(structured, "analysis_error", None) is None:
                     candidates.append((json.dumps(structured.dict(), ensure_ascii=False, indent=2), structured))
             if i < gen_count - 1 and pause_sec > 0:
                 time.sleep(pause_sec)
         if not candidates and call_errors:
-            failed = make_failed_llm_analysis(call_errors[0])
+            stage, cause = call_errors[0]
+            failed = make_failed_llm_analysis(cause, stage=stage, domain=usage_key)
             failed_text = json.dumps(failed.dict(), ensure_ascii=False, indent=2)
             return (failed_text, failed, {}) if return_scores else (failed_text, failed)
         best_text, best_parsed, score_info = _select_best_candidate(candidates, data_context, domain_key=domain_key)
@@ -2004,7 +2086,7 @@ def _two_pass_self_consistency(
     parsed_or_raw: list[tuple[Optional[LLMAnalysis], str]] = []
     for raw in raw_results:
         if isinstance(raw, BaseException):
-            call_errors.append(raw)
+            call_errors.append(("candidate", raw))
             continue
         text = str(raw or "")
         p = parse_llm_analysis_strict(text)
@@ -2014,9 +2096,8 @@ def _two_pass_self_consistency(
         else:
             parsed_or_raw.append((p, text))
     if need_critics:
-        critic_prompts = [_build_critic_prompt(r, lang) for r in need_critics]
         critic_results = _run_llm_calls(
-            critic_prompts,
+            need_critics,
             data_context,
             parallel=bool(runtime_cfg["parallel_critics"]),
             workers=int(runtime_cfg["critic_workers"]),
@@ -2029,7 +2110,7 @@ def _two_pass_self_consistency(
                 crit = critic_results[ci]
                 ci += 1
                 if isinstance(crit, BaseException):
-                    call_errors.append(crit)
+                    call_errors.append(("critic", crit))
                     candidates.append((raw, None))
                     continue
                 p2 = parse_llm_analysis_strict(str(crit or ""))
@@ -2053,8 +2134,16 @@ def _two_pass_self_consistency(
         except Exception:
             pass
     if best_parsed is None:
-        failure = call_errors[0] if call_errors else {"reason": "invalid_json", "message": prompt_text("analysis_error.invalid_json", lang)}
-        best_parsed = make_failed_llm_analysis(failure, best_text or "")
+        stage, failure = call_errors[0] if call_errors else (
+            "critic" if need_critics else "candidate",
+            {"reason": "invalid_json", "message": prompt_text("analysis_error.invalid_json", lang)},
+        )
+        best_parsed = make_failed_llm_analysis(failure, best_text or "", stage=stage, domain=usage_key)
+    elif call_errors:
+        score_info["stage_failures"] = [
+            {**_failure_payload(error, ""), "stage": stage, "domain": usage_key}
+            for stage, error in call_errors
+        ]
     if best_parsed is not None:
         best_parsed = fill_missing_verdict_rationale(best_parsed)
         best_text = json.dumps(best_parsed.dict(), ensure_ascii=False, indent=2)

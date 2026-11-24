@@ -966,11 +966,11 @@
       '</section>'
     ].join('');
   }
-  function renderRationaleBox(text) {
+  function renderRationaleBox(text, unchecked) {
     const contentHtml = markdownToSafeHtml(text) || `<p class="report-empty">${escapeHtml(LL.t('report.rationale.empty'))}</p>`;
     return [
       '<section class="report-note">',
-      `<div class="report-note-title">${escapeHtml(LL.t('report.rationale.title'))}</div>`,
+      `<div class="report-note-title">${escapeHtml(LL.t(unchecked ? 'report.rationale.unchecked' : 'report.rationale.title'))}</div>`,
       `<div class="report-note-body report-markdown-block">${contentHtml}</div>`,
       '</section>'
     ].join('');
@@ -1220,17 +1220,34 @@
     ].join('');
     box.style.display = '';
   }
+  function failureLocation(stage, domain) {
+    const stages = {
+      candidate: 'report.analysis_error.stage_candidate',
+      critic: 'report.analysis_error.stage_critic',
+      judge: 'report.analysis_error.stage_judge',
+    };
+    const label = Object.hasOwn(stages, stage) ? LL.t(stages[stage]) : safeStr(stage);
+    return [domain && LL.domainTitleFor(domain, reportDomainTitles), label].filter(Boolean).join(' · ');
+  }
+  function failureDetailsHtml(failures) {
+    if (!Array.isArray(failures)) return '';
+    const lines = failures.filter((f) => f && f.message).map((f) => {
+      const where = failureLocation(f.stage, f.domain);
+      return `<p>${where ? `<strong>${escapeHtml(where)}</strong> · ` : ''}${escapeHtml(f.message)}</p>`;
+    });
+    return Array.from(new Set(lines)).join('');
+  }
   function renderAnalysisError(report) {
     const error = report && report.analysis_error;
     if (!error || typeof error !== 'object') return '';
     const message = safeStr(error.message) || LL.t('report.analysis_error.default_message');
-    const bits = [];
+    const bits = [failureLocation(error.stage, error.domain)].filter(Boolean);
     if (error.provider) bits.push(String(error.provider));
     if (error.max_tokens) bits.push(LL.t('report.analysis_error.limit', { value: error.max_tokens }));
     if (error.output_tokens != null && error.output_tokens !== '') bits.push(LL.t('report.analysis_error.output', { value: error.output_tokens }));
     const meta = bits.length ? `<p class="dim">${escapeHtml(bits.join(' · '))}</p>` : '';
     const excerpt = error.excerpt ? `<pre>${escapeHtml(String(error.excerpt))}</pre>` : '';
-    return `<div class="report-note"><div class="report-note-title">${escapeHtml(LL.t('report.analysis_error.title'))}</div><div class="report-note-body"><p>${escapeHtml(message)}</p>${meta}${excerpt}</div></div>`;
+    return `<div class="report-note"><div class="report-note-title">${escapeHtml(LL.t('report.analysis_error.title'))}</div><div class="report-note-body"><p>${escapeHtml(message)}</p>${meta}${failureDetailsHtml(error.domain_failures)}${excerpt}</div></div>`;
   }
   function peakTableApplies(domain, peak) {
     if (domain !== 'final' && domain !== 'lt_framework') return false;
@@ -1519,7 +1536,8 @@
   function renderStructuredReportHtml(report, extraHtml, domain) {
     const analysisError = renderAnalysisError(report);
     if (analysisError) {
-      return `<div class="report-stack">${analysisError}${extraHtml || ''}</div>`;
+      const figures = testFiguresHtml(report, domain, report.peak_performance || report.peak_perfomance || {});
+      return `<div class="report-stack">${analysisError}${figures}${extraHtml || ''}</div>`;
     }
     // A verdict code from the API (old labels map as well, see LL.verdictCode).
     const verdict = (report || {}).verdict || '';
@@ -1530,15 +1548,17 @@
     const actions = (report || {}).recommended_actions || (report || {}).actions || [];
     const verdictRows = [
       {
-        label: LL.t('report.structured.ai_verdict'),
+        label: LL.t(domain === 'final' && report.deterministic_sla ? 'report.hero.verdict_title' : 'report.structured.ai_verdict'),
         html: `<span class="report-verdict-pill ${LL.verdictReportClass(verdict)}">${escapeHtml(LL.verdictLabel(verdict))}</span>`
       }
     ];
     verdictRows._tableClass = 'report-aligned-value-table';
     const sections = [
       renderKeyValueTable('', verdictRows),
-      renderRationaleBox(verdictRationale),
+      renderRationaleBox(verdictRationale, domain === 'final' && report.verdict_rationale_source !== 'sla_checks'),
       testFiguresHtml(report, domain, peak),
+      report.verification_summary && report.verification_summary.verified != null
+        ? `<p>${escapeHtml(LL.t('report.findings.verified_count', { count: report.verification_summary.verified }))}</p>` : '',
       renderProblemRecommendationRows(pairFindingsWithActions(findings, actions, domain)),
       extraHtml || ''
     ].filter(Boolean);
@@ -1562,7 +1582,8 @@
     const report = parseJsonish(finalRow && finalRow.parsed) || {};
     const peak = report.peak_performance || report.peak_perfomance || {};
     const figures = testFiguresHtml(report, 'final', peak);
-    return `<div class="report-analysis-card"><div class="report-stack"><p class="dim">${escapeHtml(LL.t('report.analysis.no_ai_note'))}</p>${figures}</div></div>`;
+    const notice = renderAnalysisError(report) || `<p class="dim">${escapeHtml(LL.t('report.analysis.no_ai_note'))}</p>`;
+    return `<div class="report-analysis-card"><div class="report-stack">${notice}${figures}</div></div>`;
   }
   // Where the reliability level comes from: the judge, the data check alone (one answer), or the data
   // check and confidence because the judge gave no usable scores. Reports saved before that case was
@@ -1758,6 +1779,11 @@
   function judgeSectionHtml(scores) {
     const md = judgeDetailsMarkdown(scores);
     if (!safeStr(md)) return '';
+    const failures = Array.isArray(scores.stage_failures) ? scores.stage_failures.slice() : [];
+    const judge = scores.judge_meta;
+    if (judge && judge.stage && judge.error) {
+      failures.push({ stage: judge.stage, domain: judge.domain_key, message: judge.error });
+    }
     const level = confidenceLevelLabel(scores);
     const titleHtml = level
       ? `${LL.ui.term('confidence', LL.t('report.judge.title_reliability'))}: ${escapeHtml(level)}`
@@ -1765,7 +1791,7 @@
     return [
       '<details class="report-collapsible">',
       `<summary><span>${titleHtml}</span><small class="report-collapsible-subtitle">${escapeHtml(answerSubtitle(scores))}</small></summary>`,
-      `<div class="report-collapsible-body report-markdown-block">${markdownToSafeHtml(md)}</div>`,
+      `<div class="report-collapsible-body report-markdown-block">${failureDetailsHtml(failures)}${markdownToSafeHtml(md)}</div>`,
       '</details>'
     ].join('');
   }
@@ -1933,6 +1959,7 @@
     return match ? match[1] : '';
   }
   function stepInterval(step) {
+    if (step && step.source === 'generator') return [step.start_iso, step.end_iso].map((s) => s.slice(11).split(/[+-]/)[0]).join('–');
     const start = hhmmFromIso(step && (step.plateau_start_iso || step.start_iso));
     const end = hhmmFromIso(step && (step.plateau_end_iso || step.end_iso));
     if (start && end) return start + '–' + end;
@@ -2044,6 +2071,7 @@
       const mean = perStepField(rpsRow, index, 'mean');
       return {
         index: index,
+        ...(step.source === 'generator' ? { label: step.label, source: step.source, planned_rps: step.planned_rps } : {}),
         start_iso: step.start_iso,
         end_iso: step.end_iso,
         plateau_start_iso: step.plateau_start_iso,
@@ -2062,6 +2090,7 @@
       rps_query: rpsSection ? rpsSection.label : '',
       latency_query: latencySection ? latencySection.label : '',
       latency_series: safeStr(latencyHint.series),
+      ...(steps[0].source === 'generator' ? { detection: source.step_detection || source.stable_detection } : {}),
       steps: steps
     };
   }
@@ -2273,13 +2302,14 @@
     const end = utcMoment(step.end_iso);
     const minutes = start !== null && end !== null && end > start ? Math.round((end - start) / 6000) / 10 : 1;
     // A phase is named after its request group; the full name is the tooltip of the cell.
-    const name = step.phase === true ? safeStr(step.label) : '';
+    const name = step.phase === true || step.source === 'generator' ? safeStr(step.label) : '';
     const title = name && step.excluded === true ? `${name} · ${LL.t('report.section.phase_excluded')}` : name;
     const titleAttr = title ? ` title="${escapeHtml(title)}"` : '';
     return [
       `<div class="${classes.join(' ')}" role="listitem"${rangeAttrs}${indexAttr}${titleAttr} style="flex-grow:${minutes}">`,
       `<b>${headHtml}${stepTagHtml(step)}</b>`,
       name ? `<span class="rep-step-name">${escapeHtml(name)}</span>` : '',
+      step.planned_rps != null ? `<span class="rep-step-sub">${escapeHtml(LL.t('report.steps.planned_rps', { rate: formatNumber(step.planned_rps) }))}</span>` : '',
       `<span class="rep-step-sub">${escapeHtml(sub)}</span>`,
       flag ? `<span class="rep-step-flag">${escapeHtml(flag)}</span>` : '',
       '</div>'
@@ -2292,7 +2322,8 @@
     if (safeStr(table.latency_query)) sourceBits.push(LL.t('report.steps.source_query', { query: safeStr(table.latency_query) }));
     if (safeStr(table.latency_series)) sourceBits.push(LL.t('report.steps.source_series', { series: safeStr(table.latency_series) }));
     else if (safeStr(table.latency_query)) sourceBits.push(LL.t('report.steps.source_max'));
-    const note = sourceBits.length ? LL.t('report.steps.note_source', { source: sourceBits.join(', ') }) : LL.t('report.steps.note');
+    const note = table.detection && table.detection.method === 'generator' ? sourceBits.join(', ')
+      : sourceBits.length ? LL.t('report.steps.note_source', { source: sourceBits.join(', ') }) : LL.t('report.steps.note');
     const detection = stepDetectionText(table);
     const phases = table.steps.some((step) => step.phase === true);
     return [
@@ -2305,6 +2336,7 @@
   function stepDetectionText(table) {
     const detection = table && isPlainObject(table.detection) ? table.detection : null;
     if (!detection) return '';
+    if (detection.method === 'generator') return LL.t('report.steps.generator', { tag: detection.run_tag, minutes: detection.min_step_minutes });
     if (detection.phases === true) {
       // How the phases of a scenario were found (AI/phases.py), or why there are none.
       if (safeStr(detection.reason)) return LL.t('report.steps.phases_none', { reason: phaseReasonText(detection.reason) });
@@ -2523,10 +2555,11 @@
       const ceilingBand = bandItem(window.start || window.start_iso, window.end || window.end_iso, ceilingLabel, 'ok', 'ceiling');
       if (ceilingBand) out.push(ceilingBand);
     }
-    steps.slice(1).forEach((step) => {
-      const t = utcMoment(step.start_iso);
+    const bounds = steps[0] && steps[0].source === 'generator'
+      ? steps.flatMap((step) => [step.start_iso, step.end_iso]) : steps.slice(1).map((step) => step.start_iso);
+    for (const t of new Set(bounds.map(utcMoment))) {
       if (t !== null) out.push(markerItem('tick', t, null, '', 'muted', 'step'));
-    });
+    }
     let degradationMs = null;
     const degradedChecks = window.degraded_checks;
     const degraded = (window.degraded_level !== null && window.degraded_level !== undefined)
@@ -2535,7 +2568,7 @@
       // The step after the ceiling broke the thresholds.
       const position = stepPosition(steps, otherCeiling ? ceiling : chosen);
       const following = position >= 0 && position < steps.length - 1 ? steps[position + 1] : null;
-      degradationMs = following ? utcMoment(following.start_iso) : utcMoment(window.end || window.end_iso);
+      degradationMs = utcMoment(window.degraded_start || (following && following.start_iso) || window.end || window.end_iso);
       if (degradationMs !== null) out.push(markerItem('line', degradationMs, null, LL.t('report.marker.degradation', { time: clockAt(degradationMs, offset) }), 'fail', 'degradation'));
     }
     let dropMs = saturation ? utcMoment(saturation.rps_drop_iso) : null;

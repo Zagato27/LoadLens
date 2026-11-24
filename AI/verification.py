@@ -67,7 +67,8 @@ def _measurement_text(finding: FindingItem) -> str:
     return blob
 
 
-def _claim_matches(claim: Dict[str, Any], refs: Sequence[Dict[str, Any]], tolerance: float) -> bool:
+def _claim_matches(claim: Dict[str, Any], refs: Sequence[Dict[str, Any]], tolerance: float,
+                   other_run_value: float | None = None) -> bool:
     value = _safe_float_value(claim.get("value"))
     if value is None:
         return False
@@ -79,7 +80,11 @@ def _claim_matches(claim: Dict[str, Any], refs: Sequence[Dict[str, Any]], tolera
         allowed = abs(ref_value) * tolerance
         if abs(ref_value) >= ROUNDING_SLACK_MIN_VALUE:
             allowed = max(ROUNDING_SLACK, allowed)
-        if any(abs(variant - ref_value) <= allowed for variant in variants):
+        if any(
+            abs(variant - ref_value) <= allowed
+            and (other_run_value is None or abs(variant - ref_value) <= abs(variant - other_run_value))
+            for variant in variants
+        ):
             return True
     return False
 
@@ -91,8 +96,9 @@ def _format_claim(claim: Dict[str, Any]) -> str:
     return f"{text} {unit}".strip()
 
 
-def verify_finding(finding: FindingItem, refs: Sequence[Dict[str, Any]]) -> FindingVerification:
-    """Matches the finding's numbers against related references first, then the whole catalog."""
+def verify_finding(finding: FindingItem, refs: Sequence[Dict[str, Any]], *,
+                   other_run_value: float | None = None) -> FindingVerification:
+    """Check related references first. For paired values, rounding cannot favor the opposite run."""
     blob = _measurement_text(finding)
     claims = _extract_numeric_claims(blob)
     if not claims:
@@ -101,7 +107,8 @@ def verify_finding(finding: FindingItem, refs: Sequence[Dict[str, Any]]) -> Find
     matched = 0
     unmatched: List[str] = []
     for claim in claims:
-        if _claim_matches(claim, related, RELATED_TOLERANCE) or _claim_matches(claim, refs, GLOBAL_TOLERANCE):
+        if (_claim_matches(claim, related, RELATED_TOLERANCE, other_run_value)
+                or _claim_matches(claim, refs, GLOBAL_TOLERANCE, other_run_value)):
             matched += 1
         else:
             unmatched.append(_format_claim(claim))

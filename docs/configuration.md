@@ -116,9 +116,47 @@ and in the area scope a line under the tabs names the services that skip it.
 
 Provider blocks share `api_base_url`, `model`, `api_key`, `max_concurrent`, `generation` (`temperature`, `top_p`,
 `max_tokens`, `force_json_in_prompt`), `verify`, `proxies`, `connect_timeout_sec` and `request_timeout_sec`.
-Perplexity adds `disable_web_search`; GigaChat uses `cert_file` and `key_file` for mTLS instead of a key and adds
-`max_attempts`, `request_min_interval_sec` and `rate_limit_cooldown_sec` for a provider with strict rate limits.
+Perplexity adds `disable_web_search`. GigaChat accepts an API key or `cert_file` and `key_file` for mTLS.
+For an OpenAI-compatible endpoint, set `openai.context_window_tokens` to the window configured on the
+inference server (the example uses 128,000). Set `generation.max_tokens` low enough to leave room for
+the prompt. For example, an 8,192-token window with a 1,024-token response allowance leaves room for
+instructions and evidence. Custom OpenAI-compatible endpoints and the demo default to `max_concurrent: 1`
+for single-slot inference servers. Increase it to the server's actual capacity. The official OpenAI
+endpoint defaults to four when its limit is unspecified. Profiles using the same provider endpoint and
+credentials in a process share a queue. While a request is waiting or active, its limit applies to new
+calls on the connection. The lowest of those limits governs admission. Running calls finish normally,
+and the HTTP timeout starts after a local slot becomes available.
+Set `max_attempts` (default 3), `request_min_interval_sec` (default 0) and `rate_limit_cooldown_sec` (default 20)
+on the provider to control retries, request pacing and the initial HTTP 429 delay when `Retry-After` is missing.
+Pacing and cooldown are shared by calls to the same API connection within a process.
 The optional provider key `max_tokens_cap` (or `LOADLENS_LLM_MAX_TOKENS_CAP`) caps `max_tokens`.
+
+Open **Settings → Connections → LLM** to save named connections, including several with the same provider type.
+To share a project connection, open **Edit**, check **Available to all projects**, and save. You can also
+check the box when adding a connection. In another project, choose **Use** beside the shared connection.
+Each project keeps its current selection until you change it. Edits to the model or credentials in the
+source project apply to everyone using that connection. To turn sharing off, first switch any other projects
+using it to a different connection. If it is the global default, choose another default as well.
+
+The global view lets you choose the shared default. **Use shared default** makes a project follow that choice
+as it changes. If you delete a source project, its shared connections remain available and can be edited in
+the global view. You can test a connection and list models from its editor before switching to it.
+
+For OpenAI-compatible, Anthropic and Perplexity connections, set **Proxy URL** in the connection editor.
+For example, `http://user:password@proxy.example:8080` sends both HTTP and HTTPS requests through an authenticated
+HTTP proxy, including connection checks and model listing. Percent-encode reserved characters in the credentials,
+such as `@` as `%40`. The settings page masks the saved password. A blank `proxy_url` uses the existing advanced
+`proxies` mapping when present. GigaChat reads `HTTP_PROXY` and `HTTPS_PROXY` from the server environment.
+
+For Kimi on Moonshot's API, use the OpenAI-compatible provider and select the model ID from **Get the model list**.
+Kimi K2.5, K2.6, K2.7 Code and K3 use Moonshot's fixed sampling settings. Connection checks use a short prompt
+and report the provider's validation message when available.
+
+LoadLens shows existing provider blocks as saved connections and keeps the current selection. New connections use
+their own credentials. Reports, forecasts, and context imports use the selected project connection when the
+operation starts. Comparisons of runs within one project use that project's connection. Comparisons across projects
+use the shared default. Provider parameters are available in the connection editor. Analysis parameters such as
+parallel domain count are configured in the advanced analysis settings for the current scope.
 
 ### default_params and limits
 

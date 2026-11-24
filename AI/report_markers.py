@@ -331,16 +331,17 @@ def _step_markers(
         ceiling_band = _band(*_window_range(window), ceiling_label, "ok", "ceiling")
         if ceiling_band is not None:
             out.append(ceiling_band)
-    for step in steps[1:]:
-        start_ms = moment_ms(step.get("start_iso"))
-        if start_ms is not None:
-            out.append(_marker("tick", start_ms, None, "", "muted", "step"))
+    bounds = ([s.get(key) for s in steps for key in ("start_iso", "end_iso")]
+              if steps and steps[0].get("source") == "generator" else [s.get("start_iso") for s in steps[1:]])
+    for stamp in dict.fromkeys(map(moment_ms, bounds)):
+        if stamp is not None:
+            out.append(_marker("tick", stamp, None, "", "muted", "step"))
     degradation_ms: Optional[int] = None
     if window and kind == "step" and (window.get("degraded_level") is not None or window.get("degraded_checks")):
         # The step after the ceiling broke the thresholds.
         position = _position(steps, ceiling if other_ceiling else chosen)
         following = steps[position + 1] if 0 <= position < len(steps) - 1 else None
-        degradation_ms = moment_ms(following.get("start_iso")) if following else moment_ms(window.get("end") or window.get("end_iso"))
+        degradation_ms = moment_ms(window.get("degraded_start") or (following or {}).get("start_iso") or window.get("end") or window.get("end_iso"))
         if degradation_ms is not None:
             out.append(_marker("line", degradation_ms, None, t("report.marker.degradation", time=clock(degradation_ms, offset)), "fail", "degradation"))
     drop_ms = moment_ms(saturation.get("rps_drop_iso")) if saturation is not None else None

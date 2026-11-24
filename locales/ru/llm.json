@@ -1,6 +1,18 @@
 {
+  "llm.error.context_budget": "Запрос не помещается в настроенное окно модели ({window} токенов) при резерве ответа {output}. Уменьшите лимит ответа или объём обязательных инструкций либо укажите фактическое окно модели.",
+  "llm.error.context_provider": "Провайдер отклонил запрос из-за переполнения контекста. Проверьте фактическое окно модели. В профиле указано {window} токенов, резерв ответа — {output}.",
   "llm.error.empty_answer": "{provider}: модель вернула пустой текст",
   "llm.error.gigachat_no_structured_output": "GigaChat client does not support with_structured_output: обновите langchain-gigachat или отключите llm.gigachat.structured_output",
+  "llm.error.gigachat_proxy_url": "GigaChat берёт адрес прокси из переменных сервера HTTP_PROXY и HTTPS_PROXY.",
+  "llm.error.invalid_proxy_url": "Введите адрес HTTP- или HTTPS-прокси, например http://user:password@proxy.example:8080.",
   "llm.error.output_truncated": "{provider}: ответ обрезан на {max_tokens} токенах",
-  "llm.error.output_truncated_with_count": "{provider}: ответ обрезан на {max_tokens} токенах, выдано {output_tokens}"
+  "llm.error.output_truncated_with_count": "{provider}: ответ обрезан на {max_tokens} токенах, выдано {output_tokens}",
+  "llm.error.overloaded": "Провайдер модели сообщил о перегрузке (HTTP 429).",
+  "llm.error.proxy_failed": "Не удалось подключиться к прокси. Проверьте адрес, логин и пароль.",
+  "llm.error.quota_exhausted": "Провайдер модели сообщил о нехватке квоты или баланса (HTTP 429). Проверьте лимиты и состояние оплаты аккаунта API.",
+  "llm.error.rate_limited": "Провайдер модели вернул HTTP 429. Проверьте лимиты аккаунта API на параллельные запросы, частоту запросов и токены.",
+  "llm.error.request_timeout": "Провайдер модели не ответил за отведённое время.",
+  "llm.prompt.compact_critic": "Исправьте черновик DRAFT по фактам DATA_CONTEXT и верните только JSON отчёта с verdict, verdict_rationale, findings и recommended_actions. Сохраните проверяемые показатели и их единицы.",
+  "llm.prompt.compact_domain": "Проанализируйте метрики домена {domain}. Опирайтесь на значения и интервалы из JSON. Вердикт должен учитывать deterministic_sla, если он задан. Верните объект отчёта с verdict, verdict_rationale, findings и recommended_actions.",
+  "llm.prompt.compact_final": "Составьте итоговый отчёт по deterministic_sla, метрикам, ступеням и выводам доменов из domain_analyses. Сохраните вердикт SLA и различайте целевую нагрузку и предел производительности. Верните JSON с verdict, verdict_rationale, findings и recommended_actions."
 }

@@ -336,7 +336,9 @@ def _explanation_env(monkeypatch, stored_language):
     monkeypatch.setattr(explain, "load_forecast_explanation", lambda conn, schema, table, run_id: stored.get(run_id))
     monkeypatch.setattr(explain, "save_forecast_explanation",
                         lambda conn, schema, table, run_id, digest, payload: stored.update({run_id: StoredExplanation(run_id, digest, payload, None)}))
-    monkeypatch.setitem(explain.CONFIG, "llm", {"provider": "openai", "openai": {"model": "test-model"}})
+    from settings import CONFIG
+
+    monkeypatch.setitem(CONFIG, "llm", {"provider": "openai", "openai": {"model": "test-model"}})
     answer = {"headline": "CPU", "cause": "CPU 95 %", "key_facts": [], "scaling": {"verdict": "helps", "reason": "CPU"},
               "evidence": [{"finding_id": "jvm:f1", "role": "CPU"}], "scaling_risks": [], "next_checks": [], "confidence": "medium"}
 

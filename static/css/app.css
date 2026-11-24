@@ -1533,6 +1533,15 @@ table.forecast-list { margin-top: 16px; }
 .conn-card .conn-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
 .conn-card .conn-head h3 { margin: 0; font-size: 15px; }
 .conn-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.llm-controls { min-width: 0; margin: 0; padding: 0; border: 0; }
+.llm-profiles { list-style: none; padding: 0; margin: 12px 0; }
+.llm-profile { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.llm-profile-label { min-width: 0; overflow-wrap: anywhere; }
+.llm-profile-label .status { margin-left: 8px; }
+.llm-profile-label small { display: block; margin-top: 2px; }
+.llm-profile-editor { margin-top: 16px; }
+.llm-profile-editor h4 { margin: 0 0 12px; }
+.llm-json { width: 100%; resize: vertical; }
 .conn-result { display: none; margin-top: 10px; padding: 2px 0 2px 12px; border-left: 2px solid var(--line-2); font-size: 13px; }
 .conn-result.ok { display: block; border-left-color: var(--ok); color: var(--ok); }
 .conn-result.error { display: block; border-left-color: var(--fail); color: var(--fail); }

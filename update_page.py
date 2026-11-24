@@ -42,6 +42,7 @@ from loadlens_app.core import (
     _resolve_services_for_area,
     overlay_runtime,
 )
+from loadlens_app.llm_profiles import effective_llm
 from metrics_config import METRICS_CONFIG  # Базовая конфигурация метрик
 from settings import CONFIG  # Импорт базовой конфигурации
 
@@ -632,7 +633,8 @@ def _effective_config_for_scope(area_name: str, service_name: str | None = None)
     area = _load_area_overrides(area_name)
     service_entry = _service_entry(area_name, service_name) if service_name else {}
     eff = dict(CONFIG)
-    for key in ("llm", "logs_source", "default_params", "queries", "sla", "system_context"):
+    eff["llm"] = effective_llm(area_name)
+    for key in ("logs_source", "default_params", "queries", "sla", "system_context"):
         base = (CONFIG.get(key) or {}) if isinstance(CONFIG.get(key), dict) else (CONFIG.get(key) if key == 'queries' else {})
         over_area = (area.get(key) or {}) if isinstance(area.get(key), dict) else {}
         over_service = (service_entry.get(key) or {}) if key in _SERVICE_CONFIG_OVERRIDES and isinstance(service_entry.get(key), dict) else {}
@@ -661,7 +663,7 @@ def _prompts_override_for_area(area_name: str | None) -> dict:
     return prompts if isinstance(prompts, dict) else {}
 
 
-def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = False, web_only: bool = False, run_name: str | None = None, test_type: str | None = None, project_area: str | None = None, progress_callback=None, run_tag: str | None = None, run_filter_packs: list[str] | None = None, report_language: str | None = None):
+def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = False, web_only: bool = False, run_name: str | None = None, test_type: str | None = None, project_area: str | None = None, progress_callback=None, run_tag: str | None = None, run_filter_packs: list[str] | None = None, report_language: str | None = None, observed_steps: list[dict] | None = None):
     """Формирует отчёт по нагрузочному тесту (Confluence и/или веб-интерфейс).
 
     Параметры:
@@ -716,6 +718,7 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
         if _filtered_packs:
             logger.info("Run tag %s applied to query packs: %s", run_tag, ", ".join(_filtered_packs))
     report_lang = resolve_lang(report_language)
+    step_metadata = {"run_tag": run_tag, "observed_steps": observed_steps} if observed_steps is not None else {}
     prompt_overrides = _prompt_overrides_for_scope(area_name, service)
     domain_keys = _domain_keys_from_config(ef_cfg)
     disabled_domains = _service_disabled_domains(area_name, service)
@@ -746,6 +749,7 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
         save_to_db_effective = True if web_only else bool(save_to_db)
 
         run_meta = {
+            **step_metadata,
             "run_id": uuid.uuid4().hex,
             "run_name": (run_name or "").strip() or default_run_name(),
             "service": service,
@@ -974,6 +978,7 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
     # Same in-process pipeline as the web report, so the progress bar keeps moving.
     results = None
     run_meta = {
+        **step_metadata,
         "run_id": uuid.uuid4().hex,
         "run_name": (run_name or "").strip() or default_run_name(),
         "service": service,
@@ -984,7 +989,7 @@ def update_report(start, end, service, use_llm: bool = True, save_to_db: bool = 
         "area_services": _resolve_services_for_area(area_name) or [service],
         "report_language": report_lang,
     }
-    if use_llm or save_to_db:
+    if use_llm or save_to_db or observed_steps is not None:
         results = uploadFromLLM(
             start / 1000,
             end / 1000,

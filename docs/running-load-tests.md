@@ -228,7 +228,7 @@ service, who started it, instances, time against the limit, RPS of the last 15 m
 ratio, a stop button for your own runs), their number in the status line and a counter next to "Run a test" in the
 top bar. The report starts after the metrics delivery pause; if every job slot is busy it waits, and if the daily AI
 budget is exhausted it is built without the analysis. The New report form uses the same role `lt.rps_total` to
-suggest the windows of tests of the last 30 days that were not started from LoadLens (`GET /lt_windows`).
+suggest the windows of tests of the last seven days that were not started from LoadLens (`GET /lt_windows`).
 
 The optional `lt_generators` domain ("Load generator resources", pack `lt-generators-node-exporter` with matchers
 of the generator hosts) shows whether the generator itself ran out of CPU, memory, network or connections; it is

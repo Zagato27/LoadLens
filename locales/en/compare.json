@@ -50,7 +50,7 @@
   "compare.explain.caveats": "Caveats",
   "compare.explain.check_none": "no numbers in the answer",
   "compare.explain.check_unknown": "links to unknown findings: {findings}",
-  "compare.explain.check_unverified": "numbers not found in the data: {numbers}",
+  "compare.explain.check_unverified": "unsupported numeric claims: {numbers}",
   "compare.explain.check_verified": "numbers checked against the data: {matched} of {total}",
   "compare.explain.col_domain": "Domain",
   "compare.explain.confidence": "Model confidence: {level}",

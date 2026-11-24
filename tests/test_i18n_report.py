@@ -38,6 +38,21 @@ def js(value):
     return json.dumps(value, ensure_ascii=False)
 
 
+@pytest.mark.parametrize(("locale", "domain", "judge", "critic"), [
+    ("en", "Database", "Candidate ranking", "Candidate review"),
+    ("ru", "База данных", "Оценка вариантов судьёй", "Проверка варианта критиком"),
+])
+def test_report_shows_judge_and_partial_candidate_failures(locale, domain, judge, critic):
+    scores = {
+        "judge_meta": {"domain_key": "database", "stage": "judge", "error": "Model context exceeded"},
+        "stage_failures": [{"stage": "critic", "domain": "database", "message": "Model timed out <once>"}],
+        "data_score": 0.8,
+    }
+    html = run_js(REPORT_JS, f"{I}.judgeSectionHtml({js(scores)})", locale=locale)
+    assert f"{domain} · {judge}" in html and "Model context exceeded" in html
+    assert f"{domain} · {critic}" in html and "Model timed out &lt;once&gt;" in html
+
+
 def stored_texts(value) -> list[str]:
     """Every string of a stored row that holds Cyrillic: texts saved with a ru report, shown as stored."""
     if isinstance(value, str):

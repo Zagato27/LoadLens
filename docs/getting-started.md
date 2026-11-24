@@ -39,8 +39,11 @@ docker compose -f docker/docker-compose.demo.yml --env-file docker/demo.env --pr
 Open http://localhost:5000 and sign in with `admin` / `loadlens-demo` (the values of `docker/demo.env`). Within a
 minute or two the dashboard shows the `demo-checkout` service with two runs: `demo-checkout-step`, a seeded run, and
 `demo-checkout-step-2`, which the real job pipeline builds against the two stubs. The archive, the comparison and the
-capacity forecast are filled, and the dashboard carries a "Demo data" banner. Stop and remove the demo data with the
-same command and `down -v`.
+capacity forecast are filled, and the dashboard carries a "Demo data" banner. On the Run page, select `demo-checkout`
+and the manual generator to mark a load window. Stop cancels a pending run or closes the window of a running test.
+
+The demo app's CPU limit defaults to one vCPU. On a larger host, set `DEMO_APP_CPUS` in `docker/demo.env` to raise
+the limit. To stop and remove the demo data, use the same Compose command with `down -v`.
 
 ## Install with Docker Compose
 
@@ -143,7 +146,7 @@ as "auto by role". Thresholds can differ per project area and per service.
 
 1. Pick the service (recent ones first) and, if you use several, the project area.
 2. Set the test window. Quick presets cover the last hours; after you choose a service the form looks for recent
-   load windows in the load tool metrics of the last 30 days ("Detected runs") and offers them, together with the runs
+   load windows in the load tool metrics of the last seven days ("Detected runs") and offers them, together with the runs
    started from LoadLens. Tests started from the "Run a test" page get their report automatically for the run window
    ([running-load-tests.md](running-load-tests.md)).
 3. Choose the test type: step (maximum performance), soak, spike, stress or scenario (one pass of a business process,
