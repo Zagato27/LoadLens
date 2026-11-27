@@ -423,6 +423,9 @@ def plan_run(data: Mapping[str, Any], owner: str, catalog: Optional[Catalog] = N
             generator = cat.generators.get(_text(raw, "generator"))
             if generator is None:
                 raise LaunchError("lt.launch.choose_generator", label=label)
+            tag_problem = generator.run_tag_problem(run_tag)
+            if tag_problem:
+                raise LaunchError(tag_problem)
             if generator.is_ci:
                 inst = _plan_ci_instance(raw, label, index, name, tag, generator, run_id, run_name, run_tag)
                 instances.append(inst)

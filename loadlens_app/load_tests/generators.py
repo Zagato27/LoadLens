@@ -18,9 +18,10 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
 from .messages import LtError, Titles, msg
-from .tools import ENV_NAME_RE, ToolTemplate, is_absolute_path, public_url
+from .tools import ENV_NAME_RE, MAX_TAG_CHARS, ToolTemplate, is_absolute_path, make_tag, public_url
 
 GENERATOR_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
+LOWERCASE_RUN_TAG_RE = re.compile(r"[a-z0-9-]+")
 GENERATOR_TYPES = ("ssh", "docker", "kubernetes", "gitlab", "jenkins", "manual")
 # Product names stay as they are; "manual" is a dictionary message in the reader's language.
 GENERATOR_TYPE_TITLES = Titles(
@@ -168,6 +169,15 @@ class Generator:
     # Last successful connection check of the settings page and what it was made against (check_target()).
     verified_at: str = ""
     verified_target: str = ""
+    run_tag_prefix: str = ""
+    run_tag_lowercase_hyphens: bool = False
+
+    def run_tag_problem(self, tag: str) -> Optional[str]:
+        if not tag.startswith(self.run_tag_prefix):
+            return msg("lt.launch.run_tag_prefix", generator=self.title, tag=tag, prefix=self.run_tag_prefix)
+        if self.run_tag_lowercase_hyphens and not LOWERCASE_RUN_TAG_RE.fullmatch(tag):
+            return msg("lt.launch.run_tag_characters", generator=self.title, tag=tag)
+        return None
 
     @property
     def is_manual(self) -> bool:
@@ -521,10 +531,19 @@ def parse_generator(generator_id: str, raw: Mapping[str, Any]) -> Generator:
         raise GeneratorConfigError("lt.gen_config.max_parallel_int", where=where) from exc
     if not 0 <= max_parallel <= MAX_PARALLEL_CAP:
         raise GeneratorConfigError("lt.gen_config.max_parallel_range", where=where, max=MAX_PARALLEL_CAP)
-    verified = raw.get("verified") if isinstance(raw.get("verified"), Mapping) else {}
-    verified_at, verified_target = _text(verified, "at")[:40], _text(verified, "target")[:500]
+    prefix = raw.get("run_tag_prefix", "")
+    lowercase_hyphens = raw.get("run_tag_lowercase_hyphens", False)
+    if not isinstance(lowercase_hyphens, bool):
+        raise GeneratorConfigError("lt.gen_config.run_tag_flag", where=where)
+    # A following letter lets prefixes end in a separator while checking the actual tag normalization.
+    if not isinstance(prefix, str) or not make_tag(prefix + "a", "").startswith(prefix):
+        raise GeneratorConfigError("lt.gen_config.run_tag_prefix", where=where, max=MAX_TAG_CHARS)
+    if prefix and lowercase_hyphens and not LOWERCASE_RUN_TAG_RE.fullmatch(prefix):
+        raise GeneratorConfigError("lt.gen_config.run_tag_prefix_characters", where=where)
+    common: dict[str, Any] = dict(id=generator_id, title=title, type=gtype, max_parallel=max_parallel,
+                                  run_tag_prefix=prefix, run_tag_lowercase_hyphens=lowercase_hyphens)
     if gtype == "manual":
-        return Generator(id=generator_id, title=title, type=gtype, max_parallel=max_parallel)
+        return Generator(**common)
 
     tools_raw = raw.get("tools") if isinstance(raw.get("tools"), Mapping) else {}
     tools: dict[str, GeneratorTool] = {}
@@ -546,8 +565,8 @@ def parse_generator(generator_id: str, raw: Mapping[str, Any]) -> Generator:
         if not ENV_NAME_RE.fullmatch(str(name)):
             raise GeneratorConfigError("lt.config.bad_env_name", where=where, name=name)
         env[str(name)] = "" if value is None else str(value)
-    common: dict[str, Any] = dict(id=generator_id, title=title, type=gtype, tools=tools, max_parallel=max_parallel, env=env,
-                                  verified_at=verified_at, verified_target=verified_target)
+    verified = raw.get("verified") if isinstance(raw.get("verified"), Mapping) else {}
+    common.update(tools=tools, env=env, verified_at=_text(verified, "at")[:40], verified_target=_text(verified, "target")[:500])
     if gtype == "ssh":
         return Generator(
             **common,

@@ -8,6 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Fixed
+
+- Command preview and run submission now check the generated run tag against the prefix and character rules
+  configured for each selected generator. Operators can catch tags their launcher would reject before a load test
+  starts ([#12](https://github.com/Zagato27/LoadLens/issues/12)).
+
 ## [2.1.0] - 2026-11-24
 
 ### Added

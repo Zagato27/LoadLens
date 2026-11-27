@@ -93,6 +93,44 @@ def test_preview_shows_commands_and_stores_nothing(env):
     assert env.store.list() == []
 
 
+def test_generator_tag_rules_apply_to_preview_and_start(env):
+    generators = env.client.get("/config").get_json()["load_generators"]
+    generators["gen-1"].update(run_tag_prefix="fx-native-capacity-", run_tag_lowercase_hyphens=True)
+    assert env.client.post("/config", json={"section": "load_generators", "data": generators}).status_code == 200
+    env.client.set_cookie("loadlens.lang", "en")
+    form = {**FORM, "instances": [
+        {"generator": "manual"},
+        {"generator": "gen-1", "tool": "gatling", "script": "demo.CapacitySimulation"},
+    ]}
+    for name, reason in (
+        ("manual-max_perf-20261124_01", "fx-native-capacity-"),
+        ("fx-native-capacity-manual_01", "hyphens"),
+        ("fx-native-capacity-Manual-01", "lowercase"),
+    ):
+        for route in ("/load_tests/preview", "/load_tests"):
+            response = env.client.post(route, json={**form, "run_name": name})
+            assert response.status_code == 400
+            error = response.get_json()
+            assert error["instance"] == 2
+            assert name in error["error"] and "Gen 1" in error["error"] and reason in error["error"]
+        assert env.store.list() == []
+
+    # An unrestricted generator still accepts the original tag.
+    legacy = env.client.post("/load_tests/preview", json={
+        **form, "run_name": "manual-max_perf-20261124_01", "instances": [{"generator": "manual"}],
+    })
+    assert legacy.status_code == 200 and legacy.get_json()["run_tag"] == "manual-max_perf-20261124_01"
+
+    name = "fx-native-capacity-manual-20261124-01"
+    preview = env.client.post("/load_tests/preview", json={**form, "run_name": name.replace("-", " ")})
+    assert preview.status_code == 200 and preview.get_json()["run_tag"] == name
+    assert f"-rd {name}" in preview.get_json()["commands"][1]["command"]
+    assert env.store.list() == []
+    created = env.client.post("/load_tests", json={**form, "run_name": name})
+    assert created.status_code == 200 and created.get_json()["run_tag"] == name
+    assert [run.run_tag for run in env.store.list()] == [name]
+
+
 def test_create_stop_logs_and_list(env):
     resp = env.client.post("/load_tests", json=FORM)
     assert resp.status_code == 200
