@@ -1295,6 +1295,10 @@
         );
       }
     }
+    fields.push(
+      { path: p('run_tag_prefix'), label: LL.t('settings.field.gen.run_tag_prefix.label'), type: 'text', group: 'wide', hint: LL.t('settings.field.gen.run_tag_prefix.hint') },
+      { path: p('run_tag_lowercase_hyphens'), label: LL.t('settings.field.gen.run_tag_lowercase_hyphens.label'), type: 'checkbox', group: 'wide' }
+    );
     // wizardStep, not step: `step` is the HTML step of number inputs (CPU 0.5).
     fields.forEach((field) => { field.wizardStep = generatorStep(field.path.slice(id.length + 1)); });
     return fields;
@@ -1304,7 +1308,7 @@
     if (rel === 'title') return 'type';
     if (rel === 'gitlab.inputs') return 'setup';
     if (/^(ssh|docker|kubernetes|gitlab|jenkins)\./.test(rel) || rel === 'namespace') return 'connect';
-    if (rel === 'max_parallel' || rel === 'env') return 'finish';
+    if (['max_parallel', 'env', 'run_tag_prefix', 'run_tag_lowercase_hyphens'].includes(rel)) return 'finish';
     return 'setup';
   }
   function formatStamp(iso) {
@@ -1843,7 +1847,7 @@
     };
     const renderFinishStep = () => {
       const current = entry();
-      if (w.type !== 'manual') body.appendChild(fieldsBlock('finish'));
+      body.appendChild(fieldsBlock('finish'));
       const summary = makeEl('div', 'gen-check-panel');
       summary.appendChild(makeEl('div', 'gen-summary-title', `${GENERATOR_TYPES[w.type].label} · ${current.title || w.id}`));
       summary.appendChild(makeEl('div', 'dim', generatorSummary(w.id, current)));

@@ -198,12 +198,26 @@ def test_generators_parse_and_hide_credentials():
     ({"ssh": {"host": "h", "username": "u", "password": "p", "port": 70000}}, "порт"),
     ({"type": "podman"}, "тип"),
     ({"max_parallel": -1}, "max_parallel"),
+    ({"run_tag_prefix": "-capacity"}, "префикс"),
+    ({"run_tag_prefix": "x" * (tools.MAX_TAG_CHARS - 1) + "-"}, "префикс"),
+    ({"run_tag_prefix": "CAP_", "run_tag_lowercase_hyphens": True}, "строчные"),
+    ({"run_tag_lowercase_hyphens": "maybe"}, "run_tag_lowercase_hyphens"),
 ])
 def test_broken_generators_name_the_problem(patch, fragment):
     raw = {**copy.deepcopy(SSH_GENERATOR), **patch}
     with pytest.raises(GeneratorConfigError) as error:
         parse_generator("gen-1", raw)
     assert fragment in str(error.value)
+
+
+def test_generator_tag_prefix_and_character_rules_can_be_used_separately():
+    prefix_only = parse_generator("manual", {"type": "manual", "run_tag_prefix": "CAP_"})
+    assert prefix_only.run_tag_problem("CAP_Run_01") is None
+    assert prefix_only.run_tag_problem("Run_01")
+
+    format_only = parse_generator("manual", {"type": "manual", "run_tag_lowercase_hyphens": True})
+    assert format_only.run_tag_problem("any-prefix-12") is None
+    assert format_only.run_tag_problem("any_prefix-12")
 
 
 def test_generator_tool_list_limits_the_offer():

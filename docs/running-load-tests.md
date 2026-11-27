@@ -44,6 +44,12 @@ connection"; for SSH the check is mandatory and shows the host key to trust), to
 the list of tools found on the generator), limits and saving. A passed check marks the generator `verified` for the
 current connection data; the run form flags unverified generators but does not refuse them.
 
+If a launcher requires a particular run tag, set its required prefix (`run_tag_prefix`) in the generator settings.
+The separate `run_tag_lowercase_hyphens` option allows only lowercase ASCII letters, digits and hyphens. For example,
+a generator with prefix `fx-native-capacity-` and this option enabled accepts `fx-native-capacity-manual-20261124-01`.
+Both settings are optional. Preview and Start check the tag generated from the run name against each selected
+generator's rules and identify the generator and tag in the error message.
+
 | Type | How an instance runs | Stop | Duration limit |
 |---|---|---|---|
 | SSH | A background process under GNU `timeout`; state in files of the instance directory | Signal or the tool's stop command, then `SIGKILL` of the process group | `timeout` on the generator |
